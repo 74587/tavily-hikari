@@ -84,3 +84,66 @@
   - `rollup_token_usage_stats_is_idempotent_without_new_logs`
   - `rollup_token_usage_stats_processes_same_second_log_once`
   - `rollup_token_usage_stats_migrates_legacy_timestamp_cursor`
+
+## 后续排查建议（安全、简约）
+
+- 观察窗口统一使用 UTC，优先看最近 24h / 7d；仅统计 `counts_business_quota = 1`。
+- 报告中仅展示聚合值与 token 短 ID（例如前 6 位），不输出完整 token、密钥、请求体。
+- 连续两个 rollup 周期无新增日志时，`rows_affected` 应为 `0`，且 v2 游标不回退。
+- `token_usage_stats` 与 `auth_token_logs` 按 `token_id + hour(bucket_start)` 对账，不应出现持续单向正漂移。
+- 若对账差值连续 2 个周期超阈值（建议 `|delta| > 3`），判定异常并进入修复分支。
+
+### 参考 SQL（仅巡检）
+
+```sql
+-- Q1: 最近24h，每小时对账（delta = stats - logs）
+WITH logs AS (
+  SELECT token_id, (created_at / 3600) * 3600 AS bucket_start, COUNT(*) AS c
+  FROM auth_token_logs
+  WHERE counts_business_quota = 1
+    AND created_at >= strftime('%s', 'now') - 86400
+  GROUP BY token_id, bucket_start
+),
+stats AS (
+  SELECT token_id, bucket_start,
+         (success_count + system_failure_count + external_failure_count + quota_exhausted_count) AS c
+  FROM token_usage_stats
+  WHERE bucket_secs = 3600
+    AND bucket_start >= strftime('%s', 'now') - 86400
+),
+joined AS (
+  SELECT l.token_id,
+         l.bucket_start,
+         l.c AS logs_c,
+         COALESCE(s.c, 0) AS stats_c
+  FROM logs l
+  LEFT JOIN stats s
+    ON s.token_id = l.token_id
+   AND s.bucket_start = l.bucket_start
+  UNION ALL
+  SELECT s.token_id,
+         s.bucket_start,
+         0 AS logs_c,
+         s.c AS stats_c
+  FROM stats s
+  LEFT JOIN logs l
+    ON l.token_id = s.token_id
+   AND l.bucket_start = s.bucket_start
+  WHERE l.token_id IS NULL
+)
+SELECT token_id, bucket_start, stats_c - logs_c AS delta
+FROM joined
+WHERE stats_c <> logs_c
+ORDER BY ABS(delta) DESC, bucket_start DESC;
+
+-- Q2: 全局总量漂移（应趋于稳定，不再单向增加）
+SELECT
+  (SELECT COUNT(*) FROM auth_token_logs WHERE counts_business_quota = 1) AS billable_logs,
+  (SELECT COALESCE(SUM(success_count + system_failure_count + external_failure_count + quota_exhausted_count), 0)
+   FROM token_usage_stats) AS stats_total;
+
+-- Q3: v2 游标存在性与数值检查
+SELECT key, value
+FROM meta
+WHERE key IN ('token_usage_rollup_last_log_id_v2', 'token_usage_rollup_last_ts');
+```
