@@ -2463,6 +2463,7 @@ impl KeyStore {
             self.set_meta_i64(META_KEY_ACCOUNT_QUOTA_BACKFILL_V1, 1)
                 .await?;
         }
+        self.sync_account_quota_limits_with_defaults().await?;
 
         Ok(())
     }
@@ -4646,7 +4647,7 @@ impl KeyStore {
             r#"SELECT t.secret
                FROM user_token_bindings b
                JOIN auth_tokens t ON t.id = b.token_id
-               WHERE b.user_id = ? AND b.token_id = ? AND t.deleted_at IS NULL
+               WHERE b.user_id = ? AND b.token_id = ? AND t.deleted_at IS NULL AND t.enabled = 1
                LIMIT 1"#,
         )
         .bind(user_id)
@@ -4677,6 +4678,26 @@ impl KeyStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.is_some())
+    }
+
+    async fn sync_account_quota_limits_with_defaults(&self) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            r#"UPDATE account_quota_limits
+               SET hourly_any_limit = ?,
+                   hourly_limit = ?,
+                   daily_limit = ?,
+                   monthly_limit = ?,
+                   updated_at = ?"#,
+        )
+        .bind(effective_token_hourly_request_limit())
+        .bind(effective_token_hourly_limit())
+        .bind(effective_token_daily_limit())
+        .bind(effective_token_monthly_limit())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn ensure_account_quota_limits(
@@ -8862,6 +8883,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_user_token_secret_returns_none_when_token_disabled() {
+        let db_path = temp_db_path("user-token-secret-disabled");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "disabled-secret-user".to_string(),
+                username: Some("disabled_secret_user".to_string()),
+                name: Some("Disabled Secret User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(0),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let token = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:disabled_secret_user"))
+            .await
+            .expect("bind token");
+
+        let before = proxy
+            .get_user_token_secret(&user.user_id, &token.id)
+            .await
+            .expect("secret before disable");
+        assert!(before.is_some(), "enabled token should expose secret");
+
+        proxy
+            .set_access_token_enabled(&token.id, false)
+            .await
+            .expect("disable token");
+
+        let after = proxy
+            .get_user_token_secret(&user.user_id, &token.id)
+            .await
+            .expect("secret after disable");
+        assert!(after.is_none(), "disabled token should not expose secret");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn bound_token_quota_checks_use_account_counters() {
         let _guard = env_lock().lock_owned().await;
         let db_path = temp_db_path("bound-token-account-quota");
@@ -9084,6 +9151,84 @@ mod tests {
         assert_eq!(second_account_hour, first_account_hour);
         assert_eq!(second_month_count, first_month_count);
 
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn account_quota_limits_sync_with_env_defaults_on_restart() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("account-limit-sync");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "limit-sync-user".to_string(),
+                username: Some("limit_sync_user".to_string()),
+                name: Some("Limit Sync User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:limit_sync_user"))
+            .await
+            .expect("bind token");
+        proxy
+            .user_dashboard_summary(&user.user_id)
+            .await
+            .expect("seed account quota row");
+
+        let first_limits: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read first limits");
+        assert_eq!(first_limits, (11, 12, 13, 14));
+
+        drop(proxy);
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "21");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "22");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "23");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "24");
+        }
+
+        let proxy_after =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened");
+        let second_limits: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read second limits");
+        assert_eq!(second_limits, (21, 22, 23, 24));
+
+        unsafe {
+            std::env::remove_var("TOKEN_HOURLY_REQUEST_LIMIT");
+            std::env::remove_var("TOKEN_HOURLY_LIMIT");
+            std::env::remove_var("TOKEN_DAILY_LIMIT");
+            std::env::remove_var("TOKEN_MONTHLY_LIMIT");
+        }
         let _ = std::fs::remove_file(db_path);
     }
 }
