@@ -967,6 +967,27 @@
   }
 }
 
+@media (max-width: 860px) {
+  .user-console-token-box .token-label {
+    width: 100%;
+    text-align: left;
+  }
+
+  .user-console-token-box .token-input-row {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .user-console-token-box .token-input-shell {
+    flex: 1 1 100%;
+  }
+
+  .user-console-token-box .token-copy-button {
+    margin-left: auto;
+  }
+}
+
 .token-input:focus {
   outline: none;
   border-color: hsl(var(--primary) / 0.56);
@@ -2856,6 +2877,182 @@ tbody tr:hover {
   border-radius: 999px;
 }
 
+.user-console-tokens-table,
+.user-console-logs-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.user-console-tokens-table th,
+.user-console-tokens-table td,
+.user-console-logs-table th,
+.user-console-logs-table td {
+  vertical-align: top;
+}
+
+.user-console-tokens-table th:nth-child(1),
+.user-console-tokens-table td:nth-child(1) {
+  width: 14%;
+}
+
+.user-console-tokens-table th:nth-child(2),
+.user-console-tokens-table td:nth-child(2) {
+  width: 44%;
+}
+
+.user-console-tokens-table th:nth-child(3),
+.user-console-tokens-table td:nth-child(3) {
+  width: 24%;
+}
+
+.user-console-tokens-table th:nth-child(4),
+.user-console-tokens-table td:nth-child(4) {
+  width: 18%;
+}
+
+.user-console-logs-table th:nth-child(1),
+.user-console-logs-table td:nth-child(1) {
+  width: 44%;
+  min-width: 0;
+}
+
+.user-console-logs-table th:nth-child(2),
+.user-console-logs-table td:nth-child(2) {
+  width: 16%;
+  min-width: 0;
+  text-align: left;
+}
+
+.user-console-logs-table th:nth-child(3),
+.user-console-logs-table td:nth-child(3) {
+  width: 40%;
+  min-width: 0;
+  text-align: left;
+}
+
+.user-console-logs-table td {
+  white-space: normal;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.user-console-cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.user-console-cell-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed hsl(var(--border) / 0.55);
+  font-size: 0.9rem;
+}
+
+.user-console-cell-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.user-console-cell-item span {
+  color: hsl(var(--muted-foreground));
+}
+
+.user-console-cell-item strong {
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-weight: 700;
+  color: hsl(var(--foreground));
+}
+
+.user-console-tokens-table .table-actions {
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.user-console-tokens-table .table-actions .btn {
+  white-space: nowrap;
+}
+
+.user-console-log-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.user-console-log-main {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: hsl(var(--foreground));
+}
+
+.user-console-log-meta {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.8rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.user-console-log-transport {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+}
+
+.user-console-log-transport-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.user-console-log-transport-item em {
+  font-style: normal;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+}
+
+.user-console-log-transport-item strong {
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.user-console-log-result-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.user-console-log-error {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.8rem;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.user-console-log-status.status-badge {
+  align-self: flex-start;
+  width: auto;
+  min-width: 0;
+}
+
 .jobs-table:not(.tokens-table) th:nth-child(7),
 .jobs-table:not(.tokens-table) td.jobs-message-cell {
   width: 24%;
@@ -3272,6 +3469,18 @@ tbody .log-details-row:hover {
     padding: 20px 16px 36px;
   }
 
+  .user-console-md-up {
+    display: none !important;
+  }
+
+  .user-console-md-down {
+    display: block;
+  }
+
+  .user-console-mobile-list.user-console-md-down {
+    display: flex;
+  }
+
   .app-header {
     flex-direction: column;
     align-items: flex-start;
@@ -3285,6 +3494,7 @@ tbody .log-details-row:hover {
 
   .admin-panel-header-main {
     width: 100%;
+    flex: none;
   }
 
   .admin-panel-header-subtitle {
@@ -3509,10 +3719,102 @@ tbody .log-details-row:hover {
   gap: 12px;
 }
 
+.user-console-token-box {
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+
+.user-console-token-box .token-label {
+  min-width: 56px;
+}
+
+.user-console-token-box .token-input-row {
+  display: flex;
+  flex: 1 1 440px;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.user-console-token-box .token-input-shell {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+}
+
+.user-console-token-box .token-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.user-console-md-down {
+  display: none;
+}
+
+.user-console-md-up {
+  display: block;
+}
+
+.user-console-mobile-list {
+  flex-direction: column;
+  gap: 12px;
+}
+
+.user-console-mobile-card {
+  border: 1px solid hsl(var(--border) / 0.78);
+  border-radius: 14px;
+  background: hsl(var(--card) / 0.92);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.user-console-mobile-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.user-console-mobile-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.9rem;
+}
+
+.user-console-mobile-kv span {
+  color: hsl(var(--muted-foreground));
+}
+
+.user-console-mobile-kv strong {
+  text-align: right;
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-console-mobile-status {
+  margin-left: auto;
+}
+
+.user-console-mobile-actions {
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .access-stats {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.access-stats + .access-stats {
+  margin-top: 12px;
 }
 
 .access-stat {
