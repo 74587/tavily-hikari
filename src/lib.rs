@@ -818,7 +818,7 @@ impl TavilyProxy {
             display_path,
             options,
             original_headers,
-            false,
+            true,
         )
         .await
     }
@@ -8186,6 +8186,155 @@ mod tests {
             .await
             .expect("key row exists");
         assert_eq!(status, STATUS_EXHAUSTED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn proxy_http_json_endpoint_injects_bearer_auth_when_enabled() {
+        let db_path = temp_db_path("http-json-bearer-enabled");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let expected_api_key = "tvly-http-bearer-enabled-key";
+        let proxy = TavilyProxy::with_endpoint(
+            vec![expected_api_key.to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let app = Router::new().route(
+            "/search",
+            post({
+                move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let expected_api_key = expected_api_key.to_string();
+                    async move {
+                        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+                        assert_eq!(api_key, expected_api_key);
+
+                        let authorization = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        let expected_auth = format!("Bearer {}", expected_api_key);
+                        assert_eq!(
+                            authorization, expected_auth,
+                            "upstream authorization should use Tavily key"
+                        );
+                        assert!(
+                            !authorization.starts_with("Bearer th-"),
+                            "upstream authorization must not be Hikari token"
+                        );
+
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "status": 200,
+                                "results": [],
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+
+        let usage_base = format!("http://{}", addr);
+        let headers = HeaderMap::new();
+        let options = serde_json::json!({ "query": "test" });
+
+        let _ = proxy
+            .proxy_http_json_endpoint(
+                &usage_base,
+                "/search",
+                Some("tok1"),
+                &Method::POST,
+                "/api/tavily/search",
+                options,
+                &headers,
+                true,
+            )
+            .await
+            .expect("proxy request succeeds");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn proxy_http_json_endpoint_does_not_inject_bearer_auth_when_disabled() {
+        let db_path = temp_db_path("http-json-bearer-disabled");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let expected_api_key = "tvly-http-bearer-disabled-key";
+        let proxy = TavilyProxy::with_endpoint(
+            vec![expected_api_key.to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let app = Router::new().route(
+            "/search",
+            post({
+                move |headers: HeaderMap, Json(body): Json<Value>| {
+                    let expected_api_key = expected_api_key.to_string();
+                    async move {
+                        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+                        assert_eq!(api_key, expected_api_key);
+                        assert!(
+                            headers.get(axum::http::header::AUTHORIZATION).is_none(),
+                            "upstream authorization should be absent when injection is disabled"
+                        );
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "status": 200,
+                                "results": [],
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+
+        let usage_base = format!("http://{}", addr);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            HeaderValue::from_static("Bearer th-client-token"),
+        );
+        let options = serde_json::json!({ "query": "test" });
+
+        let _ = proxy
+            .proxy_http_json_endpoint(
+                &usage_base,
+                "/search",
+                Some("tok1"),
+                &Method::POST,
+                "/api/tavily/search",
+                options,
+                &headers,
+                false,
+            )
+            .await
+            .expect("proxy request succeeds");
 
         let _ = std::fs::remove_file(db_path);
     }

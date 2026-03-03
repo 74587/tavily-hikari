@@ -1567,7 +1567,7 @@ async fn tavily_http_extract(
             &path,
             options,
             &headers,
-            false,
+            true,
         )
         .await;
 
@@ -1851,7 +1851,7 @@ async fn tavily_http_crawl(
             &path,
             options,
             &headers,
-            false,
+            true,
         )
         .await;
 
@@ -6507,22 +6507,45 @@ mod tests {
         addr
     }
 
+    fn assert_upstream_json_auth(
+        headers: &HeaderMap,
+        body: &Value,
+        expected_api_key: &str,
+        endpoint: &str,
+    ) {
+        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(
+            api_key, expected_api_key,
+            "upstream api_key for {endpoint} should use Tavily key from pool"
+        );
+        assert!(
+            !api_key.starts_with("th-"),
+            "upstream {endpoint} api_key must not be Hikari token"
+        );
+
+        let authorization = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let expected_auth = format!("Bearer {}", expected_api_key);
+        assert_eq!(
+            authorization, expected_auth,
+            "upstream Authorization for {endpoint} should use Tavily key"
+        );
+        assert!(
+            !authorization.starts_with("Bearer th-"),
+            "upstream Authorization for {endpoint} must not use Hikari token"
+        );
+    }
+
     async fn spawn_http_search_mock_asserting_api_key(expected_api_key: String) -> SocketAddr {
         let app = Router::new().route(
             "/search",
             post({
-                move |Json(body): Json<Value>| {
+                move |headers: HeaderMap, Json(body): Json<Value>| {
                     let expected_api_key = expected_api_key.clone();
                     async move {
-                        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-                        assert_eq!(
-                            api_key, expected_api_key,
-                            "upstream api_key should use Tavily key from pool"
-                        );
-                        assert!(
-                            !api_key.starts_with("th-"),
-                            "upstream api_key must not be Hikari token"
-                        );
+                        assert_upstream_json_auth(&headers, &body, &expected_api_key, "/search");
                         (
                             StatusCode::OK,
                             Json(serde_json::json!({
@@ -6549,18 +6572,10 @@ mod tests {
         let app = Router::new().route(
             "/extract",
             post({
-                move |Json(body): Json<Value>| {
+                move |headers: HeaderMap, Json(body): Json<Value>| {
                     let expected_api_key = expected_api_key.clone();
                     async move {
-                        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-                        assert_eq!(
-                            api_key, expected_api_key,
-                            "upstream api_key for /extract should use Tavily key from pool"
-                        );
-                        assert!(
-                            !api_key.starts_with("th-"),
-                            "upstream /extract api_key must not be Hikari token"
-                        );
+                        assert_upstream_json_auth(&headers, &body, &expected_api_key, "/extract");
                         (
                             StatusCode::OK,
                             Json(serde_json::json!({
@@ -6587,18 +6602,10 @@ mod tests {
         let app = Router::new().route(
             "/crawl",
             post({
-                move |Json(body): Json<Value>| {
+                move |headers: HeaderMap, Json(body): Json<Value>| {
                     let expected_api_key = expected_api_key.clone();
                     async move {
-                        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-                        assert_eq!(
-                            api_key, expected_api_key,
-                            "upstream api_key for /crawl should use Tavily key from pool"
-                        );
-                        assert!(
-                            !api_key.starts_with("th-"),
-                            "upstream /crawl api_key must not be Hikari token"
-                        );
+                        assert_upstream_json_auth(&headers, &body, &expected_api_key, "/crawl");
                         (
                             StatusCode::OK,
                             Json(serde_json::json!({
@@ -6625,18 +6632,10 @@ mod tests {
         let app = Router::new().route(
             "/map",
             post({
-                move |Json(body): Json<Value>| {
+                move |headers: HeaderMap, Json(body): Json<Value>| {
                     let expected_api_key = expected_api_key.clone();
                     async move {
-                        let api_key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-                        assert_eq!(
-                            api_key, expected_api_key,
-                            "upstream api_key for /map should use Tavily key from pool"
-                        );
-                        assert!(
-                            !api_key.starts_with("th-"),
-                            "upstream /map api_key must not be Hikari token"
-                        );
+                        assert_upstream_json_auth(&headers, &body, &expected_api_key, "/map");
                         (
                             StatusCode::OK,
                             Json(serde_json::json!({
@@ -8093,6 +8092,49 @@ mod tests {
             req_text.contains("***redacted***") || !req_text.contains("api_key"),
             "api_key fields in request logs should be redacted",
         );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn tavily_http_search_rewrites_header_token_to_tavily_bearer() {
+        let db_path = temp_db_path("http-search-header-token-rewrite");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let expected_api_key = "tvly-http-search-header-rewrite-key";
+        let proxy = TavilyProxy::with_endpoint(
+            vec![expected_api_key.to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let access_token = proxy
+            .create_access_token(Some("http-search-header-token"))
+            .await
+            .expect("create token");
+
+        let upstream_addr =
+            spawn_http_search_mock_asserting_api_key(expected_api_key.to_string()).await;
+        let usage_base = format!("http://{}", upstream_addr);
+        let proxy_addr = spawn_proxy_server(proxy, usage_base).await;
+
+        let client = Client::new();
+        let url = format!("http://{}/api/tavily/search", proxy_addr);
+        let resp = client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", access_token.token))
+            .json(&serde_json::json!({
+                "query": "header token path"
+            }))
+            .send()
+            .await
+            .expect("request to proxy succeeds");
+
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.expect("parse json body");
+        assert_eq!(body.get("status").and_then(|v| v.as_i64()), Some(200));
 
         let _ = std::fs::remove_file(db_path);
     }
