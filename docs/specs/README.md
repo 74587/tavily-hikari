@@ -9,6 +9,7 @@
 
 |    ID | Title                                                | Status           | Spec                                                 | Last       | Notes                                                                                            |
 | ----: | ---------------------------------------------------- | ---------------- | ---------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------ |
+| w2t73 | 批量 Key 导入稳定性修复                              | 部分完成（3/4）  | `w2t73-batch-key-upsert-stability/SPEC.md`           | 2026-03-04 | lib hardening + regression test done; pending fast-track PR convergence                          |
 | m4n7x | Admin URL Path 路由与模块化仪表盘重构                | 进行中（快车道） | `m4n7x-admin-path-routing-modular-dashboard/SPEC.md` | 2026-03-02 | admin path routes + modular shell + dashboard enrichment + future module skeletons               |
 | 45squ | 账户级配额迁移与登录后用户控制台                     | 已完成（快车道） | `45squ-account-quota-user-console/SPEC.md`           | 2026-03-02 | account quota migration + `/console` + user dashboard/tokens + review-loop converged             |
 | 3rb68 | PublicHome 未登录无令牌隐藏 Token 面板与令牌访问弹窗 | 进行中（快车道） | `3rb68-public-home-token-access-modal/SPEC.md`       | 2026-03-02 | hero 按钮统一；新增 Storybook 首屏全状态 + 页面级 token 弹窗；补充 dialog 降级兼容与首屏闪烁修复 |

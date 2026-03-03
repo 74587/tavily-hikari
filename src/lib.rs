@@ -133,6 +133,7 @@ const META_KEY_TOKEN_USAGE_ROLLUP_LOG_ID_V2: &str = "token_usage_rollup_last_log
 const META_KEY_HEAL_ORPHAN_TOKENS_V1: &str = "heal_orphan_auth_tokens_from_logs_v1";
 const META_KEY_API_KEY_USAGE_BUCKETS_V1_DONE: &str = "api_key_usage_buckets_v1_done";
 const META_KEY_ACCOUNT_QUOTA_BACKFILL_V1: &str = "account_quota_backfill_v1";
+const API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS: [u64; 2] = [20, 50];
 
 fn token_limit_from_env(var: &str, default: i64) -> i64 {
     match std::env::var(var) {
@@ -2053,6 +2054,31 @@ impl TavilyProxy {
             .list_recent_jobs_paginated(group, page, per_page)
             .await
     }
+}
+
+fn is_transient_sqlite_write_error(err: &ProxyError) -> bool {
+    let ProxyError::Database(db_err) = err else {
+        return false;
+    };
+    let sqlx::Error::Database(db_err) = db_err else {
+        return false;
+    };
+
+    if let Some(code) = db_err.code() {
+        match code.as_ref() {
+            // SQLite primary and extended codes for lock/busy states.
+            "5" | "6" | "261" | "262" | "517" | "518" | "SQLITE_BUSY" | "SQLITE_LOCKED" => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    let message = db_err.message().to_ascii_lowercase();
+    message.contains("database is locked")
+        || message.contains("database table is locked")
+        || message.contains("database schema is locked")
+        || message.contains("database is busy")
 }
 
 #[derive(Debug)]
@@ -6226,75 +6252,118 @@ impl KeyStore {
         api_key: &str,
         group: Option<&str>,
     ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
+        let normalized_group = group
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+            .map(str::to_string);
+        let mut retry_idx = 0usize;
+
+        loop {
+            match self
+                .add_or_undelete_key_with_status_in_group_once(api_key, normalized_group.as_deref())
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err)
+                    if is_transient_sqlite_write_error(&err)
+                        && retry_idx < API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS.len() =>
+                {
+                    let backoff_ms = API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS[retry_idx];
+                    retry_idx += 1;
+                    eprintln!(
+                        "api key upsert transient sqlite error (api_key={}, attempt={}, backoff={}ms): {}",
+                        api_key, retry_idx, backoff_ms, err
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn add_or_undelete_key_with_status_in_group_once(
+        &self,
+        api_key: &str,
+        group: Option<&str>,
+    ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
         let mut tx = self.pool.begin().await?;
         let now = Utc::now().timestamp();
 
-        let group = group.map(str::trim).filter(|g| !g.is_empty());
+        let operation_result: Result<(String, ApiKeyUpsertStatus), ProxyError> = async {
+            if let Some((id, deleted_at, existing_group)) =
+                sqlx::query_as::<_, (String, Option<i64>, Option<String>)>(
+                    "SELECT id, deleted_at, group_name FROM api_keys WHERE api_key = ? LIMIT 1",
+                )
+                .bind(api_key)
+                .fetch_optional(&mut *tx)
+                .await?
+            {
+                let existing_empty = existing_group
+                    .as_deref()
+                    .map(str::trim)
+                    .map(|g| g.is_empty())
+                    .unwrap_or(true);
 
-        if let Some((id, deleted_at, existing_group)) =
-            sqlx::query_as::<_, (String, Option<i64>, Option<String>)>(
-                "SELECT id, deleted_at, group_name FROM api_keys WHERE api_key = ? LIMIT 1",
-            )
-            .bind(api_key)
-            .fetch_optional(&mut *tx)
-            .await?
-        {
-            let existing_empty = existing_group
-                .as_deref()
-                .map(str::trim)
-                .map(|g| g.is_empty())
-                .unwrap_or(true);
+                if deleted_at.is_some() {
+                    if let Some(group) = group {
+                        sqlx::query(
+                            "UPDATE api_keys SET deleted_at = NULL, group_name = ? WHERE id = ?",
+                        )
+                        .bind(group)
+                        .bind(&id)
+                        .execute(&mut *tx)
+                        .await?;
+                    } else {
+                        sqlx::query("UPDATE api_keys SET deleted_at = NULL WHERE id = ?")
+                            .bind(&id)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
 
-            if deleted_at.is_some() {
-                if let Some(group) = group {
-                    sqlx::query(
-                        "UPDATE api_keys SET deleted_at = NULL, group_name = ? WHERE id = ?",
-                    )
-                    .bind(group)
-                    .bind(&id)
-                    .execute(&mut *tx)
-                    .await?;
-                } else {
-                    sqlx::query("UPDATE api_keys SET deleted_at = NULL WHERE id = ?")
+                    return Ok((id, ApiKeyUpsertStatus::Undeleted));
+                }
+
+                if let Some(group) = group
+                    && existing_empty
+                {
+                    sqlx::query("UPDATE api_keys SET group_name = ? WHERE id = ?")
+                        .bind(group)
                         .bind(&id)
                         .execute(&mut *tx)
                         .await?;
                 }
 
-                tx.commit().await?;
-                return Ok((id, ApiKeyUpsertStatus::Undeleted));
+                return Ok((id, ApiKeyUpsertStatus::Existed));
             }
 
-            if let Some(group) = group
-                && existing_empty
-            {
-                sqlx::query("UPDATE api_keys SET group_name = ? WHERE id = ?")
-                    .bind(group)
-                    .bind(&id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-
-            tx.commit().await?;
-            return Ok((id, ApiKeyUpsertStatus::Existed));
+            let id = Self::generate_unique_key_id(&mut tx).await?;
+            sqlx::query(
+                r#"
+                INSERT INTO api_keys (id, api_key, group_name, status, status_changed_at)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&id)
+            .bind(api_key)
+            .bind(group)
+            .bind(STATUS_ACTIVE)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            Ok((id, ApiKeyUpsertStatus::Created))
         }
+        .await;
 
-        let id = Self::generate_unique_key_id(&mut tx).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO api_keys (id, api_key, group_name, status, status_changed_at)
-            VALUES (?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&id)
-        .bind(api_key)
-        .bind(group)
-        .bind(STATUS_ACTIVE)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok((id, ApiKeyUpsertStatus::Created))
+        match operation_result {
+            Ok(result) => {
+                tx.commit().await?;
+                Ok(result)
+            }
+            Err(err) => {
+                tx.rollback().await.ok();
+                Err(err)
+            }
+        }
     }
 
     // Admin ops: soft-delete by ID (mark deleted_at)
@@ -8077,6 +8146,71 @@ mod tests {
     fn temp_db_path(prefix: &str) -> PathBuf {
         let file = format!("{}-{}.db", prefix, nanoid!(8));
         std::env::temp_dir().join(file)
+    }
+
+    #[tokio::test]
+    async fn add_or_undelete_key_with_status_keeps_tx_clean_after_insert_failure() {
+        let db_path = temp_db_path("api-key-upsert-clean-tx-after-failure");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_insert_api_key
+            BEFORE INSERT ON api_keys
+            WHEN NEW.api_key = 'tvly-force-fail'
+            BEGIN
+                SELECT RAISE(ABORT, 'boom');
+            END;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create fail trigger");
+
+        let first_err = proxy
+            .add_or_undelete_key_with_status_in_group("tvly-force-fail", Some("team-a"))
+            .await
+            .expect_err("first key should fail due to trigger");
+        assert!(
+            first_err.to_string().contains("boom"),
+            "error should include trigger message"
+        );
+
+        let (second_id, second_status) = proxy
+            .add_or_undelete_key_with_status_in_group("tvly-after-failure", Some("team-a"))
+            .await
+            .expect("second key insert should not be polluted by previous failure");
+        assert_eq!(second_status, ApiKeyUpsertStatus::Created);
+        assert!(!second_id.is_empty(), "second key id must be present");
+
+        let inserted_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_keys WHERE api_key = 'tvly-after-failure'",
+        )
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("count inserted keys");
+        assert_eq!(
+            inserted_count, 1,
+            "follow-up insert must succeed even after previous tx failure"
+        );
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
