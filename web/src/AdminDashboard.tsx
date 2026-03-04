@@ -2466,27 +2466,31 @@ function AdminDashboard(): JSX.Element {
                   return (
                     <label className="form-control quota-control" key={item.field}>
                       <span className="label-text">{item.label}</span>
-                      <input
-                        type="number"
-                        min={1}
-                        className="input input-bordered"
-                        value={draftValue}
-                        onChange={(event) => updateQuotaDraftField(item.field, event.target.value)}
-                      />
-                      <input
-                        type="range"
-                        min={1}
-                        max={sliderMax}
-                        step={1}
-                        className="range quota-slider"
-                        value={parsedDraft}
-                        onChange={(event) => updateQuotaDraftField(item.field, event.target.value)}
-                        style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
-                        aria-label={item.label}
-                      />
-                      <span className="panel-description">
-                        {formatNumber(item.used)} / {formatNumber(parsedDraft)}
-                      </span>
+                      <div className="quota-control-row">
+                        <div className="quota-slider-wrap">
+                          <input
+                            type="range"
+                            min={1}
+                            max={sliderMax}
+                            step={1}
+                            className="range quota-slider"
+                            value={parsedDraft}
+                            onChange={(event) => updateQuotaDraftField(item.field, event.target.value)}
+                            style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
+                            aria-label={item.label}
+                          />
+                          <span className="panel-description">
+                            {formatNumber(item.used)} / {formatNumber(parsedDraft)}
+                          </span>
+                        </div>
+                        <input
+                          type="number"
+                          min={1}
+                          className="input input-bordered quota-input"
+                          value={draftValue}
+                          onChange={(event) => updateQuotaDraftField(item.field, event.target.value)}
+                        />
+                      </div>
                     </label>
                   )
                 })}

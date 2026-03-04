@@ -1357,27 +1357,31 @@ function UserDetailPageCanvas(): JSX.Element {
             return (
               <label className="form-control quota-control" key={item.field}>
                 <span className="label-text">{item.label}</span>
-                <input
-                  type="number"
-                  className="input input-bordered"
-                  min={1}
-                  value={draftValue}
-                  onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
-                />
-                <input
-                  type="range"
-                  min={1}
-                  max={sliderMax}
-                  step={1}
-                  className="range quota-slider"
-                  value={parsedDraft}
-                  onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
-                  style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
-                  aria-label={item.label}
-                />
-                <span className="panel-description">
-                  {formatNumber(item.used)} / {formatNumber(parsedDraft)}
-                </span>
+                <div className="quota-control-row">
+                  <div className="quota-slider-wrap">
+                    <input
+                      type="range"
+                      min={1}
+                      max={sliderMax}
+                      step={1}
+                      className="range quota-slider"
+                      value={parsedDraft}
+                      onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                      style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
+                      aria-label={item.label}
+                    />
+                    <span className="panel-description">
+                      {formatNumber(item.used)} / {formatNumber(parsedDraft)}
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    className="input input-bordered quota-input"
+                    min={1}
+                    value={draftValue}
+                    onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                  />
+                </div>
               </label>
             )
           })}

@@ -471,7 +471,6 @@
   }
 
   .quota-slider {
-    margin-top: 0.5rem;
     height: 0.6rem;
     border-radius: 999px;
     border: 1px solid hsl(var(--border) / 0.82);
@@ -512,7 +511,29 @@
   .quota-control {
     display: flex;
     flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .quota-control-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .quota-slider-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
     gap: 0.35rem;
+    padding-top: 0.35rem;
+  }
+
+  .quota-input {
+    width: 140px;
+    min-width: 140px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
   .quota-control .panel-description {
