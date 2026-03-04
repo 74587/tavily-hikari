@@ -470,6 +470,56 @@
     height: 0.35rem;
   }
 
+  .quota-slider {
+    margin-top: 0.5rem;
+    height: 0.6rem;
+    border-radius: 999px;
+    border: 1px solid hsl(var(--border) / 0.82);
+    background: hsl(var(--muted) / 0.5);
+  }
+
+  .quota-slider::-webkit-slider-runnable-track {
+    height: 0.6rem;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .quota-slider::-moz-range-track {
+    height: 0.6rem;
+    border-radius: 999px;
+    background: transparent;
+  }
+
+  .quota-slider::-webkit-slider-thumb {
+    height: 1rem;
+    width: 1rem;
+    border-radius: 999px;
+    margin-top: -0.25rem;
+    border: 1px solid hsl(var(--card) / 0.92);
+    background: hsl(var(--primary));
+    box-shadow: 0 2px 6px hsl(var(--foreground) / 0.22);
+  }
+
+  .quota-slider::-moz-range-thumb {
+    height: 1rem;
+    width: 1rem;
+    border-radius: 999px;
+    border: 1px solid hsl(var(--card) / 0.92);
+    background: hsl(var(--primary));
+    box-shadow: 0 2px 6px hsl(var(--foreground) / 0.22);
+  }
+
+  .quota-control {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .quota-control .panel-description {
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+  }
+
   .table {
     width: 100%;
     border-collapse: collapse;
@@ -3138,6 +3188,44 @@ tbody tr:hover {
   border-radius: 999px;
 }
 
+/* Admin users tables: prefer horizontal scroll over cramped fixed-layout columns. */
+.jobs-table.admin-users-table {
+  table-layout: auto;
+  min-width: 1240px;
+}
+
+.jobs-table.admin-users-table th,
+.jobs-table.admin-users-table td {
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.jobs-table.admin-users-list-table th:nth-child(1),
+.jobs-table.admin-users-list-table td:nth-child(1) {
+  min-width: 18rem;
+  white-space: normal;
+}
+
+.jobs-table.admin-users-list-table th:last-child,
+.jobs-table.admin-users-list-table td:last-child,
+.jobs-table.admin-user-tokens-table th:last-child,
+.jobs-table.admin-user-tokens-table td:last-child {
+  width: 86px;
+  min-width: 86px;
+  text-align: center;
+}
+
+.jobs-table.admin-user-tokens-table {
+  min-width: 1320px;
+}
+
+.jobs-table.admin-user-tokens-table th:nth-child(2),
+.jobs-table.admin-user-tokens-table td:nth-child(2) {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .user-console-tokens-table,
 .user-console-logs-table {
   width: 100%;
@@ -3314,45 +3402,45 @@ tbody tr:hover {
   min-width: 0;
 }
 
-.jobs-table:not(.tokens-table) th:nth-child(7),
-.jobs-table:not(.tokens-table) td.jobs-message-cell {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(7),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td.jobs-message-cell {
   width: 24%;
 }
 
-.jobs-table:not(.tokens-table) th,
-.jobs-table:not(.tokens-table) td {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th,
+.jobs-table:not(.tokens-table):not(.admin-users-table) td {
   padding-inline: 12px;
 }
 
-.jobs-table:not(.tokens-table) th:nth-child(1),
-.jobs-table:not(.tokens-table) td:nth-child(1) {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(1),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(1) {
   width: 7ch;
   white-space: nowrap;
 }
 
-.jobs-table:not(.tokens-table) th:nth-child(3),
-.jobs-table:not(.tokens-table) td:nth-child(3) {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(3),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(3) {
   width: 9ch;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.jobs-table:not(.tokens-table) th:nth-child(4),
-.jobs-table:not(.tokens-table) td:nth-child(4) {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(4),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(4) {
   width: 13ch;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.jobs-table:not(.tokens-table) th:nth-child(5),
-.jobs-table:not(.tokens-table) td:nth-child(5) {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(5),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(5) {
   width: 8ch;
   white-space: nowrap;
 }
 
-.jobs-table:not(.tokens-table) td:nth-child(4) .status-pill {
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(4) .status-pill {
   min-width: 68px;
 }
 
@@ -3432,8 +3520,8 @@ tbody tr:hover {
 }
 
 /* Jobs table: prevent start time from wrapping and overflowing (jobs list only, not tokens table) */
-.jobs-table:not(.tokens-table) th:nth-child(6),
-.jobs-table:not(.tokens-table) td:nth-child(6) {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(6),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(6) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3441,8 +3529,8 @@ tbody tr:hover {
 }
 
 /* Jobs table: keep type column inside its cell (jobs list only, not tokens table) */
-.jobs-table:not(.tokens-table) th:nth-child(2),
-.jobs-table:not(.tokens-table) td:nth-child(2) {
+.jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(2),
+.jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(2) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3451,29 +3539,29 @@ tbody tr:hover {
 
 /* Mid/narrow width: keep row stable by collapsing message text to icon-only toggle. */
 @media (max-width: 1160px) {
-  .jobs-table:not(.tokens-table) th:nth-child(7),
-  .jobs-table:not(.tokens-table) td.jobs-message-cell {
+  .jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(7),
+  .jobs-table:not(.tokens-table):not(.admin-users-table) td.jobs-message-cell {
     width: 3.2rem;
   }
 
-  .jobs-table:not(.tokens-table) th:nth-child(7) {
+  .jobs-table:not(.tokens-table):not(.admin-users-table) th:nth-child(7) {
     font-size: 0;
   }
 
-  .jobs-table:not(.tokens-table) td.jobs-message-cell .jobs-message-text {
+  .jobs-table:not(.tokens-table):not(.admin-users-table) td.jobs-message-cell .jobs-message-text {
     display: none;
   }
 
-  .jobs-table:not(.tokens-table) td.jobs-message-cell .jobs-message-button {
+  .jobs-table:not(.tokens-table):not(.admin-users-table) td.jobs-message-cell .jobs-message-button {
     justify-content: center;
   }
 
-  .jobs-table:not(.tokens-table) th,
-  .jobs-table:not(.tokens-table) td {
+  .jobs-table:not(.tokens-table):not(.admin-users-table) th,
+  .jobs-table:not(.tokens-table):not(.admin-users-table) td {
     padding-inline: 10px;
   }
 
-  .jobs-table:not(.tokens-table) td:nth-child(4) .status-pill {
+  .jobs-table:not(.tokens-table):not(.admin-users-table) td:nth-child(4) .status-pill {
     min-width: 60px;
     padding-inline: 8px;
   }

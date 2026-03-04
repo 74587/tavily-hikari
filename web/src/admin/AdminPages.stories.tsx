@@ -458,6 +458,35 @@ function formatTimestamp(value: number | null): string {
   return dateTimeFormatter.format(new Date(value * 1000))
 }
 
+type StoryQuotaField = 'hourlyAnyLimit' | 'hourlyLimit' | 'dailyLimit' | 'monthlyLimit'
+
+function parseQuotaDraftValue(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? '', 10)
+  if (!Number.isFinite(parsed)) return Math.max(1, fallback)
+  return Math.max(1, parsed)
+}
+
+function pickQuotaSliderMax(used: number, currentLimit: number, draftLimit: number): number {
+  const baseline = Math.max(1, used, currentLimit, draftLimit)
+  const step = baseline >= 100_000
+    ? 10_000
+    : baseline >= 10_000
+      ? 1_000
+      : baseline >= 1_000
+        ? 100
+        : 10
+  return Math.max(step, Math.ceil((baseline * 1.25) / step) * step)
+}
+
+function buildQuotaSliderTrack(used: number, draftLimit: number, sliderMax: number): string {
+  const max = Math.max(1, sliderMax)
+  const usedRatio = Math.min(100, Math.max(0, (used / max) * 100))
+  const draftRatio = Math.min(100, Math.max(0, (draftLimit / max) * 100))
+  const start = Math.min(usedRatio, draftRatio)
+  const end = Math.max(usedRatio, draftRatio)
+  return `linear-gradient(to right, hsl(var(--warning) / 0.34) 0% ${start}%, hsl(var(--primary) / 0.44) ${start}% ${end}%, hsl(var(--muted) / 0.5) ${end}% 100%)`
+}
+
 function keyStatusTone(status: string): StatusTone {
   const normalized = status.trim().toLowerCase()
   if (normalized === 'active' || normalized === 'success' || normalized === 'completed') return 'success'
@@ -1161,7 +1190,7 @@ function UsersPageCanvas(): JSX.Element {
           {filteredUsers.length === 0 ? (
             <div className="empty-state alert">{users.empty.none}</div>
           ) : (
-            <table className="jobs-table">
+            <table className="jobs-table admin-users-table admin-users-list-table">
               <thead>
                 <tr>
                   <th>{users.table.user}</th>
@@ -1237,7 +1266,7 @@ function UserDetailPageCanvas(): JSX.Element {
   const admin = useTranslate().admin
   const users = admin.users
   const detail = MOCK_USER_DETAIL
-  const [quotaDraft, setQuotaDraft] = useState({
+  const [quotaDraft, setQuotaDraft] = useState<Record<StoryQuotaField, string>>({
     hourlyAnyLimit: String(detail.hourlyAnyLimit),
     hourlyLimit: String(detail.quotaHourlyLimit),
     dailyLimit: String(detail.quotaDailyLimit),
@@ -1296,46 +1325,62 @@ function UserDetailPageCanvas(): JSX.Element {
           </div>
         </div>
         <div className="token-detail-grid" style={{ marginTop: 12 }}>
-          <label className="form-control">
-            <span className="label-text">{users.quota.hourlyAny}</span>
-            <input
-              type="number"
-              className="input input-bordered"
-              min={1}
-              value={quotaDraft.hourlyAnyLimit}
-              onChange={(event) => setQuotaDraft((prev) => ({ ...prev, hourlyAnyLimit: event.target.value }))}
-            />
-          </label>
-          <label className="form-control">
-            <span className="label-text">{users.quota.hourly}</span>
-            <input
-              type="number"
-              className="input input-bordered"
-              min={1}
-              value={quotaDraft.hourlyLimit}
-              onChange={(event) => setQuotaDraft((prev) => ({ ...prev, hourlyLimit: event.target.value }))}
-            />
-          </label>
-          <label className="form-control">
-            <span className="label-text">{users.quota.daily}</span>
-            <input
-              type="number"
-              className="input input-bordered"
-              min={1}
-              value={quotaDraft.dailyLimit}
-              onChange={(event) => setQuotaDraft((prev) => ({ ...prev, dailyLimit: event.target.value }))}
-            />
-          </label>
-          <label className="form-control">
-            <span className="label-text">{users.quota.monthly}</span>
-            <input
-              type="number"
-              className="input input-bordered"
-              min={1}
-              value={quotaDraft.monthlyLimit}
-              onChange={(event) => setQuotaDraft((prev) => ({ ...prev, monthlyLimit: event.target.value }))}
-            />
-          </label>
+          {([
+            {
+              field: 'hourlyAnyLimit',
+              label: users.quota.hourlyAny,
+              used: detail.hourlyAnyUsed,
+              currentLimit: detail.hourlyAnyLimit,
+            },
+            {
+              field: 'hourlyLimit',
+              label: users.quota.hourly,
+              used: detail.quotaHourlyUsed,
+              currentLimit: detail.quotaHourlyLimit,
+            },
+            {
+              field: 'dailyLimit',
+              label: users.quota.daily,
+              used: detail.quotaDailyUsed,
+              currentLimit: detail.quotaDailyLimit,
+            },
+            {
+              field: 'monthlyLimit',
+              label: users.quota.monthly,
+              used: detail.quotaMonthlyUsed,
+              currentLimit: detail.quotaMonthlyLimit,
+            },
+          ] as const).map((item) => {
+            const draftValue = quotaDraft[item.field]
+            const parsedDraft = parseQuotaDraftValue(draftValue, item.currentLimit)
+            const sliderMax = pickQuotaSliderMax(item.used, item.currentLimit, parsedDraft)
+            return (
+              <label className="form-control quota-control" key={item.field}>
+                <span className="label-text">{item.label}</span>
+                <input
+                  type="number"
+                  className="input input-bordered"
+                  min={1}
+                  value={draftValue}
+                  onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                />
+                <input
+                  type="range"
+                  min={1}
+                  max={sliderMax}
+                  step={1}
+                  className="range quota-slider"
+                  value={parsedDraft}
+                  onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                  style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
+                  aria-label={item.label}
+                />
+                <span className="panel-description">
+                  {formatNumber(item.used)} / {formatNumber(parsedDraft)}
+                </span>
+              </label>
+            )
+          })}
         </div>
         <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <span className="panel-description">{users.quota.hint}</span>
@@ -1353,7 +1398,7 @@ function UserDetailPageCanvas(): JSX.Element {
           </div>
         </div>
         <div className="table-wrapper jobs-table-wrapper">
-          <table className="jobs-table">
+          <table className="jobs-table admin-users-table admin-user-tokens-table">
             <thead>
               <tr>
                 <th>{users.tokens.table.id}</th>
