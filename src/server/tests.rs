@@ -476,7 +476,10 @@ mod tests {
         }
     }
 
-    async fn spawn_user_oauth_server(proxy: TavilyProxy) -> SocketAddr {
+    async fn spawn_user_oauth_server_with_options(
+        proxy: TavilyProxy,
+        linuxdo_oauth: LinuxDoOAuthOptions,
+    ) -> SocketAddr {
         let static_dir = temp_static_dir("linuxdo-user-oauth");
         let state = Arc::new(AppState {
             proxy,
@@ -484,7 +487,7 @@ mod tests {
             forward_auth: ForwardAuthConfig::new(None, None, None, None),
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
-            linuxdo_oauth: linuxdo_oauth_options_for_test(),
+            linuxdo_oauth,
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
         });
@@ -492,6 +495,8 @@ mod tests {
         let app = Router::new()
             .route("/", get(serve_index))
             .route("/console", get(serve_console_index))
+            .route("/auth/linuxdo", get(get_linuxdo_auth).post(post_linuxdo_auth))
+            .route("/auth/linuxdo/callback", get(get_linuxdo_callback))
             .route("/api/profile", get(get_profile))
             .route("/api/user/token", get(get_user_token))
             .route("/api/user/dashboard", get(get_user_dashboard))
@@ -509,6 +514,84 @@ mod tests {
                 .unwrap();
         });
         addr
+    }
+
+    async fn spawn_user_oauth_server(proxy: TavilyProxy) -> SocketAddr {
+        spawn_user_oauth_server_with_options(proxy, linuxdo_oauth_options_for_test()).await
+    }
+
+    async fn spawn_linuxdo_oauth_mock_server(
+        provider_user_id: &str,
+        username: &str,
+        display_name: &str,
+    ) -> SocketAddr {
+        let access_token = "mock-linuxdo-access-token".to_string();
+        let profile = json!({
+            "id": provider_user_id,
+            "username": username,
+            "name": display_name,
+            "active": true,
+            "trust_level": 3
+        });
+
+        let app = Router::new()
+            .route(
+                "/oauth2/token",
+                post({
+                    let access_token = access_token.clone();
+                    move || {
+                        let access_token = access_token.clone();
+                        async move { (StatusCode::OK, Json(json!({ "access_token": access_token }))) }
+                    }
+                }),
+            )
+            .route(
+                "/api/user",
+                get({
+                    let access_token = access_token.clone();
+                    let profile = profile.clone();
+                    move |headers: HeaderMap| {
+                        let access_token = access_token.clone();
+                        let profile = profile.clone();
+                        async move {
+                            let authorization = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok());
+                            let expected = format!("Bearer {access_token}");
+                            if authorization != Some(expected.as_str()) {
+                                return (
+                                    StatusCode::UNAUTHORIZED,
+                                    Json(json!({ "error": "invalid_token" })),
+                                );
+                            }
+                            (StatusCode::OK, Json(profile))
+                        }
+                    }
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
+    fn find_cookie_pair(
+        headers: &reqwest::header::HeaderMap,
+        cookie_name: &str,
+    ) -> Option<String> {
+        headers
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter_map(|value| value.split(';').next())
+            .map(str::trim)
+            .find(|pair| pair.split_once('=').is_some_and(|(name, _)| name == cookie_name))
+            .map(str::to_string)
     }
 
     #[tokio::test]
@@ -1353,6 +1436,327 @@ mod tests {
             .await
             .expect("unauth dashboard request");
         assert_eq!(unauth_dashboard.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn post_linuxdo_auth_persists_preferred_token_id_in_oauth_state() {
+        let db_path = temp_db_path("linuxdo-auth-post-preferred-token");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let preferred = proxy
+            .create_access_token(Some("linuxdo:preferred"))
+            .await
+            .expect("create preferred token");
+
+        let addr = spawn_user_oauth_server(proxy).await;
+        let no_redirect = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build no-redirect client");
+
+        let auth_url = format!("http://{}/auth/linuxdo", addr);
+        let response = no_redirect
+            .post(&auth_url)
+            .form(&[("token", preferred.token.clone())])
+            .send()
+            .await
+            .expect("post linuxdo auth");
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        let location_url = reqwest::Url::parse(location).expect("parse redirect location");
+        let state_value = location_url
+            .query_pairs()
+            .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+            .expect("state query param");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let (bind_token_id,): (Option<String>,) =
+            sqlx::query_as("SELECT bind_token_id FROM oauth_login_states WHERE state = ? LIMIT 1")
+                .bind(state_value)
+                .fetch_one(&pool)
+                .await
+                .expect("query oauth state");
+        assert_eq!(
+            bind_token_id.as_deref(),
+            Some(preferred.id.as_str()),
+            "preferred token id should be persisted in oauth state"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn linuxdo_callback_rebinds_preferred_token_end_to_end() {
+        let db_path = temp_db_path("linuxdo-callback-rebind-preferred-e2e");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-e2e-user".to_string(),
+                username: Some("linuxdo_e2e".to_string()),
+                name: Some("LinuxDO E2E".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("seed oauth account");
+        let preferred = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:linuxdo_e2e"))
+            .await
+            .expect("create preferred binding");
+        let mistaken = proxy
+            .create_access_token(Some("linuxdo:mistaken"))
+            .await
+            .expect("create mistaken token");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+        sqlx::query("UPDATE user_token_bindings SET token_id = ? WHERE user_id = ?")
+            .bind(&mistaken.id)
+            .bind(&user.user_id)
+            .execute(&pool)
+            .await
+            .expect("simulate mistaken historical binding");
+
+        let oauth_upstream = spawn_linuxdo_oauth_mock_server(
+            "linuxdo-e2e-user",
+            "linuxdo_e2e",
+            "LinuxDO E2E",
+        )
+        .await;
+        let mut oauth_options = linuxdo_oauth_options_for_test();
+        oauth_options.authorize_url = format!("http://{oauth_upstream}/oauth2/authorize");
+        oauth_options.token_url = format!("http://{oauth_upstream}/oauth2/token");
+        oauth_options.userinfo_url = format!("http://{oauth_upstream}/api/user");
+
+        let addr = spawn_user_oauth_server_with_options(proxy, oauth_options).await;
+        let no_redirect = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build no-redirect client");
+
+        let auth_url = format!("http://{}/auth/linuxdo", addr);
+        let auth_resp = no_redirect
+            .post(&auth_url)
+            .form(&[("token", preferred.token.clone())])
+            .send()
+            .await
+            .expect("start linuxdo oauth");
+        assert_eq!(auth_resp.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+
+        let location = auth_resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("auth redirect location");
+        let state = reqwest::Url::parse(location)
+            .expect("parse redirect url")
+            .query_pairs()
+            .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+            .expect("oauth state");
+        let binding_cookie = find_cookie_pair(auth_resp.headers(), OAUTH_LOGIN_BINDING_COOKIE_NAME)
+            .expect("oauth binding cookie");
+
+        let callback_url = format!("http://{}/auth/linuxdo/callback?code=e2e-code&state={state}", addr);
+        let callback_resp = no_redirect
+            .get(&callback_url)
+            .header(reqwest::header::COOKIE, binding_cookie)
+            .send()
+            .await
+            .expect("oauth callback");
+        assert_eq!(
+            callback_resp.status(),
+            reqwest::StatusCode::TEMPORARY_REDIRECT
+        );
+        assert_eq!(
+            callback_resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/console")
+        );
+
+        let user_cookie = find_cookie_pair(callback_resp.headers(), USER_SESSION_COOKIE_NAME)
+            .expect("user session cookie");
+        let token_resp = Client::new()
+            .get(format!("http://{}/api/user/token", addr))
+            .header(reqwest::header::COOKIE, user_cookie)
+            .send()
+            .await
+            .expect("get user token");
+        assert_eq!(token_resp.status(), reqwest::StatusCode::OK);
+        let token_body: serde_json::Value = token_resp.json().await.expect("token body");
+        assert_eq!(
+            token_body.get("token").and_then(|value| value.as_str()),
+            Some(preferred.token.as_str())
+        );
+
+        let (bound_token_id,): (String,) =
+            sqlx::query_as("SELECT token_id FROM user_token_bindings WHERE user_id = ? LIMIT 1")
+                .bind(&user.user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query rebound token");
+        assert_eq!(bound_token_id, preferred.id);
+
+        let mistaken_owner =
+            sqlx::query_scalar::<_, Option<String>>("SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1")
+                .bind(&mistaken.id)
+                .fetch_optional(&pool)
+                .await
+                .expect("query mistaken owner")
+                .flatten();
+        assert!(
+            mistaken_owner.is_none(),
+            "mistaken token should remain unbound after self-heal rebind"
+        );
+
+        let (enabled, deleted_at): (i64, Option<i64>) =
+            sqlx::query_as("SELECT enabled, deleted_at FROM auth_tokens WHERE id = ? LIMIT 1")
+                .bind(&mistaken.id)
+                .fetch_one(&pool)
+                .await
+                .expect("query mistaken token state");
+        assert_eq!(enabled, 1, "mistaken token should stay active");
+        assert!(
+            deleted_at.is_none(),
+            "mistaken token should stay non-deleted"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn revoking_user_sessions_does_not_break_builtin_admin_session() {
+        let db_path = temp_db_path("user-session-revoke-vs-admin-session");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-revoke-user".to_string(),
+                username: Some("linuxdo_revoke".to_string()),
+                name: Some("LinuxDO Revoke".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("seed oauth account");
+        let _user_token = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:linuxdo_revoke"))
+            .await
+            .expect("ensure user token");
+        let user_session = proxy
+            .create_user_session(&user, 3600)
+            .await
+            .expect("create user session");
+
+        let user_addr = spawn_user_oauth_server(proxy.clone()).await;
+        let admin_password = "pw-user-revoke-admin";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy.clone(), admin_password).await;
+        let client = Client::new();
+
+        let user_cookie = format!("{USER_SESSION_COOKIE_NAME}={}", user_session.token);
+        let before_user_resp = client
+            .get(format!("http://{}/api/user/token", user_addr))
+            .header(reqwest::header::COOKIE, user_cookie.clone())
+            .send()
+            .await
+            .expect("user token before revoke");
+        assert_eq!(before_user_resp.status(), reqwest::StatusCode::OK);
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let admin_before_resp = client
+            .post(format!("http://{}/api/keys/batch", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .json(&serde_json::json!({ "api_keys": ["k-user-revoke-admin"] }))
+            .send()
+            .await
+            .expect("admin endpoint before revoke");
+        assert_eq!(admin_before_resp.status(), reqwest::StatusCode::OK);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+        sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE revoked_at IS NULL")
+            .bind(Utc::now().timestamp())
+            .execute(&pool)
+            .await
+            .expect("revoke user sessions");
+
+        let after_user_resp = client
+            .get(format!("http://{}/api/user/token", user_addr))
+            .header(reqwest::header::COOKIE, user_cookie)
+            .send()
+            .await
+            .expect("user token after revoke");
+        assert_eq!(after_user_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let admin_after_resp = client
+            .post(format!("http://{}/api/keys/batch", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .json(&serde_json::json!({ "api_keys": ["k-user-revoke-admin-2"] }))
+            .send()
+            .await
+            .expect("admin endpoint after revoke");
+        assert_eq!(admin_after_resp.status(), reqwest::StatusCode::OK);
 
         let _ = std::fs::remove_file(db_path);
     }

@@ -18,6 +18,7 @@ export interface PublicHomeHeroCardProps {
   adminActionLabel: string
   topControls?: ReactNode
   linuxDoHref?: string
+  onLinuxDoLogin?: () => void
   onTokenAccessClick?: () => void
   onAdminActionClick?: () => void
 }
@@ -35,6 +36,7 @@ function PublicHomeHeroCard({
   adminActionLabel,
   topControls,
   linuxDoHref = '/auth/linuxdo',
+  onLinuxDoLogin,
   onTokenAccessClick,
   onAdminActionClick,
 }: PublicHomeHeroCardProps): JSX.Element {
@@ -72,10 +74,24 @@ function PublicHomeHeroCard({
       {shouldShowActions && (
         <div className="public-home-actions">
           {showLinuxDoLogin && (
-            <a href={linuxDoHref} className="linuxdo-login-button" aria-label={publicStrings.linuxDoLogin.button}>
-              <img src="/linuxdo-logo.svg" alt={publicStrings.linuxDoLogin.logoAlt} width={20} height={20} />
-              <span>{publicStrings.linuxDoLogin.button}</span>
-            </a>
+            onLinuxDoLogin
+              ? (
+                  <button
+                    type="button"
+                    className="linuxdo-login-button"
+                    aria-label={publicStrings.linuxDoLogin.button}
+                    onClick={onLinuxDoLogin}
+                  >
+                    <img src="/linuxdo-logo.svg" alt={publicStrings.linuxDoLogin.logoAlt} width={20} height={20} />
+                    <span>{publicStrings.linuxDoLogin.button}</span>
+                  </button>
+                )
+              : (
+                  <a href={linuxDoHref} className="linuxdo-login-button" aria-label={publicStrings.linuxDoLogin.button}>
+                    <img src="/linuxdo-logo.svg" alt={publicStrings.linuxDoLogin.logoAlt} width={20} height={20} />
+                    <span>{publicStrings.linuxDoLogin.button}</span>
+                  </a>
+                )
           )}
           {showTokenAccessButton && (
             <button type="button" className="token-access-button" onClick={onTokenAccessClick}>

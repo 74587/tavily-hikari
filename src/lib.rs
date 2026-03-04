@@ -133,6 +133,7 @@ const META_KEY_TOKEN_USAGE_ROLLUP_LOG_ID_V2: &str = "token_usage_rollup_last_log
 const META_KEY_HEAL_ORPHAN_TOKENS_V1: &str = "heal_orphan_auth_tokens_from_logs_v1";
 const META_KEY_API_KEY_USAGE_BUCKETS_V1_DONE: &str = "api_key_usage_buckets_v1_done";
 const META_KEY_ACCOUNT_QUOTA_BACKFILL_V1: &str = "account_quota_backfill_v1";
+const META_KEY_FORCE_USER_RELOGIN_V1: &str = "force_user_relogin_v1";
 const API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS: [u64; 2] = [20, 50];
 
 fn token_limit_from_env(var: &str, default: i64) -> i64 {
@@ -1031,8 +1032,14 @@ impl TavilyProxy {
         redirect_to: Option<&str>,
         ttl_secs: i64,
     ) -> Result<String, ProxyError> {
-        self.create_oauth_login_state_with_binding(provider, redirect_to, ttl_secs, None)
-            .await
+        self.create_oauth_login_state_with_binding_and_token(
+            provider,
+            redirect_to,
+            ttl_secs,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Create a one-time OAuth login state bound to optional browser context hash.
@@ -1043,8 +1050,27 @@ impl TavilyProxy {
         ttl_secs: i64,
         binding_hash: Option<&str>,
     ) -> Result<String, ProxyError> {
+        self.create_oauth_login_state_with_binding_and_token(
+            provider,
+            redirect_to,
+            ttl_secs,
+            binding_hash,
+            None,
+        )
+        .await
+    }
+
+    /// Create a one-time OAuth login state bound to optional browser context hash and token id.
+    pub async fn create_oauth_login_state_with_binding_and_token(
+        &self,
+        provider: &str,
+        redirect_to: Option<&str>,
+        ttl_secs: i64,
+        binding_hash: Option<&str>,
+        bind_token_id: Option<&str>,
+    ) -> Result<String, ProxyError> {
         self.key_store
-            .insert_oauth_login_state(provider, redirect_to, ttl_secs, binding_hash)
+            .insert_oauth_login_state(provider, redirect_to, ttl_secs, binding_hash, bind_token_id)
             .await
     }
 
@@ -1054,8 +1080,10 @@ impl TavilyProxy {
         provider: &str,
         state: &str,
     ) -> Result<Option<Option<String>>, ProxyError> {
-        self.consume_oauth_login_state_with_binding(provider, state, None)
-            .await
+        Ok(self
+            .consume_oauth_login_state_with_binding_and_token(provider, state, None)
+            .await?
+            .map(|payload| payload.redirect_to))
     }
 
     /// Consume and invalidate an OAuth login state bound to optional browser context hash.
@@ -1065,6 +1093,19 @@ impl TavilyProxy {
         state: &str,
         binding_hash: Option<&str>,
     ) -> Result<Option<Option<String>>, ProxyError> {
+        Ok(self
+            .consume_oauth_login_state_with_binding_and_token(provider, state, binding_hash)
+            .await?
+            .map(|payload| payload.redirect_to))
+    }
+
+    /// Consume and invalidate an OAuth login state and return all payload fields.
+    pub async fn consume_oauth_login_state_with_binding_and_token(
+        &self,
+        provider: &str,
+        state: &str,
+        binding_hash: Option<&str>,
+    ) -> Result<Option<OAuthLoginStatePayload>, ProxyError> {
         self.key_store
             .consume_oauth_login_state(provider, state, binding_hash)
             .await
@@ -1086,6 +1127,18 @@ impl TavilyProxy {
     ) -> Result<AuthTokenSecret, ProxyError> {
         self.key_store
             .ensure_user_token_binding(user_id, note)
+            .await
+    }
+
+    /// Ensure binding with an optional preferred token id. Falls back to default behavior.
+    pub async fn ensure_user_token_binding_with_preferred(
+        &self,
+        user_id: &str,
+        note: Option<&str>,
+        preferred_token_id: Option<&str>,
+    ) -> Result<AuthTokenSecret, ProxyError> {
+        self.key_store
+            .ensure_user_token_binding_with_preferred(user_id, note, preferred_token_id)
             .await
     }
 
@@ -2309,6 +2362,7 @@ impl KeyStore {
                 provider TEXT NOT NULL,
                 redirect_to TEXT,
                 binding_hash TEXT,
+                bind_token_id TEXT,
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
                 consumed_at INTEGER
@@ -2329,6 +2383,14 @@ impl KeyStore {
             .await?
         {
             sqlx::query("ALTER TABLE oauth_login_states ADD COLUMN binding_hash TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        if !self
+            .table_column_exists("oauth_login_states", "bind_token_id")
+            .await?
+        {
+            sqlx::query("ALTER TABLE oauth_login_states ADD COLUMN bind_token_id TEXT")
                 .execute(&self.pool)
                 .await?;
         }
@@ -2582,6 +2644,15 @@ impl KeyStore {
             self.set_meta_i64(META_KEY_ACCOUNT_QUOTA_BACKFILL_V1, 1)
                 .await?;
         }
+        if self
+            .get_meta_i64(META_KEY_FORCE_USER_RELOGIN_V1)
+            .await?
+            .is_none()
+        {
+            self.force_user_relogin_v1().await?;
+            self.set_meta_i64(META_KEY_FORCE_USER_RELOGIN_V1, Utc::now().timestamp())
+                .await?;
+        }
         self.sync_account_quota_limits_with_defaults().await?;
 
         Ok(())
@@ -2612,6 +2683,15 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn force_user_relogin_v1(&self) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE revoked_at IS NULL")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -5105,6 +5185,7 @@ impl KeyStore {
         redirect_to: Option<&str>,
         ttl_secs: i64,
         binding_hash: Option<&str>,
+        bind_token_id: Option<&str>,
     ) -> Result<String, ProxyError> {
         const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         let now = Utc::now().timestamp();
@@ -5121,8 +5202,8 @@ impl KeyStore {
             let state = random_string(ALPHABET, 48);
             let res = sqlx::query(
                 r#"INSERT INTO oauth_login_states
-                   (state, provider, redirect_to, binding_hash, created_at, expires_at, consumed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+                   (state, provider, redirect_to, binding_hash, bind_token_id, created_at, expires_at, consumed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL)"#,
             )
             .bind(&state)
             .bind(provider)
@@ -5132,6 +5213,7 @@ impl KeyStore {
                     .map(str::trim)
                     .filter(|value| !value.is_empty()),
             )
+            .bind(bind_token_id.map(str::trim).filter(|value| !value.is_empty()))
             .bind(now)
             .bind(expires_at)
             .execute(&self.pool)
@@ -5150,7 +5232,7 @@ impl KeyStore {
         provider: &str,
         state: &str,
         binding_hash: Option<&str>,
-    ) -> Result<Option<Option<String>>, ProxyError> {
+    ) -> Result<Option<OAuthLoginStatePayload>, ProxyError> {
         let now = Utc::now().timestamp();
         let mut tx = self.pool.begin().await?;
 
@@ -5165,8 +5247,8 @@ impl KeyStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            sqlx::query_as::<_, (Option<String>,)>(
-                r#"SELECT redirect_to
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                r#"SELECT redirect_to, bind_token_id
                    FROM oauth_login_states
                    WHERE state = ?
                      AND provider = ?
@@ -5182,8 +5264,8 @@ impl KeyStore {
             .fetch_optional(&mut *tx)
             .await?
         } else {
-            sqlx::query_as::<_, (Option<String>,)>(
-                r#"SELECT redirect_to
+            sqlx::query_as::<_, (Option<String>, Option<String>)>(
+                r#"SELECT redirect_to, bind_token_id
                    FROM oauth_login_states
                    WHERE state = ?
                      AND provider = ?
@@ -5199,7 +5281,7 @@ impl KeyStore {
             .await?
         };
 
-        let Some((redirect_to,)) = row else {
+        let Some((redirect_to, bind_token_id)) = row else {
             tx.rollback().await.ok();
             return Ok(None);
         };
@@ -5221,7 +5303,10 @@ impl KeyStore {
         }
 
         tx.commit().await?;
-        Ok(Some(redirect_to))
+        Ok(Some(OAuthLoginStatePayload {
+            redirect_to,
+            bind_token_id,
+        }))
     }
 
     async fn upsert_oauth_account(
@@ -5402,6 +5487,139 @@ impl KeyStore {
         user_id: &str,
         note: Option<&str>,
     ) -> Result<AuthTokenSecret, ProxyError> {
+        self.ensure_user_token_binding_with_preferred(user_id, note, None)
+            .await
+    }
+
+    async fn fetch_active_token_secret_by_id(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<AuthTokenSecret>, ProxyError> {
+        let row = sqlx::query_as::<_, (String,)>(
+            r#"SELECT secret
+               FROM auth_tokens
+               WHERE id = ? AND enabled = 1 AND deleted_at IS NULL
+               LIMIT 1"#,
+        )
+        .bind(token_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(secret,)| AuthTokenSecret {
+            id: token_id.to_string(),
+            token: Self::compose_full_token(token_id, &secret),
+        }))
+    }
+
+    async fn ensure_user_token_binding_with_preferred(
+        &self,
+        user_id: &str,
+        note: Option<&str>,
+        preferred_token_id: Option<&str>,
+    ) -> Result<AuthTokenSecret, ProxyError> {
+        let preferred_token_id = preferred_token_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if let Some(preferred_token_id) = preferred_token_id
+            && let Some(preferred_secret) = self
+                .fetch_active_token_secret_by_id(preferred_token_id)
+                .await?
+        {
+            for _ in 0..4 {
+                let now = Utc::now().timestamp();
+                let mut tx = self.pool.begin().await?;
+
+                let owner = sqlx::query_as::<_, (String,)>(
+                    r#"SELECT user_id
+                       FROM user_token_bindings
+                       WHERE token_id = ?
+                       LIMIT 1"#,
+                )
+                .bind(preferred_token_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+                match owner {
+                    Some((owner_user_id,)) if owner_user_id != user_id => {
+                        tx.rollback().await.ok();
+                        break;
+                    }
+                    Some(_) => {
+                        tx.rollback().await.ok();
+                        self.cache_token_binding(preferred_token_id, Some(user_id))
+                            .await;
+                        return Ok(preferred_secret);
+                    }
+                    None => {
+                        let current = sqlx::query_as::<_, (String,)>(
+                            r#"SELECT token_id
+                               FROM user_token_bindings
+                               WHERE user_id = ?
+                               LIMIT 1"#,
+                        )
+                        .bind(user_id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        let previous_token_id =
+                            current.as_ref().map(|(token_id,)| token_id.clone());
+
+                        let result = if let Some((current_token_id,)) = current {
+                            if current_token_id == preferred_token_id {
+                                Ok(())
+                            } else {
+                                sqlx::query(
+                                    r#"UPDATE user_token_bindings
+                                       SET token_id = ?, updated_at = ?
+                                       WHERE user_id = ?"#,
+                                )
+                                .bind(preferred_token_id)
+                                .bind(now)
+                                .bind(user_id)
+                                .execute(&mut *tx)
+                                .await
+                                .map(|_| ())
+                            }
+                        } else {
+                            sqlx::query(
+                                r#"INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at)
+                                   VALUES (?, ?, ?, ?)"#,
+                            )
+                            .bind(user_id)
+                            .bind(preferred_token_id)
+                            .bind(now)
+                            .bind(now)
+                            .execute(&mut *tx)
+                            .await
+                            .map(|_| ())
+                        };
+
+                        match result {
+                            Ok(()) => {
+                                tx.commit().await?;
+                                self.cache_token_binding(preferred_token_id, Some(user_id))
+                                    .await;
+                                if let Some(previous_token_id) = previous_token_id
+                                    && previous_token_id != preferred_token_id
+                                {
+                                    self.cache_token_binding(&previous_token_id, None).await;
+                                }
+                                return Ok(preferred_secret);
+                            }
+                            Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                                tx.rollback().await.ok();
+                                continue;
+                            }
+                            Err(err) => {
+                                tx.rollback().await.ok();
+                                return Err(ProxyError::Database(err));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(existing) = self.fetch_user_token_any_status(user_id).await? {
             self.cache_token_binding(&existing.id, Some(user_id)).await;
             return Ok(existing);
@@ -7441,6 +7659,13 @@ pub enum UserTokenLookup {
     Unavailable,
 }
 
+/// Payload returned from OAuth state consume operation.
+#[derive(Debug, Clone)]
+pub struct OAuthLoginStatePayload {
+    pub redirect_to: Option<String>,
+    pub bind_token_id: Option<String>,
+}
+
 /// Per-token log for detail UI
 #[derive(Debug, Clone)]
 pub struct TokenLogRecord {
@@ -9322,6 +9547,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_login_state_payload_carries_bind_token_id() {
+        let db_path = temp_db_path("oauth-state-bind-token-id");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let state = proxy
+            .create_oauth_login_state_with_binding_and_token(
+                "linuxdo",
+                Some("/console"),
+                120,
+                Some("nonce-hash-a"),
+                Some("a1b2"),
+            )
+            .await
+            .expect("create oauth state");
+
+        let payload = proxy
+            .consume_oauth_login_state_with_binding_and_token(
+                "linuxdo",
+                &state,
+                Some("nonce-hash-a"),
+            )
+            .await
+            .expect("consume oauth state")
+            .expect("payload exists");
+
+        assert_eq!(payload.redirect_to.as_deref(), Some("/console"));
+        assert_eq!(payload.bind_token_id.as_deref(), Some("a1b2"));
+
+        let consumed_again = proxy
+            .consume_oauth_login_state_with_binding_and_token(
+                "linuxdo",
+                &state,
+                Some("nonce-hash-a"),
+            )
+            .await
+            .expect("consume oauth state second");
+        assert!(consumed_again.is_none(), "state must remain single-use");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn ensure_user_token_binding_reuses_existing_binding() {
         let db_path = temp_db_path("user-token-binding-reuse");
         let db_str = db_path.to_string_lossy().to_string();
@@ -9391,6 +9661,305 @@ mod tests {
         assert_eq!(
             alice_bindings, 1,
             "alice should have exactly one binding row"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn ensure_user_token_binding_with_preferred_rebinds_and_keeps_old_token_active() {
+        let db_path = temp_db_path("user-token-binding-preferred-rebind");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "preferred-rebind-user".to_string(),
+                username: Some("preferred_rebind".to_string()),
+                name: Some("Preferred Rebind".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let original = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:preferred_rebind"))
+            .await
+            .expect("ensure initial binding");
+        let mistaken = proxy
+            .create_access_token(Some("linuxdo:mistaken"))
+            .await
+            .expect("create mistaken token");
+
+        let store = proxy.key_store.clone();
+        sqlx::query(
+            "UPDATE user_token_bindings SET token_id = ?, updated_at = ? WHERE user_id = ?",
+        )
+        .bind(&mistaken.id)
+        .bind(Utc::now().timestamp())
+        .bind(&user.user_id)
+        .execute(&store.pool)
+        .await
+        .expect("simulate mistaken binding");
+
+        let rebound = proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:preferred_rebind"),
+                Some(&original.id),
+            )
+            .await
+            .expect("rebind preferred token");
+
+        assert_eq!(
+            rebound.id, original.id,
+            "preferred token should be rebound to the user"
+        );
+
+        let (bound_token_id,): (String,) =
+            sqlx::query_as("SELECT token_id FROM user_token_bindings WHERE user_id = ?")
+                .bind(&user.user_id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("query user binding");
+        assert_eq!(bound_token_id, original.id);
+
+        let mistaken_owner = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
+        )
+        .bind(&mistaken.id)
+        .fetch_optional(&store.pool)
+        .await
+        .expect("query mistaken token owner")
+        .flatten();
+        assert!(
+            mistaken_owner.is_none(),
+            "mistaken token should become unbound after self-heal"
+        );
+
+        let (enabled, deleted_at): (i64, Option<i64>) =
+            sqlx::query_as("SELECT enabled, deleted_at FROM auth_tokens WHERE id = ? LIMIT 1")
+                .bind(&mistaken.id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("query mistaken token state");
+        assert_eq!(enabled, 1, "mistaken token should remain active");
+        assert!(
+            deleted_at.is_none(),
+            "mistaken token should not be soft-deleted"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn ensure_user_token_binding_with_preferred_falls_back_when_preferred_owned_by_other_user()
+     {
+        let db_path = temp_db_path("user-token-binding-preferred-conflict");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let alice = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "preferred-conflict-alice".to_string(),
+                username: Some("alice_conflict".to_string()),
+                name: Some("Alice Conflict".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert alice");
+        let bob = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "preferred-conflict-bob".to_string(),
+                username: Some("bob_conflict".to_string()),
+                name: Some("Bob Conflict".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert bob");
+        let bob_token = proxy
+            .ensure_user_token_binding(&bob.user_id, Some("linuxdo:bob_conflict"))
+            .await
+            .expect("ensure bob token");
+
+        let alice_result = proxy
+            .ensure_user_token_binding_with_preferred(
+                &alice.user_id,
+                Some("linuxdo:alice_conflict"),
+                Some(&bob_token.id),
+            )
+            .await
+            .expect("fallback binding for alice");
+
+        assert_ne!(
+            alice_result.id, bob_token.id,
+            "preferred token owned by other user must not be rebound"
+        );
+
+        let store = proxy.key_store.clone();
+        let (owner,): (String,) =
+            sqlx::query_as("SELECT user_id FROM user_token_bindings WHERE token_id = ?")
+                .bind(&bob_token.id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("query bob token owner");
+        assert_eq!(
+            owner, bob.user_id,
+            "conflicting token owner must remain unchanged"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn ensure_user_token_binding_with_preferred_falls_back_when_preferred_unavailable() {
+        let db_path = temp_db_path("user-token-binding-preferred-unavailable");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "preferred-unavailable-user".to_string(),
+                username: Some("preferred_unavailable".to_string()),
+                name: Some("Preferred Unavailable".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let original = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:preferred_unavailable"))
+            .await
+            .expect("ensure original binding");
+        let disabled = proxy
+            .create_access_token(Some("linuxdo:disabled_preferred"))
+            .await
+            .expect("create disabled preferred token");
+        proxy
+            .set_access_token_enabled(&disabled.id, false)
+            .await
+            .expect("disable preferred token");
+
+        let fallback_disabled = proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:preferred_unavailable"),
+                Some(&disabled.id),
+            )
+            .await
+            .expect("fallback when preferred disabled");
+        assert_eq!(
+            fallback_disabled.id, original.id,
+            "disabled preferred token should be ignored"
+        );
+
+        let deleted = proxy
+            .create_access_token(Some("linuxdo:deleted_preferred"))
+            .await
+            .expect("create deleted preferred token");
+        proxy
+            .delete_access_token(&deleted.id)
+            .await
+            .expect("soft delete preferred token");
+
+        let fallback_deleted = proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:preferred_unavailable"),
+                Some(&deleted.id),
+            )
+            .await
+            .expect("fallback when preferred deleted");
+        assert_eq!(
+            fallback_deleted.id, original.id,
+            "soft-deleted preferred token should be ignored"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn force_user_relogin_migration_revokes_existing_sessions_once() {
+        let db_path = temp_db_path("force-user-relogin-v1");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "force-relogin-user".to_string(),
+                username: Some("force_relogin".to_string()),
+                name: Some("Force Relogin".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let session = proxy
+            .create_user_session(&user, 3600)
+            .await
+            .expect("create session");
+
+        let store = proxy.key_store.clone();
+        sqlx::query("DELETE FROM meta WHERE key = ?")
+            .bind(META_KEY_FORCE_USER_RELOGIN_V1)
+            .execute(&store.pool)
+            .await
+            .expect("delete relogin migration meta key");
+        drop(proxy);
+
+        let _proxy_after_restart =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy restarted");
+
+        let revoked_at = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT revoked_at FROM user_sessions WHERE token = ? LIMIT 1",
+        )
+        .bind(&session.token)
+        .fetch_optional(&store.pool)
+        .await
+        .expect("query session after restart")
+        .flatten();
+        assert!(
+            revoked_at.is_some(),
+            "existing sessions must be revoked by one-time relogin migration"
+        );
+
+        let relogin_migration_mark =
+            sqlx::query_scalar::<_, Option<String>>("SELECT value FROM meta WHERE key = ? LIMIT 1")
+                .bind(META_KEY_FORCE_USER_RELOGIN_V1)
+                .fetch_optional(&store.pool)
+                .await
+                .expect("query relogin migration mark")
+                .flatten();
+        assert!(
+            relogin_migration_mark.is_some(),
+            "relogin migration must record one-time completion mark"
         );
 
         let _ = std::fs::remove_file(db_path);
