@@ -77,7 +77,7 @@ pub async fn serve(
         .route("/api/events", get(sse_dashboard))
         .route("/api/version", get(get_versions))
         .route("/api/profile", get(get_profile))
-        .route("/auth/linuxdo", get(get_linuxdo_auth))
+        .route("/auth/linuxdo", get(get_linuxdo_auth).post(post_linuxdo_auth))
         .route("/auth/linuxdo/callback", get(get_linuxdo_callback))
         .route("/api/user/logout", post(post_user_logout))
         .route("/api/user/token", get(get_user_token))
@@ -278,4 +278,3 @@ async fn shutdown_signal() {
 
 const BODY_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB 默认限制
 const DEFAULT_LOG_LIMIT: usize = 200;
-

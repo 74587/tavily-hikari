@@ -15,6 +15,11 @@ struct LinuxDoTokenResponse {
     access_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct LinuxDoAuthForm {
+    token: Option<String>,
+}
+
 fn json_value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(v) => Some(v.clone()),
@@ -23,24 +28,61 @@ fn json_value_to_string(value: &Value) -> Option<String> {
     }
 }
 
-async fn get_linuxdo_auth(
-    State(state): State<Arc<AppState>>,
+fn parse_full_token_id(token: &str) -> Option<String> {
+    let token = token.trim();
+    let rest = token.strip_prefix("th-")?;
+    let (id, secret) = rest.split_once('-')?;
+    if id.len() != 4 || !id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let secret_len_ok = secret.len() == 12 || secret.len() == 24;
+    if !secret_len_ok || !secret.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+async fn start_linuxdo_auth(
+    state: Arc<AppState>,
     headers: HeaderMap,
+    token: Option<String>,
 ) -> Result<Response<Body>, StatusCode> {
     let cfg = &state.linuxdo_oauth;
     if !cfg.is_enabled_and_configured() {
         return Err(StatusCode::NOT_FOUND);
     }
 
+    let bind_token_id = if let Some(raw_token) = token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if state
+            .proxy
+            .validate_access_token(raw_token)
+            .await
+            .map_err(|err| {
+                eprintln!("validate preferred token error: {err}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })? {
+            parse_full_token_id(raw_token)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let binding_nonce = new_cookie_nonce();
     let binding_hash = hash_oauth_binding(&binding_nonce);
     let state_token = state
         .proxy
-        .create_oauth_login_state_with_binding(
+        .create_oauth_login_state_with_binding_and_token(
             "linuxdo",
             None,
             cfg.login_state_ttl_secs,
             Some(&binding_hash),
+            bind_token_id.as_deref(),
         )
         .await
         .map_err(|err| {
@@ -74,6 +116,21 @@ async fn get_linuxdo_auth(
         .into_response())
 }
 
+async fn get_linuxdo_auth(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, StatusCode> {
+    start_linuxdo_auth(state, headers, None).await
+}
+
+async fn post_linuxdo_auth(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(payload): Form<LinuxDoAuthForm>,
+) -> Result<Response<Body>, StatusCode> {
+    start_linuxdo_auth(state, headers, payload.token).await
+}
+
 async fn get_linuxdo_callback(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -103,17 +160,19 @@ async fn get_linuxdo_callback(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let binding_hash = hash_oauth_binding(&binding_nonce);
 
-    let redirect_to = state
+    let state_payload = state
         .proxy
-        .consume_oauth_login_state_with_binding("linuxdo", oauth_state, Some(&binding_hash))
+        .consume_oauth_login_state_with_binding_and_token("linuxdo", oauth_state, Some(&binding_hash))
         .await
         .map_err(|err| {
             eprintln!("consume linuxdo oauth state error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let Some(redirect_to) = redirect_to else {
+    let Some(state_payload) = state_payload else {
         return Err(StatusCode::BAD_REQUEST);
     };
+    let redirect_to = state_payload.redirect_to;
+    let preferred_token_id = state_payload.bind_token_id;
 
     let client = reqwest::Client::new();
     let token_resp = client
@@ -230,7 +289,11 @@ async fn get_linuxdo_callback(
     );
     state
         .proxy
-        .ensure_user_token_binding(&user.user_id, Some(&note))
+        .ensure_user_token_binding_with_preferred(
+            &user.user_id,
+            Some(&note),
+            preferred_token_id.as_deref(),
+        )
         .await
         .map_err(|err| {
             eprintln!("ensure user token binding error: {err}");

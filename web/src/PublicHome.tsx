@@ -295,6 +295,25 @@ function PublicHome(): JSX.Element {
     }
   }, [])
 
+  const startLinuxDoLogin = useCallback((candidateToken?: string) => {
+    const form = document.createElement('form')
+    form.method = 'POST'
+    form.action = '/auth/linuxdo'
+    form.style.display = 'none'
+
+    const trimmed = candidateToken?.trim() ?? ''
+    if (isFullToken(trimmed)) {
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = 'token'
+      input.value = trimmed
+      form.appendChild(input)
+    }
+
+    document.body.appendChild(form)
+    form.submit()
+  }, [])
+
   const persistToken = useCallback((next: string) => {
     setToken(next)
     const normalizedHash = normalizeTokenHash(next)
@@ -454,6 +473,7 @@ function PublicHome(): JSX.Element {
             <LanguageSwitcher />
           </>
         )}
+        onLinuxDoLogin={() => startLinuxDoLogin(token)}
         onTokenAccessClick={openTokenAccessDialog}
         onAdminActionClick={() => { window.location.href = isAdmin ? '/admin' : '/login' }}
       />
@@ -858,7 +878,14 @@ function PublicHome(): JSX.Element {
             </div>
             <p className="opacity-80" style={{ marginTop: 14, marginBottom: 0 }}>
               {publicStrings.tokenAccess.dialog.loginHint}{' '}
-              <a href="/auth/linuxdo" className="link">
+              <a
+                href="/auth/linuxdo"
+                className="link"
+                onClick={(event) => {
+                  event.preventDefault()
+                  startLinuxDoLogin(tokenDraft)
+                }}
+              >
                 {publicStrings.linuxDoLogin.button}
               </a>
             </p>

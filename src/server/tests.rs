@@ -492,6 +492,7 @@ mod tests {
         let app = Router::new()
             .route("/", get(serve_index))
             .route("/console", get(serve_console_index))
+            .route("/auth/linuxdo", get(get_linuxdo_auth).post(post_linuxdo_auth))
             .route("/api/profile", get(get_profile))
             .route("/api/user/token", get(get_user_token))
             .route("/api/user/dashboard", get(get_user_dashboard))
@@ -1353,6 +1354,71 @@ mod tests {
             .await
             .expect("unauth dashboard request");
         assert_eq!(unauth_dashboard.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn post_linuxdo_auth_persists_preferred_token_id_in_oauth_state() {
+        let db_path = temp_db_path("linuxdo-auth-post-preferred-token");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let preferred = proxy
+            .create_access_token(Some("linuxdo:preferred"))
+            .await
+            .expect("create preferred token");
+
+        let addr = spawn_user_oauth_server(proxy).await;
+        let no_redirect = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build no-redirect client");
+
+        let auth_url = format!("http://{}/auth/linuxdo", addr);
+        let response = no_redirect
+            .post(&auth_url)
+            .form(&[("token", preferred.token.clone())])
+            .send()
+            .await
+            .expect("post linuxdo auth");
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("location header");
+        let location_url = reqwest::Url::parse(location).expect("parse redirect location");
+        let state_value = location_url
+            .query_pairs()
+            .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+            .expect("state query param");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let (bind_token_id,): (Option<String>,) =
+            sqlx::query_as("SELECT bind_token_id FROM oauth_login_states WHERE state = ? LIMIT 1")
+                .bind(state_value)
+                .fetch_one(&pool)
+                .await
+                .expect("query oauth state");
+        assert_eq!(
+            bind_token_id.as_deref(),
+            Some(preferred.id.as_str()),
+            "preferred token id should be persisted in oauth state"
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
