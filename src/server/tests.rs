@@ -520,7 +520,7 @@ mod tests {
         spawn_user_oauth_server_with_options(proxy, linuxdo_oauth_options_for_test()).await
     }
 
-    async fn spawn_admin_users_server(proxy: TavilyProxy) -> SocketAddr {
+    async fn spawn_admin_users_server(proxy: TavilyProxy, dev_open_admin: bool) -> SocketAddr {
         let static_dir = temp_static_dir("admin-users");
         let state = Arc::new(AppState {
             proxy,
@@ -529,7 +529,7 @@ mod tests {
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
-            dev_open_admin: true,
+            dev_open_admin,
             usage_base: "http://127.0.0.1:58088".to_string(),
         });
 
@@ -1885,7 +1885,7 @@ mod tests {
             .await
             .expect("record error");
 
-        let addr = spawn_admin_users_server(proxy).await;
+        let addr = spawn_admin_users_server(proxy, true).await;
         let client = Client::new();
 
         let list_url = format!("http://{}/api/users?page=1&per_page=20", addr);
@@ -2046,7 +2046,7 @@ mod tests {
             .await
             .expect("upsert user");
 
-        let addr = spawn_user_oauth_server(proxy).await;
+        let addr = spawn_admin_users_server(proxy, false).await;
         let client = Client::new();
 
         let list_url = format!("http://{}/api/users?page=1&per_page=20", addr);
