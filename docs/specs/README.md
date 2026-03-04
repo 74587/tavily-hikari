@@ -9,7 +9,7 @@
 
 |    ID | Title                                                  | Status           | Spec                                                 | Last       | Notes                                                                                            |
 | ----: | ------------------------------------------------------ | ---------------- | ---------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------ |
-| vr67d | LinuxDo 登录复用既有 Token + 强制重登录 + 历史误建自愈 | 进行中（快车道） | `vr67d-linuxdo-token-rebind-relogin/SPEC.md`         | 2026-03-04 | impl+tests+build done locally; pending fast-track push/PR/checks/review-loop                     |
+| vr67d | LinuxDo 登录复用既有 Token + 强制重登录 + 历史误建自愈 | 已完成（快车道） | `vr67d-linuxdo-token-rebind-relogin/SPEC.md`         | 2026-03-04 | PR #89 ready: token self-heal + user-session revoke migration + POST login flow                  |
 | w2t73 | 批量 Key 导入稳定性修复                                | 已完成（快车道） | `w2t73-batch-key-upsert-stability/SPEC.md`           | 2026-03-04 | rollback+retry hardening landed; flaky case loop 50/50; PR #87 checks green; review-loop clear   |
 | 8brtz | Server.rs 最小风险模块化重构                           | 已完成（快车道） | `8brtz-server-rs-modularization/SPEC.md`             | 2026-03-04 | fast-track: modularized `src/server/**`; PR #88 checks green; review-loop converged              |
 | m4n7x | Admin URL Path 路由与模块化仪表盘重构                  | 进行中（快车道） | `m4n7x-admin-path-routing-modular-dashboard/SPEC.md` | 2026-03-02 | admin path routes + modular shell + dashboard enrichment + future module skeletons               |

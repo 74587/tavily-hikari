@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 进行中（快车道）
+- Status: 已完成（快车道）
 - Created: 2026-03-04
 - Last: 2026-03-04
 
@@ -88,9 +88,10 @@
 - [x] M2: 后端 OAuth state + 绑定逻辑 + 会话迁移落地
 - [x] M3: 前端 POST 登录入口落地
 - [x] M4: 测试与构建验证通过
-- [ ] M5: 快车道交付（push + PR + checks + review-loop）
+- [x] M5: 快车道交付（push + PR + checks + review-loop）
 
 ## 变更记录
 
 - 2026-03-04: 初始化规格，冻结“强制重登录 + 自愈重绑 + 误建 token 保留可用”口径。
 - 2026-03-04: 已完成后端/前端实现与本地验证（fmt + clippy + test + web build）；等待快车道收敛。
+- 2026-03-04: PR #89 已创建并通过 CI/Label Gate，合并状态 clean。
