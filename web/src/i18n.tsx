@@ -235,6 +235,85 @@ interface AdminTranslationsShape {
       }
     }
   }
+  users: {
+    title: string
+    description: string
+    searchPlaceholder: string
+    search: string
+    clear: string
+    pagination: string
+    table: {
+      user: string
+      displayName: string
+      username: string
+      status: string
+      tokenCount: string
+      hourlyAny: string
+      hourly: string
+      daily: string
+      monthly: string
+      successDaily: string
+      successMonthly: string
+      lastActivity: string
+      lastLogin: string
+      actions: string
+    }
+    status: {
+      active: string
+      inactive: string
+      enabled: string
+      disabled: string
+    }
+    actions: {
+      view: string
+    }
+    empty: {
+      loading: string
+      none: string
+      notFound: string
+      noTokens: string
+    }
+    detail: {
+      title: string
+      subtitle: string
+      back: string
+      userId: string
+      tokensTitle: string
+      tokensDescription: string
+    }
+    quota: {
+      title: string
+      description: string
+      hourlyAny: string
+      hourly: string
+      daily: string
+      monthly: string
+      hint: string
+      save: string
+      saving: string
+      savedAt: string
+      invalid: string
+      saveFailed: string
+    }
+    tokens: {
+      table: {
+        id: string
+        note: string
+        status: string
+        hourlyAny: string
+        hourly: string
+        daily: string
+        monthly: string
+        successDaily: string
+        successMonthly: string
+        lastUsed: string
+        actions: string
+      }
+      actions: {
+        view: string
+      }
+    }
+  }
   accessibility: {
     skipToContent: string
   }
@@ -901,6 +980,85 @@ export const translations: Record<Language, TranslationShape> = {
           },
         },
       },
+      users: {
+        title: 'User Management',
+        description: 'Account-level metrics, token visibility, and quota controls.',
+        searchPlaceholder: 'Search by user ID, display name, or username',
+        search: 'Search',
+        clear: 'Clear',
+        pagination: 'Page {page} of {total}',
+        table: {
+          user: 'User',
+          displayName: 'Display Name',
+          username: 'Username',
+          status: 'Status',
+          tokenCount: 'Tokens',
+          hourlyAny: '1h (any)',
+          hourly: '1h',
+          daily: '24h',
+          monthly: 'Month',
+          successDaily: 'Daily S/F',
+          successMonthly: 'Monthly S',
+          lastActivity: 'Last Activity',
+          lastLogin: 'Last Login',
+          actions: 'Actions',
+        },
+        status: {
+          active: 'Active',
+          inactive: 'Inactive',
+          enabled: 'Enabled',
+          disabled: 'Disabled',
+        },
+        actions: {
+          view: 'Open details',
+        },
+        empty: {
+          loading: 'Loading users…',
+          none: 'No users found.',
+          notFound: 'User not found.',
+          noTokens: 'This user has no bound tokens.',
+        },
+        detail: {
+          title: 'User Detail',
+          subtitle: 'Account {id}',
+          back: 'Back to users',
+          userId: 'User ID',
+          tokensTitle: 'Token List',
+          tokensDescription: 'Token-level metrics for this account.',
+        },
+        quota: {
+          title: 'Quota Settings',
+          description: 'Changes apply immediately and do not reset current usage counters.',
+          hourlyAny: 'Hourly-any limit',
+          hourly: 'Hourly business limit',
+          daily: 'Daily business limit',
+          monthly: 'Monthly business limit',
+          hint: 'Set positive integers only.',
+          save: 'Save quota',
+          saving: 'Saving…',
+          savedAt: 'Saved at {time}',
+          invalid: 'All quota fields must be positive integers.',
+          saveFailed: 'Failed to update quota settings.',
+        },
+        tokens: {
+          table: {
+            id: 'Token ID',
+            note: 'Note',
+            status: 'Status',
+            hourlyAny: '1h (any)',
+            hourly: '1h',
+            daily: '24h',
+            monthly: 'Month',
+            successDaily: 'Daily S/F',
+            successMonthly: 'Monthly S',
+            lastUsed: 'Last Used',
+            actions: 'Actions',
+          },
+          actions: {
+            view: 'Open token detail',
+          },
+        },
+      },
       accessibility: {
         skipToContent: 'Skip to main content',
       },
@@ -1552,6 +1710,85 @@ export const translations: Record<Language, TranslationShape> = {
             upstream: '上游目标',
             routing: '转发策略',
             rateLimit: '限流策略',
+          },
+        },
+      },
+      users: {
+        title: '用户管理',
+        description: '查看账户层统计、绑定令牌与配额设置。',
+        searchPlaceholder: '按用户 ID、显示名或用户名搜索',
+        search: '搜索',
+        clear: '清空',
+        pagination: '第 {page}/{total} 页',
+        table: {
+          user: '用户',
+          displayName: '显示名',
+          username: '用户名',
+          status: '状态',
+          tokenCount: '令牌数',
+          hourlyAny: '1h（任意）',
+          hourly: '1h（业务）',
+          daily: '24h',
+          monthly: '月度',
+          successDaily: '日成功/失败',
+          successMonthly: '月成功',
+          lastActivity: '最近活动',
+          lastLogin: '最近登录',
+          actions: '操作',
+        },
+        status: {
+          active: '活跃',
+          inactive: '未激活',
+          enabled: '启用',
+          disabled: '禁用',
+        },
+        actions: {
+          view: '查看详情',
+        },
+        empty: {
+          loading: '正在加载用户…',
+          none: '暂无匹配用户。',
+          notFound: '未找到该用户。',
+          noTokens: '该用户暂无绑定令牌。',
+        },
+        detail: {
+          title: '用户详情',
+          subtitle: '账户 {id}',
+          back: '返回用户列表',
+          userId: '用户 ID',
+          tokensTitle: '令牌列表',
+          tokensDescription: '该账户下所有令牌的统计信息。',
+        },
+        quota: {
+          title: '配额设置',
+          description: '保存后立即生效，不会重置当前已用计数。',
+          hourlyAny: '每小时任意请求限额',
+          hourly: '每小时业务请求限额',
+          daily: '每日业务请求限额',
+          monthly: '每月业务请求限额',
+          hint: '请填写正整数。',
+          save: '保存配额',
+          saving: '保存中…',
+          savedAt: '已于 {time} 保存',
+          invalid: '所有配额字段必须为正整数。',
+          saveFailed: '保存配额失败。',
+        },
+        tokens: {
+          table: {
+            id: '令牌 ID',
+            note: '备注',
+            status: '状态',
+            hourlyAny: '1h（任意）',
+            hourly: '1h（业务）',
+            daily: '24h',
+            monthly: '月度',
+            successDaily: '日成功/失败',
+            successMonthly: '月成功',
+            lastUsed: '最近使用',
+            actions: '操作',
+          },
+          actions: {
+            view: '查看令牌详情',
           },
         },
       },

@@ -106,6 +106,9 @@ pub async fn serve(
         .route("/api/keys/:id/status", patch(update_api_key_status))
         .route("/api/jobs", get(list_jobs))
         .route("/api/logs", get(list_logs))
+        .route("/api/users", get(list_users))
+        .route("/api/users/:id", get(get_user_detail))
+        .route("/api/users/:id/quota", patch(update_user_quota))
         // Key details
         .route("/api/keys/:id/metrics", get(get_key_metrics))
         .route("/api/keys/:id/logs", get(get_key_logs))

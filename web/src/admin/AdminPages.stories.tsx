@@ -2,7 +2,15 @@ import { Icon } from '@iconify/react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { Fragment, type ReactNode, useState } from 'react'
 
-import type { ApiKeyStats, AuthToken, JobLogView, RequestLog } from '../api'
+import type {
+  AdminUserDetail,
+  AdminUserSummary,
+  AdminUserTokenSummary,
+  ApiKeyStats,
+  AuthToken,
+  JobLogView,
+  RequestLog,
+} from '../api'
 import AdminPanelHeader from '../components/AdminPanelHeader'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
@@ -322,6 +330,111 @@ const MOCK_JOBS: JobLogView[] = [
   },
 ]
 
+const MOCK_USERS: AdminUserSummary[] = [
+  {
+    userId: 'usr_alice',
+    displayName: 'Alice Wang',
+    username: 'alice',
+    active: true,
+    lastLoginAt: now - 420,
+    tokenCount: 2,
+    hourlyAnyUsed: 312,
+    hourlyAnyLimit: 1_200,
+    quotaHourlyUsed: 298,
+    quotaHourlyLimit: 1_000,
+    quotaDailyUsed: 5_201,
+    quotaDailyLimit: 24_000,
+    quotaMonthlyUsed: 142_922,
+    quotaMonthlyLimit: 600_000,
+    dailySuccess: 4_998,
+    dailyFailure: 203,
+    monthlySuccess: 129_442,
+    lastActivity: now - 25,
+  },
+  {
+    userId: 'usr_bob',
+    displayName: 'Bob Chen',
+    username: 'bob',
+    active: true,
+    lastLoginAt: now - 2_700,
+    tokenCount: 1,
+    hourlyAnyUsed: 611,
+    hourlyAnyLimit: 1_200,
+    quotaHourlyUsed: 602,
+    quotaHourlyLimit: 1_000,
+    quotaDailyUsed: 10_009,
+    quotaDailyLimit: 24_000,
+    quotaMonthlyUsed: 231_008,
+    quotaMonthlyLimit: 600_000,
+    dailySuccess: 9_800,
+    dailyFailure: 209,
+    monthlySuccess: 201_402,
+    lastActivity: now - 38,
+  },
+  {
+    userId: 'usr_charlie',
+    displayName: 'Charlie Li',
+    username: 'charlie',
+    active: false,
+    lastLoginAt: now - 86_400 * 6,
+    tokenCount: 0,
+    hourlyAnyUsed: 0,
+    hourlyAnyLimit: 600,
+    quotaHourlyUsed: 0,
+    quotaHourlyLimit: 500,
+    quotaDailyUsed: 0,
+    quotaDailyLimit: 8_000,
+    quotaMonthlyUsed: 0,
+    quotaMonthlyLimit: 120_000,
+    dailySuccess: 0,
+    dailyFailure: 0,
+    monthlySuccess: 0,
+    lastActivity: null,
+  },
+]
+
+const MOCK_USER_TOKENS: AdminUserTokenSummary[] = [
+  {
+    tokenId: '9vsN',
+    enabled: true,
+    note: 'Core production',
+    lastUsedAt: now - 19,
+    hourlyAnyUsed: 176,
+    hourlyAnyLimit: 600,
+    quotaHourlyUsed: 162,
+    quotaHourlyLimit: 500,
+    quotaDailyUsed: 2_811,
+    quotaDailyLimit: 12_000,
+    quotaMonthlyUsed: 73_102,
+    quotaMonthlyLimit: 300_000,
+    dailySuccess: 2_704,
+    dailyFailure: 107,
+    monthlySuccess: 66_914,
+  },
+  {
+    tokenId: 'Vn7D',
+    enabled: true,
+    note: 'Realtime recommendation',
+    lastUsedAt: now - 42,
+    hourlyAnyUsed: 136,
+    hourlyAnyLimit: 600,
+    quotaHourlyUsed: 136,
+    quotaHourlyLimit: 500,
+    quotaDailyUsed: 2_390,
+    quotaDailyLimit: 12_000,
+    quotaMonthlyUsed: 69_820,
+    quotaMonthlyLimit: 300_000,
+    dailySuccess: 2_294,
+    dailyFailure: 96,
+    monthlySuccess: 62_528,
+  },
+]
+
+const MOCK_USER_DETAIL: AdminUserDetail = {
+  ...MOCK_USERS[0],
+  tokens: MOCK_USER_TOKENS,
+}
+
 const numberFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
 const percentFormatter = new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: 1, maximumFractionDigits: 1 })
 const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -343,6 +456,35 @@ function formatPercent(numerator: number, denominator: number): string {
 function formatTimestamp(value: number | null): string {
   if (!value) return '—'
   return dateTimeFormatter.format(new Date(value * 1000))
+}
+
+type StoryQuotaField = 'hourlyAnyLimit' | 'hourlyLimit' | 'dailyLimit' | 'monthlyLimit'
+
+function parseQuotaDraftValue(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? '', 10)
+  if (!Number.isFinite(parsed)) return Math.max(1, fallback)
+  return Math.max(1, parsed)
+}
+
+function pickQuotaSliderMax(used: number, currentLimit: number, draftLimit: number): number {
+  const baseline = Math.max(1, used, currentLimit, draftLimit)
+  const step = baseline >= 100_000
+    ? 10_000
+    : baseline >= 10_000
+      ? 1_000
+      : baseline >= 1_000
+        ? 100
+        : 10
+  return Math.max(step, Math.ceil((baseline * 1.25) / step) * step)
+}
+
+function buildQuotaSliderTrack(used: number, draftLimit: number, sliderMax: number): string {
+  const max = Math.max(1, sliderMax)
+  const usedRatio = Math.min(100, Math.max(0, (used / max) * 100))
+  const draftRatio = Math.min(100, Math.max(0, (draftLimit / max) * 100))
+  const start = Math.min(usedRatio, draftRatio)
+  const end = Math.max(usedRatio, draftRatio)
+  return `linear-gradient(to right, hsl(var(--warning) / 0.34) 0% ${start}%, hsl(var(--primary) / 0.44) ${start}% ${end}%, hsl(var(--muted) / 0.5) ${end}% 100%)`
 }
 
 function keyStatusTone(status: string): StatusTone {
@@ -1007,14 +1149,354 @@ function JobsPageCanvas(): JSX.Element {
 
 function UsersPageCanvas(): JSX.Element {
   const admin = useTranslate().admin
+  const users = admin.users
+  const [query, setQuery] = useState('')
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredUsers = MOCK_USERS.filter((item) => {
+    if (!normalizedQuery) return true
+    const displayName = item.displayName?.toLowerCase() ?? ''
+    const username = item.username?.toLowerCase() ?? ''
+    return (
+      item.userId.toLowerCase().includes(normalizedQuery) ||
+      displayName.includes(normalizedQuery) ||
+      username.includes(normalizedQuery)
+    )
+  })
+
   return (
     <AdminPageFrame activeModule="users">
-      <ModulePlaceholder
-        title={admin.modules.users.title}
-        description={admin.modules.users.description}
-        sections={[admin.modules.users.sections.list, admin.modules.users.sections.roles, admin.modules.users.sections.status]}
-        comingSoonLabel={admin.modules.comingSoon}
-      />
+      <section className="surface panel">
+        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <h2>{users.title}</h2>
+            <p className="panel-description">{users.description}</p>
+          </div>
+          <div className="users-search-controls">
+            <input
+              type="text"
+              className="input input-bordered users-search-input"
+              placeholder={users.searchPlaceholder}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <button type="button" className="btn btn-outline">
+              {users.search}
+            </button>
+          </div>
+        </div>
+
+        <div className="table-wrapper jobs-table-wrapper">
+          {filteredUsers.length === 0 ? (
+            <div className="empty-state alert">{users.empty.none}</div>
+          ) : (
+            <table className="jobs-table admin-users-table admin-users-list-table">
+              <thead>
+                <tr>
+                  <th>{users.table.user}</th>
+                  <th>{users.table.status}</th>
+                  <th>{users.table.tokenCount}</th>
+                  <th>{users.table.hourlyAny}</th>
+                  <th>{users.table.hourly}</th>
+                  <th>{users.table.daily}</th>
+                  <th>{users.table.monthly}</th>
+                  <th>{users.table.successDaily}</th>
+                  <th>{users.table.successMonthly}</th>
+                  <th>{users.table.lastActivity}</th>
+                  <th>{users.table.lastLogin}</th>
+                  <th>{users.table.actions}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredUsers.map((item) => (
+                  <tr key={item.userId}>
+                    <td>
+                      <strong>{item.displayName || item.username || item.userId}</strong>
+                      <div className="panel-description" style={{ marginTop: 4 }}>
+                        <code>{item.userId}</code>
+                        {item.username ? ` · @${item.username}` : ''}
+                      </div>
+                    </td>
+                    <td>
+                      <StatusBadge tone={item.active ? 'success' : 'neutral'}>
+                        {item.active ? users.status.active : users.status.inactive}
+                      </StatusBadge>
+                    </td>
+                    <td>{formatNumber(item.tokenCount)}</td>
+                    <td>
+                      {formatNumber(item.hourlyAnyUsed)} / {formatNumber(item.hourlyAnyLimit)}
+                    </td>
+                    <td>
+                      {formatNumber(item.quotaHourlyUsed)} / {formatNumber(item.quotaHourlyLimit)}
+                    </td>
+                    <td>
+                      {formatNumber(item.quotaDailyUsed)} / {formatNumber(item.quotaDailyLimit)}
+                    </td>
+                    <td>
+                      {formatNumber(item.quotaMonthlyUsed)} / {formatNumber(item.quotaMonthlyLimit)}
+                    </td>
+                    <td>
+                      {formatNumber(item.dailySuccess)} / {formatNumber(item.dailyFailure)}
+                    </td>
+                    <td>{formatNumber(item.monthlySuccess)}</td>
+                    <td>{formatTimestamp(item.lastActivity)}</td>
+                    <td>{formatTimestamp(item.lastLoginAt)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-circle btn-ghost btn-sm"
+                        title={users.actions.view}
+                        aria-label={users.actions.view}
+                      >
+                        <Icon icon="mdi:eye-outline" width={16} height={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+    </AdminPageFrame>
+  )
+}
+
+function UserDetailPageCanvas(): JSX.Element {
+  const admin = useTranslate().admin
+  const users = admin.users
+  const detail = MOCK_USER_DETAIL
+  const [quotaDraft, setQuotaDraft] = useState<Record<StoryQuotaField, string>>({
+    hourlyAnyLimit: String(detail.hourlyAnyLimit),
+    hourlyLimit: String(detail.quotaHourlyLimit),
+    dailyLimit: String(detail.quotaDailyLimit),
+    monthlyLimit: String(detail.quotaMonthlyLimit),
+  })
+
+  return (
+    <AdminPageFrame activeModule="users">
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>{users.detail.title}</h2>
+            <p className="panel-description">{users.detail.subtitle.replace('{id}', detail.userId)}</p>
+          </div>
+        </div>
+
+        <div className="token-info-grid">
+          <div className="token-info-card">
+            <span className="token-info-label">{users.detail.userId}</span>
+            <span className="token-info-value">
+              <code>{detail.userId}</code>
+            </span>
+          </div>
+          <div className="token-info-card">
+            <span className="token-info-label">{users.table.displayName}</span>
+            <span className="token-info-value">{detail.displayName ?? '—'}</span>
+          </div>
+          <div className="token-info-card">
+            <span className="token-info-label">{users.table.username}</span>
+            <span className="token-info-value">{detail.username ?? '—'}</span>
+          </div>
+          <div className="token-info-card">
+            <span className="token-info-label">{users.table.status}</span>
+            <span className="token-info-value">
+              <StatusBadge tone={detail.active ? 'success' : 'neutral'}>
+                {detail.active ? users.status.active : users.status.inactive}
+              </StatusBadge>
+            </span>
+          </div>
+          <div className="token-info-card">
+            <span className="token-info-label">{users.table.lastLogin}</span>
+            <span className="token-info-value">{formatTimestamp(detail.lastLoginAt)}</span>
+          </div>
+          <div className="token-info-card">
+            <span className="token-info-label">{users.table.tokenCount}</span>
+            <span className="token-info-value">{formatNumber(detail.tokenCount)}</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>{users.quota.title}</h2>
+            <p className="panel-description">{users.quota.description}</p>
+          </div>
+        </div>
+        <div className="quota-grid" style={{ marginTop: 12 }}>
+          {([
+            {
+              field: 'hourlyAnyLimit',
+              label: users.quota.hourlyAny,
+              used: detail.hourlyAnyUsed,
+              currentLimit: detail.hourlyAnyLimit,
+            },
+            {
+              field: 'hourlyLimit',
+              label: users.quota.hourly,
+              used: detail.quotaHourlyUsed,
+              currentLimit: detail.quotaHourlyLimit,
+            },
+            {
+              field: 'dailyLimit',
+              label: users.quota.daily,
+              used: detail.quotaDailyUsed,
+              currentLimit: detail.quotaDailyLimit,
+            },
+            {
+              field: 'monthlyLimit',
+              label: users.quota.monthly,
+              used: detail.quotaMonthlyUsed,
+              currentLimit: detail.quotaMonthlyLimit,
+            },
+          ] as const).map((item) => {
+            const draftValue = quotaDraft[item.field]
+            const parsedDraft = parseQuotaDraftValue(draftValue, item.currentLimit)
+            const sliderMax = pickQuotaSliderMax(item.used, item.currentLimit, parsedDraft)
+            return (
+              <label className="form-control quota-control" key={item.field}>
+                <span className="label-text">{item.label}</span>
+                <div className="quota-control-row">
+                  <div className="quota-slider-wrap">
+                    <input
+                      type="range"
+                      min={1}
+                      max={sliderMax}
+                      step={1}
+                      className="range quota-slider"
+                      value={parsedDraft}
+                      onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                      style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
+                      aria-label={item.label}
+                    />
+                    <span className="panel-description">
+                      {formatNumber(item.used)} / {formatNumber(parsedDraft)}
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    className="input input-bordered quota-input"
+                    min={1}
+                    value={draftValue}
+                    onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                  />
+                </div>
+              </label>
+            )
+          })}
+        </div>
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <span className="panel-description">{users.quota.hint}</span>
+          <button type="button" className="btn btn-primary">
+            {users.quota.save}
+          </button>
+        </div>
+      </section>
+
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>{users.detail.tokensTitle}</h2>
+            <p className="panel-description">{users.detail.tokensDescription}</p>
+          </div>
+        </div>
+        <div className="table-wrapper jobs-table-wrapper">
+          <table className="jobs-table admin-users-table admin-user-tokens-table">
+            <thead>
+              <tr>
+                <th>{`${users.tokens.table.id} · ${users.tokens.table.note}`}</th>
+                <th>{`${users.tokens.table.status} · ${users.tokens.table.lastUsed}`}</th>
+                <th>{`${users.tokens.table.hourlyAny} · ${users.tokens.table.hourly}`}</th>
+                <th>{`${users.tokens.table.daily} · ${users.tokens.table.monthly}`}</th>
+                <th>{`${users.tokens.table.successDaily} · ${users.tokens.table.successMonthly}`}</th>
+                <th>{users.tokens.table.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail.tokens.map((token) => {
+                const hourlyAnyText = `${formatNumber(token.hourlyAnyUsed)} / ${formatNumber(token.hourlyAnyLimit)}`
+                const hourlyText = `${formatNumber(token.quotaHourlyUsed)} / ${formatNumber(token.quotaHourlyLimit)}`
+                const dailyText = `${formatNumber(token.quotaDailyUsed)} / ${formatNumber(token.quotaDailyLimit)}`
+                const monthlyText = `${formatNumber(token.quotaMonthlyUsed)} / ${formatNumber(token.quotaMonthlyLimit)}`
+                const successDailyText = `${formatNumber(token.dailySuccess)} / ${formatNumber(token.dailyFailure)}`
+                const successMonthlyText = formatNumber(token.monthlySuccess)
+                return (
+                  <tr key={token.tokenId}>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <code className="token-compact-value">{token.tokenId}</code>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-value">{token.note || '—'}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <StatusBadge tone={token.enabled ? 'success' : 'neutral'}>
+                            {token.enabled ? users.status.enabled : users.status.disabled}
+                          </StatusBadge>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-value">{formatTimestamp(token.lastUsedAt)}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.hourlyAny}</span>
+                          <span className="token-compact-value">{hourlyAnyText}</span>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.hourly}</span>
+                          <span className="token-compact-value">{hourlyText}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.daily}</span>
+                          <span className="token-compact-value">{dailyText}</span>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.monthly}</span>
+                          <span className="token-compact-value">{monthlyText}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.successDaily}</span>
+                          <span className="token-compact-value">{successDailyText}</span>
+                        </div>
+                        <div className="token-compact-field">
+                          <span className="token-compact-label">{users.tokens.table.successMonthly}</span>
+                          <span className="token-compact-value">{successMonthlyText}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-circle btn-ghost btn-sm"
+                        title={users.tokens.actions.view}
+                        aria-label={users.tokens.actions.view}
+                      >
+                        <Icon icon="mdi:eye-outline" width={16} height={16} />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </AdminPageFrame>
   )
 }
@@ -1085,6 +1567,10 @@ export const Jobs: Story = {
 
 export const Users: Story = {
   render: () => <UsersPageCanvas />,
+}
+
+export const UserDetail: Story = {
+  render: () => <UserDetailPageCanvas />,
 }
 
 export const Alerts: Story = {

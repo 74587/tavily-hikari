@@ -246,6 +246,56 @@ export function fetchProfile(signal?: AbortSignal): Promise<Profile> {
   return requestJson('/api/profile', { signal })
 }
 
+export interface AdminUserSummary {
+  userId: string
+  displayName: string | null
+  username: string | null
+  active: boolean
+  lastLoginAt: number | null
+  tokenCount: number
+  hourlyAnyUsed: number
+  hourlyAnyLimit: number
+  quotaHourlyUsed: number
+  quotaHourlyLimit: number
+  quotaDailyUsed: number
+  quotaDailyLimit: number
+  quotaMonthlyUsed: number
+  quotaMonthlyLimit: number
+  dailySuccess: number
+  dailyFailure: number
+  monthlySuccess: number
+  lastActivity: number | null
+}
+
+export interface AdminUserTokenSummary {
+  tokenId: string
+  enabled: boolean
+  note: string | null
+  lastUsedAt: number | null
+  hourlyAnyUsed: number
+  hourlyAnyLimit: number
+  quotaHourlyUsed: number
+  quotaHourlyLimit: number
+  quotaDailyUsed: number
+  quotaDailyLimit: number
+  quotaMonthlyUsed: number
+  quotaMonthlyLimit: number
+  dailySuccess: number
+  dailyFailure: number
+  monthlySuccess: number
+}
+
+export interface AdminUserDetail extends AdminUserSummary {
+  tokens: AdminUserTokenSummary[]
+}
+
+export interface UpdateUserQuotaPayload {
+  hourlyAnyLimit: number
+  hourlyLimit: number
+  dailyLimit: number
+  monthlyLimit: number
+}
+
 export interface UserTokenResponse {
   token: string
 }
@@ -501,6 +551,39 @@ export function fetchJobs(
     params.set('group', group)
   }
   return requestJson(`/api/jobs?${params.toString()}`, { signal })
+}
+
+export function fetchAdminUsers(
+  page = 1,
+  perPage = 20,
+  query?: string,
+  signal?: AbortSignal,
+): Promise<Paginated<AdminUserSummary>> {
+  const params = new URLSearchParams({
+    page: String(page),
+    per_page: String(perPage),
+  })
+  if (query && query.trim().length > 0) {
+    params.set('q', query.trim())
+  }
+  return requestJson(`/api/users?${params.toString()}`, { signal })
+}
+
+export function fetchAdminUserDetail(id: string, signal?: AbortSignal): Promise<AdminUserDetail> {
+  const encoded = encodeURIComponent(id)
+  return requestJson(`/api/users/${encoded}`, { signal })
+}
+
+export async function updateAdminUserQuota(id: string, payload: UpdateUserQuotaPayload): Promise<void> {
+  const encoded = encodeURIComponent(id)
+  const res = await fetch(`/api/users/${encoded}/quota`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    throw new Error(`Failed to update user quota: ${res.status}`)
+  }
 }
 
 export interface TokenGroup {

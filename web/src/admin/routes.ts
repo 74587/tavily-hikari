@@ -12,6 +12,7 @@ export type AdminPathRoute =
   | { name: 'module'; module: AdminModuleId }
   | { name: 'token'; id: string }
   | { name: 'token-usage' }
+  | { name: 'user'; id: string }
   | { name: 'key'; id: string }
 
 const ADMIN_BASE = '/admin'
@@ -65,6 +66,11 @@ export function parseAdminPath(pathname: string): AdminPathRoute {
   if (path === `${ADMIN_BASE}/users`) {
     return { name: 'module', module: 'users' }
   }
+  if (path.startsWith(`${ADMIN_BASE}/users/`)) {
+    const id = decodeSegment(path.slice(`${ADMIN_BASE}/users/`.length))
+    if (id) return { name: 'user', id }
+    return { name: 'module', module: 'users' }
+  }
   if (path === `${ADMIN_BASE}/alerts`) {
     return { name: 'module', module: 'alerts' }
   }
@@ -81,6 +87,9 @@ export function isSameAdminRoute(left: AdminPathRoute, right: AdminPathRoute): b
     return left.module === right.module
   }
   if (left.name === 'token' && right.name === 'token') {
+    return left.id === right.id
+  }
+  if (left.name === 'user' && right.name === 'user') {
     return left.id === right.id
   }
   if (left.name === 'key' && right.name === 'key') {
@@ -100,6 +109,10 @@ export function tokenDetailPath(id: string): string {
 
 export function tokenLeaderboardPath(): string {
   return `${ADMIN_BASE}/tokens/leaderboard`
+}
+
+export function userDetailPath(id: string): string {
+  return `${ADMIN_BASE}/users/${encodeURIComponent(id)}`
 }
 
 export function keyDetailPath(id: string): string {

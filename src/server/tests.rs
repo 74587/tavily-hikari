@@ -520,6 +520,36 @@ mod tests {
         spawn_user_oauth_server_with_options(proxy, linuxdo_oauth_options_for_test()).await
     }
 
+    async fn spawn_admin_users_server(proxy: TavilyProxy, dev_open_admin: bool) -> SocketAddr {
+        let static_dir = temp_static_dir("admin-users");
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: Some(static_dir),
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: false,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            dev_open_admin,
+            usage_base: "http://127.0.0.1:58088".to_string(),
+        });
+
+        let app = Router::new()
+            .route("/api/users", get(list_users))
+            .route("/api/users/:id", get(get_user_detail))
+            .route("/api/users/:id/quota", patch(update_user_quota))
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        addr
+    }
+
+
     async fn spawn_linuxdo_oauth_mock_server(
         provider_user_id: &str,
         username: &str,
@@ -1760,6 +1790,290 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
+
+    #[tokio::test]
+    async fn admin_user_management_lists_details_and_updates_quota() {
+        let db_path = temp_db_path("admin-users");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let alice = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "admin-users-alice".to_string(),
+                username: Some("alice".to_string()),
+                name: Some("Alice".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert alice");
+        let bob = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "admin-users-bob".to_string(),
+                username: Some("bob".to_string()),
+                name: Some("Bob".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert bob");
+        let _charlie = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "admin-users-charlie".to_string(),
+                username: Some("charlie".to_string()),
+                name: Some("Charlie".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(0),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert charlie");
+
+        let alice_token = proxy
+            .ensure_user_token_binding(&alice.user_id, Some("linuxdo:alice"))
+            .await
+            .expect("bind alice token");
+        let _bob_token = proxy
+            .ensure_user_token_binding(&bob.user_id, Some("linuxdo:bob"))
+            .await
+            .expect("bind bob token");
+
+        let _ = proxy
+            .check_token_hourly_requests(&alice_token.id)
+            .await
+            .expect("seed hourly-any");
+        let _ = proxy
+            .check_token_quota(&alice_token.id)
+            .await
+            .expect("seed business quota");
+        proxy
+            .record_token_attempt(
+                &alice_token.id,
+                &Method::POST,
+                "/mcp",
+                None,
+                Some(200),
+                Some(0),
+                true,
+                "success",
+                None,
+            )
+            .await
+            .expect("record success");
+        proxy
+            .record_token_attempt(
+                &alice_token.id,
+                &Method::POST,
+                "/mcp",
+                None,
+                Some(500),
+                Some(-32001),
+                true,
+                "error",
+                Some("upstream error"),
+            )
+            .await
+            .expect("record error");
+
+        let addr = spawn_admin_users_server(proxy, true).await;
+        let client = Client::new();
+
+        let list_url = format!("http://{}/api/users?page=1&per_page=20", addr);
+        let list_resp = client
+            .get(&list_url)
+            .send()
+            .await
+            .expect("list users request");
+        assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+        let list_body: serde_json::Value = list_resp.json().await.expect("list users json");
+        let items = list_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("items is array");
+        let alice_item = items
+            .iter()
+            .find(|item| {
+                item.get("userId")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value == alice.user_id)
+            })
+            .expect("alice row exists");
+        assert_eq!(
+            alice_item
+                .get("tokenCount")
+                .and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert!(
+            alice_item
+                .get("hourlyAnyUsed")
+                .and_then(|value| value.as_i64())
+                .unwrap_or_default()
+                >= 1
+        );
+        assert!(
+            alice_item
+                .get("quotaHourlyUsed")
+                .and_then(|value| value.as_i64())
+                .unwrap_or_default()
+                >= 1
+        );
+
+        let detail_url = format!("http://{}/api/users/{}", addr, alice.user_id);
+        let detail_resp = client
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("user detail request");
+        assert_eq!(detail_resp.status(), reqwest::StatusCode::OK);
+        let detail_body: serde_json::Value = detail_resp.json().await.expect("user detail json");
+        let before_hourly_any_used = detail_body
+            .get("hourlyAnyUsed")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let tokens = detail_body
+            .get("tokens")
+            .and_then(|value| value.as_array())
+            .expect("tokens is array");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(
+            tokens
+                .first()
+                .and_then(|value| value.get("tokenId"))
+                .and_then(|value| value.as_str()),
+            Some(alice_token.id.as_str())
+        );
+
+        let patch_url = format!("http://{}/api/users/{}/quota", addr, alice.user_id);
+        let patch_resp = client
+            .patch(&patch_url)
+            .json(&serde_json::json!({
+                "hourlyAnyLimit": 123,
+                "hourlyLimit": 45,
+                "dailyLimit": 678,
+                "monthlyLimit": 910,
+            }))
+            .send()
+            .await
+            .expect("patch user quota request");
+        assert_eq!(patch_resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let detail_after_resp = client
+            .get(&detail_url)
+            .send()
+            .await
+            .expect("user detail after patch request");
+        assert_eq!(detail_after_resp.status(), reqwest::StatusCode::OK);
+        let detail_after: serde_json::Value = detail_after_resp
+            .json()
+            .await
+            .expect("user detail after patch json");
+        assert_eq!(
+            detail_after
+                .get("hourlyAnyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(123)
+        );
+        assert_eq!(
+            detail_after
+                .get("quotaHourlyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(45)
+        );
+        assert_eq!(
+            detail_after
+                .get("quotaDailyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(678)
+        );
+        assert_eq!(
+            detail_after
+                .get("quotaMonthlyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(910)
+        );
+        assert_eq!(
+            detail_after
+                .get("hourlyAnyUsed")
+                .and_then(|value| value.as_i64()),
+            Some(before_hourly_any_used)
+        );
+
+        let invalid_resp = client
+            .patch(&patch_url)
+            .json(&serde_json::json!({
+                "hourlyAnyLimit": 0,
+                "hourlyLimit": 45,
+                "dailyLimit": 678,
+                "monthlyLimit": 910,
+            }))
+            .send()
+            .await
+            .expect("invalid patch request");
+        assert_eq!(invalid_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_user_management_requires_admin() {
+        let db_path = temp_db_path("admin-users-authz");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "admin-users-authz-user".to_string(),
+                username: Some("authz".to_string()),
+                name: Some("Authz".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+
+        let addr = spawn_admin_users_server(proxy, false).await;
+        let client = Client::new();
+
+        let list_url = format!("http://{}/api/users?page=1&per_page=20", addr);
+        let list_resp = client
+            .get(&list_url)
+            .send()
+            .await
+            .expect("list users unauth request");
+        assert_eq!(list_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let patch_url = format!("http://{}/api/users/{}/quota", addr, user.user_id);
+        let patch_resp = client
+            .patch(&patch_url)
+            .json(&serde_json::json!({
+                "hourlyAnyLimit": 10,
+                "hourlyLimit": 10,
+                "dailyLimit": 100,
+                "monthlyLimit": 1000,
+            }))
+            .send()
+            .await
+            .expect("patch users unauth request");
+        assert_eq!(patch_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
 
     #[tokio::test]
     async fn tavily_http_search_returns_401_for_invalid_token() {

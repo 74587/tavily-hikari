@@ -1212,6 +1212,46 @@ impl TavilyProxy {
         })
     }
 
+    /// Admin: list users with pagination and optional fuzzy query.
+    pub async fn list_admin_users_paged(
+        &self,
+        page: i64,
+        per_page: i64,
+        query: Option<&str>,
+    ) -> Result<(Vec<AdminUserIdentity>, i64), ProxyError> {
+        self.key_store
+            .list_admin_users_paged(page, per_page, query)
+            .await
+    }
+
+    /// Admin: get a single user identity by id.
+    pub async fn get_admin_user_identity(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<AdminUserIdentity>, ProxyError> {
+        self.key_store.get_admin_user_identity(user_id).await
+    }
+
+    /// Admin: upsert account quota limits for a user.
+    pub async fn update_account_quota_limits(
+        &self,
+        user_id: &str,
+        hourly_any_limit: i64,
+        hourly_limit: i64,
+        daily_limit: i64,
+        monthly_limit: i64,
+    ) -> Result<bool, ProxyError> {
+        self.key_store
+            .update_account_quota_limits(
+                user_id,
+                hourly_any_limit,
+                hourly_limit,
+                daily_limit,
+                monthly_limit,
+            )
+            .await
+    }
+
     /// Create persisted user session.
     pub async fn create_user_session(
         &self,
@@ -1610,9 +1650,6 @@ impl TokenQuota {
         &self,
         user_id: &str,
     ) -> Result<Option<AccountQuotaSnapshot>, ProxyError> {
-        if !self.store.user_has_token_binding(user_id).await? {
-            return Ok(None);
-        }
         let now = Utc::now();
         let now_ts = now.timestamp();
         let minute_bucket = now_ts - (now_ts % SECS_PER_MINUTE);
@@ -4988,14 +5025,214 @@ impl KeyStore {
         }
     }
 
-    async fn user_has_token_binding(&self, user_id: &str) -> Result<bool, ProxyError> {
-        let row = sqlx::query_scalar::<_, Option<i64>>(
-            r#"SELECT 1 FROM user_token_bindings WHERE user_id = ? LIMIT 1"#,
+    async fn list_admin_users_paged(
+        &self,
+        page: i64,
+        per_page: i64,
+        query: Option<&str>,
+    ) -> Result<(Vec<AdminUserIdentity>, i64), ProxyError> {
+        let page = page.max(1);
+        let per_page = per_page.clamp(1, 100);
+        let offset = (page - 1) * per_page;
+        let search = query
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{value}%"));
+
+        let total = if let Some(search) = search.as_ref() {
+            sqlx::query_scalar::<_, i64>(
+                r#"SELECT COUNT(*)
+                   FROM users
+                   WHERE id LIKE ?
+                      OR COALESCE(display_name, '') LIKE ?
+                      OR COALESCE(username, '') LIKE ?"#,
+            )
+            .bind(search)
+            .bind(search)
+            .bind(search)
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                .fetch_one(&self.pool)
+                .await?
+        };
+
+        let rows = if let Some(search) = search.as_ref() {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    i64,
+                    Option<i64>,
+                    i64,
+                ),
+            >(
+                r#"SELECT
+                     u.id,
+                     u.display_name,
+                     u.username,
+                     u.active,
+                     u.last_login_at,
+                     COALESCE(COUNT(b.token_id), 0) AS token_count
+                   FROM users u
+                   LEFT JOIN user_token_bindings b ON b.user_id = u.id
+                   WHERE u.id LIKE ?
+                      OR COALESCE(u.display_name, '') LIKE ?
+                      OR COALESCE(u.username, '') LIKE ?
+                   GROUP BY u.id, u.display_name, u.username, u.active, u.last_login_at
+                   ORDER BY (u.last_login_at IS NULL) ASC, u.last_login_at DESC, u.id ASC
+                   LIMIT ? OFFSET ?"#,
+            )
+            .bind(search)
+            .bind(search)
+            .bind(search)
+            .bind(per_page)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    i64,
+                    Option<i64>,
+                    i64,
+                ),
+            >(
+                r#"SELECT
+                     u.id,
+                     u.display_name,
+                     u.username,
+                     u.active,
+                     u.last_login_at,
+                     COALESCE(COUNT(b.token_id), 0) AS token_count
+                   FROM users u
+                   LEFT JOIN user_token_bindings b ON b.user_id = u.id
+                   GROUP BY u.id, u.display_name, u.username, u.active, u.last_login_at
+                   ORDER BY (u.last_login_at IS NULL) ASC, u.last_login_at DESC, u.id ASC
+                   LIMIT ? OFFSET ?"#,
+            )
+            .bind(per_page)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let items = rows
+            .into_iter()
+            .map(
+                |(user_id, display_name, username, active, last_login_at, token_count)| {
+                    AdminUserIdentity {
+                        user_id,
+                        display_name,
+                        username,
+                        active: active == 1,
+                        last_login_at,
+                        token_count,
+                    }
+                },
+            )
+            .collect();
+        Ok((items, total))
+    }
+
+    async fn get_admin_user_identity(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<AdminUserIdentity>, ProxyError> {
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                i64,
+                Option<i64>,
+                i64,
+            ),
+        >(
+            r#"SELECT
+                 u.id,
+                 u.display_name,
+                 u.username,
+                 u.active,
+                 u.last_login_at,
+                 COALESCE(COUNT(b.token_id), 0) AS token_count
+               FROM users u
+               LEFT JOIN user_token_bindings b ON b.user_id = u.id
+               WHERE u.id = ?
+               GROUP BY u.id, u.display_name, u.username, u.active, u.last_login_at
+               LIMIT 1"#,
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.is_some())
+
+        Ok(row.map(
+            |(user_id, display_name, username, active, last_login_at, token_count)| {
+                AdminUserIdentity {
+                    user_id,
+                    display_name,
+                    username,
+                    active: active == 1,
+                    last_login_at,
+                    token_count,
+                }
+            },
+        ))
+    }
+
+    async fn update_account_quota_limits(
+        &self,
+        user_id: &str,
+        hourly_any_limit: i64,
+        hourly_limit: i64,
+        daily_limit: i64,
+        monthly_limit: i64,
+    ) -> Result<bool, ProxyError> {
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await?;
+        if exists == 0 {
+            return Ok(false);
+        }
+
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            r#"INSERT INTO account_quota_limits (
+                    user_id,
+                    hourly_any_limit,
+                    hourly_limit,
+                    daily_limit,
+                    monthly_limit,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    hourly_any_limit = excluded.hourly_any_limit,
+                    hourly_limit = excluded.hourly_limit,
+                    daily_limit = excluded.daily_limit,
+                    monthly_limit = excluded.monthly_limit,
+                    updated_at = excluded.updated_at"#,
+        )
+        .bind(user_id)
+        .bind(hourly_any_limit)
+        .bind(hourly_limit)
+        .bind(daily_limit)
+        .bind(monthly_limit)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(true)
     }
 
     async fn sync_account_quota_limits_with_defaults(&self) -> Result<(), ProxyError> {
@@ -7598,6 +7835,16 @@ pub struct UserDashboardSummary {
     pub daily_failure: i64,
     pub monthly_success: i64,
     pub last_activity: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminUserIdentity {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub username: Option<String>,
+    pub active: bool,
+    pub last_login_at: Option<i64>,
+    pub token_count: i64,
 }
 
 #[derive(Debug, Clone)]

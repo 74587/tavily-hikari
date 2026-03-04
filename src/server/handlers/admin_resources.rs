@@ -673,6 +673,307 @@ async fn list_logs(
         })
 }
 
+#[derive(Debug, Deserialize)]
+struct ListUsersQuery {
+    page: Option<i64>,
+    per_page: Option<i64>,
+    q: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserSummaryView {
+    user_id: String,
+    display_name: Option<String>,
+    username: Option<String>,
+    active: bool,
+    last_login_at: Option<i64>,
+    token_count: i64,
+    hourly_any_used: i64,
+    hourly_any_limit: i64,
+    quota_hourly_used: i64,
+    quota_hourly_limit: i64,
+    quota_daily_used: i64,
+    quota_daily_limit: i64,
+    quota_monthly_used: i64,
+    quota_monthly_limit: i64,
+    daily_success: i64,
+    daily_failure: i64,
+    monthly_success: i64,
+    last_activity: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserTokenSummaryView {
+    token_id: String,
+    enabled: bool,
+    note: Option<String>,
+    last_used_at: Option<i64>,
+    hourly_any_used: i64,
+    hourly_any_limit: i64,
+    quota_hourly_used: i64,
+    quota_hourly_limit: i64,
+    quota_daily_used: i64,
+    quota_daily_limit: i64,
+    quota_monthly_used: i64,
+    quota_monthly_limit: i64,
+    daily_success: i64,
+    daily_failure: i64,
+    monthly_success: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListUsersResponse {
+    items: Vec<AdminUserSummaryView>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserDetailView {
+    user_id: String,
+    display_name: Option<String>,
+    username: Option<String>,
+    active: bool,
+    last_login_at: Option<i64>,
+    token_count: i64,
+    hourly_any_used: i64,
+    hourly_any_limit: i64,
+    quota_hourly_used: i64,
+    quota_hourly_limit: i64,
+    quota_daily_used: i64,
+    quota_daily_limit: i64,
+    quota_monthly_used: i64,
+    quota_monthly_limit: i64,
+    daily_success: i64,
+    daily_failure: i64,
+    monthly_success: i64,
+    last_activity: Option<i64>,
+    tokens: Vec<AdminUserTokenSummaryView>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateUserQuotaRequest {
+    hourly_any_limit: i64,
+    hourly_limit: i64,
+    daily_limit: i64,
+    monthly_limit: i64,
+}
+
+fn build_admin_user_summary_view(
+    user: &tavily_hikari::AdminUserIdentity,
+    summary: &tavily_hikari::UserDashboardSummary,
+) -> AdminUserSummaryView {
+    AdminUserSummaryView {
+        user_id: user.user_id.clone(),
+        display_name: user.display_name.clone(),
+        username: user.username.clone(),
+        active: user.active,
+        last_login_at: user.last_login_at,
+        token_count: user.token_count,
+        hourly_any_used: summary.hourly_any_used,
+        hourly_any_limit: summary.hourly_any_limit,
+        quota_hourly_used: summary.quota_hourly_used,
+        quota_hourly_limit: summary.quota_hourly_limit,
+        quota_daily_used: summary.quota_daily_used,
+        quota_daily_limit: summary.quota_daily_limit,
+        quota_monthly_used: summary.quota_monthly_used,
+        quota_monthly_limit: summary.quota_monthly_limit,
+        daily_success: summary.daily_success,
+        daily_failure: summary.daily_failure,
+        monthly_success: summary.monthly_success,
+        last_activity: summary.last_activity,
+    }
+}
+
+async fn list_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<ListUsersQuery>,
+) -> Result<Json<ListUsersResponse>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
+    let (users, total) = state
+        .proxy
+        .list_admin_users_paged(page, per_page, q.q.as_deref())
+        .await
+        .map_err(|err| {
+            eprintln!("list admin users error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut items = Vec::with_capacity(users.len());
+    for user in users {
+        let summary = state
+            .proxy
+            .user_dashboard_summary(&user.user_id)
+            .await
+            .map_err(|err| {
+                eprintln!("list admin users dashboard summary error: {err}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        items.push(build_admin_user_summary_view(&user, &summary));
+    }
+    Ok(Json(ListUsersResponse {
+        items,
+        total,
+        page,
+        per_page,
+    }))
+}
+
+async fn get_user_detail(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<AdminUserDetailView>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(user) = state
+        .proxy
+        .get_admin_user_identity(&id)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user identity error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let summary = state
+        .proxy
+        .user_dashboard_summary(&user.user_id)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user dashboard summary error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let tokens = state
+        .proxy
+        .list_user_tokens(&user.user_id)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user tokens error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let token_ids: Vec<String> = tokens.iter().map(|token| token.id.clone()).collect();
+    let hourly_any = state
+        .proxy
+        .token_hourly_any_snapshot(&token_ids)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user token hourly snapshot error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut token_items = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let (monthly_success, daily_success, daily_failure) = state
+            .proxy
+            .token_success_breakdown(&token.id)
+            .await
+            .map_err(|err| {
+                eprintln!("get admin user token success breakdown error: {err}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let (
+            quota_hourly_used,
+            quota_hourly_limit,
+            quota_daily_used,
+            quota_daily_limit,
+            quota_monthly_used,
+            quota_monthly_limit,
+        ) = user_token_quota_values(&token);
+        let (hourly_any_used, hourly_any_limit) = hourly_any
+            .get(&token.id)
+            .map(|value| (value.hourly_used, value.hourly_limit))
+            .unwrap_or((0, effective_token_hourly_request_limit()));
+        token_items.push(AdminUserTokenSummaryView {
+            token_id: token.id,
+            enabled: token.enabled,
+            note: token.note,
+            last_used_at: token.last_used_at,
+            hourly_any_used,
+            hourly_any_limit,
+            quota_hourly_used,
+            quota_hourly_limit,
+            quota_daily_used,
+            quota_daily_limit,
+            quota_monthly_used,
+            quota_monthly_limit,
+            daily_success,
+            daily_failure,
+            monthly_success,
+        });
+    }
+
+    Ok(Json(AdminUserDetailView {
+        user_id: user.user_id,
+        display_name: user.display_name,
+        username: user.username,
+        active: user.active,
+        last_login_at: user.last_login_at,
+        token_count: user.token_count,
+        hourly_any_used: summary.hourly_any_used,
+        hourly_any_limit: summary.hourly_any_limit,
+        quota_hourly_used: summary.quota_hourly_used,
+        quota_hourly_limit: summary.quota_hourly_limit,
+        quota_daily_used: summary.quota_daily_used,
+        quota_daily_limit: summary.quota_daily_limit,
+        quota_monthly_used: summary.quota_monthly_used,
+        quota_monthly_limit: summary.quota_monthly_limit,
+        daily_success: summary.daily_success,
+        daily_failure: summary.daily_failure,
+        monthly_success: summary.monthly_success,
+        last_activity: summary.last_activity,
+        tokens: token_items,
+    }))
+}
+
+async fn update_user_quota(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateUserQuotaRequest>,
+) -> Result<StatusCode, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if payload.hourly_any_limit <= 0
+        || payload.hourly_limit <= 0
+        || payload.daily_limit <= 0
+        || payload.monthly_limit <= 0
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let updated = state
+        .proxy
+        .update_account_quota_limits(
+            &id,
+            payload.hourly_any_limit,
+            payload.hourly_limit,
+            payload.daily_limit,
+            payload.monthly_limit,
+        )
+        .await
+        .map_err(|err| {
+            eprintln!("update user quota error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if !updated {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ----- Access token management handlers -----
 
 #[derive(Debug, Deserialize)]
@@ -1014,4 +1315,3 @@ async fn create_tokens_batch(
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }
-
