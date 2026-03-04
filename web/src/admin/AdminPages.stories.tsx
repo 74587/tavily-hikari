@@ -1282,22 +1282,22 @@ function UserDetailPageCanvas(): JSX.Element {
           </div>
         </div>
 
-        <div className="token-detail-grid" style={{ marginTop: 12 }}>
-          <div>
+        <div className="token-info-grid">
+          <div className="token-info-card">
             <span className="token-info-label">{users.detail.userId}</span>
             <span className="token-info-value">
               <code>{detail.userId}</code>
             </span>
           </div>
-          <div>
+          <div className="token-info-card">
             <span className="token-info-label">{users.table.displayName}</span>
             <span className="token-info-value">{detail.displayName ?? '—'}</span>
           </div>
-          <div>
+          <div className="token-info-card">
             <span className="token-info-label">{users.table.username}</span>
-            <span className="token-info-value">{detail.username ? `@${detail.username}` : '—'}</span>
+            <span className="token-info-value">{detail.username ?? '—'}</span>
           </div>
-          <div>
+          <div className="token-info-card">
             <span className="token-info-label">{users.table.status}</span>
             <span className="token-info-value">
               <StatusBadge tone={detail.active ? 'success' : 'neutral'}>
@@ -1305,11 +1305,11 @@ function UserDetailPageCanvas(): JSX.Element {
               </StatusBadge>
             </span>
           </div>
-          <div>
+          <div className="token-info-card">
             <span className="token-info-label">{users.table.lastLogin}</span>
             <span className="token-info-value">{formatTimestamp(detail.lastLoginAt)}</span>
           </div>
-          <div>
+          <div className="token-info-card">
             <span className="token-info-label">{users.table.tokenCount}</span>
             <span className="token-info-value">{formatNumber(detail.tokenCount)}</span>
           </div>
