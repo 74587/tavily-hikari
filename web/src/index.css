@@ -514,6 +514,12 @@
     gap: 0.45rem;
   }
 
+  .quota-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 12px;
+  }
+
   .quota-control-row {
     display: flex;
     align-items: flex-start;
@@ -539,6 +545,12 @@
   .quota-control .panel-description {
     font-size: 0.82rem;
     font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 920px) {
+    .quota-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .table {

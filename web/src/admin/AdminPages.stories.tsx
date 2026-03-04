@@ -1324,7 +1324,7 @@ function UserDetailPageCanvas(): JSX.Element {
             <p className="panel-description">{users.quota.description}</p>
           </div>
         </div>
-        <div className="token-detail-grid" style={{ marginTop: 12 }}>
+        <div className="quota-grid" style={{ marginTop: 12 }}>
           {([
             {
               field: 'hourlyAnyLimit',

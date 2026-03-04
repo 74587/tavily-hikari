@@ -2427,13 +2427,7 @@ function AdminDashboard(): JSX.Element {
                   <p className="panel-description">{usersStrings.quota.description}</p>
                 </div>
               </div>
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-                  gap: 12,
-                }}
-              >
+              <div className="quota-grid">
                 {([
                   {
                     field: 'hourlyAnyLimit',
