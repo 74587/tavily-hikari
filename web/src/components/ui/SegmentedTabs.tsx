@@ -2,6 +2,7 @@ import * as React from 'react'
 
 import { useViewportMode } from '../../lib/responsive'
 import { cn } from '../../lib/utils'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './select'
 
 export interface SegmentedTabsOption<T extends string = string> {
   value: T
@@ -36,20 +37,23 @@ export default function SegmentedTabs<T extends string = string>({
   const viewportMode = useViewportMode()
 
   if (viewportMode === 'small') {
+    const selectedOption = options.find((option) => option.value === value)
+    const selectedLabel = selectedOption ? labelToPlainText(selectedOption.label) : ''
+
     return (
       <div className={cn('segmented-tabs segmented-tabs-mobile', className)}>
-        <select
-          className="segmented-tabs-select"
-          value={value}
-          onChange={(event) => onChange(event.target.value as T)}
-          aria-label={ariaLabel}
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value} disabled={option.disabled}>
-              {labelToPlainText(option.label) || option.value}
-            </option>
-          ))}
-        </select>
+        <Select value={value} onValueChange={(next) => onChange(next as T)}>
+          <SelectTrigger aria-label={ariaLabel} className="segmented-tabs-select-trigger">
+            <SelectValue>{selectedLabel || value}</SelectValue>
+          </SelectTrigger>
+          <SelectContent align="start" className="segmented-tabs-select-content">
+            {options.map((option) => (
+              <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
     )
   }
