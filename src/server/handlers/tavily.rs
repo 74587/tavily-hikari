@@ -805,7 +805,9 @@ async fn proxy_tavily_http_endpoint(
                     && analysis.status == "success"
                     && usage_delta.is_none()
                 {
-                    let msg = "research usage diff unavailable; returned upstream response without billing to avoid duplicate upstream charges".to_string();
+                    let msg = format!(
+                        "research usage diff unavailable; charging reserved minimum {reserved_credits} credit(s)"
+                    );
                     eprintln!("{msg}");
                     Some(msg)
                 } else {
@@ -817,7 +819,7 @@ async fn proxy_tavily_http_endpoint(
                     && analysis.status == "success"
                     && let Some(tid) = token_id_for_logs.as_deref()
                 {
-                    let credits = usage_delta.unwrap_or(0);
+                    let credits = usage_delta.unwrap_or(reserved_credits);
                     if credits > 0 {
                         match if let Some(subject) = billing_subject.as_deref() {
                             state
@@ -856,6 +858,12 @@ async fn proxy_tavily_http_endpoint(
                         {
                             Ok(log_id) => {
                                 attempt_logged = true;
+                                if let Some(msg) = billing_error.as_deref() {
+                                    let _ = state
+                                        .proxy
+                                        .annotate_pending_billing_attempt(log_id, msg)
+                                        .await;
+                                }
                                 let lock_lost_msg = token_billing_guard
                                     .as_ref()
                                     .and_then(|guard| guard.ensure_live().err())

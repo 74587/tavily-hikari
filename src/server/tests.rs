@@ -6357,7 +6357,7 @@ mod tests {
             .peek_token_quota(&access_token.id)
             .await
             .expect("peek quota");
-        assert_eq!(verdict.hourly_used, 0);
+        assert_eq!(verdict.hourly_used, 4);
         assert_eq!(usage_calls.load(Ordering::SeqCst), 2);
         assert_eq!(research_calls.load(Ordering::SeqCst), 1);
 
@@ -6372,7 +6372,7 @@ mod tests {
         assert!(latest_log
             .error_message
             .unwrap_or_default()
-            .contains("research usage diff unavailable"));
+            .contains("charging reserved minimum 4 credit(s)"));
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -6425,7 +6425,7 @@ mod tests {
             .peek_token_quota(&access_token.id)
             .await
             .expect("peek quota");
-        assert_eq!(verdict.hourly_used, 0);
+        assert_eq!(verdict.hourly_used, 4);
         assert_eq!(usage_calls.load(Ordering::SeqCst), 4);
         assert_eq!(research_calls.load(Ordering::SeqCst), 1);
 
@@ -6440,7 +6440,7 @@ mod tests {
         assert!(latest_log
             .error_message
             .unwrap_or_default()
-            .contains("research usage diff unavailable"));
+            .contains("charging reserved minimum 4 credit(s)"));
 
         let _ = std::fs::remove_file(db_path);
     }
