@@ -9511,8 +9511,7 @@ fn extract_usage_credits_from_value(value: &Value) -> Option<i64> {
         Value::Object(map) => {
             if let Some(credits) = map
                 .get("usage")
-                .and_then(|usage| usage.get("credits"))
-                .and_then(parse_credits_value)
+                .and_then(extract_usage_credits_from_usage_value)
             {
                 return Some(credits);
             }
@@ -9527,6 +9526,26 @@ fn extract_usage_credits_from_value(value: &Value) -> Option<i64> {
         Value::Array(items) => items.iter().find_map(extract_usage_credits_from_value),
         _ => None,
     }
+}
+
+fn extract_usage_credits_from_usage_value(value: &Value) -> Option<i64> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+
+    for key in [
+        "credits",
+        // Some Tavily responses report fractional usage via an exact field instead of the
+        // integer `credits` counter. We round up to avoid under-billing when only the exact
+        // field is present.
+        "total_credits_exact",
+    ] {
+        if let Some(credits) = map.get(key).and_then(parse_credits_value) {
+            return Some(credits);
+        }
+    }
+
+    None
 }
 
 fn parse_credits_value(value: &Value) -> Option<i64> {
@@ -9763,6 +9782,19 @@ mod tests {
     fn extract_usage_credits_from_json_bytes_parses_string_float_and_rounds_up() {
         let body = br#"{"usage":{"credits":"1.2"}}"#;
         assert_eq!(extract_usage_credits_from_json_bytes(body), Some(2));
+    }
+
+    #[test]
+    fn extract_usage_credits_from_json_bytes_supports_total_credits_exact() {
+        let body = br#"{"usage":{"total_credits_exact":0.2}}"#;
+        assert_eq!(extract_usage_credits_from_json_bytes(body), Some(1));
+    }
+
+    #[test]
+    fn extract_usage_credits_total_from_json_bytes_sums_total_credits_exact() {
+        let body =
+            br#"[{"usage":{"total_credits_exact":0.2}},{"usage":{"total_credits_exact":"1.2"}}]"#;
+        assert_eq!(extract_usage_credits_total_from_json_bytes(body), Some(3));
     }
 
     #[test]
