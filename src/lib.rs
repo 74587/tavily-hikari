@@ -1,7 +1,10 @@
 use std::{
     cmp::min,
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant},
 };
 
@@ -110,8 +113,16 @@ const TOKEN_AFFINITY_MAX_ENTRIES: usize = 10_000;
 // Cache token -> user binding to avoid repeated DB lookups on hot request paths.
 const TOKEN_BINDING_CACHE_TTL_SECS: u64 = 30;
 const TOKEN_BINDING_CACHE_MAX_ENTRIES: usize = 10_000;
+const QUOTA_SUBJECT_LOCK_TTL_SECS: u64 = 5 * 60;
+const QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+const QUOTA_SUBJECT_LOCK_REFRESH_SECS: u64 = 30;
 
 const REQUEST_LOGS_MIN_RETENTION_DAYS: i64 = 7;
+
+const BILLING_STATE_PENDING: &str = "pending";
+const BILLING_STATE_CHARGED: &str = "charged";
+
+static QUOTA_SUBJECT_LOCK_OWNER_SEQ: AtomicU64 = AtomicU64::new(1);
 
 const GRANULARITY_MINUTE: &str = "minute";
 const GRANULARITY_HOUR: &str = "hour";
@@ -463,10 +474,82 @@ pub struct TavilyProxy {
     affinity: Arc<Mutex<TokenAffinityState>>,
     research_request_affinity: Arc<Mutex<TokenAffinityState>>,
     research_request_owner_affinity: Arc<Mutex<TokenAffinityState>>,
-    // In-process mutexes to keep quota enforcement and /usage-diff billing consistent under
-    // concurrency. These do NOT provide cross-instance guarantees.
+    // Fast in-process lock to collapse duplicate work within one instance. Cross-instance
+    // serialization is provided by quota_subject_locks in SQLite.
     token_billing_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     research_key_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+}
+
+#[derive(Debug, Clone)]
+struct QuotaSubjectDbLease {
+    subject: String,
+    owner: String,
+    ttl: Duration,
+}
+
+#[derive(Debug)]
+struct QuotaSubjectLockGuard {
+    store: Arc<KeyStore>,
+    lease: QuotaSubjectDbLease,
+    refresh_stop: Arc<AtomicBool>,
+    refresh_task: tokio::task::JoinHandle<()>,
+}
+
+impl QuotaSubjectLockGuard {
+    fn new(store: Arc<KeyStore>, lease: QuotaSubjectDbLease) -> Self {
+        let refresh_stop = Arc::new(AtomicBool::new(false));
+        let refresh_task = {
+            let store = Arc::clone(&store);
+            let lease = lease.clone();
+            let refresh_stop = Arc::clone(&refresh_stop);
+            tokio::spawn(async move {
+                let refresh_every = Duration::from_secs(QUOTA_SUBJECT_LOCK_REFRESH_SECS);
+                while !refresh_stop.load(AtomicOrdering::Relaxed) {
+                    tokio::time::sleep(refresh_every).await;
+                    if refresh_stop.load(AtomicOrdering::Relaxed) {
+                        break;
+                    }
+                    if let Err(err) = store.refresh_quota_subject_lock(&lease).await {
+                        eprintln!(
+                            "quota subject lock refresh failed (subject={} owner={}): {}",
+                            lease.subject, lease.owner, err
+                        );
+                    }
+                }
+            })
+        };
+
+        Self {
+            store,
+            lease,
+            refresh_stop,
+            refresh_task,
+        }
+    }
+}
+
+impl Drop for QuotaSubjectLockGuard {
+    fn drop(&mut self) {
+        self.refresh_stop.store(true, AtomicOrdering::Relaxed);
+        self.refresh_task.abort();
+
+        let store = Arc::clone(&self.store);
+        let lease = self.lease.clone();
+        tokio::spawn(async move {
+            if let Err(err) = store.release_quota_subject_lock(&lease).await {
+                eprintln!(
+                    "quota subject lock release failed (subject={} owner={}): {}",
+                    lease.subject, lease.owner, err
+                );
+            }
+        });
+    }
+}
+
+#[derive(Debug)]
+pub struct TokenBillingGuard {
+    _local: tokio::sync::OwnedMutexGuard<()>,
+    _subject_lock: QuotaSubjectLockGuard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -542,38 +625,67 @@ impl TavilyProxy {
         })
     }
 
-    /// Serialize billing/quota checks per quota subject within this process.
-    ///
-    /// This is intentionally in-memory (not DB transactional), and exists to prevent
-    /// concurrent requests from "peeking" the same snapshot and then charging later,
-    /// which can otherwise allow limit bypass under concurrency.
-    pub async fn lock_token_billing(&self, token_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        // Lock on the *effective* quota subject so bound tokens (account-scoped quota)
-        // cannot interleave billing with other requests for the same account.
-        //
-        // Errors fall back to token-scoped locking; subsequent quota ops will fail anyway.
-        let lock_key = match self.key_store.find_user_id_by_token(token_id).await {
-            Ok(Some(user_id)) => format!("account:{user_id}"),
-            Ok(None) => format!("token:{token_id}"),
-            Err(_) => format!("token:{token_id}"),
-        };
+    async fn billing_subject_for_token(&self, token_id: &str) -> Result<String, ProxyError> {
+        Ok(
+            match self.key_store.find_user_id_by_token(token_id).await? {
+                Some(user_id) => format!("account:{user_id}"),
+                None => format!("token:{token_id}"),
+            },
+        )
+    }
+
+    async fn reconcile_pending_billing_for_subject(
+        &self,
+        billing_subject: &str,
+    ) -> Result<(), ProxyError> {
+        let pending = self
+            .key_store
+            .list_pending_billing_log_ids(billing_subject)
+            .await?;
+        for log_id in pending {
+            self.key_store.apply_pending_billing_log(log_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Serialize quota/billing work per effective quota subject across both the local process
+    /// and any other instances sharing the same SQLite database.
+    pub async fn lock_token_billing(
+        &self,
+        token_id: &str,
+    ) -> Result<TokenBillingGuard, ProxyError> {
+        let billing_subject = self.billing_subject_for_token(token_id).await?;
 
         let lock = {
             let mut locks = self.token_billing_locks.lock().await;
-            // Opportunistic cleanup: drop dead weak refs when the map starts growing.
             if locks.len() > 1024 {
                 locks.retain(|_, lock| lock.strong_count() > 0);
             }
 
-            if let Some(existing) = locks.get(&lock_key).and_then(|lock| lock.upgrade()) {
+            if let Some(existing) = locks.get(&billing_subject).and_then(|lock| lock.upgrade()) {
                 existing
             } else {
                 let lock = Arc::new(Mutex::new(()));
-                locks.insert(lock_key, Arc::downgrade(&lock));
+                locks.insert(billing_subject.clone(), Arc::downgrade(&lock));
                 lock
             }
         };
-        lock.lock_owned().await
+        let local_guard = lock.lock_owned().await;
+        let lease = self
+            .key_store
+            .acquire_quota_subject_lock(
+                &billing_subject,
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_TTL_SECS),
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS),
+            )
+            .await?;
+        self.reconcile_pending_billing_for_subject(&billing_subject)
+            .await?;
+
+        Ok(TokenBillingGuard {
+            _local: local_guard,
+            _subject_lock: QuotaSubjectLockGuard::new(self.key_store.clone(), lease),
+        })
     }
 
     async fn lock_research_key_usage(&self, key_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
@@ -1788,6 +1900,54 @@ impl TavilyProxy {
                 result_status,
                 error_message,
             )
+            .await
+    }
+
+    /// Persist a billable attempt before quota counters are charged, so it can be replayed if the
+    /// process crashes after the upstream call succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+    ) -> Result<i64, ProxyError> {
+        let billing_subject = self.billing_subject_for_token(token_id).await?;
+        self.key_store
+            .insert_token_log_pending_billing(
+                token_id,
+                method,
+                path,
+                query,
+                http_status,
+                mcp_status,
+                counts_business_quota,
+                result_status,
+                error_message,
+                business_credits,
+                &billing_subject,
+            )
+            .await
+    }
+
+    pub async fn settle_pending_billing_attempt(&self, log_id: i64) -> Result<(), ProxyError> {
+        self.key_store.apply_pending_billing_log(log_id).await
+    }
+
+    pub async fn annotate_pending_billing_attempt(
+        &self,
+        log_id: i64,
+        message: &str,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .annotate_pending_billing_log(log_id, message)
             .await
     }
 
@@ -3072,6 +3232,9 @@ impl KeyStore {
                 result_status TEXT NOT NULL,
                 error_message TEXT,
                 counts_business_quota INTEGER NOT NULL DEFAULT 1,
+                business_credits INTEGER,
+                billing_subject TEXT,
+                billing_state TEXT NOT NULL DEFAULT 'none',
                 created_at INTEGER NOT NULL
             )
             "#,
@@ -3110,6 +3273,62 @@ impl KeyStore {
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_token_logs_billable_id
                ON auth_token_logs(counts_business_quota, id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        if !self
+            .table_column_exists("auth_token_logs", "business_credits")
+            .await?
+        {
+            sqlx::query("ALTER TABLE auth_token_logs ADD COLUMN business_credits INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !self
+            .table_column_exists("auth_token_logs", "billing_subject")
+            .await?
+        {
+            sqlx::query("ALTER TABLE auth_token_logs ADD COLUMN billing_subject TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !self
+            .table_column_exists("auth_token_logs", "billing_state")
+            .await?
+        {
+            sqlx::query(
+                "ALTER TABLE auth_token_logs ADD COLUMN billing_state TEXT NOT NULL DEFAULT 'none'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_token_logs_billing_pending
+               ON auth_token_logs(billing_state, billing_subject, id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS quota_subject_locks (
+                subject TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_quota_subject_locks_expires_at
+               ON quota_subject_locks(expires_at)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -6980,6 +7199,378 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_token_log_pending_billing(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        billing_subject: &str,
+    ) -> Result<i64, ProxyError> {
+        let created_at = Utc::now().timestamp();
+        let counts_business_quota = if counts_business_quota { 1i64 } else { 0i64 };
+        let log_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO auth_token_logs (
+                token_id,
+                method,
+                path,
+                query,
+                http_status,
+                mcp_status,
+                result_status,
+                error_message,
+                counts_business_quota,
+                business_credits,
+                billing_subject,
+                billing_state,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            "#,
+        )
+        .bind(token_id)
+        .bind(method.as_str())
+        .bind(path)
+        .bind(query)
+        .bind(http_status)
+        .bind(mcp_status)
+        .bind(result_status)
+        .bind(error_message)
+        .bind(counts_business_quota)
+        .bind(business_credits)
+        .bind(billing_subject)
+        .bind(BILLING_STATE_PENDING)
+        .bind(created_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "UPDATE auth_tokens SET total_requests = total_requests + 1, last_used_at = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(created_at)
+        .bind(token_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(log_id)
+    }
+
+    async fn list_pending_billing_log_ids(
+        &self,
+        billing_subject: &str,
+    ) -> Result<Vec<i64>, ProxyError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM auth_token_logs
+            WHERE billing_state = ? AND billing_subject = ? AND COALESCE(business_credits, 0) > 0
+            ORDER BY id ASC
+            "#,
+        )
+        .bind(BILLING_STATE_PENDING)
+        .bind(billing_subject)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ProxyError::from)
+    }
+
+    async fn apply_pending_billing_log(&self, log_id: i64) -> Result<(), ProxyError> {
+        let mut tx = self.pool.begin().await?;
+        let Some((credits, billing_subject, billing_state, created_at)) =
+            sqlx::query_as::<_, (i64, Option<String>, String, i64)>(
+                r#"
+            SELECT COALESCE(business_credits, 0), billing_subject, billing_state, created_at
+            FROM auth_token_logs
+            WHERE id = ?
+            LIMIT 1
+            "#,
+            )
+            .bind(log_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            tx.rollback().await.ok();
+            return Err(ProxyError::Other(format!(
+                "pending billing log not found: {log_id}",
+            )));
+        };
+
+        if credits <= 0 || billing_state == BILLING_STATE_CHARGED {
+            tx.commit().await?;
+            return Ok(());
+        }
+        if billing_state != BILLING_STATE_PENDING {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        let Some(billing_subject) = billing_subject else {
+            tx.rollback().await.ok();
+            return Err(ProxyError::QuotaDataMissing {
+                reason: format!("missing billing_subject for auth_token_logs.id={log_id}"),
+            });
+        };
+
+        let charge_time = Utc
+            .timestamp_opt(created_at, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+        let charge_ts = charge_time.timestamp();
+        let minute_bucket = charge_ts - (charge_ts % SECS_PER_MINUTE);
+        let hour_bucket = charge_ts - (charge_ts % SECS_PER_HOUR);
+        let month_start = start_of_month(charge_time).timestamp();
+
+        if let Some(user_id) = billing_subject.strip_prefix("account:") {
+            sqlx::query(
+                r#"
+                INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, bucket_start, granularity)
+                DO UPDATE SET count = account_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(user_id)
+            .bind(minute_bucket)
+            .bind(GRANULARITY_MINUTE)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, bucket_start, granularity)
+                DO UPDATE SET count = account_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(user_id)
+            .bind(hour_bucket)
+            .bind(GRANULARITY_HOUR)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            let (_month_start, _month_count): (i64, i64) = sqlx::query_as(
+                r#"
+                INSERT INTO account_monthly_quota (user_id, month_start, month_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    month_start = CASE
+                        WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_start
+                        ELSE account_monthly_quota.month_start
+                    END,
+                    month_count = CASE
+                        WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_count
+                        ELSE account_monthly_quota.month_count + excluded.month_count
+                    END
+                RETURNING month_start, month_count
+                "#,
+            )
+            .bind(user_id)
+            .bind(month_start)
+            .bind(credits)
+            .fetch_one(&mut *tx)
+            .await?;
+        } else if let Some(token_id) = billing_subject.strip_prefix("token:") {
+            sqlx::query(
+                r#"
+                INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(token_id, bucket_start, granularity)
+                DO UPDATE SET count = token_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(token_id)
+            .bind(minute_bucket)
+            .bind(GRANULARITY_MINUTE)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(token_id, bucket_start, granularity)
+                DO UPDATE SET count = token_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(token_id)
+            .bind(hour_bucket)
+            .bind(GRANULARITY_HOUR)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            let (_month_start, _month_count): (i64, i64) = sqlx::query_as(
+                r#"
+                INSERT INTO auth_token_quota (token_id, month_start, month_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(token_id) DO UPDATE SET
+                    month_start = CASE
+                        WHEN excluded.month_start > auth_token_quota.month_start THEN excluded.month_start
+                        ELSE auth_token_quota.month_start
+                    END,
+                    month_count = CASE
+                        WHEN excluded.month_start > auth_token_quota.month_start THEN excluded.month_count
+                        ELSE auth_token_quota.month_count + excluded.month_count
+                    END
+                RETURNING month_start, month_count
+                "#,
+            )
+            .bind(token_id)
+            .bind(month_start)
+            .bind(credits)
+            .fetch_one(&mut *tx)
+            .await?;
+        } else {
+            tx.rollback().await.ok();
+            return Err(ProxyError::QuotaDataMissing {
+                reason: format!(
+                    "invalid billing_subject for auth_token_logs.id={log_id}: {billing_subject}",
+                ),
+            });
+        }
+
+        sqlx::query(
+            "UPDATE auth_token_logs SET billing_state = ? WHERE id = ? AND billing_state = ?",
+        )
+        .bind(BILLING_STATE_CHARGED)
+        .bind(log_id)
+        .bind(BILLING_STATE_PENDING)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn annotate_pending_billing_log(
+        &self,
+        log_id: i64,
+        message: &str,
+    ) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            UPDATE auth_token_logs
+            SET error_message = CASE
+                WHEN error_message IS NULL OR error_message = '' THEN ?
+                WHEN error_message = ? THEN error_message
+                ELSE error_message || ' | ' || ?
+            END
+            WHERE id = ?
+            "#,
+        )
+        .bind(message)
+        .bind(message)
+        .bind(message)
+        .bind(log_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn acquire_quota_subject_lock(
+        &self,
+        subject: &str,
+        ttl: Duration,
+        wait_timeout: Duration,
+    ) -> Result<QuotaSubjectDbLease, ProxyError> {
+        let owner = format!(
+            "{}:{}",
+            std::process::id(),
+            QUOTA_SUBJECT_LOCK_OWNER_SEQ.fetch_add(1, AtomicOrdering::Relaxed)
+        );
+        let deadline = Instant::now() + wait_timeout;
+        let ttl_secs = ttl.as_secs().max(1) as i64;
+
+        loop {
+            let now = Utc::now().timestamp();
+            let expires_at = now + ttl_secs;
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("DELETE FROM quota_subject_locks WHERE subject = ? AND expires_at <= ?")
+                .bind(subject)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+
+            let inserted = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO quota_subject_locks (subject, owner, expires_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                "#,
+            )
+            .bind(subject)
+            .bind(&owner)
+            .bind(expires_at)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            if inserted.rows_affected() == 1 {
+                tx.commit().await?;
+                return Ok(QuotaSubjectDbLease {
+                    subject: subject.to_string(),
+                    owner,
+                    ttl,
+                });
+            }
+
+            tx.rollback().await.ok();
+            if Instant::now() >= deadline {
+                return Err(ProxyError::Other(format!(
+                    "timed out acquiring quota subject lock for {subject}",
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn refresh_quota_subject_lock(
+        &self,
+        lease: &QuotaSubjectDbLease,
+    ) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        let expires_at = now + lease.ttl.as_secs().max(1) as i64;
+        let rows = sqlx::query(
+            "UPDATE quota_subject_locks SET expires_at = ?, updated_at = ? WHERE subject = ? AND owner = ?",
+        )
+        .bind(expires_at)
+        .bind(now)
+        .bind(&lease.subject)
+        .bind(&lease.owner)
+        .execute(&self.pool)
+        .await?;
+        if rows.rows_affected() == 0 {
+            return Err(ProxyError::Other(format!(
+                "quota subject lock lost for {}",
+                lease.subject,
+            )));
+        }
+        Ok(())
+    }
+
+    async fn release_quota_subject_lock(
+        &self,
+        lease: &QuotaSubjectDbLease,
+    ) -> Result<(), ProxyError> {
+        sqlx::query("DELETE FROM quota_subject_locks WHERE subject = ? AND owner = ?")
+            .bind(&lease.subject)
+            .bind(&lease.owner)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

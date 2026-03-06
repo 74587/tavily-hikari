@@ -493,7 +493,16 @@ async fn proxy_handler(
         && invalid_mcp_request_message.is_none()
         && let Some(tid) = token_id.as_deref()
     {
-        Some(state.proxy.lock_token_billing(tid).await)
+        Some(
+            state
+                .proxy
+                .lock_token_billing(tid)
+                .await
+                .map_err(|err| {
+                    eprintln!("token billing lock failed: {err}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
+        )
     } else {
         None
     };
@@ -617,6 +626,7 @@ async fn proxy_handler(
                 let analysis = analyze_mcp_attempt(resp.status, &resp.body);
                 let tavily_code: Option<i64> = analysis.tavily_status_code;
                 let result_status = analysis.status;
+                let mut attempt_logged = false;
 
                 // Charge credits after a successful billable Tavily tool call.
                 //
@@ -693,29 +703,62 @@ async fn proxy_handler(
                         total
                     };
 
-                    if credits > 0
-                        && let Err(err) = state.proxy.charge_token_quota(tid, credits).await
-                    {
-                        let msg = format!("charge_token_quota failed for {path}: {err}");
-                        eprintln!("{msg}");
-                        billing_error = Some(msg);
+                    if credits > 0 {
+                        match state
+                            .proxy
+                            .record_pending_billing_attempt(
+                                tid,
+                                &method,
+                                &path,
+                                parts.uri.query(),
+                                Some(resp.status.as_u16() as i64),
+                                tavily_code,
+                                billable_flag,
+                                result_status,
+                                None,
+                                credits,
+                            )
+                            .await
+                        {
+                            Ok(log_id) => {
+                                attempt_logged = true;
+                                if let Err(err) = state.proxy.settle_pending_billing_attempt(log_id).await {
+                                    let msg = format!("charge_token_quota failed for {path}: {err}");
+                                    eprintln!("{msg}");
+                                    let _ = state
+                                        .proxy
+                                        .annotate_pending_billing_attempt(log_id, &msg)
+                                        .await;
+                                    billing_error = Some(msg);
+                                }
+                            }
+                            Err(err) => {
+                                let msg = format!(
+                                    "record_pending_billing_attempt failed for {path}: {err}"
+                                );
+                                eprintln!("{msg}");
+                                billing_error = Some(msg);
+                            }
+                        }
                     }
                 }
-                let http_code = resp.status.as_u16() as i64;
-                let _ = state
-                    .proxy
-                    .record_token_attempt(
-                        tid,
-                        &method,
-                        &path,
-                        parts.uri.query(),
-                        Some(http_code),
-                        tavily_code,
-                        billable_flag,
-                        result_status,
-                        billing_error.as_deref(),
-                    )
-                    .await;
+                if !attempt_logged {
+                    let http_code = resp.status.as_u16() as i64;
+                    let _ = state
+                        .proxy
+                        .record_token_attempt(
+                            tid,
+                            &method,
+                            &path,
+                            parts.uri.query(),
+                            Some(http_code),
+                            tavily_code,
+                            billable_flag,
+                            result_status,
+                            billing_error.as_deref(),
+                        )
+                        .await;
+                }
             }
             // Always return the upstream response, even if local billing persistence fails.
             // Returning a 5xx here can trigger client retries and cause duplicate upstream charges.

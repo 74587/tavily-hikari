@@ -512,11 +512,20 @@ async fn proxy_tavily_http_endpoint(
         tavily_research_min_credits(&options)
     });
 
-    // Serialize billable requests per token within this process so `peek -> upstream -> charge`
-    // cannot be interleaved by concurrent requests from the same token.
+    // Serialize billable requests per quota subject so `peek -> upstream -> charge` stays
+    // consistent across local concurrency and other instances sharing the same SQLite database.
     let _token_billing_guard = if !state.dev_open_admin {
         if let Some(tid) = auth_token_id.as_deref() {
-            Some(state.proxy.lock_token_billing(tid).await)
+            Some(
+                state
+                    .proxy
+                    .lock_token_billing(tid)
+                    .await
+                    .map_err(|err| {
+                        eprintln!("token billing lock failed for {path}: {err}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+            )
         } else {
             None
         }
@@ -668,6 +677,7 @@ async fn proxy_tavily_http_endpoint(
             Ok((resp, analysis, usage_delta)) => {
                 let mut billing_error: Option<String> = None;
                 let mut usage_probe_warning: Option<&'static str> = None;
+                let mut attempt_logged = false;
                 if resp.status.is_success()
                     && analysis.status == "success"
                     && let Some(tid) = token_id_for_logs.as_deref()
@@ -682,16 +692,49 @@ async fn proxy_tavily_http_endpoint(
                         eprintln!("research /usage diff unavailable; charging minimum credits");
                         research_min_credits.unwrap_or(4)
                     };
-                    if credits > 0
-                        && let Err(err) = state.proxy.charge_token_quota(tid, credits).await
-                    {
-                        let msg = format!("charge_token_quota failed for {path}: {err}");
-                        eprintln!("{msg}");
-                        billing_error = Some(msg);
+                    if credits > 0 {
+                        match state
+                            .proxy
+                            .record_pending_billing_attempt(
+                                tid,
+                                &method,
+                                &path,
+                                None,
+                                Some(resp.status.as_u16() as i64),
+                                analysis.tavily_status_code,
+                                true,
+                                analysis.status,
+                                usage_probe_warning,
+                                credits,
+                            )
+                            .await
+                        {
+                            Ok(log_id) => {
+                                attempt_logged = true;
+                                if let Err(err) = state.proxy.settle_pending_billing_attempt(log_id).await {
+                                    let msg = format!("charge_token_quota failed for {path}: {err}");
+                                    eprintln!("{msg}");
+                                    let _ = state
+                                        .proxy
+                                        .annotate_pending_billing_attempt(log_id, &msg)
+                                        .await;
+                                    billing_error = Some(msg);
+                                }
+                            }
+                            Err(err) => {
+                                let msg = format!(
+                                    "record_pending_billing_attempt failed for {path}: {err}"
+                                );
+                                eprintln!("{msg}");
+                                billing_error = Some(msg);
+                            }
+                        }
                     }
                 }
 
-                if let Some(tid) = token_id_for_logs.as_deref() {
+                if !attempt_logged
+                    && let Some(tid) = token_id_for_logs.as_deref()
+                {
                     let http_code = resp.status.as_u16() as i64;
                     let _ = state
                         .proxy
@@ -789,6 +832,7 @@ async fn proxy_tavily_http_endpoint(
     match result {
         Ok((resp, analysis)) => {
             let mut billing_error: Option<String> = None;
+            let mut attempt_logged = false;
             if resp.status.is_success()
                 && analysis.status == "success"
                 && let Some(tid) = token_id_for_logs.as_deref()
@@ -808,16 +852,49 @@ async fn proxy_tavily_http_endpoint(
                         }
                     }
                 };
-                if credits > 0
-                    && let Err(err) = state.proxy.charge_token_quota(tid, credits).await
-                {
-                    let msg = format!("charge_token_quota failed for {path}: {err}");
-                    eprintln!("{msg}");
-                    billing_error = Some(msg);
+                if credits > 0 {
+                    match state
+                        .proxy
+                        .record_pending_billing_attempt(
+                            tid,
+                            &method,
+                            &path,
+                            None,
+                            Some(resp.status.as_u16() as i64),
+                            analysis.tavily_status_code,
+                            true,
+                            analysis.status,
+                            None,
+                            credits,
+                        )
+                        .await
+                    {
+                        Ok(log_id) => {
+                            attempt_logged = true;
+                            if let Err(err) = state.proxy.settle_pending_billing_attempt(log_id).await {
+                                let msg = format!("charge_token_quota failed for {path}: {err}");
+                                eprintln!("{msg}");
+                                let _ = state
+                                    .proxy
+                                    .annotate_pending_billing_attempt(log_id, &msg)
+                                    .await;
+                                billing_error = Some(msg);
+                            }
+                        }
+                        Err(err) => {
+                            let msg = format!(
+                                "record_pending_billing_attempt failed for {path}: {err}"
+                            );
+                            eprintln!("{msg}");
+                            billing_error = Some(msg);
+                        }
+                    }
                 }
             }
 
-            if let Some(tid) = token_id_for_logs.as_deref() {
+            if !attempt_logged
+                && let Some(tid) = token_id_for_logs.as_deref()
+            {
                 let http_code = resp.status.as_u16() as i64;
                 let _ = state
                     .proxy

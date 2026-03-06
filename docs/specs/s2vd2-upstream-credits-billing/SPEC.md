@@ -97,3 +97,4 @@
 - 2026-03-06: 初始化规格，冻结 1:1 credits billing、mixed enforcement 与 Research `/usage` 差分方案。
 - 2026-03-06: 完成本轮实现与本地验证（`cargo fmt --all`、`cargo test`、`cargo clippy -- -D warnings` 通过）。
 - 2026-03-06: review fix：MCP `tools/call` 保留非对象 `arguments` 原样转发，仅在对象参数上注入 `include_usage`。
+- 2026-03-06: review fix：为 billable 请求落盘 `pending` credits 日志并在下次同 quota subject 进入时补扣，避免成功响应后因本地写库失败而永久漏扣。

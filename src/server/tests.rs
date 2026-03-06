@@ -4761,7 +4761,7 @@ mod tests {
 
         let row = sqlx::query(
             r#"
-            SELECT result_status, error_message
+            SELECT result_status, error_message, business_credits, billing_state
             FROM auth_token_logs
             WHERE token_id = ?
             ORDER BY id DESC
@@ -4774,13 +4774,56 @@ mod tests {
         .expect("token log row exists");
         let status: String = row.try_get("result_status").unwrap();
         let message: Option<String> = row.try_get("error_message").unwrap();
+        let business_credits: Option<i64> = row.try_get("business_credits").unwrap();
+        let billing_state: String = row.try_get("billing_state").unwrap();
         assert_eq!(status, "success");
+        assert_eq!(business_credits, Some(1));
+        assert_eq!(billing_state, "pending");
         assert!(
             message
                 .unwrap_or_default()
                 .contains("charge_token_quota failed"),
             "expected charge_token_quota failure to be logged"
         );
+
+        sqlx::query(
+            r#"
+            CREATE TABLE token_usage_buckets (
+                token_id TEXT NOT NULL,
+                bucket_start INTEGER NOT NULL,
+                granularity TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                PRIMARY KEY (token_id, bucket_start, granularity),
+                FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate token_usage_buckets");
+
+        let _guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("reconcile pending billing");
+        let verdict = proxy.peek_token_quota(&token.id).await.expect("peek quota");
+        assert_eq!(verdict.hourly_used, 1);
+
+        let row = sqlx::query(
+            r#"
+            SELECT billing_state
+            FROM auth_token_logs
+            WHERE token_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&token.id)
+        .fetch_one(&pool)
+        .await
+        .expect("token log row after reconcile");
+        let billing_state: String = row.try_get("billing_state").unwrap();
+        assert_eq!(billing_state, "charged");
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -8070,7 +8113,7 @@ mod tests {
 
         let row = sqlx::query(
             r#"
-            SELECT result_status, error_message
+            SELECT result_status, error_message, business_credits, billing_state
             FROM auth_token_logs
             WHERE token_id = ?
             ORDER BY id DESC
@@ -8083,13 +8126,59 @@ mod tests {
         .expect("token log row exists");
         let status: String = row.try_get("result_status").unwrap();
         let message: Option<String> = row.try_get("error_message").unwrap();
+        let business_credits: Option<i64> = row.try_get("business_credits").unwrap();
+        let billing_state: String = row.try_get("billing_state").unwrap();
         assert_eq!(status, "success");
+        assert_eq!(business_credits, Some(1));
+        assert_eq!(billing_state, "pending");
         assert!(
             message
                 .unwrap_or_default()
                 .contains("charge_token_quota failed"),
             "expected charge_token_quota failure to be logged"
         );
+
+        sqlx::query(
+            r#"
+            CREATE TABLE token_usage_buckets (
+                token_id TEXT NOT NULL,
+                bucket_start INTEGER NOT NULL,
+                granularity TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                PRIMARY KEY (token_id, bucket_start, granularity),
+                FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate token_usage_buckets");
+
+        let _guard = proxy
+            .lock_token_billing(&access_token.id)
+            .await
+            .expect("reconcile pending billing");
+        let verdict = proxy
+            .peek_token_quota(&access_token.id)
+            .await
+            .expect("peek quota");
+        assert_eq!(verdict.hourly_used, 1);
+
+        let row = sqlx::query(
+            r#"
+            SELECT billing_state
+            FROM auth_token_logs
+            WHERE token_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&access_token.id)
+        .fetch_one(&pool)
+        .await
+        .expect("token log row after reconcile");
+        let billing_state: String = row.try_get("billing_state").unwrap();
+        assert_eq!(billing_state, "charged");
 
         let _ = std::fs::remove_file(db_path);
     }
