@@ -262,7 +262,12 @@ async fn proxy_handler(
                             .trim()
                             .to_string();
 
-                        if tool.starts_with("tavily-") {
+                        let supported_billable_tool = matches!(
+                            tool.as_str(),
+                            "tavily-search" | "tavily-extract" | "tavily-crawl" | "tavily-map"
+                        );
+
+                        if supported_billable_tool {
                             *any_billable = true;
                             *all_non_billable = false;
 
@@ -659,50 +664,33 @@ async fn proxy_handler(
                         }
                     } else {
                         let errors_by_id = extract_mcp_has_error_by_id_from_bytes(&resp.body);
-                        let mut billable_has_error = billable_mcp_ids.is_empty()
-                            || billable_mcp_ids
-                                .iter()
-                                .any(|id| *errors_by_id.get(id).unwrap_or(&true));
-                        if allow_empty_body_search_fallback {
-                            billable_has_error = false;
-                        }
-
                         let credits_by_id = extract_mcp_usage_credits_by_id_from_bytes(&resp.body);
                         let mut total = 0i64;
-                        let mut any_usage = false;
 
                         for id in billable_mcp_ids.iter() {
                             if let Some(credits) = credits_by_id.get(id) {
                                 total = total.saturating_add(*credits);
-                                any_usage = true;
+                                continue;
                             }
-                        }
 
-                        if billable_has_error {
-                            if any_usage {
-                                total
+                            let id_has_error = if allow_empty_body_search_fallback {
+                                false
                             } else {
-                                0
-                            }
-                        } else {
-                            // Search is predictable: when usage is missing, fall back to the
-                            // request-derived expected credits *per search call*.
-                            for (id, expected) in expected_search_credits_by_id.iter() {
-                                if billable_search_mcp_ids.contains(id)
-                                    && !credits_by_id.contains_key(id)
-                                {
-                                    total = total.saturating_add(*expected);
-                                }
-                            }
-
-                            if has_search_mcp_without_id
-                                && expected_search_credits_without_id_total > 0
+                                *errors_by_id.get(id).unwrap_or(&true)
+                            };
+                            if !id_has_error
+                                && billable_search_mcp_ids.contains(id)
+                                && let Some(expected) = expected_search_credits_by_id.get(id)
                             {
-                                total = total.saturating_add(expected_search_credits_without_id_total);
+                                total = total.saturating_add(*expected);
                             }
-
-                            total
                         }
+
+                        if has_search_mcp_without_id && expected_search_credits_without_id_total > 0 {
+                            total = total.saturating_add(expected_search_credits_without_id_total);
+                        }
+
+                        total
                     };
 
                     if credits > 0

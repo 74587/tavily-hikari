@@ -1069,6 +1069,111 @@ mod tests {
         (addr, hits)
     }
 
+    async fn spawn_mock_mcp_upstream_for_search_missing_usage_with_extract_error(
+        expected_api_key: String,
+    ) -> (SocketAddr, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/mcp",
+            any({
+                let hits = hits.clone();
+                move |Query(params): Query<HashMap<String, String>>, Json(body): Json<Value>| {
+                    let expected_api_key = expected_api_key.clone();
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        let received = params.get("tavilyApiKey").cloned();
+                        assert_eq!(
+                            received.as_deref(),
+                            Some(expected_api_key.as_str()),
+                            "missing or incorrect tavilyApiKey"
+                        );
+
+                        let items = body
+                            .as_array()
+                            .expect("expected JSON-RPC batch body (array)");
+                        assert_eq!(items.len(), 2, "expected 2-item batch");
+
+                        let mut search_id = None;
+                        let mut extract_id = None;
+
+                        for item in items {
+                            let map = item
+                                .as_object()
+                                .expect("expected JSON-RPC object item in batch");
+                            assert_eq!(
+                                map.get("method").and_then(|v| v.as_str()),
+                                Some("tools/call"),
+                                "expected MCP tools/call in batch"
+                            );
+                            let name = map
+                                .get("params")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+
+                            assert!(
+                                matches!(name, "tavily-search" | "tavily-extract"),
+                                "unexpected tool name: {name}"
+                            );
+                            assert_eq!(
+                                map.get("params")
+                                    .and_then(|p| p.get("arguments"))
+                                    .and_then(|a| a.get("include_usage"))
+                                    .and_then(|v| v.as_bool()),
+                                Some(true),
+                                "proxy should inject include_usage=true"
+                            );
+
+                            if name == "tavily-search" {
+                                search_id = Some(
+                                    map.get("id").cloned().unwrap_or_else(|| serde_json::json!(1)),
+                                );
+                            }
+                            if name == "tavily-extract" {
+                                extract_id = Some(
+                                    map.get("id").cloned().unwrap_or_else(|| serde_json::json!(2)),
+                                );
+                            }
+                        }
+
+                        let search_id = search_id.expect("missing tavily-search id");
+                        let extract_id = extract_id.expect("missing tavily-extract id");
+
+                        (
+                            StatusCode::OK,
+                            Json(serde_json::json!([
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": search_id,
+                                    "result": {
+                                        "structuredContent": {
+                                            "status": 200
+                                        }
+                                    }
+                                },
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": extract_id,
+                                    "error": { "code": -32000, "message": "extract boom" }
+                                }
+                            ])),
+                        )
+                    }
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        (addr, hits)
+    }
+
     async fn spawn_mock_mcp_upstream_for_tavily_search_delayed(
         expected_api_key: String,
         arrived: Arc<Notify>,
@@ -1353,8 +1458,8 @@ mod tests {
                                 .and_then(|p| p.get("arguments"))
                                 .and_then(|a| a.get("include_usage"))
                                 .and_then(|v| v.as_bool()),
-                            Some(true),
-                            "proxy should inject include_usage=true for tavily-* tool calls"
+                            None,
+                            "proxy should not inject include_usage for unsupported Tavily tools"
                         );
 
                         (
@@ -7228,6 +7333,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_batch_tools_call_tavily_search_falls_back_per_id_when_billable_sibling_errors() {
+        let db_path = temp_db_path("mcp-batch-search-missing-usage-with-billable-error");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
+
+        let expected_api_key = "tvly-mcp-batch-search-missing-usage-with-billable-error-key";
+        let (upstream_addr, hits) =
+            spawn_mock_mcp_upstream_for_search_missing_usage_with_extract_error(
+                expected_api_key.to_string(),
+            )
+            .await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+        let access_token = proxy
+            .create_access_token(Some("mcp-batch-search-missing-usage-with-billable-error"))
+            .await
+            .expect("create access token");
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+        let client = Client::new();
+        let url = format!(
+            "http://{}/mcp?tavilyApiKey={}",
+            proxy_addr, access_token.token
+        );
+
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!([
+                {
+                    "method": "tools/call",
+                    "id": 1,
+                    "params": {
+                        "name": "tavily-search",
+                        "arguments": { "query": "missing usage", "search_depth": "advanced" }
+                    }
+                },
+                {
+                    "method": "tools/call",
+                    "id": 2,
+                    "params": {
+                        "name": "tavily-extract",
+                        "arguments": { "url": "https://example.com" }
+                    }
+                }
+            ]))
+            .send()
+            .await
+            .expect("batch request");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let verdict = proxy
+            .peek_token_quota(&access_token.id)
+            .await
+            .expect("peek quota");
+        assert_eq!(
+            verdict.hourly_used, 2,
+            "successful search should still charge expected credits when a billable sibling errors"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn mcp_batch_tools_call_tavily_search_does_not_overcharge_when_error_is_in_detail_status() {
         let db_path = temp_db_path("mcp-batch-search-detail-status-no-overcharge");
         let db_str = db_path.to_string_lossy().to_string();
@@ -8023,7 +8197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tools_call_unknown_tavily_tool_is_forwarded_and_charges_credits() {
+    async fn mcp_tools_call_unknown_tavily_tool_is_forwarded_without_business_billing() {
         let db_path = temp_db_path("mcp-tools-call-unknown-tool");
         let db_str = db_path.to_string_lossy().to_string();
 
@@ -8075,7 +8249,7 @@ mod tests {
             .peek_token_quota(&access_token.id)
             .await
             .expect("peek quota");
-        assert_eq!(verdict.hourly_used, 5);
+        assert_eq!(verdict.hourly_used, 0);
 
         let _ = std::fs::remove_file(db_path);
     }
