@@ -636,22 +636,23 @@ async fn proxy_handler(
                 // to avoid guessing partial failures.
                 let allow_empty_body_search_fallback =
                     resp.body.is_empty() && expected_search_credits.is_some();
-                if billable_flag
-                    && resp.status.is_success()
-                    && (matches!(result_status, "success" | "quota_exhausted")
-                        || allow_empty_body_search_fallback)
-                {
+                if billable_flag && resp.status.is_success() {
                     let credits = if has_billable_mcp_without_id {
                         let mut response_has_error = mcp_response_has_any_error(&resp.body);
+                        let mut response_has_success = mcp_response_has_any_success(&resp.body);
                         if allow_empty_body_search_fallback {
                             response_has_error = false;
+                            response_has_success = true;
                         }
 
                         // Without JSON-RPC ids we cannot reliably separate billable vs non-billable
-                        // response items, so we fall back to total extraction (safe default).
+                        // response items, so we only charge observed credits when the response
+                        // still shows at least one successful tool call.
                         match extract_usage_credits_total_from_json_bytes(&resp.body) {
                             Some(credits) => {
-                                if response_has_error {
+                                if response_has_error && !response_has_success {
+                                    0
+                                } else if response_has_error {
                                     credits
                                 } else if let Some(expected) = expected_search_credits {
                                     credits.max(expected)
@@ -660,7 +661,7 @@ async fn proxy_handler(
                                 }
                             }
                             None => {
-                                if response_has_error {
+                                if response_has_error || !response_has_success {
                                     0
                                 } else if let Some(expected) = expected_search_credits {
                                     expected
@@ -678,18 +679,21 @@ async fn proxy_handler(
                         let mut total = 0i64;
 
                         for id in billable_mcp_ids.iter() {
-                            if let Some(credits) = credits_by_id.get(id) {
-                                total = total.saturating_add(*credits);
-                                continue;
-                            }
-
                             let id_has_error = if allow_empty_body_search_fallback {
                                 false
                             } else {
                                 *errors_by_id.get(id).unwrap_or(&true)
                             };
-                            if !id_has_error
-                                && billable_search_mcp_ids.contains(id)
+                            if id_has_error {
+                                continue;
+                            }
+
+                            if let Some(credits) = credits_by_id.get(id) {
+                                total = total.saturating_add(*credits);
+                                continue;
+                            }
+
+                            if billable_search_mcp_ids.contains(id)
                                 && let Some(expected) = expected_search_credits_by_id.get(id)
                             {
                                 total = total.saturating_add(*expected);

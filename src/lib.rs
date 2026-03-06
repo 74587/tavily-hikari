@@ -113,9 +113,11 @@ const TOKEN_AFFINITY_MAX_ENTRIES: usize = 10_000;
 // Cache token -> user binding to avoid repeated DB lookups on hot request paths.
 const TOKEN_BINDING_CACHE_TTL_SECS: u64 = 30;
 const TOKEN_BINDING_CACHE_MAX_ENTRIES: usize = 10_000;
-const QUOTA_SUBJECT_LOCK_TTL_SECS: u64 = 5 * 60;
+// Keep the lease TTL below the acquisition wait so a crashed holder can be recovered
+// by the next in-flight request instead of blocking the subject for minutes.
+const QUOTA_SUBJECT_LOCK_TTL_SECS: u64 = 20;
 const QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS: u64 = 30;
-const QUOTA_SUBJECT_LOCK_REFRESH_SECS: u64 = 30;
+const QUOTA_SUBJECT_LOCK_REFRESH_SECS: u64 = 10;
 
 const REQUEST_LOGS_MIN_RETENTION_DAYS: i64 = 7;
 
@@ -634,14 +636,24 @@ impl TavilyProxy {
         )
     }
 
-    async fn reconcile_pending_billing_for_subject(
+    async fn reconcile_pending_billing_for_subjects<I, S>(
         &self,
-        billing_subject: &str,
-    ) -> Result<(), ProxyError> {
-        let pending = self
-            .key_store
-            .list_pending_billing_log_ids(billing_subject)
-            .await?;
+        billing_subjects: I,
+    ) -> Result<(), ProxyError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut pending = Vec::new();
+        for billing_subject in billing_subjects {
+            pending.extend(
+                self.key_store
+                    .list_pending_billing_log_ids(billing_subject.as_ref())
+                    .await?,
+            );
+        }
+        pending.sort_unstable();
+        pending.dedup();
         for log_id in pending {
             self.key_store.apply_pending_billing_log(log_id).await?;
         }
@@ -679,7 +691,12 @@ impl TavilyProxy {
                 Duration::from_secs(QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS),
             )
             .await?;
-        self.reconcile_pending_billing_for_subject(&billing_subject)
+        let token_subject = format!("token:{token_id}");
+        let mut pending_subjects = vec![token_subject];
+        if billing_subject != pending_subjects[0] {
+            pending_subjects.push(billing_subject.clone());
+        }
+        self.reconcile_pending_billing_for_subjects(pending_subjects)
             .await?;
 
         Ok(TokenBillingGuard {
@@ -688,22 +705,36 @@ impl TavilyProxy {
         })
     }
 
-    async fn lock_research_key_usage(&self, key_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    async fn lock_research_key_usage(&self, key_id: &str) -> Result<TokenBillingGuard, ProxyError> {
+        let subject = format!("research-key:{key_id}");
         let lock = {
             let mut locks = self.research_key_locks.lock().await;
             if locks.len() > 256 {
                 locks.retain(|_, lock| lock.strong_count() > 0);
             }
 
-            if let Some(existing) = locks.get(key_id).and_then(|lock| lock.upgrade()) {
+            if let Some(existing) = locks.get(&subject).and_then(|lock| lock.upgrade()) {
                 existing
             } else {
                 let lock = Arc::new(Mutex::new(()));
-                locks.insert(key_id.to_string(), Arc::downgrade(&lock));
+                locks.insert(subject.clone(), Arc::downgrade(&lock));
                 lock
             }
         };
-        lock.lock_owned().await
+        let local_guard = lock.lock_owned().await;
+        let lease = self
+            .key_store
+            .acquire_quota_subject_lock(
+                &subject,
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_TTL_SECS),
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS),
+            )
+            .await?;
+
+        Ok(TokenBillingGuard {
+            _local: local_guard,
+            _subject_lock: QuotaSubjectLockGuard::new(self.key_store.clone(), lease),
+        })
     }
 
     async fn acquire_key_for(
@@ -1138,7 +1169,7 @@ impl TavilyProxy {
         let lease = self.acquire_key_for(auth_token_id).await?;
         // Research billing uses /usage diff of a key-scoped counter; protect it from concurrent
         // research calls sharing the same upstream key, otherwise deltas can be misattributed.
-        let _key_guard = self.lock_research_key_usage(&lease.id).await;
+        let _key_guard = self.lock_research_key_usage(&lease.id).await?;
 
         let before_usage = self
             .fetch_research_usage_for_secret(
@@ -3089,7 +3120,7 @@ impl KeyStore {
         // - users: local user records
         // - oauth_accounts: third-party account bindings (provider + provider_user_id unique)
         // - user_sessions: persisted user sessions for browser auth
-        // - user_token_bindings: one user maps to one auth token
+        // - user_token_bindings: one user may bind multiple auth tokens
         // - oauth_login_states: one-time OAuth state tokens for CSRF/replay protection
         sqlx::query(
             r#"
@@ -3162,14 +3193,24 @@ impl KeyStore {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS user_token_bindings (
-                user_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
                 token_id TEXT NOT NULL UNIQUE,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, token_id),
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
             )
             "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.migrate_user_token_bindings_to_multi_binding().await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_user_token_bindings_user_updated
+               ON user_token_bindings(user_id, updated_at DESC)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -3577,6 +3618,72 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn user_token_bindings_uses_single_binding_primary_key(
+        &self,
+    ) -> Result<bool, ProxyError> {
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT name, pk FROM pragma_table_info('user_token_bindings')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+
+        let mut user_id_pk = 0;
+        let mut token_id_pk = 0;
+        for (name, pk) in rows {
+            if name == "user_id" {
+                user_id_pk = pk;
+            } else if name == "token_id" {
+                token_id_pk = pk;
+            }
+        }
+
+        Ok(user_id_pk == 1 && token_id_pk == 0)
+    }
+
+    async fn migrate_user_token_bindings_to_multi_binding(&self) -> Result<(), ProxyError> {
+        if !self
+            .user_token_bindings_uses_single_binding_primary_key()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE user_token_bindings_v2 (
+                user_id TEXT NOT NULL,
+                token_id TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, token_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO user_token_bindings_v2 (user_id, token_id, created_at, updated_at)
+               SELECT user_id, token_id, created_at, updated_at
+               FROM user_token_bindings"#,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DROP TABLE user_token_bindings")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("ALTER TABLE user_token_bindings_v2 RENAME TO user_token_bindings")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5917,7 +6024,7 @@ impl KeyStore {
                FROM user_token_bindings b
                JOIN auth_tokens t ON t.id = b.token_id
                WHERE b.user_id = ? AND t.deleted_at IS NULL
-               ORDER BY t.created_at DESC, t.id DESC"#,
+               ORDER BY b.updated_at DESC, b.created_at DESC, t.id DESC"#,
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -6810,64 +6917,48 @@ impl KeyStore {
                         break;
                     }
                     Some(_) => {
-                        tx.rollback().await.ok();
-                        self.cache_token_binding(preferred_token_id, Some(user_id))
-                            .await;
-                        return Ok(preferred_secret);
-                    }
-                    None => {
-                        let current = sqlx::query_as::<_, (String,)>(
-                            r#"SELECT token_id
-                               FROM user_token_bindings
-                               WHERE user_id = ?
-                               LIMIT 1"#,
+                        let touch = sqlx::query(
+                            r#"UPDATE user_token_bindings
+                               SET updated_at = ?
+                               WHERE user_id = ? AND token_id = ?"#,
                         )
+                        .bind(now)
                         .bind(user_id)
-                        .fetch_optional(&mut *tx)
-                        .await?;
-                        let previous_token_id =
-                            current.as_ref().map(|(token_id,)| token_id.clone());
-
-                        let result = if let Some((current_token_id,)) = current {
-                            if current_token_id == preferred_token_id {
-                                Ok(())
-                            } else {
-                                sqlx::query(
-                                    r#"UPDATE user_token_bindings
-                                       SET token_id = ?, updated_at = ?
-                                       WHERE user_id = ?"#,
-                                )
-                                .bind(preferred_token_id)
-                                .bind(now)
-                                .bind(user_id)
-                                .execute(&mut *tx)
-                                .await
-                                .map(|_| ())
-                            }
-                        } else {
-                            sqlx::query(
-                                r#"INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at)
-                                   VALUES (?, ?, ?, ?)"#,
-                            )
-                            .bind(user_id)
-                            .bind(preferred_token_id)
-                            .bind(now)
-                            .bind(now)
-                            .execute(&mut *tx)
-                            .await
-                            .map(|_| ())
-                        };
-
-                        match result {
-                            Ok(()) => {
+                        .bind(preferred_token_id)
+                        .execute(&mut *tx)
+                        .await;
+                        match touch {
+                            Ok(_) => {
                                 tx.commit().await?;
                                 self.cache_token_binding(preferred_token_id, Some(user_id))
                                     .await;
-                                if let Some(previous_token_id) = previous_token_id
-                                    && previous_token_id != preferred_token_id
-                                {
-                                    self.cache_token_binding(&previous_token_id, None).await;
-                                }
+                                return Ok(preferred_secret);
+                            }
+                            Err(err) => {
+                                tx.rollback().await.ok();
+                                return Err(ProxyError::Database(err));
+                            }
+                        }
+                    }
+                    None => {
+                        let result = sqlx::query(
+                            r#"INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at)
+                               VALUES (?, ?, ?, ?)
+                               ON CONFLICT(user_id, token_id) DO UPDATE SET
+                                   updated_at = excluded.updated_at"#,
+                        )
+                        .bind(user_id)
+                        .bind(preferred_token_id)
+                        .bind(now)
+                        .bind(now)
+                        .execute(&mut *tx)
+                        .await;
+
+                        match result {
+                            Ok(_) => {
+                                tx.commit().await?;
+                                self.cache_token_binding(preferred_token_id, Some(user_id))
+                                    .await;
                                 return Ok(preferred_secret);
                             }
                             Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
@@ -6900,6 +6991,7 @@ impl KeyStore {
                    FROM user_token_bindings b
                    JOIN auth_tokens t ON t.id = b.token_id
                    WHERE b.user_id = ?
+                   ORDER BY b.updated_at DESC, b.created_at DESC, b.token_id DESC
                    LIMIT 1"#,
             )
             .bind(user_id)
@@ -6995,6 +7087,7 @@ impl KeyStore {
                FROM user_token_bindings b
                JOIN auth_tokens t ON t.id = b.token_id
                WHERE b.user_id = ?
+               ORDER BY b.updated_at DESC, b.created_at DESC, b.token_id DESC
                LIMIT 1"#,
         )
         .bind(user_id)
@@ -7013,6 +7106,7 @@ impl KeyStore {
                FROM user_token_bindings b
                LEFT JOIN auth_tokens t ON t.id = b.token_id
                WHERE b.user_id = ?
+               ORDER BY b.updated_at DESC, b.created_at DESC, b.token_id DESC
                LIMIT 1"#,
         )
         .bind(user_id)
@@ -9577,17 +9671,17 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
         }
     }
 
-    if any_success {
+    if any_error {
         return AttemptAnalysis {
-            status: OUTCOME_SUCCESS,
+            status: OUTCOME_ERROR,
             mark_exhausted: false,
             tavily_status_code: detected_code,
         };
     }
 
-    if any_error {
+    if any_success {
         return AttemptAnalysis {
-            status: OUTCOME_ERROR,
+            status: OUTCOME_SUCCESS,
             mark_exhausted: false,
             tavily_status_code: detected_code,
         };
@@ -9684,6 +9778,38 @@ pub fn mcp_response_has_any_error(body: &[u8]) -> bool {
             return true;
         };
         if outcome != MessageOutcome::Success {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Best-effort detection of whether a Tavily MCP response contains at least one successful item.
+pub fn mcp_response_has_any_success(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return false,
+    };
+
+    let mut messages = extract_sse_json_messages(text);
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    if messages.is_empty() {
+        return false;
+    }
+
+    for message in messages {
+        if let Some((outcome, _code)) = analyze_json_message(&message)
+            && outcome == MessageOutcome::Success
+        {
             return true;
         }
     }
@@ -10483,6 +10609,19 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         let flags = extract_mcp_has_error_by_id_from_bytes(body);
         let id1 = serde_json::json!(1).to_string();
         assert_eq!(flags.get(&id1), Some(&true));
+    }
+
+    #[test]
+    fn analyze_mcp_attempt_marks_mixed_success_and_error_as_error() {
+        let body = br#"[
+          {"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"status":200}}},
+          {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"oops"}}
+        ]"#;
+
+        let analysis = analyze_mcp_attempt(StatusCode::OK, body);
+        assert_eq!(analysis.status, OUTCOME_ERROR);
+        assert!(!analysis.mark_exhausted);
+        assert_eq!(analysis.tavily_status_code, Some(200));
     }
 
     #[test]
@@ -11932,7 +12071,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     }
 
     #[tokio::test]
-    async fn ensure_user_token_binding_with_preferred_rebinds_and_keeps_old_token_active() {
+    async fn ensure_user_token_binding_with_preferred_keeps_existing_binding_and_adds_preferred() {
         let db_path = temp_db_path("user-token-binding-preferred-rebind");
         let db_str = db_path.to_string_lossy().to_string();
         let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
@@ -11966,7 +12105,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             "UPDATE user_token_bindings SET token_id = ?, updated_at = ? WHERE user_id = ?",
         )
         .bind(&mistaken.id)
-        .bind(Utc::now().timestamp())
+        .bind(Utc::now().timestamp() - 30)
         .bind(&user.user_id)
         .execute(&store.pool)
         .await
@@ -11983,16 +12122,33 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
 
         assert_eq!(
             rebound.id, original.id,
-            "preferred token should be rebound to the user"
+            "preferred token should be bound to the user"
         );
 
-        let (bound_token_id,): (String,) =
-            sqlx::query_as("SELECT token_id FROM user_token_bindings WHERE user_id = ?")
+        let (binding_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM user_token_bindings WHERE user_id = ?")
                 .bind(&user.user_id)
                 .fetch_one(&store.pool)
                 .await
-                .expect("query user binding");
-        assert_eq!(bound_token_id, original.id);
+                .expect("count user bindings");
+        assert_eq!(
+            binding_count, 2,
+            "preferred binding should be added without removing existing token"
+        );
+
+        let preferred_owner = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
+        )
+        .bind(&original.id)
+        .fetch_optional(&store.pool)
+        .await
+        .expect("query preferred owner")
+        .flatten();
+        assert_eq!(
+            preferred_owner.as_deref(),
+            Some(user.user_id.as_str()),
+            "preferred token should belong to the user"
+        );
 
         let mistaken_owner = sqlx::query_scalar::<_, Option<String>>(
             "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
@@ -12002,10 +12158,23 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         .await
         .expect("query mistaken token owner")
         .flatten();
-        assert!(
-            mistaken_owner.is_none(),
-            "mistaken token should become unbound after self-heal"
+        assert_eq!(
+            mistaken_owner.as_deref(),
+            Some(user.user_id.as_str()),
+            "existing token must stay bound to the same user"
         );
+
+        let primary = proxy
+            .get_user_token(&user.user_id)
+            .await
+            .expect("query primary user token");
+        match primary {
+            UserTokenLookup::Found(secret) => assert_eq!(
+                secret.id, original.id,
+                "latest preferred binding should be selected as primary token"
+            ),
+            other => panic!("expected found user token, got {other:?}"),
+        }
 
         let (enabled, deleted_at): (i64, Option<i64>) =
             sqlx::query_as("SELECT enabled, deleted_at FROM auth_tokens WHERE id = ? LIMIT 1")
@@ -12231,6 +12400,134 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     }
 
     #[tokio::test]
+    async fn user_token_bindings_migration_supports_multi_binding_without_backfill() {
+        let db_path = temp_db_path("user-token-bindings-multi-binding-migration");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "legacy-binding-user".to_string(),
+                username: Some("legacy_binding_user".to_string()),
+                name: Some("Legacy Binding User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert legacy user");
+        let legacy = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:legacy_binding_user"))
+            .await
+            .expect("create legacy binding");
+        drop(proxy);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let legacy_row = sqlx::query_as::<_, (String, String, i64, i64)>(
+            "SELECT user_id, token_id, created_at, updated_at FROM user_token_bindings WHERE user_id = ? LIMIT 1",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read legacy binding row");
+        sqlx::query("DROP TABLE user_token_bindings")
+            .execute(&pool)
+            .await
+            .expect("drop user_token_bindings");
+        sqlx::query(
+            r#"
+            CREATE TABLE user_token_bindings (
+                user_id TEXT PRIMARY KEY,
+                token_id TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate legacy user_token_bindings");
+        sqlx::query(
+            "INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&legacy_row.0)
+        .bind(&legacy_row.1)
+        .bind(legacy_row.2)
+        .bind(legacy_row.3)
+        .execute(&pool)
+        .await
+        .expect("insert legacy binding row");
+        drop(pool);
+
+        let proxy_after_restart =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy restarted");
+        let preferred = proxy_after_restart
+            .create_access_token(Some("linuxdo:preferred_after_migration"))
+            .await
+            .expect("create preferred token");
+        proxy_after_restart
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:legacy_binding_user"),
+                Some(&preferred.id),
+            )
+            .await
+            .expect("bind preferred token after migration");
+
+        let store = proxy_after_restart.key_store.clone();
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM user_token_bindings WHERE user_id = ?")
+                .bind(&user.user_id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("count user bindings after migration");
+        assert_eq!(
+            count, 2,
+            "migrated schema should allow multiple token bindings per user"
+        );
+
+        let owners = sqlx::query_as::<_, (String, String)>(
+            "SELECT token_id, user_id FROM user_token_bindings WHERE user_id = ? ORDER BY token_id ASC",
+        )
+        .bind(&user.user_id)
+        .fetch_all(&store.pool)
+        .await
+        .expect("query owners after migration");
+        assert!(
+            owners
+                .iter()
+                .any(|(token_id, owner)| token_id == &legacy.id && owner == &user.user_id),
+            "legacy binding should be preserved"
+        );
+        assert!(
+            owners
+                .iter()
+                .any(|(token_id, owner)| token_id == &preferred.id && owner == &user.user_id),
+            "preferred binding should be added"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+    #[tokio::test]
     async fn get_user_token_returns_unavailable_after_soft_delete() {
         let db_path = temp_db_path("user-token-unavailable");
         let db_str = db_path.to_string_lossy().to_string();
@@ -12324,6 +12621,122 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             .await
             .expect("secret after disable");
         assert!(after.is_none(), "disabled token should not expose secret");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_replays_after_token_binding_changes_subject() {
+        let db_path = temp_db_path("pending-billing-subject-flip");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("pending-billing-subject-flip"))
+            .await
+            .expect("create token");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("simulated pending charge"),
+                3,
+            )
+            .await
+            .expect("record pending billing attempt");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "pending-billing-subject-user".to_string(),
+                username: Some("pending_billing_subject".to_string()),
+                name: Some("Pending Billing Subject".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:pending_billing_subject"),
+                Some(&token.id),
+            )
+            .await
+            .expect("bind existing token to user");
+
+        let _guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("reconcile pending billing after subject flip");
+
+        let token_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&token.id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read token minute buckets");
+        assert_eq!(token_minute_sum, 3);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn research_usage_lock_serializes_across_proxy_instances() {
+        let db_path = temp_db_path("research-usage-cross-instance-lock");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy_a = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy a created");
+        let proxy_b = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy b created");
+
+        let guard = proxy_a
+            .lock_research_key_usage("shared-upstream-key")
+            .await
+            .expect("acquire first research lock");
+
+        let waiter = tokio::spawn(async move {
+            let _guard = proxy_b
+                .lock_research_key_usage("shared-upstream-key")
+                .await
+                .expect("acquire second research lock");
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiter.is_finished(),
+            "second proxy instance should wait for the shared research lock"
+        );
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("second proxy acquires after release")
+            .expect("waiter joins");
 
         let _ = std::fs::remove_file(db_path);
     }
