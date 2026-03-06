@@ -1372,7 +1372,7 @@ impl TavilyProxy {
         self.key_store.upsert_oauth_account(profile).await
     }
 
-    /// Ensure one-to-one user token binding exists, creating a token only when missing.
+    /// Ensure user has at least one token binding, creating a token only when missing.
     pub async fn ensure_user_token_binding(
         &self,
         user_id: &str,
@@ -2584,7 +2584,7 @@ impl KeyStore {
         // - users: local user records
         // - oauth_accounts: third-party account bindings (provider + provider_user_id unique)
         // - user_sessions: persisted user sessions for browser auth
-        // - user_token_bindings: one user maps to one auth token
+        // - user_token_bindings: one user may bind multiple auth tokens
         // - oauth_login_states: one-time OAuth state tokens for CSRF/replay protection
         sqlx::query(
             r#"
@@ -2657,14 +2657,24 @@ impl KeyStore {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS user_token_bindings (
-                user_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
                 token_id TEXT NOT NULL UNIQUE,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, token_id),
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
             )
             "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.migrate_user_token_bindings_to_multi_binding().await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_user_token_bindings_user_updated
+               ON user_token_bindings(user_id, updated_at DESC)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -2997,6 +3007,72 @@ impl KeyStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn user_token_bindings_uses_single_binding_primary_key(
+        &self,
+    ) -> Result<bool, ProxyError> {
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT name, pk FROM pragma_table_info('user_token_bindings')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+
+        let mut user_id_pk = 0;
+        let mut token_id_pk = 0;
+        for (name, pk) in rows {
+            if name == "user_id" {
+                user_id_pk = pk;
+            } else if name == "token_id" {
+                token_id_pk = pk;
+            }
+        }
+
+        Ok(user_id_pk == 1 && token_id_pk == 0)
+    }
+
+    async fn migrate_user_token_bindings_to_multi_binding(&self) -> Result<(), ProxyError> {
+        if !self
+            .user_token_bindings_uses_single_binding_primary_key()
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE user_token_bindings_v2 (
+                user_id TEXT NOT NULL,
+                token_id TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, token_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO user_token_bindings_v2 (user_id, token_id, created_at, updated_at)
+               SELECT user_id, token_id, created_at, updated_at
+               FROM user_token_bindings"#,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DROP TABLE user_token_bindings")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("ALTER TABLE user_token_bindings_v2 RENAME TO user_token_bindings")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -5245,7 +5321,7 @@ impl KeyStore {
                FROM user_token_bindings b
                JOIN auth_tokens t ON t.id = b.token_id
                WHERE b.user_id = ? AND t.deleted_at IS NULL
-               ORDER BY t.created_at DESC, t.id DESC"#,
+               ORDER BY b.updated_at DESC, b.created_at DESC, t.id DESC"#,
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -6138,64 +6214,48 @@ impl KeyStore {
                         break;
                     }
                     Some(_) => {
-                        tx.rollback().await.ok();
-                        self.cache_token_binding(preferred_token_id, Some(user_id))
-                            .await;
-                        return Ok(preferred_secret);
-                    }
-                    None => {
-                        let current = sqlx::query_as::<_, (String,)>(
-                            r#"SELECT token_id
-                               FROM user_token_bindings
-                               WHERE user_id = ?
-                               LIMIT 1"#,
+                        let touch = sqlx::query(
+                            r#"UPDATE user_token_bindings
+                               SET updated_at = ?
+                               WHERE user_id = ? AND token_id = ?"#,
                         )
+                        .bind(now)
                         .bind(user_id)
-                        .fetch_optional(&mut *tx)
-                        .await?;
-                        let previous_token_id =
-                            current.as_ref().map(|(token_id,)| token_id.clone());
-
-                        let result = if let Some((current_token_id,)) = current {
-                            if current_token_id == preferred_token_id {
-                                Ok(())
-                            } else {
-                                sqlx::query(
-                                    r#"UPDATE user_token_bindings
-                                       SET token_id = ?, updated_at = ?
-                                       WHERE user_id = ?"#,
-                                )
-                                .bind(preferred_token_id)
-                                .bind(now)
-                                .bind(user_id)
-                                .execute(&mut *tx)
-                                .await
-                                .map(|_| ())
-                            }
-                        } else {
-                            sqlx::query(
-                                r#"INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at)
-                                   VALUES (?, ?, ?, ?)"#,
-                            )
-                            .bind(user_id)
-                            .bind(preferred_token_id)
-                            .bind(now)
-                            .bind(now)
-                            .execute(&mut *tx)
-                            .await
-                            .map(|_| ())
-                        };
-
-                        match result {
-                            Ok(()) => {
+                        .bind(preferred_token_id)
+                        .execute(&mut *tx)
+                        .await;
+                        match touch {
+                            Ok(_) => {
                                 tx.commit().await?;
                                 self.cache_token_binding(preferred_token_id, Some(user_id))
                                     .await;
-                                if let Some(previous_token_id) = previous_token_id
-                                    && previous_token_id != preferred_token_id
-                                {
-                                    self.cache_token_binding(&previous_token_id, None).await;
-                                }
+                                return Ok(preferred_secret);
+                            }
+                            Err(err) => {
+                                tx.rollback().await.ok();
+                                return Err(ProxyError::Database(err));
+                            }
+                        }
+                    }
+                    None => {
+                        let result = sqlx::query(
+                            r#"INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at)
+                               VALUES (?, ?, ?, ?)
+                               ON CONFLICT(user_id, token_id) DO UPDATE SET
+                                   updated_at = excluded.updated_at"#,
+                        )
+                        .bind(user_id)
+                        .bind(preferred_token_id)
+                        .bind(now)
+                        .bind(now)
+                        .execute(&mut *tx)
+                        .await;
+
+                        match result {
+                            Ok(_) => {
+                                tx.commit().await?;
+                                self.cache_token_binding(preferred_token_id, Some(user_id))
+                                    .await;
                                 return Ok(preferred_secret);
                             }
                             Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
@@ -6228,6 +6288,7 @@ impl KeyStore {
                    FROM user_token_bindings b
                    JOIN auth_tokens t ON t.id = b.token_id
                    WHERE b.user_id = ?
+                   ORDER BY b.updated_at DESC, b.created_at DESC, b.token_id DESC
                    LIMIT 1"#,
             )
             .bind(user_id)
@@ -6323,6 +6384,7 @@ impl KeyStore {
                FROM user_token_bindings b
                JOIN auth_tokens t ON t.id = b.token_id
                WHERE b.user_id = ?
+               ORDER BY b.updated_at DESC, b.created_at DESC, b.token_id DESC
                LIMIT 1"#,
         )
         .bind(user_id)
@@ -6341,6 +6403,7 @@ impl KeyStore {
                FROM user_token_bindings b
                LEFT JOIN auth_tokens t ON t.id = b.token_id
                WHERE b.user_id = ?
+               ORDER BY b.updated_at DESC, b.created_at DESC, b.token_id DESC
                LIMIT 1"#,
         )
         .bind(user_id)
@@ -10398,7 +10461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_user_token_binding_with_preferred_rebinds_and_keeps_old_token_active() {
+    async fn ensure_user_token_binding_with_preferred_keeps_existing_binding_and_adds_preferred() {
         let db_path = temp_db_path("user-token-binding-preferred-rebind");
         let db_str = db_path.to_string_lossy().to_string();
         let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
@@ -10432,7 +10495,7 @@ mod tests {
             "UPDATE user_token_bindings SET token_id = ?, updated_at = ? WHERE user_id = ?",
         )
         .bind(&mistaken.id)
-        .bind(Utc::now().timestamp())
+        .bind(Utc::now().timestamp() - 30)
         .bind(&user.user_id)
         .execute(&store.pool)
         .await
@@ -10449,16 +10512,33 @@ mod tests {
 
         assert_eq!(
             rebound.id, original.id,
-            "preferred token should be rebound to the user"
+            "preferred token should be bound to the user"
         );
 
-        let (bound_token_id,): (String,) =
-            sqlx::query_as("SELECT token_id FROM user_token_bindings WHERE user_id = ?")
+        let (binding_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM user_token_bindings WHERE user_id = ?")
                 .bind(&user.user_id)
                 .fetch_one(&store.pool)
                 .await
-                .expect("query user binding");
-        assert_eq!(bound_token_id, original.id);
+                .expect("count user bindings");
+        assert_eq!(
+            binding_count, 2,
+            "preferred binding should be added without removing existing token"
+        );
+
+        let preferred_owner = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
+        )
+        .bind(&original.id)
+        .fetch_optional(&store.pool)
+        .await
+        .expect("query preferred owner")
+        .flatten();
+        assert_eq!(
+            preferred_owner.as_deref(),
+            Some(user.user_id.as_str()),
+            "preferred token should belong to the user"
+        );
 
         let mistaken_owner = sqlx::query_scalar::<_, Option<String>>(
             "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
@@ -10468,10 +10548,23 @@ mod tests {
         .await
         .expect("query mistaken token owner")
         .flatten();
-        assert!(
-            mistaken_owner.is_none(),
-            "mistaken token should become unbound after self-heal"
+        assert_eq!(
+            mistaken_owner.as_deref(),
+            Some(user.user_id.as_str()),
+            "existing token must stay bound to the same user"
         );
+
+        let primary = proxy
+            .get_user_token(&user.user_id)
+            .await
+            .expect("query primary user token");
+        match primary {
+            UserTokenLookup::Found(secret) => assert_eq!(
+                secret.id, original.id,
+                "latest preferred binding should be selected as primary token"
+            ),
+            other => panic!("expected found user token, got {other:?}"),
+        }
 
         let (enabled, deleted_at): (i64, Option<i64>) =
             sqlx::query_as("SELECT enabled, deleted_at FROM auth_tokens WHERE id = ? LIMIT 1")
@@ -10691,6 +10784,135 @@ mod tests {
         assert!(
             relogin_migration_mark.is_some(),
             "relogin migration must record one-time completion mark"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn user_token_bindings_migration_supports_multi_binding_without_backfill() {
+        let db_path = temp_db_path("user-token-bindings-multi-binding-migration");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "legacy-binding-user".to_string(),
+                username: Some("legacy_binding_user".to_string()),
+                name: Some("Legacy Binding User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert legacy user");
+        let legacy = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:legacy_binding_user"))
+            .await
+            .expect("create legacy binding");
+        drop(proxy);
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        let legacy_row = sqlx::query_as::<_, (String, String, i64, i64)>(
+            "SELECT user_id, token_id, created_at, updated_at FROM user_token_bindings WHERE user_id = ? LIMIT 1",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read legacy binding row");
+        sqlx::query("DROP TABLE user_token_bindings")
+            .execute(&pool)
+            .await
+            .expect("drop user_token_bindings");
+        sqlx::query(
+            r#"
+            CREATE TABLE user_token_bindings (
+                user_id TEXT PRIMARY KEY,
+                token_id TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (token_id) REFERENCES auth_tokens(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate legacy user_token_bindings");
+        sqlx::query(
+            "INSERT INTO user_token_bindings (user_id, token_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&legacy_row.0)
+        .bind(&legacy_row.1)
+        .bind(legacy_row.2)
+        .bind(legacy_row.3)
+        .execute(&pool)
+        .await
+        .expect("insert legacy binding row");
+        drop(pool);
+
+        let proxy_after_restart =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy restarted");
+        let preferred = proxy_after_restart
+            .create_access_token(Some("linuxdo:preferred_after_migration"))
+            .await
+            .expect("create preferred token");
+        proxy_after_restart
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:legacy_binding_user"),
+                Some(&preferred.id),
+            )
+            .await
+            .expect("bind preferred token after migration");
+
+        let store = proxy_after_restart.key_store.clone();
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM user_token_bindings WHERE user_id = ?")
+                .bind(&user.user_id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("count user bindings after migration");
+        assert_eq!(
+            count, 2,
+            "migrated schema should allow multiple token bindings per user"
+        );
+
+        let owners = sqlx::query_as::<_, (String, String)>(
+            "SELECT token_id, user_id FROM user_token_bindings WHERE user_id = ? ORDER BY token_id ASC",
+        )
+        .bind(&user.user_id)
+        .fetch_all(&store.pool)
+        .await
+        .expect("query owners after migration");
+        assert!(
+            owners
+                .iter()
+                .any(|(token_id, owner)| token_id == &legacy.id && owner == &user.user_id),
+            "legacy binding should be preserved"
+        );
+        assert!(
+            owners
+                .iter()
+                .any(|(token_id, owner)| token_id == &preferred.id && owner == &user.user_id),
+            "preferred binding should be added"
         );
 
         let _ = std::fs::remove_file(db_path);

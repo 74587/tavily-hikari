@@ -1783,7 +1783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linuxdo_callback_rebinds_preferred_token_end_to_end() {
+    async fn linuxdo_callback_binds_preferred_without_unbinding_existing_end_to_end() {
         let db_path = temp_db_path("linuxdo-callback-rebind-preferred-e2e");
         let db_str = db_path.to_string_lossy().to_string();
         let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
@@ -1823,8 +1823,9 @@ mod tests {
             .connect_with(options)
             .await
             .expect("open db pool");
-        sqlx::query("UPDATE user_token_bindings SET token_id = ? WHERE user_id = ?")
+        sqlx::query("UPDATE user_token_bindings SET token_id = ?, updated_at = ? WHERE user_id = ?")
             .bind(&mistaken.id)
+            .bind(Utc::now().timestamp() - 30)
             .bind(&user.user_id)
             .execute(&pool)
             .await
@@ -1892,7 +1893,7 @@ mod tests {
             .expect("user session cookie");
         let token_resp = Client::new()
             .get(format!("http://{}/api/user/token", addr))
-            .header(reqwest::header::COOKIE, user_cookie)
+            .header(reqwest::header::COOKIE, user_cookie.clone())
             .send()
             .await
             .expect("get user token");
@@ -1903,13 +1904,29 @@ mod tests {
             Some(preferred.token.as_str())
         );
 
-        let (bound_token_id,): (String,) =
-            sqlx::query_as("SELECT token_id FROM user_token_bindings WHERE user_id = ? LIMIT 1")
+        let (binding_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM user_token_bindings WHERE user_id = ?")
                 .bind(&user.user_id)
                 .fetch_one(&pool)
                 .await
-                .expect("query rebound token");
-        assert_eq!(bound_token_id, preferred.id);
+                .expect("count user bindings");
+        assert_eq!(
+            binding_count, 2,
+            "preferred token should be added while keeping existing bound token"
+        );
+
+        let preferred_owner =
+            sqlx::query_scalar::<_, Option<String>>("SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1")
+                .bind(&preferred.id)
+                .fetch_optional(&pool)
+                .await
+                .expect("query preferred owner")
+                .flatten();
+        assert_eq!(
+            preferred_owner.as_deref(),
+            Some(user.user_id.as_str()),
+            "preferred token should belong to the current user"
+        );
 
         let mistaken_owner =
             sqlx::query_scalar::<_, Option<String>>("SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1")
@@ -1918,9 +1935,31 @@ mod tests {
                 .await
                 .expect("query mistaken owner")
                 .flatten();
+        assert_eq!(
+            mistaken_owner.as_deref(),
+            Some(user.user_id.as_str()),
+            "existing token should remain bound to the same user"
+        );
+
+        let tokens_resp = Client::new()
+            .get(format!("http://{}/api/user/tokens", addr))
+            .header(reqwest::header::COOKIE, user_cookie)
+            .send()
+            .await
+            .expect("get user tokens");
+        assert_eq!(tokens_resp.status(), reqwest::StatusCode::OK);
+        let token_items: Vec<serde_json::Value> = tokens_resp.json().await.expect("token list body");
+        let token_ids: std::collections::HashSet<String> = token_items
+            .into_iter()
+            .filter_map(|item| item.get("tokenId").and_then(|value| value.as_str()).map(str::to_string))
+            .collect();
         assert!(
-            mistaken_owner.is_none(),
-            "mistaken token should remain unbound after self-heal rebind"
+            token_ids.contains(&preferred.id),
+            "preferred token should appear in user token list"
+        );
+        assert!(
+            token_ids.contains(&mistaken.id),
+            "existing token should stay in user token list"
         );
 
         let (enabled, deleted_at): (i64, Option<i64>) =
