@@ -4,7 +4,7 @@
 
 - Status: 已完成（6/6）
 - Created: 2026-03-04
-- Last: 2026-03-04
+- Last: 2026-03-06
 
 ## 背景 / 问题陈述
 
@@ -68,6 +68,20 @@
 
 - `cd web && bun run build`
 - `cd web && bun run build-storybook`
+
+## 验收截图（移动端，iPhone 14 portrait 390px）
+
+- User Detail（主内容卡片布局与间距）
+
+  ![User Detail - iPhone 14 portrait 390px](./assets/mobile/user-detail-iphone14-390.png)
+
+- Dashboard（左侧汉堡导航抽屉）
+
+  ![Dashboard Nav Drawer - iPhone 14 portrait 390px](./assets/mobile/dashboard-nav-drawer-iphone14-390.png)
+
+- API Keys Validation Dialog（底部全屏抽屉；底部操作单行、Import 徽标计数）
+
+  ![API Keys Validation Drawer - iPhone 14 portrait 390px](./assets/mobile/apikey-validation-drawer-iphone14-390.png)
 
 ## 实现里程碑（Milestones）
 
