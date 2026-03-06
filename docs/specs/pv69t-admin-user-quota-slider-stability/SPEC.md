@@ -113,3 +113,4 @@
 
 - 2026-03-06: 创建 follow-up spec，收敛稳定上限与指数档位滑块方案。
 - 2026-03-06: 实现稳定上限 + 指数档位滑块；已完成 `bun run build`、`bun run build-storybook`，并在 Storybook 与真实 admin 页面完成交互验证。
+- 2026-03-06: 创建 PR #99，进入快车道 checks / review-loop 收敛阶段。
