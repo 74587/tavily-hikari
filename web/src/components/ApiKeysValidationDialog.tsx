@@ -236,6 +236,12 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
     return rows.filter((row) => filterKeyForStatus(row.status) === activeFilter);
   }, [props.state?.rows, activeFilter]);
   const isSmallViewport = viewportMode === "small";
+  const importVerboseLabel = (actions.importValid ?? "Import {count} valid keys").replace(
+    "{count}",
+    String(props.validKeys.length),
+  );
+  const importButtonLabel = isSmallViewport ? (actions.import ?? "Import") : importVerboseLabel;
+  const retryFailedLabel = isSmallViewport ? (actions.retry ?? "Retry") : (actions.retryFailed ?? "Retry failed");
   const isOpen = !!props.forceOpen || !!props.state;
   const handleOpenChange = React.useCallback((open: boolean) => {
     if (!open) props.onClose();
@@ -584,7 +590,7 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
             disabled={!canRetryFailed}
           >
             <Icon icon="mdi:refresh" width={18} height={18} />
-            &nbsp;{actions.retryFailed ?? "Retry failed"}
+            &nbsp;{retryFailedLabel}
           </button>
 
           <div className="key-validation-footer-primary flex items-center gap-2 justify-end flex-wrap md:flex-nowrap flex-shrink-0">
@@ -593,20 +599,22 @@ export function ApiKeysValidationDialog(props: ApiKeysValidationDialogProps): JS
             </button>
             <button
               type="button"
-              className="btn btn-primary"
+              className="btn btn-primary key-validation-import-button"
               onClick={props.onImportValid}
               disabled={!canImport}
+              aria-label={importVerboseLabel}
             >
               <Icon
                 icon={props.state?.importing ? "mdi:progress-helper" : "mdi:tray-arrow-down"}
                 width={18}
                 height={18}
               />
-              &nbsp;
-              {(actions.importValid ?? "Import {count} valid keys").replace(
-                "{count}",
-                String(props.validKeys.length),
-              )}
+              &nbsp;<span>{importButtonLabel}</span>
+              {isSmallViewport && props.validKeys.length > 0 ? (
+                <span className="key-validation-import-count-badge" aria-hidden="true">
+                  {props.validKeys.length}
+                </span>
+              ) : null}
             </button>
           </div>
         </div>

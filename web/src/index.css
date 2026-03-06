@@ -3129,6 +3129,29 @@ table {
   min-width: 0;
 }
 
+.key-validation-import-button {
+  position: relative;
+}
+
+.key-validation-import-count-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 2px solid hsl(var(--card));
+  background: hsl(var(--destructive));
+  color: hsl(var(--destructive-foreground));
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .key-validation-detail-trigger {
   cursor: help;
 }
@@ -3207,21 +3230,41 @@ table {
 }
 
 @media (max-width: 767px) {
+  .key-validation-footer-actions {
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .key-validation-footer-actions > .btn.btn-outline {
+    flex: 0 0 auto;
+    padding-inline: 0.68rem;
+  }
+
   .key-validation-footer-primary {
-    width: auto;
+    width: 100%;
     flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
     align-items: stretch;
   }
 
   .key-validation-footer-primary .btn {
-    width: auto;
-    flex: 0 0 auto;
+    width: 100%;
     justify-content: center;
+    padding-inline: 0.75rem;
   }
 
   .key-validation-footer-primary .btn.btn-primary {
-    flex: 1 1 auto;
     min-width: 0;
+    overflow: visible;
+  }
+
+  .key-validation-footer-primary .btn.btn-primary .key-validation-import-count-badge {
+    top: -6px;
+    right: -6px;
   }
 
   .key-validation-table th,
