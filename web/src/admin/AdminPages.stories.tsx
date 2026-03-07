@@ -41,6 +41,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Core production',
     group: 'production',
+    owner: { userId: 'usr_alice', displayName: 'Alice Chen', username: 'alice' },
     total_requests: 32_640,
     created_at: now - 86_400 * 120,
     last_used_at: now - 320,
@@ -60,6 +61,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Batch enrichment',
     group: 'batch',
+    owner: { userId: 'usr_ops_bot', displayName: 'Ops Bot', username: 'ops-bot' },
     total_requests: 21_884,
     created_at: now - 86_400 * 90,
     last_used_at: now - 1_200,
@@ -79,6 +81,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: false,
     note: 'Legacy backup token',
     group: 'legacy',
+    owner: null,
     total_requests: 7_201,
     created_at: now - 86_400 * 240,
     last_used_at: now - 86_400 * 2,
@@ -98,6 +101,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Realtime recommendation',
     group: 'production',
+    owner: { userId: 'usr_bob', displayName: 'Bob Li', username: 'bobli' },
     total_requests: 19_901,
     created_at: now - 86_400 * 60,
     last_used_at: now - 42,
@@ -117,6 +121,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Risk control',
     group: 'ops',
+    owner: { userId: 'usr_risk', displayName: 'Risk Control', username: 'risk-control' },
     total_requests: 11_298,
     created_at: now - 86_400 * 30,
     last_used_at: now - 510,
@@ -701,6 +706,7 @@ function TokensPageCanvas(): JSX.Element {
             <thead>
               <tr>
                 <th>{tokenStrings.table.id}</th>
+                <th>{tokenStrings.table.owner}</th>
                 <th>{tokenStrings.table.note}</th>
                 <th>{tokenStrings.table.usage}</th>
                 <th>{tokenStrings.table.quota}</th>
@@ -715,6 +721,18 @@ function TokensPageCanvas(): JSX.Element {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <code>{token.id}</code>
                       {!token.enabled && <StatusBadge tone="warning">{tokenStrings.statusBadges.disabled}</StatusBadge>}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="token-owner-block">
+                      {token.owner ? (
+                        <>
+                          <span className="token-owner-link">{token.owner.displayName || token.owner.userId}</span>
+                          {token.owner.username ? <span className="token-owner-secondary">@{token.owner.username}</span> : null}
+                        </>
+                      ) : (
+                        <span className="token-owner-empty">{tokenStrings.owner.unbound}</span>
+                      )}
                     </div>
                   </td>
                   <td>{token.note ?? '—'}</td>

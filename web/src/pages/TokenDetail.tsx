@@ -2,9 +2,10 @@ import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useS
 import { Icon } from '@iconify/react'
 import { Chart as ChartJS, BarElement, CategoryScale, Legend, LinearScale, Tooltip, type ChartOptions } from 'chart.js'
 import { Bar } from 'react-chartjs-2'
-import { fetchTokenUsageSeries, rotateTokenSecret, type TokenUsageBucket } from '../api'
+import { fetchTokenUsageSeries, rotateTokenSecret, type TokenOwnerSummary, type TokenUsageBucket } from '../api'
 import ThemeToggle from '../components/ThemeToggle'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
+import { useTranslate } from '../i18n'
 import { useResponsiveModes } from '../lib/responsive'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
@@ -15,6 +16,7 @@ interface TokenDetailInfo {
   id: string
   enabled: boolean
   note: string | null
+  owner?: TokenOwnerSummary | null
   total_requests: number
   created_at: number
   last_used_at: number | null
@@ -97,6 +99,44 @@ function statusLabel(status: string): string {
     case 'quota_exhausted': return 'Quota Exhausted'
     default: return status
   }
+}
+
+function tokenOwnerPrimary(owner: TokenOwnerSummary | null): string {
+  if (!owner) return ''
+  return owner.displayName || owner.userId
+}
+
+function tokenOwnerSecondary(owner: TokenOwnerSummary | null): string | null {
+  if (!owner?.username) return null
+  return `@${owner.username}`
+}
+
+function TokenOwnerValue({
+  owner,
+  emptyLabel,
+  onOpenUser,
+}: {
+  owner: TokenOwnerSummary | null
+  emptyLabel: string
+  onOpenUser?: (userId: string) => void
+}): JSX.Element {
+  if (!owner) {
+    return <span className="token-owner-empty">{emptyLabel}</span>
+  }
+
+  const secondary = tokenOwnerSecondary(owner)
+  return (
+    <div className="token-owner-block">
+      {onOpenUser ? (
+        <button type="button" className="link-button token-owner-link" onClick={() => onOpenUser(owner.userId)}>
+          {tokenOwnerPrimary(owner)}
+        </button>
+      ) : (
+        <span className="token-owner-link">{tokenOwnerPrimary(owner)}</span>
+      )}
+      {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
+    </div>
+  )
 }
 
 function formatDate(value: Date): string {
@@ -280,7 +320,17 @@ function dayLabel(bucket: number): string {
   return date.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
 }
 
-export default function TokenDetail({ id, onBack }: { id: string; onBack?: () => void }): JSX.Element {
+export default function TokenDetail({
+  id,
+  onBack,
+  onOpenUser,
+}: {
+  id: string
+  onBack?: () => void
+  onOpenUser?: (userId: string) => void
+}): JSX.Element {
+  const translations = useTranslate()
+  const tokenStrings = translations.admin.tokens
   const pageRef = useRef<HTMLDivElement>(null)
   const { viewportMode, contentMode, isCompactLayout } = useResponsiveModes(pageRef)
   const [info, setInfo] = useState<TokenDetailInfo | null>(null)
@@ -673,6 +723,10 @@ export default function TokenDetail({ id, onBack }: { id: string; onBack?: () =>
           <InfoCard label="Total Requests" value={formatNumber(info?.total_requests ?? 0)} />
           <InfoCard label="Created" value={formatTime(info?.created_at ?? null)} />
           <InfoCard label="Last Used" value={formatTime(info?.last_used_at ?? null)} />
+          <InfoCard
+            label={tokenStrings.owner.label}
+            value={<TokenOwnerValue owner={info?.owner ?? null} emptyLabel={tokenStrings.owner.unbound} onOpenUser={onOpenUser} />}
+          />
           <InfoCard
             label="Note"
             value={info?.note ? <span className="token-info-note" title={info.note}>{info.note}</span> : '—'}

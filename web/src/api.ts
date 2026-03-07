@@ -108,11 +108,18 @@ export interface ApiKeySecret {
 }
 
 // ---- Access Tokens (for /mcp auth) ----
+export interface TokenOwnerSummary {
+  userId: string
+  displayName: string | null
+  username: string | null
+}
+
 export interface AuthToken {
   id: string // 4-char code
   enabled: boolean
   note: string | null
   group: string | null
+  owner?: TokenOwnerSummary | null
   total_requests: number
   created_at: number
   last_used_at: number | null

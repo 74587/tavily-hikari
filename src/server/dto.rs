@@ -74,11 +74,30 @@ struct PublicMetricsView {
 
 // ---- Access Token views ----
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenOwnerView {
+    user_id: String,
+    display_name: Option<String>,
+    username: Option<String>,
+}
+
+impl From<&tavily_hikari::AdminUserIdentity> for TokenOwnerView {
+    fn from(user: &tavily_hikari::AdminUserIdentity) -> Self {
+        Self {
+            user_id: user.user_id.clone(),
+            display_name: user.display_name.clone(),
+            username: user.username.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct AuthTokenView {
     id: String,
     enabled: bool,
     note: Option<String>,
     group: Option<String>,
+    owner: Option<TokenOwnerView>,
     total_requests: i64,
     created_at: i64,
     last_used_at: Option<i64>,
@@ -94,8 +113,11 @@ struct AuthTokenView {
     quota_monthly_reset_at: Option<i64>,
 }
 
-impl From<AuthToken> for AuthTokenView {
-    fn from(t: AuthToken) -> Self {
+impl AuthTokenView {
+    fn from_token_and_owner(
+        t: AuthToken,
+        owner: Option<&tavily_hikari::AdminUserIdentity>,
+    ) -> Self {
         let (
             quota_state,
             quota_hourly_used,
@@ -130,6 +152,7 @@ impl From<AuthToken> for AuthTokenView {
             enabled: t.enabled,
             note: t.note,
             group: t.group_name,
+            owner: owner.map(TokenOwnerView::from),
             total_requests: t.total_requests,
             created_at: t.created_at,
             last_used_at: t.last_used_at,
@@ -144,6 +167,12 @@ impl From<AuthToken> for AuthTokenView {
             quota_daily_reset_at: t.quota_daily_reset_at,
             quota_monthly_reset_at: t.quota_monthly_reset_at,
         }
+    }
+}
+
+impl From<AuthToken> for AuthTokenView {
+    fn from(t: AuthToken) -> Self {
+        Self::from_token_and_owner(t, None)
     }
 }
 

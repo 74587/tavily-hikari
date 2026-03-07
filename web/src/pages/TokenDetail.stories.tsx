@@ -5,10 +5,31 @@ import TokenDetail from './TokenDetail'
 
 const tokenId = 'a1b2'
 
-const tokenDetailMock = {
+interface StoryTokenDetail {
+  id: string
+  enabled: boolean
+  note: string | null
+  owner: { userId: string; displayName: string; username: string } | null
+  total_requests: number
+  created_at: number
+  last_used_at: number
+  quota_state: string
+  quota_hourly_used: number
+  quota_hourly_limit: number
+  quota_daily_used: number
+  quota_daily_limit: number
+  quota_monthly_used: number
+  quota_monthly_limit: number
+  quota_hourly_reset_at: number
+  quota_daily_reset_at: number
+  quota_monthly_reset_at: number
+}
+
+const tokenDetailMock: StoryTokenDetail = {
   id: tokenId,
   enabled: true,
   note: 'primary token',
+  owner: { userId: 'usr_alice', displayName: 'Alice Chen', username: 'alice' },
   total_requests: 9241,
   created_at: 1_762_100_200,
   last_used_at: 1_762_390_010,
@@ -23,6 +44,14 @@ const tokenDetailMock = {
   quota_daily_reset_at: 1_762_444_400,
   quota_monthly_reset_at: 1_764_806_400,
 }
+
+const tokenDetailUnboundMock: StoryTokenDetail = {
+  ...tokenDetailMock,
+  id: 'z9x8',
+  owner: null,
+  note: 'unassigned sandbox token',
+}
+
 
 const metricsMock = {
   total_requests: 9241,
@@ -58,7 +87,7 @@ function jsonResponse(data: unknown, status = 200): Response {
   })
 }
 
-function installFetchMock(): () => void {
+function installFetchMock(detailOverride = tokenDetailMock): () => void {
   const originalFetch = window.fetch.bind(window)
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -66,7 +95,7 @@ function installFetchMock(): () => void {
     const url = new URL(request.url, window.location.origin)
 
     if (url.pathname === `/api/tokens/${tokenId}`) {
-      return jsonResponse(tokenDetailMock)
+      return jsonResponse(detailOverride)
     }
 
     if (url.pathname === `/api/tokens/${tokenId}/metrics`) {
@@ -161,11 +190,11 @@ function installEventSourceMock(): () => void {
   }
 }
 
-function TokenDetailStoryCanvas(): JSX.Element {
+function TokenDetailStoryCanvas({ detail = tokenDetailMock }: { detail?: StoryTokenDetail }): JSX.Element {
   const [ready, setReady] = useState(false)
 
   useLayoutEffect(() => {
-    const cleanupFetch = installFetchMock()
+    const cleanupFetch = installFetchMock(detail)
     const cleanupEventSource = installEventSourceMock()
     setReady(true)
 
@@ -174,7 +203,7 @@ function TokenDetailStoryCanvas(): JSX.Element {
       cleanupEventSource()
       setReady(false)
     }
-  }, [])
+  }, [detail])
 
   if (!ready) {
     return <div style={{ minHeight: '100vh' }} />
@@ -188,14 +217,22 @@ const meta = {
   parameters: {
     layout: 'fullscreen',
   },
-  render: () => <TokenDetailStoryCanvas />,
-} satisfies Meta
+  render: (args) => <TokenDetailStoryCanvas {...args} />,
+} satisfies Meta<typeof TokenDetailStoryCanvas>
 
 export default meta
 
 type Story = StoryObj<typeof meta>
 
 export const Default: Story = {
+  args: { detail: tokenDetailMock },
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const Unbound: Story = {
+  args: { detail: tokenDetailUnboundMock },
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
   },

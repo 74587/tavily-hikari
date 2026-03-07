@@ -280,6 +280,42 @@ function formatDateOnly(value: number | null): string {
   return `${y}-${m}-${day}`
 }
 
+function tokenOwnerPrimary(owner: AuthToken['owner']): string {
+  if (!owner) return ''
+  return owner.displayName || owner.userId
+}
+
+function tokenOwnerSecondary(owner: AuthToken['owner']): string | null {
+  if (!owner?.username) return null
+  return `@${owner.username}`
+}
+
+function TokenOwnerValue({
+  owner,
+  emptyLabel,
+  onOpenUser,
+  compact = false,
+}: {
+  owner: AuthToken['owner']
+  emptyLabel: string
+  onOpenUser: (userId: string) => void
+  compact?: boolean
+}): JSX.Element {
+  if (!owner) {
+    return <span className="token-owner-empty">{emptyLabel}</span>
+  }
+
+  const secondary = tokenOwnerSecondary(owner)
+  return (
+    <div className={`token-owner-block${compact ? ' token-owner-block-compact' : ''}`}>
+      <button type="button" className="link-button token-owner-link" onClick={() => onOpenUser(owner.userId)}>
+        {tokenOwnerPrimary(owner)}
+      </button>
+      {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
+    </div>
+  )
+}
+
 function statusTone(status: string): StatusTone {
   const normalized = status.toLowerCase()
   if (normalized === 'active' || normalized === 'success' || normalized === 'completed') return 'success'
@@ -2335,7 +2371,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectModule={navigateModule}
       >
-        <TokenDetail id={route.id} onBack={() => navigateModule('tokens')} />
+        <TokenDetail id={route.id} onBack={() => navigateModule('tokens')} onOpenUser={navigateUser} />
       </AdminShell>
     )
   }
@@ -3152,6 +3188,7 @@ function AdminDashboard(): JSX.Element {
               <thead>
                 <tr>
                   <th>{tokenStrings.table.id}</th>
+                  <th>{tokenStrings.table.owner}</th>
                   <th>{tokenStrings.table.note}</th>
                   <th>{tokenStrings.table.usage}</th>
                   <th>{tokenStrings.table.quota}</th>
@@ -3196,6 +3233,9 @@ function AdminDashboard(): JSX.Element {
                             )}
                           </span>
                         </div>
+                      </td>
+                      <td>
+                        <TokenOwnerValue owner={t.owner} emptyLabel={tokenStrings.owner.unbound} onOpenUser={navigateUser} />
                       </td>
                       <td>{t.note || '—'}</td>
                       <td>{formatNumber(t.total_requests)}</td>
@@ -3306,6 +3346,10 @@ function AdminDashboard(): JSX.Element {
                     <strong>
                       <code>{t.id}</code>
                     </strong>
+                  </div>
+                  <div className="admin-mobile-kv">
+                    <span>{tokenStrings.table.owner}</span>
+                    <TokenOwnerValue owner={t.owner} emptyLabel={tokenStrings.owner.unbound} onOpenUser={navigateUser} compact />
                   </div>
                   <div className="admin-mobile-kv">
                     <span>{tokenStrings.table.note}</span>

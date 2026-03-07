@@ -12,7 +12,15 @@ async fn get_token_detail(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     match tokens.into_iter().find(|t| t.id == id) {
-        Some(t) => Ok(Json(t.into())),
+        Some(t) => {
+            let owners = state
+                .proxy
+                .get_admin_token_owners(std::slice::from_ref(&t.id))
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let owner = owners.get(&t.id);
+            Ok(Json(AuthTokenView::from_token_and_owner(t, owner)))
+        }
         None => Err(StatusCode::NOT_FOUND),
     }
 }
