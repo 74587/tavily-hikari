@@ -1,25 +1,36 @@
-import { useEffect, useLayoutEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 
 import type { Profile, UserDashboard, UserTokenSummary } from './api'
 import UserConsole from './UserConsole'
 
-type Scenario =
-  | 'dashboard'
-  | 'tokens'
-  | 'tokens-empty'
-  | 'token-detail'
-  | 'token-detail-probe-running'
-  | 'token-detail-probe-success'
-  | 'token-detail-probe-partial'
-  | 'token-detail-probe-auth-fail'
-  | 'token-detail-probe-exhausted'
+type ConsoleView = 'Dashboard' | 'Tokens' | 'Token Detail'
+type TokenListState = 'Default List' | 'Empty'
+type TokenDetailPreview =
+  | 'Overview'
+  | 'API Check Running'
+  | 'All Checks Pass'
+  | 'Partial Availability'
+  | 'Authentication Failed'
+  | 'Quota Blocked'
+
+type ProbeMockMode = 'none' | 'running' | 'success' | 'partial' | 'auth-fail' | 'exhausted'
 
 interface UserConsoleStoryArgs {
-  scenario: Scenario
+  consoleView: ConsoleView
+  tokenListState: TokenListState
+  tokenDetailPreview: TokenDetailPreview
+}
+
+interface UserConsoleStoryState {
+  autoProbeTarget: 'mcp' | 'api' | null
+  probeMode: ProbeMockMode
+  routeHash: string
+  tokenListEmpty: boolean
 }
 
 const PROBE_STEP_DELAY_MS = 900
+const TOKEN_DETAIL_HASH = '#/tokens/a1b2'
 
 const dashboardSample: UserDashboard = {
   hourlyAnyUsed: 126,
@@ -146,45 +157,50 @@ function sleep(ms: number): Promise<void> {
   })
 }
 
-type ProbeMockMode = 'none' | 'running' | 'success' | 'partial' | 'auth-fail' | 'exhausted'
-
-function probeModeFromScenario(scenario: Scenario): ProbeMockMode {
-  if (scenario === 'token-detail-probe-running') return 'running'
-  if (scenario === 'token-detail-probe-success') return 'success'
-  if (scenario === 'token-detail-probe-partial') return 'partial'
-  if (scenario === 'token-detail-probe-auth-fail') return 'auth-fail'
-  if (scenario === 'token-detail-probe-exhausted') return 'exhausted'
+function probeModeFromPreview(preview: TokenDetailPreview): ProbeMockMode {
+  if (preview === 'API Check Running') return 'running'
+  if (preview === 'All Checks Pass') return 'success'
+  if (preview === 'Partial Availability') return 'partial'
+  if (preview === 'Authentication Failed') return 'auth-fail'
+  if (preview === 'Quota Blocked') return 'exhausted'
   return 'none'
 }
 
-function autoProbeTargetFromScenario(scenario: Scenario): 'mcp' | 'api' | null {
-  if (scenario === 'token-detail-probe-running') return 'api'
-  if (scenario === 'token-detail-probe-success') return 'api'
-  if (scenario === 'token-detail-probe-partial') return 'api'
-  if (scenario === 'token-detail-probe-auth-fail') return 'mcp'
-  if (scenario === 'token-detail-probe-exhausted') return 'mcp'
+function autoProbeTargetFromPreview(preview: TokenDetailPreview): 'mcp' | 'api' | null {
+  if (
+    preview === 'API Check Running'
+    || preview === 'All Checks Pass'
+    || preview === 'Partial Availability'
+  ) {
+    return 'api'
+  }
+  if (preview === 'Authentication Failed' || preview === 'Quota Blocked') {
+    return 'mcp'
+  }
   return null
 }
 
-function scenarioHash(scenario: Scenario): string {
-  if (scenario === 'tokens') return '#/tokens'
-  if (scenario === 'tokens-empty') return '#/tokens'
-  if (
-    scenario === 'token-detail'
-    || scenario === 'token-detail-probe-running'
-    || scenario === 'token-detail-probe-success'
-    || scenario === 'token-detail-probe-partial'
-    || scenario === 'token-detail-probe-auth-fail'
-    || scenario === 'token-detail-probe-exhausted'
-  ) {
-    return '#/tokens/a1b2'
-  }
+function routeHashFromView(view: ConsoleView): string {
+  if (view === 'Tokens') return '#/tokens'
+  if (view === 'Token Detail') return TOKEN_DETAIL_HASH
   return '#/dashboard'
 }
 
-function installUserConsoleFetchMock(scenario: Scenario): () => void {
+function resolveStoryState(args: UserConsoleStoryArgs): UserConsoleStoryState {
+  return {
+    autoProbeTarget: args.consoleView === 'Token Detail'
+      ? autoProbeTargetFromPreview(args.tokenDetailPreview)
+      : null,
+    probeMode: args.consoleView === 'Token Detail'
+      ? probeModeFromPreview(args.tokenDetailPreview)
+      : 'none',
+    routeHash: routeHashFromView(args.consoleView),
+    tokenListEmpty: args.consoleView === 'Tokens' && args.tokenListState === 'Empty',
+  }
+}
+
+function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
   const originalFetch = window.fetch.bind(window)
-  const probeMode = probeModeFromScenario(scenario)
   const researchRequestId = 'rq-story-001'
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -202,7 +218,7 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
     }
 
     if (url.pathname === '/api/user/tokens') {
-      return jsonResponse(scenario === 'tokens-empty' ? [] : [tokenSample])
+      return jsonResponse(state.tokenListEmpty ? [] : [tokenSample])
     }
 
     const tokenRoute = url.pathname.match(/^\/api\/user\/tokens\/([^/]+)(?:\/(secret|logs))?$/)
@@ -222,14 +238,14 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
         return jsonResponse(tokenLogsSample)
       }
 
-      return jsonResponse(probeMode === 'exhausted' ? tokenDetailExhaustedSample : tokenDetailSample)
+      return jsonResponse(state.probeMode === 'exhausted' ? tokenDetailExhaustedSample : tokenDetailSample)
     }
 
     if (url.pathname === '/mcp') {
-      if (probeMode === 'auth-fail') {
+      if (state.probeMode === 'auth-fail') {
         return jsonResponse({ error: 'invalid or disabled token' }, 401)
       }
-      if (probeMode !== 'none') {
+      if (state.probeMode !== 'none') {
         await sleep(PROBE_STEP_DELAY_MS)
       }
       const payload = await request.clone().json().catch(() => ({}))
@@ -237,7 +253,7 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
       const accept = request.headers.get('Accept') ?? ''
       const acceptsProbeFormats = accept.includes('application/json') && accept.includes('text/event-stream')
 
-      if (probeMode === 'exhausted' && method === 'ping') {
+      if (state.probeMode === 'exhausted' && method === 'ping') {
         return jsonResponse({
           error: 'quota_exceeded',
           window: 'day',
@@ -258,7 +274,7 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
         }, 406)
       }
 
-      if (probeMode === 'partial' && method === 'tools/list') {
+      if (state.probeMode === 'partial' && method === 'tools/list') {
         return jsonResponse({ error: { code: -32001, message: 'tools/list unavailable' } })
       }
 
@@ -289,15 +305,15 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
     }
 
     if (url.pathname.startsWith('/api/tavily/')) {
-      if (probeMode === 'auth-fail') {
+      if (state.probeMode === 'auth-fail') {
         return jsonResponse({ error: 'invalid or disabled token' }, 401)
       }
-      if (probeMode !== 'none') {
+      if (state.probeMode !== 'none') {
         await sleep(PROBE_STEP_DELAY_MS)
       }
 
       if (url.pathname === '/api/tavily/search') {
-        if (probeMode === 'running') {
+        if (state.probeMode === 'running') {
           await sleep(60_000)
         }
         return jsonResponse({ status: 200, results: [] })
@@ -309,7 +325,7 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
         return jsonResponse({ status: 200, results: [] })
       }
       if (url.pathname === '/api/tavily/map') {
-        if (probeMode === 'partial') {
+        if (state.probeMode === 'partial') {
           return jsonResponse({ error: 'map endpoint timeout' }, 500)
         }
         return jsonResponse({ status: 200, results: [] })
@@ -338,12 +354,15 @@ function installUserConsoleFetchMock(scenario: Scenario): () => void {
 
 function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
   const [ready, setReady] = useState(false)
-  const autoProbeTarget = autoProbeTargetFromScenario(args.scenario)
+  const storyState = useMemo(
+    () => resolveStoryState(args),
+    [args.consoleView, args.tokenListState, args.tokenDetailPreview],
+  )
 
   useLayoutEffect(() => {
     const previousHash = window.location.hash
-    const cleanupFetch = installUserConsoleFetchMock(args.scenario)
-    window.location.hash = scenarioHash(args.scenario)
+    const cleanupFetch = installUserConsoleFetchMock(storyState)
+    window.location.hash = storyState.routeHash
     setReady(true)
 
     return () => {
@@ -351,17 +370,17 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
       window.location.hash = previousHash
       setReady(false)
     }
-  }, [args.scenario])
+  }, [storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
 
   useEffect(() => {
-    if (!ready || !autoProbeTarget) return
+    if (!ready || !storyState.autoProbeTarget) return
     const timer = window.setTimeout(() => {
-      const selector = `[data-probe-kind="${autoProbeTarget}"]`
+      const selector = `[data-probe-kind="${storyState.autoProbeTarget}"]`
       const button = document.querySelector<HTMLButtonElement>(selector)
       button?.click()
     }, 80)
     return () => window.clearTimeout(timer)
-  }, [autoProbeTarget, ready])
+  }, [ready, storyState.autoProbeTarget])
 
   if (!ready) {
     return <div style={{ minHeight: '100vh' }} />
@@ -373,7 +392,43 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
 const meta = {
   title: 'User Console/UserConsole',
   parameters: {
+    controls: { expanded: true },
     layout: 'fullscreen',
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+  args: {
+    consoleView: 'Dashboard',
+    tokenListState: 'Default List',
+    tokenDetailPreview: 'Overview',
+  },
+  argTypes: {
+    consoleView: {
+      name: 'Console view',
+      description: 'Pick the main console page to preview.',
+      options: ['Dashboard', 'Tokens', 'Token Detail'],
+      control: { type: 'inline-radio' },
+    },
+    tokenListState: {
+      name: 'Token list state',
+      description: 'Pick the list presentation for the Tokens page.',
+      options: ['Default List', 'Empty'],
+      control: { type: 'inline-radio' },
+      if: { arg: 'consoleView', eq: 'Tokens' },
+    },
+    tokenDetailPreview: {
+      name: 'Token detail preview',
+      description: 'Pick the overview or special state to preview on the Token Detail page.',
+      options: [
+        'Overview',
+        'API Check Running',
+        'All Checks Pass',
+        'Partial Availability',
+        'Authentication Failed',
+        'Quota Blocked',
+      ],
+      control: { type: 'select' },
+      if: { arg: 'consoleView', eq: 'Token Detail' },
+    },
   },
   render: (args) => <UserConsoleStory {...args} />,
 } satisfies Meta<UserConsoleStoryArgs>
@@ -384,66 +439,69 @@ type Story = StoryObj<typeof meta>
 
 export const Dashboard: Story = {
   args: {
-    scenario: 'dashboard',
-  },
-  parameters: {
-    viewport: { defaultViewport: '1440-device-desktop' },
+    consoleView: 'Dashboard',
   },
 }
 
 export const Tokens: Story = {
   args: {
-    scenario: 'tokens',
-  },
-  parameters: {
-    viewport: { defaultViewport: '1440-device-desktop' },
-  },
-}
-
-export const TokenDetail: Story = {
-  args: {
-    scenario: 'token-detail',
-  },
-  parameters: {
-    viewport: { defaultViewport: '1440-device-desktop' },
-  },
-}
-
-export const TokenDetailProbeSuccess: Story = {
-  args: {
-    scenario: 'token-detail-probe-success',
-  },
-}
-
-export const TokenDetailProbeRunning: Story = {
-  args: {
-    scenario: 'token-detail-probe-running',
-  },
-}
-
-export const TokenDetailProbePartialFail: Story = {
-  args: {
-    scenario: 'token-detail-probe-partial',
-  },
-}
-
-export const TokenDetailProbeAuthFail: Story = {
-  args: {
-    scenario: 'token-detail-probe-auth-fail',
-  },
-}
-
-export const TokenDetailProbeQuotaBlocked: Story = {
-  args: {
-    scenario: 'token-detail-probe-exhausted',
+    consoleView: 'Tokens',
+    tokenListState: 'Default List',
   },
 }
 
 export const TokensEmpty: Story = {
+  name: 'Tokens Empty',
   args: {
-    scenario: 'tokens-empty',
+    consoleView: 'Tokens',
+    tokenListState: 'Empty',
   },
-  parameters: {
-    viewport: { defaultViewport: '1440-device-desktop' },
+}
+
+export const TokenDetailOverview: Story = {
+  name: 'Token Detail Overview',
+  args: {
+    consoleView: 'Token Detail',
+    tokenDetailPreview: 'Overview',
+  },
+}
+
+export const ApiCheckRunning: Story = {
+  name: 'API Check Running',
+  args: {
+    consoleView: 'Token Detail',
+    tokenDetailPreview: 'API Check Running',
+  },
+}
+
+export const AllChecksPass: Story = {
+  name: 'All Checks Pass',
+  args: {
+    consoleView: 'Token Detail',
+    tokenDetailPreview: 'All Checks Pass',
+  },
+}
+
+export const PartialAvailability: Story = {
+  name: 'Partial Availability',
+  args: {
+    consoleView: 'Token Detail',
+    tokenDetailPreview: 'Partial Availability',
+  },
+}
+
+export const AuthenticationFailed: Story = {
+  name: 'Authentication Failed',
+  args: {
+    consoleView: 'Token Detail',
+    tokenDetailPreview: 'Authentication Failed',
+  },
+}
+
+export const QuotaBlocked: Story = {
+  name: 'Quota Blocked',
+  args: {
+    consoleView: 'Token Detail',
+    tokenDetailPreview: 'Quota Blocked',
   },
 }
