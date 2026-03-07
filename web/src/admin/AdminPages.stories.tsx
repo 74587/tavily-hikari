@@ -19,6 +19,18 @@ import { useTranslate, type AdminTranslations } from '../i18n'
 import AdminShell, { type AdminNavItem } from './AdminShell'
 import DashboardOverview, { type DashboardMetricCard } from './DashboardOverview'
 import ModulePlaceholder from './ModulePlaceholder'
+import {
+  buildQuotaSliderTrack,
+  clampQuotaSliderStageIndex,
+  createQuotaSliderSeed,
+  formatQuotaDraftInput,
+  getQuotaSliderStagePosition,
+  getQuotaSliderStageValue,
+  normalizeQuotaDraftInput,
+  parseQuotaDraftValue,
+  type QuotaSliderField,
+  type QuotaSliderSeed,
+} from './quotaSlider'
 import type { AdminModuleId } from './routes'
 
 const now = 1_762_380_000
@@ -432,6 +444,14 @@ const MOCK_USER_TOKENS: AdminUserTokenSummary[] = [
 
 const MOCK_USER_DETAIL: AdminUserDetail = {
   ...MOCK_USERS[0],
+  hourlyAnyUsed: 340,
+  hourlyAnyLimit: 500,
+  quotaHourlyUsed: 134,
+  quotaHourlyLimit: 262,
+  quotaDailyUsed: 528,
+  quotaDailyLimit: 1_022,
+  quotaMonthlyUsed: 528,
+  quotaMonthlyLimit: 5_000,
   tokens: MOCK_USER_TOKENS,
 }
 
@@ -458,33 +478,15 @@ function formatTimestamp(value: number | null): string {
   return dateTimeFormatter.format(new Date(value * 1000))
 }
 
-type StoryQuotaField = 'hourlyAnyLimit' | 'hourlyLimit' | 'dailyLimit' | 'monthlyLimit'
+type StoryQuotaSnapshot = Record<QuotaSliderField, QuotaSliderSeed>
 
-function parseQuotaDraftValue(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(value ?? '', 10)
-  if (!Number.isFinite(parsed)) return Math.max(1, fallback)
-  return Math.max(1, parsed)
-}
-
-function pickQuotaSliderMax(used: number, currentLimit: number, draftLimit: number): number {
-  const baseline = Math.max(1, used, currentLimit, draftLimit)
-  const step = baseline >= 100_000
-    ? 10_000
-    : baseline >= 10_000
-      ? 1_000
-      : baseline >= 1_000
-        ? 100
-        : 10
-  return Math.max(step, Math.ceil((baseline * 1.25) / step) * step)
-}
-
-function buildQuotaSliderTrack(used: number, draftLimit: number, sliderMax: number): string {
-  const max = Math.max(1, sliderMax)
-  const usedRatio = Math.min(100, Math.max(0, (used / max) * 100))
-  const draftRatio = Math.min(100, Math.max(0, (draftLimit / max) * 100))
-  const start = Math.min(usedRatio, draftRatio)
-  const end = Math.max(usedRatio, draftRatio)
-  return `linear-gradient(to right, hsl(var(--warning) / 0.34) 0% ${start}%, hsl(var(--primary) / 0.44) ${start}% ${end}%, hsl(var(--muted) / 0.5) ${end}% 100%)`
+function buildStoryQuotaSnapshot(detail: AdminUserDetail): StoryQuotaSnapshot {
+  return {
+    hourlyAnyLimit: createQuotaSliderSeed('hourlyAnyLimit', detail.hourlyAnyUsed, detail.hourlyAnyLimit),
+    hourlyLimit: createQuotaSliderSeed('hourlyLimit', detail.quotaHourlyUsed, detail.quotaHourlyLimit),
+    dailyLimit: createQuotaSliderSeed('dailyLimit', detail.quotaDailyUsed, detail.quotaDailyLimit),
+    monthlyLimit: createQuotaSliderSeed('monthlyLimit', detail.quotaMonthlyUsed, detail.quotaMonthlyLimit),
+  }
 }
 
 function keyStatusTone(status: string): StatusTone {
@@ -1265,7 +1267,8 @@ function UserDetailPageCanvas(): JSX.Element {
   const admin = useTranslate().admin
   const users = admin.users
   const detail = MOCK_USER_DETAIL
-  const [quotaDraft, setQuotaDraft] = useState<Record<StoryQuotaField, string>>({
+  const quotaSnapshot = buildStoryQuotaSnapshot(detail)
+  const [quotaDraft, setQuotaDraft] = useState<Record<QuotaSliderField, string>>({
     hourlyAnyLimit: String(detail.hourlyAnyLimit),
     hourlyLimit: String(detail.quotaHourlyLimit),
     dailyLimit: String(detail.quotaDailyLimit),
@@ -1350,9 +1353,10 @@ function UserDetailPageCanvas(): JSX.Element {
               currentLimit: detail.quotaMonthlyLimit,
             },
           ] as const).map((item) => {
+            const sliderSeed = quotaSnapshot[item.field]
             const draftValue = quotaDraft[item.field]
-            const parsedDraft = parseQuotaDraftValue(draftValue, item.currentLimit)
-            const sliderMax = pickQuotaSliderMax(item.used, item.currentLimit, parsedDraft)
+            const parsedDraft = parseQuotaDraftValue(draftValue, sliderSeed.initialLimit)
+            const sliderPosition = getQuotaSliderStagePosition(sliderSeed.stages, parsedDraft)
             return (
               <label className="form-control quota-control" key={item.field}>
                 <span className="label-text">{item.label}</span>
@@ -1360,25 +1364,44 @@ function UserDetailPageCanvas(): JSX.Element {
                   <div className="quota-slider-wrap">
                     <input
                       type="range"
-                      min={1}
-                      max={sliderMax}
-                      step={1}
+                      name={`${item.field}-slider`}
+                      min={0}
+                      max={Math.max(0, sliderSeed.stages.length - 1)}
+                      step="any"
                       className="range quota-slider"
-                      value={parsedDraft}
-                      onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
-                      style={{ background: buildQuotaSliderTrack(item.used, parsedDraft, sliderMax) }}
+                      value={sliderPosition}
+                      onChange={(event) => setQuotaDraft((prev) => ({
+                        ...prev,
+                        [item.field]: String(
+                          getQuotaSliderStageValue(
+                            sliderSeed.stages,
+                            clampQuotaSliderStageIndex(sliderSeed.stages, Number.parseFloat(event.target.value)),
+                          ),
+                        ),
+                      }))}
+                      style={{ background: buildQuotaSliderTrack(sliderSeed.stages, sliderSeed.used, parsedDraft) }}
                       aria-label={item.label}
                     />
                     <span className="panel-description">
-                      {formatNumber(item.used)} / {formatNumber(parsedDraft)}
+                      {formatNumber(sliderSeed.used)} / {formatNumber(parsedDraft)}
                     </span>
                   </div>
                   <input
-                    type="number"
+                    type="text"
+                    name={item.field}
+                    inputMode="numeric"
+                    autoComplete="off"
                     className="input input-bordered quota-input"
-                    min={1}
-                    value={draftValue}
-                    onChange={(event) => setQuotaDraft((prev) => ({ ...prev, [item.field]: event.target.value }))}
+                    value={formatQuotaDraftInput(draftValue)}
+                    onChange={(event) => {
+                      const normalizedValue = normalizeQuotaDraftInput(event.target.value)
+                      if (normalizedValue == null) return
+                      setQuotaDraft((prev) => ({
+                        ...prev,
+                        [item.field]: normalizedValue,
+                      }))
+                    }}
+                    aria-label={`${item.label} input`}
                   />
                 </div>
               </label>

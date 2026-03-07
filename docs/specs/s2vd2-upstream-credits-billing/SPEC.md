@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 进行中（快车道）
+- Status: 已完成（快车道）
 - Created: 2026-03-06
-- Last: 2026-03-06
+- Last: 2026-03-07
 
 ## 背景 / 问题陈述
 
@@ -58,7 +58,7 @@
 - `/api/tavily/research`
   - `model=mini/auto` 最小成本 4；`pro` 最小成本 15。
   - 初始 `/usage` 探针失败时直接阻断，不触发上游 `/research`。
-  - 上游 `/research` 已成功返回后，若后续 `/usage` 差分不可得或计数回退，则继续把成功响应返回给客户端，并仅记录 billing warning（不返回 5xx、不做最小值兜底扣费）。
+  - 上游 `/research` 已成功返回后，若后续 `/usage` 差分不可得或计数回退，则继续把成功响应返回给客户端，记录 billing warning，并按 reserved minimum cost 兜底扣费（mini/auto=4，pro=15），避免静默漏扣。
 - `/mcp`
   - 白名单非业务方法不计 business quota。
   - `tools/call` + `tavily-search|extract|crawl|map` 注入 `include_usage=true`。
@@ -71,7 +71,7 @@
 - HTTP Extract / Crawl / Map：请求体被注入 `include_usage=true`；reserved credits 超额时会先验 429，成功回包后按 `usage.credits` 扣费，`credits=0` 不扣费。
 - MCP 非工具调用继续保持 0 成本，`counts_business_quota=0`。
 - MCP `tavily-search`：支持嵌套 `usage.credits`、SSE/JSON-RPC 包装、expected cost fallback 与先验阻断。
-- Research：初始 `/usage` 探针失败会在打上游前阻断；若上游成功但 follow-up `/usage` 差分不可得，则继续返回成功响应、记录 billing warning、且不重复创建 research 任务。
+- Research：初始 `/usage` 探针失败会在打上游前阻断；若上游成功但 follow-up `/usage` 差分不可得或计数回退，则继续返回成功响应、记录 billing warning，并按 reserved minimum cost 兜底扣费。
 - 绑定账户的 token 继续只写 account counters，不回退到 token counters。
 
 ## 质量门槛（Quality Gates）
@@ -86,7 +86,7 @@
 - [x] M2: quota 子系统切换为 credits 增量扣费
 - [x] M3: HTTP/MCP/Research mixed enforcement 接入
 - [x] M4: 测试补齐并通过本地验证
-- [ ] M5: 新 PR 创建、checks 明确、review-loop 收敛
+- [x] M5: 新 PR 创建、checks 明确、review-loop 收敛
 
 ## 风险 / 假设
 
@@ -109,3 +109,5 @@
 - 2026-03-06: review fix：Research 初始 `/usage` 探针继续 fail-closed，但上游成功后的 follow-up `/usage` 不可用时改为返回成功响应并记录 billing warning，避免把已创建的 research 任务翻译成 5xx 重试。
 - 2026-03-06: review fix：SQLite quota subject lease 刷新改为更早调度并在过期前重试；若续租耗尽则后续计费改为 deferred pending settle。
 - 2026-03-06: review fix：未知 `tavily-*` MCP 工具改为默认 billable safe-default，避免未来上游新增工具时绕过 quota；reserved precheck 的 429 也会回传投影后的 `window`。
+
+- 2026-03-07: fast-flow 复跑后补齐规格同步：Research follow-up `/usage` 失败/回退改为成功回包 + warning + reserved minimum cost 兜底扣费；PR #100 checks 绿灯，可直接合并。

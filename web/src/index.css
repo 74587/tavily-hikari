@@ -536,9 +536,12 @@
   }
 
   .quota-input {
-    width: 140px;
-    min-width: 140px;
+    width: 156px;
+    min-width: 156px;
     text-align: right;
+    font-size: 1.08rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
     font-variant-numeric: tabular-nums;
   }
 
@@ -4766,7 +4769,7 @@ tbody .log-details-row:hover {
 
 .user-console-probe-bubble-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   font-size: 0.84rem;
 }
@@ -4792,10 +4795,26 @@ tbody .log-details-row:hover {
   color: #dc2626;
 }
 
+.user-console-probe-bubble-item-icon-status-blocked {
+  color: #d97706;
+}
+
+.user-console-probe-bubble-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .user-console-probe-bubble-item-label {
   color: hsl(var(--foreground) / 0.9);
   font-weight: 500;
   line-height: 1.32;
+}
+
+.user-console-probe-bubble-item-detail {
+  color: hsl(var(--foreground) / 0.68);
+  font-size: 0.76rem;
+  line-height: 1.35;
 }
 
 @media (max-width: 640px) {
