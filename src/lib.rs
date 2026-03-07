@@ -1,7 +1,10 @@
 use std::{
     cmp::min,
-    collections::HashMap,
-    sync::Arc,
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant},
 };
 
@@ -110,8 +113,19 @@ const TOKEN_AFFINITY_MAX_ENTRIES: usize = 10_000;
 // Cache token -> user binding to avoid repeated DB lookups on hot request paths.
 const TOKEN_BINDING_CACHE_TTL_SECS: u64 = 30;
 const TOKEN_BINDING_CACHE_MAX_ENTRIES: usize = 10_000;
+// Keep the lease TTL below the acquisition wait so a crashed holder can be recovered
+// by the next in-flight request instead of blocking the subject for minutes.
+const QUOTA_SUBJECT_LOCK_TTL_SECS: u64 = 20;
+const QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS: u64 = 30;
+const QUOTA_SUBJECT_LOCK_REFRESH_SECS: u64 = 5;
+const QUOTA_SUBJECT_LOCK_REFRESH_RETRY_SECS: u64 = 1;
 
 const REQUEST_LOGS_MIN_RETENTION_DAYS: i64 = 7;
+
+const BILLING_STATE_PENDING: &str = "pending";
+const BILLING_STATE_CHARGED: &str = "charged";
+
+static QUOTA_SUBJECT_LOCK_OWNER_SEQ: AtomicU64 = AtomicU64::new(1);
 
 const GRANULARITY_MINUTE: &str = "minute";
 const GRANULARITY_HOUR: &str = "hour";
@@ -124,6 +138,8 @@ const SECS_PER_HOUR: i64 = 3600;
 const SECS_PER_DAY: i64 = 24 * SECS_PER_HOUR;
 const TOKEN_USAGE_STATS_BUCKET_SECS: i64 = SECS_PER_HOUR;
 const USAGE_PROBE_TIMEOUT_SECS: u64 = 8;
+const USAGE_PROBE_RETRY_ATTEMPTS: usize = 3;
+const USAGE_PROBE_RETRY_DELAY_MS: u64 = 200;
 
 // Time-based retention for per-token access logs (auth_token_logs).
 // This is purely time-driven and must not depend on access token enable/disable/delete status,
@@ -137,6 +153,10 @@ const META_KEY_HEAL_ORPHAN_TOKENS_V1: &str = "heal_orphan_auth_tokens_from_logs_
 const META_KEY_API_KEY_USAGE_BUCKETS_V1_DONE: &str = "api_key_usage_buckets_v1_done";
 const META_KEY_ACCOUNT_QUOTA_BACKFILL_V1: &str = "account_quota_backfill_v1";
 const META_KEY_FORCE_USER_RELOGIN_V1: &str = "force_user_relogin_v1";
+// Cutover marker for switching business quota counters from "requests" to "credits".
+// We cannot retroactively convert legacy request counts into credits, so we reset the
+// lightweight counters once and start charging by upstream credits going forward.
+const META_KEY_BUSINESS_QUOTA_CREDITS_CUTOVER_V1: &str = "business_quota_credits_cutover_v1";
 const API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS: [u64; 2] = [20, 50];
 
 fn token_limit_from_env(var: &str, default: i64) -> i64 {
@@ -423,6 +443,28 @@ enum QuotaSubject {
     Account(String),
 }
 
+impl QuotaSubject {
+    fn billing_subject(&self) -> String {
+        match self {
+            Self::Token(token_id) => format!("token:{token_id}"),
+            Self::Account(user_id) => format!("account:{user_id}"),
+        }
+    }
+
+    fn from_billing_subject(subject: &str) -> Result<Self, ProxyError> {
+        if let Some(user_id) = subject.strip_prefix("account:") {
+            Ok(Self::Account(user_id.to_string()))
+        } else if let Some(token_id) = subject.strip_prefix("token:") {
+            Ok(Self::Token(token_id.to_string()))
+        } else {
+            Err(ProxyError::QuotaDataMissing {
+                reason: format!("invalid billing subject: {subject}"),
+            })
+        }
+    }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct TokenBindingCacheEntry {
     user_id: Option<String>,
@@ -459,6 +501,146 @@ pub struct TavilyProxy {
     affinity: Arc<Mutex<TokenAffinityState>>,
     research_request_affinity: Arc<Mutex<TokenAffinityState>>,
     research_request_owner_affinity: Arc<Mutex<TokenAffinityState>>,
+    // Fast in-process lock to collapse duplicate work within one instance. Cross-instance
+    // serialization is provided by quota_subject_locks in SQLite.
+    token_billing_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    research_key_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+}
+
+#[derive(Debug, Clone)]
+struct QuotaSubjectDbLease {
+    subject: String,
+    owner: String,
+    ttl: Duration,
+}
+
+#[derive(Debug)]
+struct QuotaSubjectLockGuard {
+    store: Arc<KeyStore>,
+    lease: QuotaSubjectDbLease,
+    refresh_stop: Arc<AtomicBool>,
+    lease_lost: Arc<AtomicBool>,
+    refresh_task: tokio::task::JoinHandle<()>,
+}
+
+impl QuotaSubjectLockGuard {
+    fn new(store: Arc<KeyStore>, lease: QuotaSubjectDbLease) -> Self {
+        let refresh_stop = Arc::new(AtomicBool::new(false));
+        let lease_lost = Arc::new(AtomicBool::new(false));
+        let refresh_task = {
+            let store = Arc::clone(&store);
+            let lease = lease.clone();
+            let refresh_stop = Arc::clone(&refresh_stop);
+            let lease_lost = Arc::clone(&lease_lost);
+            tokio::spawn(async move {
+                let refresh_every = Duration::from_secs(QUOTA_SUBJECT_LOCK_REFRESH_SECS);
+                let retry_every = Duration::from_secs(QUOTA_SUBJECT_LOCK_REFRESH_RETRY_SECS);
+                while !refresh_stop.load(AtomicOrdering::Relaxed) {
+                    tokio::time::sleep(refresh_every).await;
+                    if refresh_stop.load(AtomicOrdering::Relaxed) {
+                        break;
+                    }
+
+                    let retry_budget = lease.ttl.saturating_sub(refresh_every);
+                    let retry_deadline = Instant::now() + retry_budget.max(retry_every);
+                    loop {
+                        match store.refresh_quota_subject_lock(&lease).await {
+                            Ok(()) => break,
+                            Err(err) => {
+                                if refresh_stop.load(AtomicOrdering::Relaxed) {
+                                    return;
+                                }
+                                if Instant::now() >= retry_deadline {
+                                    lease_lost.store(true, AtomicOrdering::Relaxed);
+                                    eprintln!(
+                                        "quota subject lock refresh exhausted retries (subject={} owner={}): {}",
+                                        lease.subject, lease.owner, err
+                                    );
+                                    return;
+                                }
+                                eprintln!(
+                                    "quota subject lock refresh failed (subject={} owner={}): {}; retrying",
+                                    lease.subject, lease.owner, err
+                                );
+                                tokio::time::sleep(retry_every).await;
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
+        Self {
+            store,
+            lease,
+            refresh_stop,
+            lease_lost,
+            refresh_task,
+        }
+    }
+
+    fn ensure_live(&self) -> Result<(), ProxyError> {
+        if self.lease_lost.load(AtomicOrdering::Relaxed) {
+            return Err(ProxyError::Other(format!(
+                "quota subject lock lost for {}",
+                self.lease.subject,
+            )));
+        }
+        let mut forced = self
+            .store
+            .forced_quota_subject_lock_loss_subjects
+            .lock()
+            .expect("forced quota subject lock loss mutex poisoned");
+        if forced.remove(&self.lease.subject) {
+            return Err(ProxyError::Other(format!(
+                "quota subject lock lost for {}",
+                self.lease.subject,
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for QuotaSubjectLockGuard {
+    fn drop(&mut self) {
+        self.refresh_stop.store(true, AtomicOrdering::Relaxed);
+        self.refresh_task.abort();
+
+        let store = Arc::clone(&self.store);
+        let lease = self.lease.clone();
+        tokio::spawn(async move {
+            if let Err(err) = store.release_quota_subject_lock(&lease).await {
+                eprintln!(
+                    "quota subject lock release failed (subject={} owner={}): {}",
+                    lease.subject, lease.owner, err
+                );
+            }
+        });
+    }
+}
+
+#[derive(Debug)]
+pub struct TokenBillingGuard {
+    billing_subject: String,
+    _local: tokio::sync::OwnedMutexGuard<()>,
+    _subject_lock: QuotaSubjectLockGuard,
+}
+
+impl TokenBillingGuard {
+    pub fn billing_subject(&self) -> &str {
+        &self.billing_subject
+    }
+
+    pub fn ensure_live(&self) -> Result<(), ProxyError> {
+        self._subject_lock.ensure_live()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingBillingSettleOutcome {
+    Charged,
+    AlreadySettled,
+    RetryLater,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +711,156 @@ impl TavilyProxy {
             research_request_owner_affinity: Arc::new(Mutex::new(TokenAffinityState::new(
                 RESEARCH_REQUEST_AFFINITY_TTL_SECS,
             ))),
+            token_billing_locks: Arc::new(Mutex::new(HashMap::new())),
+            research_key_locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    async fn billing_subject_for_token(&self, token_id: &str) -> Result<String, ProxyError> {
+        Ok(
+            match self.key_store.find_user_id_by_token_fresh(token_id).await? {
+                Some(user_id) => QuotaSubject::Account(user_id).billing_subject(),
+                None => QuotaSubject::Token(token_id.to_string()).billing_subject(),
+            },
+        )
+    }
+
+    async fn reconcile_pending_billing_for_subject(
+        &self,
+        billing_subject: &str,
+    ) -> Result<(), ProxyError> {
+        let pending = self
+            .key_store
+            .list_pending_billing_log_ids(billing_subject)
+            .await?;
+        for log_id in pending {
+            // `lock_token_billing()` already holds the per-subject lock at this point, so a
+            // retry-later miss here is unexpected. We retry once to tolerate edge timing around
+            // SQLite statement visibility, then fail closed so stale pending charges cannot bypass
+            // the quota precheck for the current request.
+            let mut retry_later_attempts = 0;
+            loop {
+                match self.key_store.apply_pending_billing_log(log_id).await? {
+                    PendingBillingSettleOutcome::Charged
+                    | PendingBillingSettleOutcome::AlreadySettled => break,
+                    PendingBillingSettleOutcome::RetryLater => {
+                        retry_later_attempts += 1;
+                        if retry_later_attempts >= 2 {
+                            let msg = format!(
+                                "pending billing claim miss for auth_token_logs.id={log_id}; blocking request until replay succeeds",
+                            );
+                            eprintln!("{msg}");
+                            let _ = self.annotate_pending_billing_attempt(log_id, &msg).await;
+                            return Err(ProxyError::Other(msg));
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn lock_billing_subject(
+        &self,
+        billing_subject: &str,
+    ) -> Result<TokenBillingGuard, ProxyError> {
+        let lock = {
+            let mut locks = self.token_billing_locks.lock().await;
+            if locks.len() > 1024 {
+                locks.retain(|_, lock| lock.strong_count() > 0);
+            }
+
+            if let Some(existing) = locks.get(billing_subject).and_then(|lock| lock.upgrade()) {
+                existing
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(billing_subject.to_string(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let local_guard = lock.lock_owned().await;
+        let lease = self
+            .key_store
+            .acquire_quota_subject_lock(
+                billing_subject,
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_TTL_SECS),
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS),
+            )
+            .await?;
+        Ok(TokenBillingGuard {
+            billing_subject: billing_subject.to_string(),
+            _local: local_guard,
+            _subject_lock: QuotaSubjectLockGuard::new(self.key_store.clone(), lease),
+        })
+    }
+
+    /// Serialize quota/billing work per effective quota subject across both the local process
+    /// and any other instances sharing the same SQLite database.
+    pub async fn lock_token_billing(
+        &self,
+        token_id: &str,
+    ) -> Result<TokenBillingGuard, ProxyError> {
+        let current_subject = self.billing_subject_for_token(token_id).await?;
+        let mut subjects = self
+            .key_store
+            .list_pending_billing_subjects_for_token(token_id)
+            .await?;
+        subjects.push(current_subject.clone());
+        subjects.sort();
+        subjects.dedup();
+
+        let mut current_guard: Option<TokenBillingGuard> = None;
+        let mut extra_guards: Vec<TokenBillingGuard> = Vec::new();
+        for subject in subjects {
+            let guard = self.lock_billing_subject(&subject).await?;
+            self.reconcile_pending_billing_for_subject(guard.billing_subject())
+                .await?;
+            if subject == current_subject {
+                current_guard = Some(guard);
+            } else {
+                extra_guards.push(guard);
+            }
+        }
+        drop(extra_guards);
+
+        current_guard.ok_or_else(|| {
+            ProxyError::Other(format!(
+                "failed to acquire billing guard for current subject {current_subject}",
+            ))
+        })
+    }
+
+    async fn lock_research_key_usage(&self, key_id: &str) -> Result<TokenBillingGuard, ProxyError> {
+        let subject = format!("research-key:{key_id}");
+        let lock = {
+            let mut locks = self.research_key_locks.lock().await;
+            if locks.len() > 256 {
+                locks.retain(|_, lock| lock.strong_count() > 0);
+            }
+
+            if let Some(existing) = locks.get(&subject).and_then(|lock| lock.upgrade()) {
+                existing
+            } else {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(subject.clone(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        let local_guard = lock.lock_owned().await;
+        let lease = self
+            .key_store
+            .acquire_quota_subject_lock(
+                &subject,
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_TTL_SECS),
+                Duration::from_secs(QUOTA_SUBJECT_LOCK_ACQUIRE_TIMEOUT_SECS),
+            )
+            .await?;
+
+        Ok(TokenBillingGuard {
+            billing_subject: subject,
+            _local: local_guard,
+            _subject_lock: QuotaSubjectLockGuard::new(self.key_store.clone(), lease),
         })
     }
 
@@ -843,6 +1175,14 @@ impl TavilyProxy {
             upstream_options = Value::Object(map);
         }
 
+        // Force Tavily to return usage for predictable endpoints so we can charge credits 1:1.
+        // Tavily does not document/support this on `/research` (we use /usage diff for that).
+        if matches!(upstream_path, "/search" | "/extract" | "/crawl" | "/map")
+            && let Value::Object(ref mut map) = upstream_options
+        {
+            map.insert("include_usage".to_string(), Value::Bool(true));
+        }
+
         let request_body =
             serde_json::to_vec(&upstream_options).map_err(|e| ProxyError::Other(e.to_string()))?;
         let redacted_request_body = redact_api_key_bytes(&request_body);
@@ -909,6 +1249,163 @@ impl TavilyProxy {
                         body: body_bytes,
                     },
                     analysis,
+                ))
+            }
+            Err(err) => {
+                log_error(&lease.secret, method, display_path, None, &err);
+                let redacted_empty: Vec<u8> = Vec::new();
+                self.key_store
+                    .log_attempt(AttemptLog {
+                        key_id: &lease.id,
+                        auth_token_id,
+                        method,
+                        path: display_path,
+                        query: None,
+                        status: None,
+                        tavily_status_code: None,
+                        error: Some(&err.to_string()),
+                        request_body: &redacted_request_body,
+                        response_body: &redacted_empty,
+                        outcome: OUTCOME_ERROR,
+                        forwarded_headers: &sanitized_headers.forwarded,
+                        dropped_headers: &sanitized_headers.dropped,
+                    })
+                    .await?;
+                Err(ProxyError::Http(err))
+            }
+        }
+    }
+
+    /// Proxy Tavily `/research` while charging credits via `/usage` (research_usage) diff.
+    ///
+    /// Tavily research responses do not include `usage.credits`, so we probe
+    /// `GET {usage_base}/usage` before and after the call using the *same* upstream key.
+    ///
+    /// Returns the usage delta when both probes succeed; otherwise `None`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn proxy_http_research_with_usage_diff(
+        &self,
+        usage_base: &str,
+        auth_token_id: Option<&str>,
+        method: &Method,
+        display_path: &str,
+        options: Value,
+        original_headers: &HeaderMap,
+        inject_upstream_bearer_auth: bool,
+    ) -> Result<(ProxyResponse, AttemptAnalysis, Option<i64>), ProxyError> {
+        let lease = self.acquire_key_for(auth_token_id).await?;
+        // Research billing uses /usage diff of a key-scoped counter; protect it from concurrent
+        // research calls sharing the same upstream key, otherwise deltas can be misattributed.
+        let _key_guard = self.lock_research_key_usage(&lease.id).await?;
+
+        let before_usage = self
+            .fetch_research_usage_for_secret_with_retries(&lease.secret, usage_base)
+            .await?;
+
+        let base = Url::parse(usage_base).map_err(|source| ProxyError::InvalidEndpoint {
+            endpoint: usage_base.to_owned(),
+            source,
+        })?;
+        let origin = origin_from_url(&base);
+
+        let mut url = base.clone();
+        url.set_path("/research");
+
+        let sanitized_headers = sanitize_headers_inner(original_headers, &base, &origin);
+
+        // Build upstream request body by injecting Tavily key into api_key field.
+        let mut upstream_options = options;
+        if let Value::Object(ref mut map) = upstream_options {
+            let keys_to_remove: Vec<String> = map
+                .keys()
+                .filter(|k| k.eq_ignore_ascii_case("api_key"))
+                .cloned()
+                .collect();
+            for key in keys_to_remove {
+                map.remove(&key);
+            }
+            map.insert("api_key".to_string(), Value::String(lease.secret.clone()));
+        } else {
+            let mut map = serde_json::Map::new();
+            map.insert("api_key".to_string(), Value::String(lease.secret.clone()));
+            map.insert("payload".to_string(), upstream_options);
+            upstream_options = Value::Object(map);
+        }
+
+        let request_body =
+            serde_json::to_vec(&upstream_options).map_err(|e| ProxyError::Other(e.to_string()))?;
+        let redacted_request_body = redact_api_key_bytes(&request_body);
+
+        let mut builder = self.client.request(method.clone(), url.clone());
+        for (name, value) in sanitized_headers.headers.iter() {
+            if name == HOST || name == CONTENT_LENGTH {
+                continue;
+            }
+            builder = builder.header(name, value);
+        }
+        if inject_upstream_bearer_auth {
+            builder = builder.header("Authorization", format!("Bearer {}", lease.secret));
+        }
+
+        let response = builder.body(request_body.clone()).send().await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let headers = response.headers().clone();
+                let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
+
+                let analysis = analyze_http_attempt(status, &body_bytes);
+                let redacted_response_body = redact_api_key_bytes(&body_bytes);
+                if status.is_success()
+                    && let Some(request_id) = extract_research_request_id(&body_bytes)
+                    && let Some(token_id) = auth_token_id
+                {
+                    self.record_research_request_affinity(&request_id, &lease.id, token_id)
+                        .await?;
+                }
+
+                self.key_store
+                    .log_attempt(AttemptLog {
+                        key_id: &lease.id,
+                        auth_token_id,
+                        method,
+                        path: display_path,
+                        query: None,
+                        status: Some(status),
+                        tavily_status_code: analysis.tavily_status_code,
+                        error: None,
+                        request_body: &redacted_request_body,
+                        response_body: &redacted_response_body,
+                        outcome: analysis.status,
+                        forwarded_headers: &sanitized_headers.forwarded,
+                        dropped_headers: &sanitized_headers.dropped,
+                    })
+                    .await?;
+
+                if status.as_u16() == 432 || analysis.mark_exhausted {
+                    let _changed = self.key_store.mark_quota_exhausted(&lease.secret).await?;
+                } else {
+                    self.key_store.restore_active_status(&lease.secret).await?;
+                }
+
+                let after_usage = self
+                    .fetch_research_usage_for_secret_with_retries(&lease.secret, usage_base)
+                    .await
+                    .ok();
+                let delta = match after_usage {
+                    Some(after) if after >= before_usage => Some(after - before_usage),
+                    _ => None,
+                };
+
+                Ok((
+                    ProxyResponse {
+                        status,
+                        headers,
+                        body: body_bytes,
+                    },
+                    analysis,
+                    delta,
                 ))
             }
             Err(err) => {
@@ -1372,7 +1869,7 @@ impl TavilyProxy {
         self.key_store.upsert_oauth_account(profile).await
     }
 
-    /// Ensure user has at least one token binding, creating a token only when missing.
+    /// Ensure one-to-one user token binding exists, creating a token only when missing.
     pub async fn ensure_user_token_binding(
         &self,
         user_id: &str,
@@ -1555,6 +2052,109 @@ impl TavilyProxy {
             .await
     }
 
+    /// Persist a billable attempt before quota counters are charged, so it can be replayed if the
+    /// process crashes after the upstream call succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+    ) -> Result<i64, ProxyError> {
+        let billing_subject = self.billing_subject_for_token(token_id).await?;
+        self.record_pending_billing_attempt_for_subject(
+            token_id,
+            method,
+            path,
+            query,
+            http_status,
+            mcp_status,
+            counts_business_quota,
+            result_status,
+            error_message,
+            business_credits,
+            &billing_subject,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_pending_billing_attempt_for_subject(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        billing_subject: &str,
+    ) -> Result<i64, ProxyError> {
+        self.key_store
+            .insert_token_log_pending_billing(
+                token_id,
+                method,
+                path,
+                query,
+                http_status,
+                mcp_status,
+                counts_business_quota,
+                result_status,
+                error_message,
+                business_credits,
+                billing_subject,
+            )
+            .await
+    }
+
+    pub async fn settle_pending_billing_attempt(
+        &self,
+        log_id: i64,
+    ) -> Result<PendingBillingSettleOutcome, ProxyError> {
+        self.key_store.apply_pending_billing_log(log_id).await
+    }
+
+    pub async fn annotate_pending_billing_attempt(
+        &self,
+        log_id: i64,
+        message: &str,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .annotate_pending_billing_log(log_id, message)
+            .await
+    }
+
+    #[cfg(test)]
+    async fn force_pending_billing_claim_miss_once(&self, log_id: i64) {
+        let mut forced = self
+            .key_store
+            .forced_pending_claim_miss_log_ids
+            .lock()
+            .await;
+        forced.insert(log_id);
+    }
+
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub fn force_quota_subject_lock_loss_once_for_subject(&self, billing_subject: &str) {
+        let mut forced = self
+            .key_store
+            .forced_quota_subject_lock_loss_subjects
+            .lock()
+            .expect("forced quota subject lock loss mutex poisoned");
+        forced.insert(billing_subject.to_string());
+    }
+
     /// Token summary since a timestamp
     pub async fn token_summary_since(
         &self,
@@ -1582,6 +2182,31 @@ impl TavilyProxy {
     /// Check and update quota usage for a token. Returns the latest counts and verdict.
     pub async fn check_token_quota(&self, token_id: &str) -> Result<TokenQuotaVerdict, ProxyError> {
         self.token_quota.check(token_id).await
+    }
+
+    /// Read-only snapshot of the current business quota usage for a token (hour/day/month).
+    /// This does NOT increment any counters.
+    pub async fn peek_token_quota(&self, token_id: &str) -> Result<TokenQuotaVerdict, ProxyError> {
+        let now = Utc::now();
+        self.token_quota.snapshot_for_token(token_id, now).await
+    }
+
+    /// Read-only snapshot for a locked billing subject. Use this when a request must keep the
+    /// same quota subject from precheck through charge even if token bindings change mid-flight.
+    pub async fn peek_token_quota_for_subject(
+        &self,
+        billing_subject: &str,
+    ) -> Result<TokenQuotaVerdict, ProxyError> {
+        let now = Utc::now();
+        self.token_quota
+            .snapshot_for_billing_subject(billing_subject, now)
+            .await
+    }
+
+    /// Charge business quota usage for a token by Tavily credits (1:1).
+    /// `credits <= 0` is treated as a no-op.
+    pub async fn charge_token_quota(&self, token_id: &str, credits: i64) -> Result<(), ProxyError> {
+        self.token_quota.charge(token_id, credits).await
     }
 
     /// Check and update the hourly *raw request* usage for a token.
@@ -1753,7 +2378,7 @@ impl TokenQuota {
     }
 
     async fn resolve_subject(&self, token_id: &str) -> Result<QuotaSubject, ProxyError> {
-        if let Some(user_id) = self.store.find_user_id_by_token(token_id).await? {
+        if let Some(user_id) = self.store.find_user_id_by_token_fresh(token_id).await? {
             Ok(QuotaSubject::Account(user_id))
         } else {
             Ok(QuotaSubject::Token(token_id.to_string()))
@@ -1839,9 +2464,84 @@ impl TokenQuota {
         Ok(verdict)
     }
 
+    async fn charge(&self, token_id: &str, credits: i64) -> Result<(), ProxyError> {
+        if credits <= 0 {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let now_ts = now.timestamp();
+        let minute_bucket = now_ts - (now_ts % SECS_PER_MINUTE);
+        let hour_bucket = now_ts - (now_ts % SECS_PER_HOUR);
+        let month_start = start_of_month(now).timestamp();
+
+        match self.resolve_subject(token_id).await? {
+            QuotaSubject::Account(user_id) => {
+                self.store
+                    .increment_account_usage_bucket_by(
+                        &user_id,
+                        minute_bucket,
+                        GRANULARITY_MINUTE,
+                        credits,
+                    )
+                    .await?;
+                self.store
+                    .increment_account_usage_bucket_by(
+                        &user_id,
+                        hour_bucket,
+                        GRANULARITY_HOUR,
+                        credits,
+                    )
+                    .await?;
+                let _ = self
+                    .store
+                    .increment_account_monthly_quota_by(&user_id, month_start, credits)
+                    .await?;
+            }
+            QuotaSubject::Token(token_id) => {
+                self.store
+                    .increment_usage_bucket_by(
+                        &token_id,
+                        minute_bucket,
+                        GRANULARITY_MINUTE,
+                        credits,
+                    )
+                    .await?;
+                self.store
+                    .increment_usage_bucket_by(&token_id, hour_bucket, GRANULARITY_HOUR, credits)
+                    .await?;
+                let _ = self
+                    .store
+                    .increment_monthly_quota_by(&token_id, month_start, credits)
+                    .await?;
+            }
+        }
+
+        self.maybe_cleanup(now_ts).await?;
+        Ok(())
+    }
+
     async fn snapshot_for_token(
         &self,
         token_id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<TokenQuotaVerdict, ProxyError> {
+        let subject = self.resolve_subject(token_id).await?;
+        self.snapshot_for_subject(&subject, now).await
+    }
+
+    async fn snapshot_for_billing_subject(
+        &self,
+        billing_subject: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<TokenQuotaVerdict, ProxyError> {
+        let subject = QuotaSubject::from_billing_subject(billing_subject)?;
+        self.snapshot_for_subject(&subject, now).await
+    }
+
+    async fn snapshot_for_subject(
+        &self,
+        subject: &QuotaSubject,
         now: chrono::DateTime<Utc>,
     ) -> Result<TokenQuotaVerdict, ProxyError> {
         let now_ts = now.timestamp();
@@ -1850,20 +2550,20 @@ impl TokenQuota {
         let hour_window_start = minute_bucket - 59 * SECS_PER_MINUTE;
         let day_window_start = hour_bucket - 23 * SECS_PER_HOUR;
         let month_start = start_of_month(now).timestamp();
-        match self.resolve_subject(token_id).await? {
+        match subject {
             QuotaSubject::Account(user_id) => {
-                let limits = self.store.ensure_account_quota_limits(&user_id).await?;
+                let limits = self.store.ensure_account_quota_limits(user_id).await?;
                 let hourly_used = self
                     .store
-                    .sum_account_usage_buckets(&user_id, GRANULARITY_MINUTE, hour_window_start)
+                    .sum_account_usage_buckets(user_id, GRANULARITY_MINUTE, hour_window_start)
                     .await?;
                 let daily_used = self
                     .store
-                    .sum_account_usage_buckets(&user_id, GRANULARITY_HOUR, day_window_start)
+                    .sum_account_usage_buckets(user_id, GRANULARITY_HOUR, day_window_start)
                     .await?;
                 let monthly_used = self
                     .store
-                    .fetch_account_monthly_count(&user_id, month_start)
+                    .fetch_account_monthly_count(user_id, month_start)
                     .await?;
                 Ok(TokenQuotaVerdict::new(
                     hourly_used,
@@ -1877,15 +2577,15 @@ impl TokenQuota {
             QuotaSubject::Token(token_id) => {
                 let hourly_used = self
                     .store
-                    .sum_usage_buckets(&token_id, GRANULARITY_MINUTE, hour_window_start)
+                    .sum_usage_buckets(token_id, GRANULARITY_MINUTE, hour_window_start)
                     .await?;
                 let daily_used = self
                     .store
-                    .sum_usage_buckets(&token_id, GRANULARITY_HOUR, day_window_start)
+                    .sum_usage_buckets(token_id, GRANULARITY_HOUR, day_window_start)
                     .await?;
                 let monthly_used = self
                     .store
-                    .fetch_monthly_count(&token_id, month_start)
+                    .fetch_monthly_count(token_id, month_start)
                     .await?;
                 Ok(TokenQuotaVerdict::new(
                     hourly_used,
@@ -2102,7 +2802,9 @@ impl TokenRequestLimit {
         let now_ts = Utc::now().timestamp();
         let minute_bucket = now_ts - (now_ts % SECS_PER_MINUTE);
         let hour_window_start = minute_bucket - 59 * SECS_PER_MINUTE;
-        let verdict = if let Some(user_id) = self.store.find_user_id_by_token(token_id).await? {
+        let verdict = if let Some(user_id) =
+            self.store.find_user_id_by_token_fresh(token_id).await?
+        {
             let limits = self.store.ensure_account_quota_limits(&user_id).await?;
             self.store
                 .increment_account_usage_bucket(&user_id, minute_bucket, GRANULARITY_REQUEST_MINUTE)
@@ -2337,6 +3039,74 @@ impl TavilyProxy {
         Ok((limit, remaining))
     }
 
+    async fn fetch_research_usage_for_secret(
+        &self,
+        secret: &str,
+        usage_base: &str,
+        timeout: Option<Duration>,
+    ) -> Result<i64, ProxyError> {
+        let base = Url::parse(usage_base).map_err(|e| ProxyError::InvalidEndpoint {
+            endpoint: usage_base.to_string(),
+            source: e,
+        })?;
+        let mut url = base.clone();
+        url.set_path("/usage");
+
+        let mut req = self
+            .client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", secret));
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
+        }
+        let resp = req.send().await.map_err(ProxyError::Http)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(ProxyError::Http)?;
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            return Err(ProxyError::UsageHttp { status, body });
+        }
+
+        let json: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| ProxyError::Other(format!("invalid usage json: {}", e)))?;
+        let usage = json
+            .get("key")
+            .and_then(|k| k.get("research_usage"))
+            .and_then(parse_credits_value);
+        usage.ok_or_else(|| ProxyError::QuotaDataMissing {
+            reason: "missing key.research_usage field".to_owned(),
+        })
+    }
+
+    async fn fetch_research_usage_for_secret_with_retries(
+        &self,
+        secret: &str,
+        usage_base: &str,
+    ) -> Result<i64, ProxyError> {
+        let mut last_error: Option<ProxyError> = None;
+        for attempt in 0..USAGE_PROBE_RETRY_ATTEMPTS {
+            match self
+                .fetch_research_usage_for_secret(
+                    secret,
+                    usage_base,
+                    Some(Duration::from_secs(USAGE_PROBE_TIMEOUT_SECS)),
+                )
+                .await
+            {
+                Ok(usage) => return Ok(usage),
+                Err(err) => last_error = Some(err),
+            }
+
+            if attempt + 1 < USAGE_PROBE_RETRY_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(USAGE_PROBE_RETRY_DELAY_MS)).await;
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            ProxyError::Other("research usage probe failed without error".to_owned())
+        }))
+    }
+
     /// Aggregate per-token usage logs into token_usage_stats for UI metrics.
     /// Used by background schedulers to keep usage charts up to date.
     pub async fn rollup_token_usage_stats(&self) -> Result<(i64, Option<i64>), ProxyError> {
@@ -2428,6 +3198,11 @@ fn is_transient_sqlite_write_error(err: &ProxyError) -> bool {
 struct KeyStore {
     pool: SqlitePool,
     token_binding_cache: RwLock<HashMap<String, TokenBindingCacheEntry>>,
+    #[cfg(test)]
+    forced_pending_claim_miss_log_ids: Mutex<HashSet<i64>>,
+    // Lightweight failpoint registry used by integration tests to simulate a lost quota
+    // subject lease after precheck but before settlement.
+    forced_quota_subject_lock_loss_subjects: std::sync::Mutex<HashSet<String>>,
 }
 
 impl KeyStore {
@@ -2447,6 +3222,9 @@ impl KeyStore {
         let store = Self {
             pool,
             token_binding_cache: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
+            forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
         };
         store.initialize_schema().await?;
         Ok(store)
@@ -2737,6 +3515,9 @@ impl KeyStore {
                 result_status TEXT NOT NULL,
                 error_message TEXT,
                 counts_business_quota INTEGER NOT NULL DEFAULT 1,
+                business_credits INTEGER,
+                billing_subject TEXT,
+                billing_state TEXT NOT NULL DEFAULT 'none',
                 created_at INTEGER NOT NULL
             )
             "#,
@@ -2775,6 +3556,62 @@ impl KeyStore {
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_token_logs_billable_id
                ON auth_token_logs(counts_business_quota, id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        if !self
+            .table_column_exists("auth_token_logs", "business_credits")
+            .await?
+        {
+            sqlx::query("ALTER TABLE auth_token_logs ADD COLUMN business_credits INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !self
+            .table_column_exists("auth_token_logs", "billing_subject")
+            .await?
+        {
+            sqlx::query("ALTER TABLE auth_token_logs ADD COLUMN billing_subject TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        if !self
+            .table_column_exists("auth_token_logs", "billing_state")
+            .await?
+        {
+            sqlx::query(
+                "ALTER TABLE auth_token_logs ADD COLUMN billing_state TEXT NOT NULL DEFAULT 'none'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_token_logs_billing_pending
+               ON auth_token_logs(billing_state, billing_subject, id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS quota_subject_locks (
+                subject TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_quota_subject_locks_expires_at
+               ON quota_subject_locks(expires_at)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -2957,6 +3794,22 @@ impl KeyStore {
             .is_none()
         {
             self.heal_orphan_auth_tokens_from_logs().await?;
+        }
+
+        // Cut over business quota counters from legacy "requests" units to "credits".
+        // Historical request counts cannot be converted safely, but clearing them would silently
+        // grant fresh quota to every active subject on upgrade. Preserve existing windows and let
+        // them age out naturally; new charges written after the cutover are already credits-based.
+        if self
+            .get_meta_i64(META_KEY_BUSINESS_QUOTA_CREDITS_CUTOVER_V1)
+            .await?
+            .is_none()
+        {
+            self.set_meta_i64(
+                META_KEY_BUSINESS_QUOTA_CREDITS_CUTOVER_V1,
+                Utc::now().timestamp(),
+            )
+            .await?;
         }
 
         if self
@@ -3381,23 +4234,65 @@ impl KeyStore {
         Ok(())
     }
 
+    async fn increment_usage_bucket_by(
+        &self,
+        token_id: &str,
+        bucket_start: i64,
+        granularity: &str,
+        delta: i64,
+    ) -> Result<(), ProxyError> {
+        if delta <= 0 {
+            return Ok(());
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(token_id, bucket_start, granularity)
+            DO UPDATE SET count = token_usage_buckets.count + excluded.count
+            "#,
+        )
+        .bind(token_id)
+        .bind(bucket_start)
+        .bind(granularity)
+        .bind(delta)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn increment_usage_bucket(
         &self,
         token_id: &str,
         bucket_start: i64,
         granularity: &str,
     ) -> Result<(), ProxyError> {
+        self.increment_usage_bucket_by(token_id, bucket_start, granularity, 1)
+            .await
+    }
+
+    async fn increment_account_usage_bucket_by(
+        &self,
+        user_id: &str,
+        bucket_start: i64,
+        granularity: &str,
+        delta: i64,
+    ) -> Result<(), ProxyError> {
+        if delta <= 0 {
+            return Ok(());
+        }
         sqlx::query(
             r#"
-            INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(token_id, bucket_start, granularity)
-            DO UPDATE SET count = count + 1
+            INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, bucket_start, granularity)
+            DO UPDATE SET count = account_usage_buckets.count + excluded.count
             "#,
         )
-        .bind(token_id)
+        .bind(user_id)
         .bind(bucket_start)
         .bind(granularity)
+        .bind(delta)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -3409,20 +4304,8 @@ impl KeyStore {
         bucket_start: i64,
         granularity: &str,
     ) -> Result<(), ProxyError> {
-        sqlx::query(
-            r#"
-            INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(user_id, bucket_start, granularity)
-            DO UPDATE SET count = count + 1
-            "#,
-        )
-        .bind(user_id)
-        .bind(bucket_start)
-        .bind(granularity)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        self.increment_account_usage_bucket_by(user_id, bucket_start, granularity, 1)
+            .await
     }
 
     async fn sum_usage_buckets(
@@ -4072,32 +4955,87 @@ impl KeyStore {
         Ok((affected, new_last_rollup_ts))
     }
 
-    async fn increment_monthly_quota(
+    async fn increment_monthly_quota_by(
         &self,
         token_id: &str,
         current_month_start: i64,
+        delta: i64,
     ) -> Result<i64, ProxyError> {
+        if delta <= 0 {
+            let month_count = self
+                .fetch_monthly_count(token_id, current_month_start)
+                .await?;
+            return Ok(month_count);
+        }
         let (_month_start, month_count): (i64, i64) = sqlx::query_as(
             r#"
             INSERT INTO auth_token_quota (token_id, month_start, month_count)
-            VALUES (?, ?, 1)
+            VALUES (?, ?, ?)
             ON CONFLICT(token_id) DO UPDATE SET
                 month_start = CASE
                     WHEN excluded.month_start > auth_token_quota.month_start THEN excluded.month_start
                     ELSE auth_token_quota.month_start
                 END,
                 month_count = CASE
-                    WHEN excluded.month_start > auth_token_quota.month_start THEN 1
-                    ELSE auth_token_quota.month_count + 1
+                    WHEN excluded.month_start > auth_token_quota.month_start THEN excluded.month_count
+                    WHEN excluded.month_start < auth_token_quota.month_start THEN auth_token_quota.month_count
+                    ELSE auth_token_quota.month_count + excluded.month_count
                 END
             RETURNING month_start, month_count
             "#,
         )
         .bind(token_id)
         .bind(current_month_start)
+        .bind(delta)
         .fetch_one(&self.pool)
         .await?;
 
+        Ok(month_count)
+    }
+
+    async fn increment_monthly_quota(
+        &self,
+        token_id: &str,
+        current_month_start: i64,
+    ) -> Result<i64, ProxyError> {
+        self.increment_monthly_quota_by(token_id, current_month_start, 1)
+            .await
+    }
+
+    async fn increment_account_monthly_quota_by(
+        &self,
+        user_id: &str,
+        current_month_start: i64,
+        delta: i64,
+    ) -> Result<i64, ProxyError> {
+        if delta <= 0 {
+            let month_count = self
+                .fetch_account_monthly_count(user_id, current_month_start)
+                .await?;
+            return Ok(month_count);
+        }
+        let (_month_start, month_count): (i64, i64) = sqlx::query_as(
+            r#"
+            INSERT INTO account_monthly_quota (user_id, month_start, month_count)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                month_start = CASE
+                    WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_start
+                    ELSE account_monthly_quota.month_start
+                END,
+                month_count = CASE
+                    WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_count
+                    WHEN excluded.month_start < account_monthly_quota.month_start THEN account_monthly_quota.month_count
+                    ELSE account_monthly_quota.month_count + excluded.month_count
+                END
+            RETURNING month_start, month_count
+            "#,
+        )
+        .bind(user_id)
+        .bind(current_month_start)
+        .bind(delta)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(month_count)
     }
 
@@ -4106,27 +5044,8 @@ impl KeyStore {
         user_id: &str,
         current_month_start: i64,
     ) -> Result<i64, ProxyError> {
-        let (_month_start, month_count): (i64, i64) = sqlx::query_as(
-            r#"
-            INSERT INTO account_monthly_quota (user_id, month_start, month_count)
-            VALUES (?, ?, 1)
-            ON CONFLICT(user_id) DO UPDATE SET
-                month_start = CASE
-                    WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_start
-                    ELSE account_monthly_quota.month_start
-                END,
-                month_count = CASE
-                    WHEN excluded.month_start > account_monthly_quota.month_start THEN 1
-                    ELSE account_monthly_quota.month_count + 1
-                END
-            RETURNING month_start, month_count
-            "#,
-        )
-        .bind(user_id)
-        .bind(current_month_start)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(month_count)
+        self.increment_account_monthly_quota_by(user_id, current_month_start, 1)
+            .await
     }
 
     async fn upgrade_auth_tokens_schema(&self) -> Result<(), ProxyError> {
@@ -5410,6 +6329,7 @@ impl KeyStore {
         }))
     }
 
+    #[allow(dead_code)]
     async fn find_user_id_by_token(&self, token_id: &str) -> Result<Option<String>, ProxyError> {
         let now = Instant::now();
         if let Some(cached) = {
@@ -5420,6 +6340,13 @@ impl KeyStore {
             return Ok(cached.user_id);
         }
 
+        self.find_user_id_by_token_fresh(token_id).await
+    }
+
+    async fn find_user_id_by_token_fresh(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<String>, ProxyError> {
         let row = sqlx::query_as::<_, (String,)>(
             r#"SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1"#,
         )
@@ -6590,6 +7517,432 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_token_log_pending_billing(
+        &self,
+        token_id: &str,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        http_status: Option<i64>,
+        mcp_status: Option<i64>,
+        counts_business_quota: bool,
+        result_status: &str,
+        error_message: Option<&str>,
+        business_credits: i64,
+        billing_subject: &str,
+    ) -> Result<i64, ProxyError> {
+        let created_at = Utc::now().timestamp();
+        let counts_business_quota = if counts_business_quota { 1i64 } else { 0i64 };
+        let log_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO auth_token_logs (
+                token_id,
+                method,
+                path,
+                query,
+                http_status,
+                mcp_status,
+                result_status,
+                error_message,
+                counts_business_quota,
+                business_credits,
+                billing_subject,
+                billing_state,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            "#,
+        )
+        .bind(token_id)
+        .bind(method.as_str())
+        .bind(path)
+        .bind(query)
+        .bind(http_status)
+        .bind(mcp_status)
+        .bind(result_status)
+        .bind(error_message)
+        .bind(counts_business_quota)
+        .bind(business_credits)
+        .bind(billing_subject)
+        .bind(BILLING_STATE_PENDING)
+        .bind(created_at)
+        .fetch_one(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "UPDATE auth_tokens SET total_requests = total_requests + 1, last_used_at = ? WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(created_at)
+        .bind(token_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(log_id)
+    }
+
+    async fn list_pending_billing_log_ids(
+        &self,
+        billing_subject: &str,
+    ) -> Result<Vec<i64>, ProxyError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM auth_token_logs
+            WHERE billing_state = ? AND billing_subject = ? AND COALESCE(business_credits, 0) > 0
+            ORDER BY id ASC
+            "#,
+        )
+        .bind(BILLING_STATE_PENDING)
+        .bind(billing_subject)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ProxyError::from)
+    }
+
+    async fn list_pending_billing_subjects_for_token(
+        &self,
+        token_id: &str,
+    ) -> Result<Vec<String>, ProxyError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT DISTINCT billing_subject
+            FROM auth_token_logs
+            WHERE billing_state = ?
+              AND token_id = ?
+              AND billing_subject IS NOT NULL
+              AND COALESCE(business_credits, 0) > 0
+            ORDER BY billing_subject ASC
+            "#,
+        )
+        .bind(BILLING_STATE_PENDING)
+        .bind(token_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ProxyError::from)
+    }
+
+    async fn apply_pending_billing_log(
+        &self,
+        log_id: i64,
+    ) -> Result<PendingBillingSettleOutcome, ProxyError> {
+        let mut tx = self.pool.begin().await?;
+        #[cfg(test)]
+        let force_claim_miss = {
+            let mut forced = self.forced_pending_claim_miss_log_ids.lock().await;
+            forced.remove(&log_id)
+        };
+        #[cfg(not(test))]
+        let force_claim_miss = false;
+
+        let claimed = if force_claim_miss {
+            None
+        } else {
+            sqlx::query_as::<_, (i64, Option<String>, i64)>(
+                r#"
+                UPDATE auth_token_logs
+                SET billing_state = ?
+                WHERE id = ? AND billing_state = ?
+                RETURNING COALESCE(business_credits, 0), billing_subject, created_at
+                "#,
+            )
+            .bind(BILLING_STATE_CHARGED)
+            .bind(log_id)
+            .bind(BILLING_STATE_PENDING)
+            .fetch_optional(&mut *tx)
+            .await?
+        };
+
+        let Some((credits, billing_subject, created_at)) = claimed else {
+            let billing_state = sqlx::query_scalar::<_, String>(
+                "SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1",
+            )
+            .bind(log_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match billing_state.as_deref() {
+                Some(BILLING_STATE_CHARGED) => {
+                    tx.commit().await?;
+                    return Ok(PendingBillingSettleOutcome::AlreadySettled);
+                }
+                Some(BILLING_STATE_PENDING) => {
+                    tx.commit().await?;
+                    return Ok(PendingBillingSettleOutcome::RetryLater);
+                }
+                Some(other) => {
+                    tx.rollback().await.ok();
+                    return Err(ProxyError::QuotaDataMissing {
+                        reason: format!(
+                            "invalid billing_state for auth_token_logs.id={log_id}: {other}",
+                        ),
+                    });
+                }
+                None => {
+                    tx.rollback().await.ok();
+                    return Err(ProxyError::Other(format!(
+                        "pending billing log not found: {log_id}",
+                    )));
+                }
+            }
+        };
+
+        if credits <= 0 {
+            tx.commit().await?;
+            return Ok(PendingBillingSettleOutcome::Charged);
+        }
+
+        let Some(billing_subject) = billing_subject else {
+            tx.rollback().await.ok();
+            return Err(ProxyError::QuotaDataMissing {
+                reason: format!("missing billing_subject for auth_token_logs.id={log_id}"),
+            });
+        };
+
+        let charge_time = Utc
+            .timestamp_opt(created_at, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+        let charge_ts = charge_time.timestamp();
+        let minute_bucket = charge_ts - (charge_ts % SECS_PER_MINUTE);
+        let hour_bucket = charge_ts - (charge_ts % SECS_PER_HOUR);
+        let month_start = start_of_month(charge_time).timestamp();
+
+        if let Some(user_id) = billing_subject.strip_prefix("account:") {
+            sqlx::query(
+                r#"
+                INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, bucket_start, granularity)
+                DO UPDATE SET count = account_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(user_id)
+            .bind(minute_bucket)
+            .bind(GRANULARITY_MINUTE)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, bucket_start, granularity)
+                DO UPDATE SET count = account_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(user_id)
+            .bind(hour_bucket)
+            .bind(GRANULARITY_HOUR)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            let (_month_start, _month_count): (i64, i64) = sqlx::query_as(
+                r#"
+                INSERT INTO account_monthly_quota (user_id, month_start, month_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    month_start = CASE
+                        WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_start
+                        ELSE account_monthly_quota.month_start
+                    END,
+                    month_count = CASE
+                        WHEN excluded.month_start > account_monthly_quota.month_start THEN excluded.month_count
+                        WHEN excluded.month_start < account_monthly_quota.month_start THEN account_monthly_quota.month_count
+                        ELSE account_monthly_quota.month_count + excluded.month_count
+                    END
+                RETURNING month_start, month_count
+                "#,
+            )
+            .bind(user_id)
+            .bind(month_start)
+            .bind(credits)
+            .fetch_one(&mut *tx)
+            .await?;
+        } else if let Some(token_id) = billing_subject.strip_prefix("token:") {
+            sqlx::query(
+                r#"
+                INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(token_id, bucket_start, granularity)
+                DO UPDATE SET count = token_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(token_id)
+            .bind(minute_bucket)
+            .bind(GRANULARITY_MINUTE)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(token_id, bucket_start, granularity)
+                DO UPDATE SET count = token_usage_buckets.count + excluded.count
+                "#,
+            )
+            .bind(token_id)
+            .bind(hour_bucket)
+            .bind(GRANULARITY_HOUR)
+            .bind(credits)
+            .execute(&mut *tx)
+            .await?;
+
+            let (_month_start, _month_count): (i64, i64) = sqlx::query_as(
+                r#"
+                INSERT INTO auth_token_quota (token_id, month_start, month_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(token_id) DO UPDATE SET
+                    month_start = CASE
+                        WHEN excluded.month_start > auth_token_quota.month_start THEN excluded.month_start
+                        ELSE auth_token_quota.month_start
+                    END,
+                    month_count = CASE
+                        WHEN excluded.month_start > auth_token_quota.month_start THEN excluded.month_count
+                        WHEN excluded.month_start < auth_token_quota.month_start THEN auth_token_quota.month_count
+                        ELSE auth_token_quota.month_count + excluded.month_count
+                    END
+                RETURNING month_start, month_count
+                "#,
+            )
+            .bind(token_id)
+            .bind(month_start)
+            .bind(credits)
+            .fetch_one(&mut *tx)
+            .await?;
+        } else {
+            tx.rollback().await.ok();
+            return Err(ProxyError::QuotaDataMissing {
+                reason: format!(
+                    "invalid billing_subject for auth_token_logs.id={log_id}: {billing_subject}",
+                ),
+            });
+        }
+
+        tx.commit().await?;
+        Ok(PendingBillingSettleOutcome::Charged)
+    }
+
+    async fn annotate_pending_billing_log(
+        &self,
+        log_id: i64,
+        message: &str,
+    ) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            UPDATE auth_token_logs
+            SET error_message = CASE
+                WHEN error_message IS NULL OR error_message = '' THEN ?
+                WHEN error_message = ? THEN error_message
+                ELSE error_message || ' | ' || ?
+            END
+            WHERE id = ?
+            "#,
+        )
+        .bind(message)
+        .bind(message)
+        .bind(message)
+        .bind(log_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn acquire_quota_subject_lock(
+        &self,
+        subject: &str,
+        ttl: Duration,
+        wait_timeout: Duration,
+    ) -> Result<QuotaSubjectDbLease, ProxyError> {
+        let owner = format!(
+            "{}:{}",
+            std::process::id(),
+            QUOTA_SUBJECT_LOCK_OWNER_SEQ.fetch_add(1, AtomicOrdering::Relaxed)
+        );
+        let deadline = Instant::now() + wait_timeout;
+        let ttl_secs = ttl.as_secs().max(1) as i64;
+
+        loop {
+            let now = Utc::now().timestamp();
+            let expires_at = now + ttl_secs;
+            let mut tx = self.pool.begin().await?;
+            sqlx::query("DELETE FROM quota_subject_locks WHERE subject = ? AND expires_at <= ?")
+                .bind(subject)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+
+            let inserted = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO quota_subject_locks (subject, owner, expires_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                "#,
+            )
+            .bind(subject)
+            .bind(&owner)
+            .bind(expires_at)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            if inserted.rows_affected() == 1 {
+                tx.commit().await?;
+                return Ok(QuotaSubjectDbLease {
+                    subject: subject.to_string(),
+                    owner,
+                    ttl,
+                });
+            }
+
+            tx.rollback().await.ok();
+            if Instant::now() >= deadline {
+                return Err(ProxyError::Other(format!(
+                    "timed out acquiring quota subject lock for {subject}",
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn refresh_quota_subject_lock(
+        &self,
+        lease: &QuotaSubjectDbLease,
+    ) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        let expires_at = now + lease.ttl.as_secs().max(1) as i64;
+        let rows = sqlx::query(
+            "UPDATE quota_subject_locks SET expires_at = ?, updated_at = ? WHERE subject = ? AND owner = ?",
+        )
+        .bind(expires_at)
+        .bind(now)
+        .bind(&lease.subject)
+        .bind(&lease.owner)
+        .execute(&self.pool)
+        .await?;
+        if rows.rows_affected() == 0 {
+            return Err(ProxyError::Other(format!(
+                "quota subject lock lost for {}",
+                lease.subject,
+            )));
+        }
+        Ok(())
+    }
+
+    async fn release_quota_subject_lock(
+        &self,
+        lease: &QuotaSubjectDbLease,
+    ) -> Result<(), ProxyError> {
+        sqlx::query("DELETE FROM quota_subject_locks WHERE subject = ? AND owner = ?")
+            .bind(&lease.subject)
+            .bind(&lease.owner)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -8088,8 +9441,49 @@ impl TokenQuotaVerdict {
         }
     }
 
+    fn effective_window(&self) -> Option<QuotaWindow> {
+        if let Some(window) = self.exceeded_window {
+            return Some(window);
+        }
+
+        // Snapshot-based enforcement blocks when counters are *at* the limit (>=),
+        // so expose the same "exhausted window" for reporting/UI consistency.
+        if self.monthly_used >= self.monthly_limit {
+            return Some(QuotaWindow::Month);
+        }
+        if self.daily_used >= self.daily_limit {
+            return Some(QuotaWindow::Day);
+        }
+        if self.hourly_used >= self.hourly_limit {
+            return Some(QuotaWindow::Hour);
+        }
+        None
+    }
+
+    fn projected_window(&self, delta: i64) -> Option<QuotaWindow> {
+        if let Some(window) = self.effective_window() {
+            return Some(window);
+        }
+        if delta > 0 {
+            if self.monthly_used.saturating_add(delta) > self.monthly_limit {
+                return Some(QuotaWindow::Month);
+            }
+            if self.daily_used.saturating_add(delta) > self.daily_limit {
+                return Some(QuotaWindow::Day);
+            }
+            if self.hourly_used.saturating_add(delta) > self.hourly_limit {
+                return Some(QuotaWindow::Hour);
+            }
+        }
+        None
+    }
+
     pub fn window_name(&self) -> Option<&'static str> {
-        self.exceeded_window.map(|w| w.as_str())
+        self.effective_window().map(|w| w.as_str())
+    }
+
+    pub fn window_name_for_delta(&self, delta: i64) -> Option<&'static str> {
+        self.projected_window(delta).map(|w| w.as_str())
     }
 
     pub fn state_key(&self) -> &'static str {
@@ -8542,12 +9936,18 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
     };
 
     let mut any_success = false;
+    let mut any_error = false;
     let mut detected_code = None;
     let mut messages = extract_sse_json_messages(text);
     if messages.is_empty()
         && let Ok(value) = serde_json::from_str::<Value>(text)
     {
-        messages.push(value);
+        match value {
+            // JSON-RPC batch responses return an array of message envelopes. Treat each element
+            // as its own message so we can correctly detect success/error and enforce billing.
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
     }
 
     for message in messages {
@@ -8564,15 +9964,19 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
                     };
                 }
                 MessageOutcome::Error => {
-                    return AttemptAnalysis {
-                        status: OUTCOME_ERROR,
-                        mark_exhausted: false,
-                        tavily_status_code: code.or(detected_code),
-                    };
+                    any_error = true;
                 }
                 MessageOutcome::Success => any_success = true,
             }
         }
+    }
+
+    if any_error {
+        return AttemptAnalysis {
+            status: OUTCOME_ERROR,
+            mark_exhausted: false,
+            tavily_status_code: detected_code,
+        };
     }
 
     if any_success {
@@ -8634,6 +10038,83 @@ pub fn analyze_http_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis 
         mark_exhausted,
         tavily_status_code: Some(effective),
     }
+}
+
+/// Analyze a Tavily MCP JSON-RPC response (e.g. `/mcp tools/call`) using the same heuristics
+/// as the core proxy request logger (supports JSON-RPC envelopes and SSE message streams).
+pub fn analyze_mcp_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
+    analyze_attempt(status, body)
+}
+
+/// Best-effort detection of whether a Tavily MCP response contains *any* error.
+///
+/// This is used by downstream billing code to avoid over-charging when a JSON-RPC batch
+/// contains partial failures (e.g. some items succeed but others error/quota-exhaust).
+///
+/// Conservative behavior: if we cannot confidently parse the response, treat it as "has error"
+/// so we never apply the "expected credits" billing fallback on ambiguous payloads.
+pub fn mcp_response_has_any_error(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return true,
+    };
+
+    let mut messages = extract_sse_json_messages(text);
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    if messages.is_empty() {
+        return true;
+    }
+
+    for message in messages {
+        let Some((outcome, _code)) = analyze_json_message(&message) else {
+            return true;
+        };
+        if outcome != MessageOutcome::Success {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Best-effort detection of whether a Tavily MCP response contains at least one successful item.
+pub fn mcp_response_has_any_success(body: &[u8]) -> bool {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text,
+        Err(_) => return false,
+    };
+
+    let mut messages = extract_sse_json_messages(text);
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_str::<Value>(text)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    if messages.is_empty() {
+        return false;
+    }
+
+    for message in messages {
+        if let Some((outcome, _code)) = analyze_json_message(&message)
+            && outcome == MessageOutcome::Success
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn sanitize_headers_inner(
@@ -8745,7 +10226,7 @@ fn parse_header_list(raw: Option<String>) -> Vec<String> {
 }
 
 fn analyze_json_message(value: &Value) -> Option<(MessageOutcome, Option<i64>)> {
-    if value.get("error").is_some() {
+    if value.get("error").is_some_and(|v| !v.is_null()) {
         return Some((MessageOutcome::Error, None));
     }
 
@@ -8776,7 +10257,7 @@ fn analyze_result_payload(result: &Value) -> Option<(MessageOutcome, Option<i64>
         }
     }
 
-    if result.get("error").is_some() {
+    if result.get("error").is_some_and(|v| !v.is_null()) {
         return Some((MessageOutcome::Error, None));
     }
 
@@ -8795,7 +10276,18 @@ fn analyze_structured_content(result: &Value) -> Option<(MessageOutcome, Option<
     let structured = result.get("structuredContent")?;
 
     if let Some(code) = extract_status_code(structured) {
-        return Some((classify_status_code(code), Some(code)));
+        let code_outcome = classify_status_code(code);
+        if matches!(code_outcome, MessageOutcome::Success)
+            && let Some(text_outcome) =
+                extract_status_text(structured).and_then(classify_status_text)
+        {
+            return Some((text_outcome, Some(code)));
+        }
+        return Some((code_outcome, Some(code)));
+    }
+
+    if let Some(text_outcome) = extract_status_text(structured).and_then(classify_status_text) {
+        return Some((text_outcome, None));
     }
 
     if structured
@@ -8871,6 +10363,281 @@ fn extract_research_request_id(body: &[u8]) -> Option<String> {
         return None;
     }
     Some(trimmed.to_owned())
+}
+
+/// Best-effort extraction of Tavily `usage.credits` from an upstream JSON response body.
+///
+/// - Returns `None` when the body isn't JSON or the field is missing.
+/// - Handles nested MCP envelopes by recursively scanning for an object containing `{ "usage": { "credits": ... } }`.
+/// - If credits is a float, rounds up to avoid under-charging.
+pub fn extract_usage_credits_from_json_bytes(body: &[u8]) -> Option<i64> {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body) {
+        return extract_usage_credits_from_value(&parsed);
+    }
+    extract_usage_credits_from_sse_bytes(body)
+}
+
+/// Best-effort extraction of Tavily `usage.credits` from an upstream JSON response body,
+/// summing across JSON-RPC batch responses (top-level arrays).
+///
+/// For non-batch responses, this matches `extract_usage_credits_from_json_bytes()`.
+pub fn extract_usage_credits_total_from_json_bytes(body: &[u8]) -> Option<i64> {
+    if let Ok(parsed) = serde_json::from_slice::<Value>(body) {
+        return extract_usage_credits_total_from_value(&parsed);
+    }
+    extract_usage_credits_total_from_sse_bytes(body)
+}
+
+/// Best-effort extraction of `usage.credits` from an MCP response, keyed by JSON-RPC `id`.
+///
+/// This is primarily used by the `/mcp` proxy to avoid accidentally charging credits from
+/// non-Tavily tool calls in a mixed JSON-RPC batch.
+pub fn extract_mcp_usage_credits_by_id_from_bytes(body: &[u8]) -> HashMap<String, i64> {
+    let mut messages: Vec<Value> = Vec::new();
+
+    if let Ok(text) = std::str::from_utf8(body) {
+        messages = extract_sse_json_messages(text);
+        if messages.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(text)
+        {
+            match value {
+                Value::Array(items) => messages.extend(items),
+                other => messages.push(other),
+            }
+        }
+    }
+
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_slice::<Value>(body)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    fn ingest(value: &Value, out: &mut HashMap<String, i64>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    ingest(item, out);
+                }
+            }
+            Value::Object(map) => {
+                let Some(id) = map.get("id").filter(|v| !v.is_null()) else {
+                    return;
+                };
+                let Some(credits) = extract_usage_credits_from_value(value) else {
+                    return;
+                };
+                let key = id.to_string();
+                out.entry(key)
+                    .and_modify(|current| *current = (*current).max(credits))
+                    .or_insert(credits);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out: HashMap<String, i64> = HashMap::new();
+    for message in messages {
+        ingest(&message, &mut out);
+    }
+    out
+}
+
+/// Best-effort extraction of whether an MCP response message contains an error, keyed by JSON-RPC `id`.
+///
+/// Values are `true` when we see any non-success outcome for that id (including quota exhausted).
+/// This is used to scope billing fallbacks (like expected credits) to only the billable calls.
+pub fn extract_mcp_has_error_by_id_from_bytes(body: &[u8]) -> HashMap<String, bool> {
+    let mut messages: Vec<Value> = Vec::new();
+
+    if let Ok(text) = std::str::from_utf8(body) {
+        messages = extract_sse_json_messages(text);
+        if messages.is_empty()
+            && let Ok(value) = serde_json::from_str::<Value>(text)
+        {
+            match value {
+                Value::Array(items) => messages.extend(items),
+                other => messages.push(other),
+            }
+        }
+    }
+
+    if messages.is_empty()
+        && let Ok(value) = serde_json::from_slice::<Value>(body)
+    {
+        match value {
+            Value::Array(items) => messages.extend(items),
+            other => messages.push(other),
+        }
+    }
+
+    fn ingest(value: &Value, out: &mut HashMap<String, bool>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    ingest(item, out);
+                }
+            }
+            Value::Object(map) => {
+                let Some(id) = map.get("id").filter(|v| !v.is_null()) else {
+                    return;
+                };
+
+                let is_error = analyze_json_message(value)
+                    .map(|(outcome, _code)| outcome != MessageOutcome::Success)
+                    .unwrap_or(true);
+
+                let key = id.to_string();
+                out.entry(key)
+                    .and_modify(|current| *current = *current || is_error)
+                    .or_insert(is_error);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out: HashMap<String, bool> = HashMap::new();
+    for message in messages {
+        ingest(&message, &mut out);
+    }
+    out
+}
+
+fn extract_usage_credits_total_from_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Array(items) => {
+            let mut total = 0i64;
+            let mut found = false;
+            for item in items {
+                if let Some(credits) = extract_usage_credits_from_value(item) {
+                    total = total.saturating_add(credits);
+                    found = true;
+                }
+            }
+            found.then_some(total)
+        }
+        other => extract_usage_credits_from_value(other),
+    }
+}
+
+fn extract_usage_credits_from_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            if let Some(credits) = map
+                .get("usage")
+                .and_then(extract_usage_credits_from_usage_value)
+            {
+                return Some(credits);
+            }
+            // MCP responses can be wrapped in arbitrary envelopes. Scan all nested values.
+            for nested in map.values() {
+                if let Some(credits) = extract_usage_credits_from_value(nested) {
+                    return Some(credits);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().find_map(extract_usage_credits_from_value),
+        _ => None,
+    }
+}
+
+fn extract_usage_credits_from_usage_value(value: &Value) -> Option<i64> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+
+    for key in [
+        "credits",
+        // Some Tavily responses report fractional usage via an exact field instead of the
+        // integer `credits` counter. We round up to avoid under-billing when only the exact
+        // field is present.
+        "total_credits_exact",
+    ] {
+        if let Some(credits) = map.get(key).and_then(parse_credits_value) {
+            return Some(credits);
+        }
+    }
+
+    None
+}
+
+fn parse_credits_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => {
+            if let Some(v) = number.as_i64()
+                && v >= 0
+            {
+                return Some(v);
+            }
+            number.as_f64().map(|v| v.ceil() as i64).filter(|v| *v >= 0)
+        }
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            if let Ok(v) = trimmed.parse::<i64>()
+                && v >= 0
+            {
+                return Some(v);
+            }
+            trimmed
+                .parse::<f64>()
+                .ok()
+                .map(|v| v.ceil() as i64)
+                .filter(|v| *v >= 0)
+        }
+        _ => None,
+    }
+}
+
+fn extract_usage_credits_from_sse_bytes(body: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(body).ok()?;
+    let messages = extract_sse_json_messages(text);
+    let mut best: Option<i64> = None;
+    for message in messages {
+        if let Some(credits) = extract_usage_credits_from_value(&message) {
+            best = Some(best.map_or(credits, |current| current.max(credits)));
+        }
+    }
+    best
+}
+
+fn extract_usage_credits_total_from_sse_bytes(body: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(body).ok()?;
+    let messages = extract_sse_json_messages(text);
+    if messages.is_empty() {
+        return None;
+    }
+
+    // SSE streams can contain multiple messages for the same JSON-RPC `id` (e.g. progress updates).
+    // To avoid double-charging, we take the maximum observed credits per id and then sum.
+    let mut per_id_max: HashMap<String, i64> = HashMap::new();
+    let mut found = false;
+
+    for message in messages {
+        let Some(credits) = extract_usage_credits_total_from_value(&message) else {
+            continue;
+        };
+        found = true;
+
+        let id_key = match &message {
+            Value::Object(map) => map
+                .get("id")
+                .filter(|v| !v.is_null())
+                .map(|v| v.to_string()),
+            _ => None,
+        }
+        .unwrap_or_else(|| "__no_id__".to_string());
+
+        per_id_max
+            .entry(id_key)
+            .and_modify(|current| *current = (*current).max(credits))
+            .or_insert(credits);
+    }
+
+    found.then(|| per_id_max.values().copied().sum())
 }
 
 fn classify_status_text(status: &str) -> Option<MessageOutcome> {
@@ -9020,6 +10787,141 @@ mod tests {
         assert_eq!(parse_hhmm("00:60"), None);
         assert_eq!(parse_hhmm(""), None);
         assert_eq!(parse_hhmm("07:00:00"), None);
+    }
+
+    #[test]
+    fn extract_usage_credits_from_json_bytes_finds_nested_usage_and_rounds_up() {
+        let body = br#"{"result":{"structuredContent":{"usage":{"credits":1.2}}}}"#;
+        assert_eq!(extract_usage_credits_from_json_bytes(body), Some(2));
+    }
+
+    #[test]
+    fn extract_usage_credits_from_json_bytes_parses_string_float_and_rounds_up() {
+        let body = br#"{"usage":{"credits":"1.2"}}"#;
+        assert_eq!(extract_usage_credits_from_json_bytes(body), Some(2));
+    }
+
+    #[test]
+    fn extract_usage_credits_from_json_bytes_supports_total_credits_exact() {
+        let body = br#"{"usage":{"total_credits_exact":0.2}}"#;
+        assert_eq!(extract_usage_credits_from_json_bytes(body), Some(1));
+    }
+
+    #[test]
+    fn extract_usage_credits_total_from_json_bytes_sums_total_credits_exact() {
+        let body =
+            br#"[{"usage":{"total_credits_exact":0.2}},{"usage":{"total_credits_exact":"1.2"}}]"#;
+        assert_eq!(extract_usage_credits_total_from_json_bytes(body), Some(3));
+    }
+
+    #[test]
+    fn extract_usage_credits_total_from_json_bytes_sums_across_arrays() {
+        let body = br#"[{"result":{"structuredContent":{"usage":{"credits":1}}}},{"result":{"structuredContent":{"usage":{"credits":2.1}}}}]"#;
+        assert_eq!(extract_usage_credits_total_from_json_bytes(body), Some(4));
+    }
+
+    #[test]
+    fn extract_usage_credits_from_json_bytes_parses_sse_and_returns_max() {
+        let body = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":1}}}}\n\n\
+data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":2}}}}\n\n";
+        assert_eq!(extract_usage_credits_from_json_bytes(body), Some(2));
+    }
+
+    #[test]
+    fn extract_usage_credits_total_from_json_bytes_parses_sse_and_sums_by_id() {
+        // Duplicate id=1 message should not double count.
+        let body = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":1}}}}\n\n\
+data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":1}}}}\n\n\
+data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":2}}}}\n\n";
+        assert_eq!(extract_usage_credits_total_from_json_bytes(body), Some(3));
+    }
+
+    #[test]
+    fn extract_mcp_usage_credits_by_id_from_bytes_tracks_max_per_id() {
+        let body = br#"
+        [
+          {"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"usage":{"credits":1}}}},
+          {"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"usage":{"credits":2}}}},
+          {"jsonrpc":"2.0","id":"abc","result":{"structuredContent":{"usage":{"credits":"3"}}}},
+          {"jsonrpc":"2.0","id":null,"result":{"structuredContent":{"usage":{"credits":99}}}},
+          {"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"status":200}}}
+        ]
+        "#;
+
+        let credits = extract_mcp_usage_credits_by_id_from_bytes(body);
+
+        let id1 = serde_json::json!(1).to_string();
+        let id_abc = serde_json::json!("abc").to_string();
+        let id2 = serde_json::json!(2).to_string();
+
+        assert_eq!(credits.get(&id1), Some(&2));
+        assert_eq!(credits.get(&id_abc), Some(&3));
+        assert_eq!(
+            credits.get(&id2),
+            None,
+            "missing usage should not create a map entry"
+        );
+        assert!(
+            !credits.values().any(|v| *v == 99),
+            "null ids should be ignored"
+        );
+    }
+
+    #[test]
+    fn extract_mcp_usage_credits_by_id_from_bytes_parses_sse() {
+        let body = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":1}}}}\n\n\
+data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":2}}}}\n\n\
+data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"structuredContent\":{\"usage\":{\"credits\":1}}}}\n\n";
+
+        let credits = extract_mcp_usage_credits_by_id_from_bytes(body);
+
+        let id1 = serde_json::json!(1).to_string();
+        let id2 = serde_json::json!(2).to_string();
+        assert_eq!(credits.get(&id1), Some(&2));
+        assert_eq!(credits.get(&id2), Some(&1));
+    }
+
+    #[test]
+    fn extract_mcp_has_error_by_id_from_bytes_marks_error_and_quota_exhausted() {
+        let body = br#"
+        [
+          {"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"status":200}}},
+          {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"oops"}},
+          {"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"status":432}}}
+        ]
+        "#;
+
+        let flags = extract_mcp_has_error_by_id_from_bytes(body);
+        let id1 = serde_json::json!(1).to_string();
+        let id2 = serde_json::json!(2).to_string();
+        let id3 = serde_json::json!(3).to_string();
+
+        assert_eq!(flags.get(&id1), Some(&false));
+        assert_eq!(flags.get(&id2), Some(&true));
+        assert_eq!(flags.get(&id3), Some(&true));
+    }
+
+    #[test]
+    fn extract_mcp_has_error_by_id_from_bytes_or_accumulates_across_sse() {
+        let body = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"structuredContent\":{\"status\":200}}}\n\n\
+data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oops\"}}\n\n";
+
+        let flags = extract_mcp_has_error_by_id_from_bytes(body);
+        let id1 = serde_json::json!(1).to_string();
+        assert_eq!(flags.get(&id1), Some(&true));
+    }
+
+    #[test]
+    fn analyze_mcp_attempt_marks_mixed_success_and_error_as_error() {
+        let body = br#"[
+          {"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"status":200}}},
+          {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"oops"}}
+        ]"#;
+
+        let analysis = analyze_mcp_attempt(StatusCode::OK, body);
+        assert_eq!(analysis.status, OUTCOME_ERROR);
+        assert!(!analysis.mark_exhausted);
+        assert_eq!(analysis.tavily_status_code, Some(200));
     }
 
     #[test]
@@ -9520,6 +11422,14 @@ mod tests {
         assert_eq!(verdict.exceeded_window, Some(QuotaWindow::Hour));
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn quota_window_name_reports_exhausted_when_at_limit() {
+        let verdict = TokenQuotaVerdict::new(2, 2, 0, 10, 0, 100);
+        assert!(verdict.allowed, "at-limit is not considered exceeded");
+        assert_eq!(verdict.window_name(), Some("hour"));
+        assert_eq!(verdict.state_key(), "hour");
     }
 
     #[tokio::test]
@@ -10917,7 +12827,6 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
-
     #[tokio::test]
     async fn get_user_token_returns_unavailable_after_soft_delete() {
         let db_path = temp_db_path("user-token-unavailable");
@@ -11017,13 +12926,740 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_billing_for_previous_subject_stays_pending_after_token_binding_changes_subject()
+     {
+        let db_path = temp_db_path("pending-billing-subject-flip");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("pending-billing-subject-flip"))
+            .await
+            .expect("create token");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("simulated pending charge"),
+                3,
+            )
+            .await
+            .expect("record pending billing attempt");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "pending-billing-subject-user".to_string(),
+                username: Some("pending_billing_subject".to_string()),
+                name: Some("Pending Billing Subject".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:pending_billing_subject"),
+                Some(&token.id),
+            )
+            .await
+            .expect("bind existing token to user");
+
+        let _guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("reconcile pending billing after subject flip");
+
+        let token_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&token.id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read token minute buckets");
+        assert_eq!(token_minute_sum, 3);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_for_previous_account_subject_stays_pending_after_token_becomes_unbound()
+     {
+        let db_path = temp_db_path("pending-billing-account-to-token-subject-flip");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "pending-billing-account-user".to_string(),
+                username: Some("pending_billing_account".to_string()),
+                name: Some("Pending Billing Account".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let token = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:pending_billing_account"))
+            .await
+            .expect("bind token");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("simulated pending charge"),
+                4,
+            )
+            .await
+            .expect("record pending billing attempt");
+
+        sqlx::query("DELETE FROM user_token_bindings WHERE token_id = ?")
+            .bind(&token.id)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("unbind token");
+        proxy.key_store.cache_token_binding(&token.id, None).await;
+
+        let _guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("reconcile pending billing after unbind");
+
+        let account_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM account_usage_buckets WHERE user_id = ? AND granularity = ?",
+        )
+        .bind(&user.user_id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read account minute buckets");
+        assert_eq!(account_minute_sum, 4);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn locked_billing_subject_keeps_original_precheck_after_binding_change() {
+        let db_path = temp_db_path("locked-billing-subject-precheck");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("locked-billing-subject-precheck"))
+            .await
+            .expect("create token");
+        proxy
+            .charge_token_quota(&token.id, 1)
+            .await
+            .expect("seed token quota before binding change");
+
+        let guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("lock token billing");
+        assert_eq!(guard.billing_subject(), format!("token:{}", token.id));
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "locked-billing-subject-precheck-user".to_string(),
+                username: Some("locked_billing_precheck".to_string()),
+                name: Some("Locked Billing Precheck".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:locked_billing_precheck"),
+                Some(&token.id),
+            )
+            .await
+            .expect("bind existing token to user");
+
+        let locked_verdict = proxy
+            .peek_token_quota_for_subject(guard.billing_subject())
+            .await
+            .expect("peek locked subject quota");
+        assert_eq!(locked_verdict.hourly_used, 1);
+
+        let current_verdict = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek current token quota");
+        assert_eq!(current_verdict.hourly_used, 0);
+
+        drop(guard);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_attempt_for_subject_charges_original_subject_after_binding_change() {
+        let db_path = temp_db_path("pending-billing-for-subject");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("pending-billing-for-subject"))
+            .await
+            .expect("create token");
+
+        let guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("lock token billing");
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "pending-billing-for-subject-user".to_string(),
+                username: Some("pending_billing_subject_charge".to_string()),
+                name: Some("Pending Billing Subject Charge".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:pending_billing_subject_charge"),
+                Some(&token.id),
+            )
+            .await
+            .expect("bind existing token to user");
+
+        let log_id = proxy
+            .record_pending_billing_attempt_for_subject(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("subject pinned to original token"),
+                2,
+                guard.billing_subject(),
+            )
+            .await
+            .expect("record pending billing attempt with pinned subject");
+        proxy
+            .settle_pending_billing_attempt(log_id)
+            .await
+            .expect("settle pending billing attempt");
+
+        let token_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&token.id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read token minute buckets");
+        assert_eq!(token_minute_sum, 2);
+
+        let account_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM account_usage_buckets WHERE user_id = ? AND granularity = ?",
+        )
+        .bind(&user.user_id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read account minute buckets");
+        assert_eq!(account_minute_sum, 0);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        drop(guard);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn lock_token_billing_uses_fresh_binding_after_external_rebind() {
+        let db_path = temp_db_path("lock-token-billing-fresh-binding");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy_a = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy a created");
+        let proxy_b = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy b created");
+        let token = proxy_a
+            .create_access_token(Some("fresh-binding-rebind"))
+            .await
+            .expect("create token");
+
+        // Warm proxy_a's cache with the old unbound subject first.
+        let initial = proxy_a
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek unbound quota");
+        assert_eq!(initial.hourly_used, 0);
+
+        let user = proxy_b
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "fresh-binding-user".to_string(),
+                username: Some("fresh_binding_user".to_string()),
+                name: Some("Fresh Binding User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy_b
+            .ensure_user_token_binding_with_preferred(
+                &user.user_id,
+                Some("linuxdo:fresh_binding_user"),
+                Some(&token.id),
+            )
+            .await
+            .expect("bind token on proxy b");
+
+        let guard = proxy_a
+            .lock_token_billing(&token.id)
+            .await
+            .expect("lock token billing after external rebind");
+        assert_eq!(guard.billing_subject(), format!("account:{}", user.user_id));
+
+        drop(guard);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_replay_does_not_backfill_previous_month_into_current_token_quota() {
+        let db_path = temp_db_path("pending-billing-token-old-month");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("pending-billing-token-old-month"))
+            .await
+            .expect("create token");
+
+        let current_month_start = start_of_month(Utc::now()).timestamp();
+        let previous_month_ts = current_month_start - 60;
+
+        sqlx::query(
+            "INSERT INTO auth_token_quota (token_id, month_start, month_count) VALUES (?, ?, ?)",
+        )
+        .bind(&token.id)
+        .bind(current_month_start)
+        .bind(7_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed current token month");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("previous month token charge"),
+                3,
+            )
+            .await
+            .expect("record pending token billing");
+        sqlx::query("UPDATE auth_token_logs SET created_at = ? WHERE id = ?")
+            .bind(previous_month_ts)
+            .bind(log_id)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("rewrite token log timestamp");
+
+        proxy
+            .settle_pending_billing_attempt(log_id)
+            .await
+            .expect("settle previous month token billing");
+
+        let token_month: (i64, i64) = sqlx::query_as(
+            "SELECT month_start, month_count FROM auth_token_quota WHERE token_id = ? LIMIT 1",
+        )
+        .bind(&token.id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read token monthly quota");
+        assert_eq!(token_month, (current_month_start, 7));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_replay_does_not_backfill_previous_month_into_current_account_quota() {
+        let db_path = temp_db_path("pending-billing-account-old-month");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "pending-billing-account-old-month-user".to_string(),
+                username: Some("pending_billing_account_old_month".to_string()),
+                name: Some("Pending Billing Account Old Month".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let token = proxy
+            .ensure_user_token_binding(
+                &user.user_id,
+                Some("linuxdo:pending_billing_account_old_month"),
+            )
+            .await
+            .expect("bind token");
+
+        let current_month_start = start_of_month(Utc::now()).timestamp();
+        let previous_month_ts = current_month_start - 60;
+
+        sqlx::query(
+            "INSERT INTO account_monthly_quota (user_id, month_start, month_count) VALUES (?, ?, ?)",
+        )
+        .bind(&user.user_id)
+        .bind(current_month_start)
+        .bind(11_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed current account month");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("previous month account charge"),
+                4,
+            )
+            .await
+            .expect("record pending account billing");
+        sqlx::query("UPDATE auth_token_logs SET created_at = ? WHERE id = ?")
+            .bind(previous_month_ts)
+            .bind(log_id)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("rewrite account log timestamp");
+
+        proxy
+            .settle_pending_billing_attempt(log_id)
+            .await
+            .expect("settle previous month account billing");
+
+        let account_month: (i64, i64) = sqlx::query_as(
+            "SELECT month_start, month_count FROM account_monthly_quota WHERE user_id = ? LIMIT 1",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read account monthly quota");
+        assert_eq!(account_month, (current_month_start, 11));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn settle_pending_billing_attempt_is_idempotent_across_instances() {
+        let db_path = temp_db_path("pending-billing-idempotent-settle");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy_a = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy a created");
+        let proxy_b = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy b created");
+        let token = proxy_a
+            .create_access_token(Some("pending-billing-idempotent-settle"))
+            .await
+            .expect("create token");
+
+        let log_id = proxy_a
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("concurrent settle"),
+                5,
+            )
+            .await
+            .expect("record pending billing attempt");
+
+        let settle_a = tokio::spawn(async move {
+            proxy_a
+                .settle_pending_billing_attempt(log_id)
+                .await
+                .expect("settle on proxy a");
+        });
+        let proxy_b_settle = proxy_b.clone();
+        let settle_b = tokio::spawn(async move {
+            proxy_b_settle
+                .settle_pending_billing_attempt(log_id)
+                .await
+                .expect("settle on proxy b");
+        });
+
+        tokio::try_join!(settle_a, settle_b).expect("join settle tasks");
+
+        let token_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&token.id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy_b.key_store.pool)
+        .await
+        .expect("read token minute buckets");
+        assert_eq!(token_minute_sum, 5);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy_b.key_store.pool)
+                .await
+                .expect("read billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pending_billing_claim_miss_is_retry_later_until_next_replay() {
+        let db_path = temp_db_path("pending-billing-claim-miss-retry");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("pending-billing-claim-miss-retry"))
+            .await
+            .expect("create token");
+
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("forced claim miss"),
+                3,
+            )
+            .await
+            .expect("record pending billing attempt");
+
+        proxy.force_pending_billing_claim_miss_once(log_id).await;
+
+        let outcome = proxy
+            .settle_pending_billing_attempt(log_id)
+            .await
+            .expect("forced claim miss should surface retry-later outcome");
+        assert_eq!(outcome, PendingBillingSettleOutcome::RetryLater);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read pending billing state");
+        assert_eq!(billing_state, BILLING_STATE_PENDING);
+
+        let verdict = proxy.peek_token_quota(&token.id).await.expect("peek quota");
+        assert_eq!(verdict.hourly_used, 0);
+
+        let guard = proxy
+            .lock_token_billing(&token.id)
+            .await
+            .expect("next billing lock should replay the pending charge before precheck");
+        drop(guard);
+
+        let billing_state: String =
+            sqlx::query_scalar("SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1")
+                .bind(log_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read charged billing state");
+        assert_eq!(billing_state, BILLING_STATE_CHARGED);
+
+        let verdict = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota after replay");
+        assert_eq!(verdict.hourly_used, 3);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn token_billing_lock_serializes_across_proxy_instances() {
+        let db_path = temp_db_path("billing-lock-cross-instance");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy_a = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy a created");
+        let proxy_b = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy b created");
+        let token = proxy_a
+            .create_access_token(Some("billing-lock-cross-instance"))
+            .await
+            .expect("create token");
+
+        let guard = proxy_a
+            .lock_token_billing(&token.id)
+            .await
+            .expect("acquire first billing lock");
+
+        let token_id = token.id.clone();
+        let waiter = tokio::spawn(async move {
+            let _guard = proxy_b
+                .lock_token_billing(&token_id)
+                .await
+                .expect("acquire second billing lock");
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiter.is_finished(),
+            "second proxy instance should wait for the shared billing lock"
+        );
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("second proxy acquires after release")
+            .expect("waiter joins");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn research_usage_lock_serializes_across_proxy_instances() {
+        let db_path = temp_db_path("research-usage-cross-instance-lock");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy_a = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy a created");
+        let proxy_b = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy b created");
+
+        let guard = proxy_a
+            .lock_research_key_usage("shared-upstream-key")
+            .await
+            .expect("acquire first research lock");
+
+        let waiter = tokio::spawn(async move {
+            let _guard = proxy_b
+                .lock_research_key_usage("shared-upstream-key")
+                .await
+                .expect("acquire second research lock");
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiter.is_finished(),
+            "second proxy instance should wait for the shared research lock"
+        );
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("second proxy acquires after release")
+            .expect("waiter joins");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn bound_token_quota_checks_use_account_counters() {
-        let _guard = env_lock().lock_owned().await;
         let db_path = temp_db_path("bound-token-account-quota");
         let db_str = db_path.to_string_lossy().to_string();
-        unsafe {
-            std::env::set_var("TOKEN_HOURLY_LIMIT", "1");
-        }
 
         let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
             .await
@@ -11047,21 +13683,10 @@ mod tests {
             .await
             .expect("bind token");
 
-        let first = proxy
-            .check_token_quota(&token.id)
+        proxy
+            .charge_token_quota(&token.id, 2)
             .await
-            .expect("first quota check");
-        assert!(first.allowed, "first request should pass");
-
-        let second = proxy
-            .check_token_quota(&token.id)
-            .await
-            .expect("second quota check");
-        assert!(
-            !second.allowed,
-            "second request should hit account hourly limit"
-        );
-        assert_eq!(second.exceeded_window, Some(QuotaWindow::Hour));
+            .expect("charge business quota credits");
 
         let account_minute_sum: i64 = sqlx::query_scalar(
             "SELECT COALESCE(SUM(count), 0) FROM account_usage_buckets WHERE user_id = ? AND granularity = ?",
@@ -11073,7 +13698,7 @@ mod tests {
         .expect("read account minute buckets");
         assert_eq!(
             account_minute_sum, 2,
-            "account buckets should count both checks"
+            "account buckets should count charged credits"
         );
 
         let token_minute_sum: i64 = sqlx::query_scalar(
@@ -11089,9 +13714,261 @@ mod tests {
             "bound token should no longer mutate token-level buckets"
         );
 
-        unsafe {
-            std::env::remove_var("TOKEN_HOURLY_LIMIT");
-        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn business_quota_credits_cutover_preserves_existing_counters_once() {
+        let db_path = temp_db_path("business-quota-credits-cutover");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        // First start: create schema + seed token/user rows for FK constraints.
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let unbound_token = proxy
+            .create_access_token(Some("cutover-unbound-token"))
+            .await
+            .expect("create token");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "cutover-user".to_string(),
+                username: Some("cutover".to_string()),
+                name: Some("Cutover User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let bound_token = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:cutover"))
+            .await
+            .expect("bind token");
+
+        // Simulate an older DB (pre-cutover) by clearing the cutover meta key and writing
+        // legacy request-count counters into the buckets/quota tables. The migration should
+        // preserve them so deploys do not silently reset active customer quotas.
+        sqlx::query("DELETE FROM meta WHERE key = ?")
+            .bind(META_KEY_BUSINESS_QUOTA_CREDITS_CUTOVER_V1)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("reset cutover meta");
+
+        let now = Utc::now();
+        let now_ts = now.timestamp();
+        let minute_bucket = now_ts - (now_ts % SECS_PER_MINUTE);
+        let hour_bucket = now_ts - (now_ts % SECS_PER_HOUR);
+        let month_start = start_of_month(now).timestamp();
+
+        // Token-scoped legacy counters.
+        sqlx::query(
+            "INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&unbound_token.id)
+        .bind(minute_bucket)
+        .bind(GRANULARITY_MINUTE)
+        .bind(9_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed token minute bucket");
+        sqlx::query(
+            "INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&unbound_token.id)
+        .bind(hour_bucket)
+        .bind(GRANULARITY_HOUR)
+        .bind(11_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed token hour bucket");
+        // Ensure the request limiter bucket is not affected by the cutover reset.
+        sqlx::query(
+            "INSERT INTO token_usage_buckets (token_id, bucket_start, granularity, count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&unbound_token.id)
+        .bind(minute_bucket)
+        .bind(GRANULARITY_REQUEST_MINUTE)
+        .bind(5_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed token request_minute bucket");
+        sqlx::query(
+            "INSERT INTO auth_token_quota (token_id, month_start, month_count) VALUES (?, ?, ?)",
+        )
+        .bind(&unbound_token.id)
+        .bind(month_start)
+        .bind(13_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed token monthly quota");
+
+        // Account-scoped legacy counters (e.g. from old backfill).
+        sqlx::query(
+            "INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&user.user_id)
+        .bind(minute_bucket)
+        .bind(GRANULARITY_MINUTE)
+        .bind(7_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed account minute bucket");
+        sqlx::query(
+            "INSERT INTO account_usage_buckets (user_id, bucket_start, granularity, count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&user.user_id)
+        .bind(hour_bucket)
+        .bind(GRANULARITY_HOUR)
+        .bind(8_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed account hour bucket");
+        sqlx::query(
+            "INSERT INTO account_monthly_quota (user_id, month_start, month_count) VALUES (?, ?, ?)",
+        )
+        .bind(&user.user_id)
+        .bind(month_start)
+        .bind(14_i64)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("seed account monthly quota");
+
+        drop(proxy);
+
+        // Second start: cutover migration should preserve legacy counters exactly once.
+        let proxy_after =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy restarted");
+
+        let token_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&unbound_token.id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read token minute buckets");
+        assert_eq!(
+            token_minute_sum, 9,
+            "cutover should preserve token minute buckets"
+        );
+
+        let token_hour_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&unbound_token.id)
+        .bind(GRANULARITY_HOUR)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read token hour buckets");
+        assert_eq!(
+            token_hour_sum, 11,
+            "cutover should preserve token hour buckets"
+        );
+
+        let token_request_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&unbound_token.id)
+        .bind(GRANULARITY_REQUEST_MINUTE)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read token request_minute buckets");
+        assert_eq!(
+            token_request_minute_sum, 5,
+            "cutover must not clear raw request limiter buckets"
+        );
+
+        let token_monthly_count: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(month_count, 0) FROM auth_token_quota WHERE token_id = ?",
+        )
+        .bind(&unbound_token.id)
+        .fetch_optional(&proxy_after.key_store.pool)
+        .await
+        .expect("read token monthly quota")
+        .unwrap_or(0);
+        assert_eq!(
+            token_monthly_count, 13,
+            "cutover should preserve token monthly quota"
+        );
+
+        let account_minute_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM account_usage_buckets WHERE user_id = ? AND granularity = ?",
+        )
+        .bind(&user.user_id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read account minute buckets");
+        assert_eq!(
+            account_minute_sum, 7,
+            "cutover should preserve account minute buckets"
+        );
+
+        let account_hour_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM account_usage_buckets WHERE user_id = ? AND granularity = ?",
+        )
+        .bind(&user.user_id)
+        .bind(GRANULARITY_HOUR)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read account hour buckets");
+        assert_eq!(
+            account_hour_sum, 8,
+            "cutover should preserve account hour buckets"
+        );
+
+        let account_monthly_count: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(month_count, 0) FROM account_monthly_quota WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_optional(&proxy_after.key_store.pool)
+        .await
+        .expect("read account monthly quota")
+        .unwrap_or(0);
+        assert_eq!(
+            account_monthly_count, 14,
+            "cutover should preserve account monthly quota"
+        );
+
+        // Third start: cutover meta key exists, so preserved counters should remain untouched.
+        sqlx::query(
+            "UPDATE token_usage_buckets SET count = ? WHERE token_id = ? AND bucket_start = ? AND granularity = ?",
+        )
+        .bind(12_i64)
+        .bind(&unbound_token.id)
+        .bind(minute_bucket)
+        .bind(GRANULARITY_MINUTE)
+        .execute(&proxy_after.key_store.pool)
+        .await
+        .expect("update post-cutover token bucket");
+        drop(proxy_after);
+
+        let proxy_third =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy restarted again");
+
+        let token_minute_sum_after: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(count), 0) FROM token_usage_buckets WHERE token_id = ? AND granularity = ?",
+        )
+        .bind(&unbound_token.id)
+        .bind(GRANULARITY_MINUTE)
+        .fetch_one(&proxy_third.key_store.pool)
+        .await
+        .expect("read token minute buckets after third start");
+        assert_eq!(
+            token_minute_sum_after, 12,
+            "cutover migration must not rerun after meta is set"
+        );
+
+        // Silence unused warning for the bound token variable; it exists only for FK seeding.
+        assert!(!bound_token.id.is_empty());
+
         let _ = std::fs::remove_file(db_path);
     }
 
