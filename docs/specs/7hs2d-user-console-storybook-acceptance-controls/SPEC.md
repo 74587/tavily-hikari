@@ -86,6 +86,7 @@
 
 ### Testing
 
+- `cd web && bun test src/UserConsole.stories.test.ts src/lib/mcpProbe.test.js`
 - `cd web && bun run build`
 - `cd web && bun run build-storybook`
 
@@ -114,3 +115,4 @@
 
 - 2026-03-07: 将 UserConsole Storybook 公开 args 收敛为 `consoleView`、`tokenListState`、`tokenDetailPreview`，并把 preset stories 改为业务语义命名。
 - 2026-03-07: 已完成 `cd web && bun run build` 与 `cd web && bun run build-storybook`；静态产物确认 UserConsole stories 不再暴露 `scenario`。
+- 2026-03-07: 新增 `web/src/UserConsole.stories.test.ts`，回归锁定 acceptance-facing args、条件 controls 与旧导出名移除。
