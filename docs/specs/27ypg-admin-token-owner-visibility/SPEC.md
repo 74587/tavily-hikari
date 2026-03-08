@@ -119,7 +119,7 @@
   target_program: mock-only
   capture_scope: browser-viewport
   sensitive_exclusion: N/A
-  submission_gate: pending-owner-approval
+  submission_gate: approved
   evidence_note: verifies the admin token list shows bound and unbound owner states, and owner names are rendered as clickable review targets.
   image:
   ![Admin tokens owner list](./assets/admin-tokens-owner-list.png)
@@ -130,7 +130,7 @@
   target_program: mock-only
   capture_scope: browser-viewport
   sensitive_exclusion: N/A
-  submission_gate: pending-owner-approval
+  submission_gate: approved
   evidence_note: verifies the token detail metadata card exposes the linked user block with clickable owner text.
   image:
   ![Admin token detail owner card](./assets/admin-token-detail-owner-card.png)
