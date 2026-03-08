@@ -308,10 +308,14 @@ function TokenOwnerValue({
   const secondary = tokenOwnerSecondary(owner)
   return (
     <div className={`token-owner-block${compact ? ' token-owner-block-compact' : ''}`}>
-      <button type="button" className="link-button token-owner-link" onClick={() => onOpenUser(owner.userId)}>
-        {tokenOwnerPrimary(owner)}
+      <button
+        type="button"
+        className={`link-button token-owner-trigger${compact ? ' token-owner-trigger-compact' : ''}`}
+        onClick={() => onOpenUser(owner.userId)}
+      >
+        <span className="token-owner-link">{tokenOwnerPrimary(owner)}</span>
+        {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
       </button>
-      {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
     </div>
   )
 }

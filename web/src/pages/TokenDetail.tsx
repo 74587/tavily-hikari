@@ -128,13 +128,16 @@ function TokenOwnerValue({
   return (
     <div className="token-owner-block">
       {onOpenUser ? (
-        <button type="button" className="link-button token-owner-link" onClick={() => onOpenUser(owner.userId)}>
-          {tokenOwnerPrimary(owner)}
+        <button type="button" className="link-button token-owner-trigger" onClick={() => onOpenUser(owner.userId)}>
+          <span className="token-owner-link">{tokenOwnerPrimary(owner)}</span>
+          {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
         </button>
       ) : (
-        <span className="token-owner-link">{tokenOwnerPrimary(owner)}</span>
+        <>
+          <span className="token-owner-link">{tokenOwnerPrimary(owner)}</span>
+          {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
+        </>
       )}
-      {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
     </div>
   )
 }

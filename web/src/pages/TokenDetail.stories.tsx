@@ -204,6 +204,15 @@ function installEventSourceMock(): () => void {
   };
 }
 
+function openStoryInManager(storyId: string): void {
+  const target = `${window.location.origin}/?path=/story/${storyId}`;
+  if (window.top && window.top !== window) {
+    window.top.location.assign(target);
+    return;
+  }
+  window.location.assign(target);
+}
+
 function TokenDetailStoryCanvas({
   detail = tokenDetailMock,
 }: {
@@ -227,7 +236,16 @@ function TokenDetailStoryCanvas({
     return <div style={{ minHeight: "100vh" }} />;
   }
 
-  return <TokenDetail id={detail.id} onBack={() => undefined} />;
+  return (
+    <TokenDetail
+      id={detail.id}
+      onBack={() => undefined}
+      onOpenUser={(userId) => {
+        if (!userId) return;
+        openStoryInManager('admin-pages--user-detail');
+      }}
+    />
+  );
 }
 
 const meta = {

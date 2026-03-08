@@ -2683,6 +2683,31 @@ button:disabled {
   white-space: nowrap;
   font-weight: 600;
 }
+
+.token-owner-trigger {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+}
+.token-owner-trigger .token-owner-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.token-owner-trigger-compact {
+  align-items: flex-end;
+  text-align: right;
+}
+.token-owner-trigger:hover .token-owner-link,
+.token-owner-trigger:hover .token-owner-secondary,
+.token-owner-trigger:focus-visible .token-owner-link,
+.token-owner-trigger:focus-visible .token-owner-secondary {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .token-owner-secondary {
   max-width: 100%;
   overflow: hidden;
