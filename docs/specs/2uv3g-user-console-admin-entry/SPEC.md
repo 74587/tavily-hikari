@@ -75,6 +75,14 @@
 - 管理员入口在 desktop 与 mobile 管理员态下可见。
 - Storybook Controls 暴露 `Admin session` 布尔开关。
 
+## Visual Evidence (PR)
+
+![管理员会话下的用户控制台入口](./assets/console-real-admin-preview.png)
+
+- 证据类型：真实应用预览态 `/console` 页面截图。
+- 证明点：管理员会话进入 `/console` 后，页头显示唯一且清晰的“打开管理员面板”入口。
+- 证明点：控制台主体正常渲染，不出现用户接口 `404` 提示。
+
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: `/console` 页头增加管理员专属入口
