@@ -78,7 +78,7 @@ async fn serve_console_index(
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
     if !state.linuxdo_oauth.is_enabled_and_configured() {
-        return Err(StatusCode::NOT_FOUND);
+        return load_spa_response(state.as_ref(), "console.html").await;
     }
     if resolve_user_session(state.as_ref(), &headers)
         .await

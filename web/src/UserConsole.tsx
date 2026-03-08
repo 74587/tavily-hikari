@@ -40,6 +40,7 @@ import {
 } from './lib/mcpProbe'
 import { useResponsiveModes } from './lib/responsive'
 import { getUserConsoleAdminHref } from './lib/userConsoleAdminEntry'
+import { resolveUserConsoleAvailability } from './lib/userConsoleAvailability'
 
 const REPO_URL = 'https://github.com/IvanLi-CN/tavily-hikari'
 const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
@@ -266,16 +267,27 @@ export default function UserConsole(): JSX.Element {
 
   const reloadBase = useCallback(async (signal: AbortSignal) => {
     try {
-      const [nextProfile, nextDashboard, nextTokens] = await Promise.all([
-        fetchProfile(signal),
-        fetchUserDashboard(signal),
-        fetchUserTokens(signal),
-      ])
+      const nextProfile = await fetchProfile(signal)
       setProfile(nextProfile)
-      if (nextProfile.userLoggedIn === false) {
+
+      const availability = resolveUserConsoleAvailability(nextProfile)
+      if (availability === 'logged_out') {
         window.location.href = '/'
         return
       }
+      if (availability === 'disabled') {
+        setDashboard(null)
+        setTokens([])
+        setDetail(null)
+        setDetailLogs([])
+        setError(null)
+        return
+      }
+
+      const [nextDashboard, nextTokens] = await Promise.all([
+        fetchUserDashboard(signal),
+        fetchUserTokens(signal),
+      ])
       setDashboard(nextDashboard)
       setTokens(nextTokens)
       setError(null)
@@ -296,10 +308,13 @@ export default function UserConsole(): JSX.Element {
     return () => controller.abort()
   }, [reloadBase])
 
+  const consoleAvailability = resolveUserConsoleAvailability(profile)
+
   useEffect(() => {
-    if (route.name !== 'token') {
+    if (consoleAvailability !== 'enabled' || route.name !== 'token') {
       setDetail(null)
       setDetailLogs([])
+      setDetailLoading(false)
       return
     }
     setDetail(null)
@@ -325,7 +340,7 @@ export default function UserConsole(): JSX.Element {
       })
       .finally(() => setDetailLoading(false))
     return () => controller.abort()
-  }, [route, text.errors.detail])
+  }, [consoleAvailability, route, text.errors.detail])
 
   useEffect(() => {
     probeRunIdRef.current += 1
@@ -407,6 +422,7 @@ export default function UserConsole(): JSX.Element {
 
   const anyProbeRunning = mcpProbe.state === 'running' || apiProbe.state === 'running'
   const adminHref = getUserConsoleAdminHref(profile)
+  const consoleUnavailable = consoleAvailability === 'disabled'
 
   const runMcpProbe = useCallback(async () => {
     if (route.name !== 'token' || anyProbeRunning) return
@@ -877,6 +893,9 @@ export default function UserConsole(): JSX.Element {
   const goDashboard = () => {
     window.location.hash = '#/dashboard'
   }
+  const goHome = () => {
+    window.location.href = '/'
+  }
   const goTokens = () => {
     window.location.hash = '#/tokens'
   }
@@ -934,20 +953,41 @@ export default function UserConsole(): JSX.Element {
         </div>
       </section>
 
-      <section className="surface panel" style={{ marginBottom: 16 }}>
-        <div className="table-actions">
-          <button type="button" className={`btn ${route.name === 'dashboard' ? 'btn-primary' : 'btn-outline'}`} onClick={goDashboard}>
-            {text.nav.dashboard}
-          </button>
-          <button type="button" className={`btn ${route.name !== 'dashboard' ? 'btn-primary' : 'btn-outline'}`} onClick={goTokens}>
-            {text.nav.tokens}
-          </button>
-        </div>
-      </section>
+      {!consoleUnavailable && (
+        <section className="surface panel" style={{ marginBottom: 16 }}>
+          <div className="table-actions">
+            <button type="button" className={`btn ${route.name === 'dashboard' ? 'btn-primary' : 'btn-outline'}`} onClick={goDashboard}>
+              {text.nav.dashboard}
+            </button>
+            <button type="button" className={`btn ${route.name !== 'dashboard' ? 'btn-primary' : 'btn-outline'}`} onClick={goTokens}>
+              {text.nav.tokens}
+            </button>
+          </div>
+        </section>
+      )}
 
-      {error && <section className="surface error-banner">{error}</section>}
+      {consoleUnavailable && (
+        <section className="surface panel access-panel">
+          <div className="console-unavailable-state">
+            <div className="console-unavailable-icon" aria-hidden="true">
+              <Icon icon="mdi:account-off-outline" width={22} height={22} />
+            </div>
+            <div className="console-unavailable-copy">
+              <h2>{text.unavailable.title}</h2>
+              <p>{text.unavailable.description}</p>
+            </div>
+            <div className="table-actions console-unavailable-actions">
+              <button type="button" className="btn btn-primary" onClick={goHome}>
+                {text.unavailable.home}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
-      {route.name === 'dashboard' && (
+      {!consoleUnavailable && error && <section className="surface error-banner">{error}</section>}
+
+      {!consoleUnavailable && route.name === 'dashboard' && (
         <>
           <section className="surface panel access-panel">
             <header className="panel-header">
@@ -1001,7 +1041,7 @@ export default function UserConsole(): JSX.Element {
         </>
       )}
 
-      {route.name === 'tokens' && (
+      {!consoleUnavailable && route.name === 'tokens' && (
         <section className="surface panel">
           <div className="panel-header">
             <h2>{text.tokens.title}</h2>
@@ -1144,7 +1184,7 @@ export default function UserConsole(): JSX.Element {
         </section>
       )}
 
-      {route.name === 'token' && (
+      {!consoleUnavailable && route.name === 'token' && (
         <>
           <section className="surface panel access-panel">
             <header className="panel-header" style={{ marginBottom: 8 }}>
@@ -1756,6 +1796,11 @@ const EN = {
       actions: 'Actions',
     },
   },
+  unavailable: {
+    title: 'User console unavailable',
+    description: 'This server has not enabled user OAuth login, so `/console` cannot load dashboard or token data right now.',
+    home: 'Back to Home',
+  },
   detail: {
     title: 'Token Detail',
     subtitle: 'Same token-level modules as home page (without global site card).',
@@ -1880,6 +1925,11 @@ const ZH = {
       dailyFailure: '今日失败',
       actions: '操作',
     },
+  },
+  unavailable: {
+    title: '用户控制台暂不可用',
+    description: '当前服务未启用用户 OAuth 登录，因此 `/console` 暂时无法加载账户仪表盘与 Token 数据。',
+    home: '返回首页',
   },
   detail: {
     title: 'Token 详情',

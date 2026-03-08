@@ -3793,6 +3793,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn console_route_serves_spa_when_user_oauth_is_disabled() {
+        let db_path = temp_db_path("console-route-disabled");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("create proxy");
+
+        let addr = spawn_user_oauth_server_with_options(proxy, LinuxDoOAuthOptions::disabled()).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build no-redirect client");
+
+        let console_resp = client
+            .get(format!("http://{}/console", addr))
+            .send()
+            .await
+            .expect("console request");
+        assert_eq!(console_resp.status(), reqwest::StatusCode::OK);
+        let console_html = console_resp.text().await.expect("console html");
+        assert!(console_html.contains("<title>console</title>"));
+
+        let profile_resp = client
+            .get(format!("http://{}/api/profile", addr))
+            .send()
+            .await
+            .expect("profile request");
+        assert_eq!(profile_resp.status(), reqwest::StatusCode::OK);
+        let profile_body: serde_json::Value = profile_resp.json().await.expect("profile json");
+        assert!(profile_body.get("userLoggedIn").is_none());
+
+        let dashboard_resp = client
+            .get(format!("http://{}/api/user/dashboard", addr))
+            .send()
+            .await
+            .expect("dashboard request");
+        assert_eq!(dashboard_resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn post_linuxdo_auth_persists_preferred_token_id_in_oauth_state() {
         let db_path = temp_db_path("linuxdo-auth-post-preferred-token");
         let db_str = db_path.to_string_lossy().to_string();

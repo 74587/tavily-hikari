@@ -4226,6 +4226,38 @@ tbody .log-details-row:hover {
   margin-top: -12px;
 }
 
+.console-unavailable-state {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.console-unavailable-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: hsl(var(--warning) / 0.14);
+  color: hsl(var(--warning));
+}
+
+.console-unavailable-copy h2 {
+  margin: 0;
+}
+
+.console-unavailable-copy p {
+  margin: 8px 0 0;
+  max-width: 60ch;
+  color: hsl(var(--muted-foreground));
+}
+
+.console-unavailable-actions {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .link-button {
   background: none;
   border: none;
