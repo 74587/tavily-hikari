@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-07
-- Last: 2026-03-07
+- Last: 2026-03-08
 
 ## 背景 / 问题陈述
 
@@ -110,6 +110,30 @@
 
 - Storybook token 列表页与 token 详情页均可看到 owner present / owner missing mock。
 - 真实 admin 页面完成 owner 列表与详情验收；浏览器会话保留供复查。
+
+## Visual Evidence (PR)
+
+- source_type: storybook_canvas
+  story_id_or_title: admin-pages--tokens
+  state: default
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  evidence_note: verifies the admin token list shows bound and unbound owner states, and owner names are rendered as clickable review targets.
+  image:
+  ![Admin tokens owner list](./assets/admin-tokens-owner-list.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: admin-pages-tokendetail--default
+  state: default
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  evidence_note: verifies the token detail metadata card exposes the linked user block with clickable owner text.
+  image:
+  ![Admin token detail owner card](./assets/admin-token-detail-owner-card.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
