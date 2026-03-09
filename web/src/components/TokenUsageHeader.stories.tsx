@@ -19,7 +19,7 @@ const focusOptions = [
 ] as const
 
 const meta = {
-  title: 'Admin/TokenUsageHeader',
+  title: 'Admin/Components/TokenUsageHeader',
   component: TokenUsageHeader,
   parameters: {
     layout: 'padded',

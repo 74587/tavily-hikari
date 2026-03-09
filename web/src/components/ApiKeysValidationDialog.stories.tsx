@@ -81,7 +81,7 @@ function ModalHarness(props: { initial: KeysValidationState }): JSX.Element {
 }
 
 const meta = {
-  title: "Admin/ApiKeysValidationDialog",
+  title: "Admin/Components/ApiKeysValidationDialog",
   component: ModalHarness,
   parameters: { layout: "fullscreen" },
   render: (args) => <ModalHarness {...args} />,

@@ -3,7 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import AdminPanelHeader from './AdminPanelHeader'
 
 const meta = {
-  title: 'Admin/AdminPanelHeader',
+  title: 'Admin/Components/AdminPanelHeader',
   component: AdminPanelHeader,
   parameters: {
     layout: 'padded',
