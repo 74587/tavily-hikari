@@ -1982,6 +1982,37 @@ impl TavilyProxy {
         self.key_store.get_admin_user_identity(user_id).await
     }
 
+    /// Admin: resolve token owners in bulk for management views.
+    pub async fn get_admin_token_owners(
+        &self,
+        token_ids: &[String],
+    ) -> Result<HashMap<String, AdminUserIdentity>, ProxyError> {
+        if token_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let token_bindings = self
+            .key_store
+            .list_user_bindings_for_tokens(token_ids)
+            .await?;
+        if token_bindings.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut user_ids: Vec<String> = token_bindings.values().cloned().collect();
+        user_ids.sort_unstable();
+        user_ids.dedup();
+
+        let user_map = self.key_store.get_admin_user_identities(&user_ids).await?;
+        let mut owners = HashMap::with_capacity(token_bindings.len());
+        for (token_id, user_id) in token_bindings {
+            if let Some(identity) = user_map.get(&user_id) {
+                owners.insert(token_id, identity.clone());
+            }
+        }
+        Ok(owners)
+    }
+
     /// Admin: upsert account quota limits for a user.
     pub async fn update_account_quota_limits(
         &self,
@@ -6544,6 +6575,63 @@ impl KeyStore {
                 }
             },
         ))
+    }
+
+    async fn get_admin_user_identities(
+        &self,
+        user_ids: &[String],
+    ) -> Result<HashMap<String, AdminUserIdentity>, ProxyError> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut builder = QueryBuilder::new(
+            r#"SELECT
+                 u.id,
+                 u.display_name,
+                 u.username,
+                 u.active,
+                 u.last_login_at,
+                 COALESCE(COUNT(b.token_id), 0) AS token_count
+               FROM users u
+               LEFT JOIN user_token_bindings b ON b.user_id = u.id
+               WHERE u.id IN ("#,
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for user_id in user_ids {
+                separated.push_bind(user_id);
+            }
+        }
+        builder.push(") GROUP BY u.id, u.display_name, u.username, u.active, u.last_login_at");
+
+        let rows = builder
+            .build_query_as::<(
+                String,
+                Option<String>,
+                Option<String>,
+                i64,
+                Option<i64>,
+                i64,
+            )>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut items = HashMap::with_capacity(rows.len());
+        for (user_id, display_name, username, active, last_login_at, token_count) in rows {
+            items.insert(
+                user_id.clone(),
+                AdminUserIdentity {
+                    user_id,
+                    display_name,
+                    username,
+                    active: active == 1,
+                    last_login_at,
+                    token_count,
+                },
+            );
+        }
+        Ok(items)
     }
 
     async fn update_account_quota_limits(

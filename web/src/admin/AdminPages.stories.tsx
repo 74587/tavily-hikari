@@ -1,5 +1,7 @@
 import { Icon } from '@iconify/react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { addons } from 'storybook/preview-api'
+import { SELECT_STORY } from 'storybook/internal/core-events'
 import { Fragment, type ReactNode, useState } from 'react'
 
 import type {
@@ -35,12 +37,17 @@ import type { AdminModuleId } from './routes'
 
 const now = 1_762_380_000
 
+function openAdminStory(storyId: string): void {
+  addons.getChannel().emit(SELECT_STORY, { storyId })
+}
+
 const MOCK_TOKENS: AuthToken[] = [
   {
     id: '9vsN',
     enabled: true,
     note: 'Core production',
     group: 'production',
+    owner: { userId: 'usr_alice', displayName: 'Alice Chen', username: 'alice' },
     total_requests: 32_640,
     created_at: now - 86_400 * 120,
     last_used_at: now - 320,
@@ -60,6 +67,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Batch enrichment',
     group: 'batch',
+    owner: { userId: 'usr_ops_bot', displayName: 'Ops Bot', username: 'ops-bot' },
     total_requests: 21_884,
     created_at: now - 86_400 * 90,
     last_used_at: now - 1_200,
@@ -79,6 +87,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: false,
     note: 'Legacy backup token',
     group: 'legacy',
+    owner: null,
     total_requests: 7_201,
     created_at: now - 86_400 * 240,
     last_used_at: now - 86_400 * 2,
@@ -98,6 +107,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Realtime recommendation',
     group: 'production',
+    owner: { userId: 'usr_bob', displayName: 'Bob Li', username: 'bobli' },
     total_requests: 19_901,
     created_at: now - 86_400 * 60,
     last_used_at: now - 42,
@@ -117,6 +127,7 @@ const MOCK_TOKENS: AuthToken[] = [
     enabled: true,
     note: 'Risk control',
     group: 'ops',
+    owner: { userId: 'usr_risk', displayName: 'Risk Control', username: 'risk-control' },
     total_requests: 11_298,
     created_at: now - 86_400 * 30,
     last_used_at: now - 510,
@@ -701,6 +712,7 @@ function TokensPageCanvas(): JSX.Element {
             <thead>
               <tr>
                 <th>{tokenStrings.table.id}</th>
+                <th>{tokenStrings.table.owner}</th>
                 <th>{tokenStrings.table.note}</th>
                 <th>{tokenStrings.table.usage}</th>
                 <th>{tokenStrings.table.quota}</th>
@@ -712,9 +724,39 @@ function TokensPageCanvas(): JSX.Element {
               {MOCK_TOKENS.map((token) => (
                 <tr key={token.id}>
                   <td>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <code>{token.id}</code>
-                      {!token.enabled && <StatusBadge tone="warning">{tokenStrings.statusBadges.disabled}</StatusBadge>}
+                    <div className="token-id-cell">
+                      <code className="token-id-code">{token.id}</code>
+                      <span
+                        className="token-status-slot"
+                        aria-hidden={token.enabled ? true : undefined}
+                        title={token.enabled ? undefined : tokenStrings.statusBadges.disabled}
+                      >
+                        {!token.enabled && (
+                          <Icon
+                            className="token-status-icon"
+                            icon="mdi:pause-circle-outline"
+                            width={14}
+                            height={14}
+                            aria-label={tokenStrings.statusBadges.disabled}
+                          />
+                        )}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="token-owner-block">
+                      {token.owner ? (
+                        <button
+                          type="button"
+                          className="link-button token-owner-trigger"
+                          onClick={() => openAdminStory('admin-pages--user-detail')}
+                        >
+                          <span className="token-owner-link">{token.owner.displayName || token.owner.userId}</span>
+                          {token.owner.username ? <span className="token-owner-secondary">@{token.owner.username}</span> : null}
+                        </button>
+                      ) : (
+                        <span className="token-owner-empty">{tokenStrings.owner.unbound}</span>
+                      )}
                     </div>
                   </td>
                   <td>{token.note ?? '—'}</td>

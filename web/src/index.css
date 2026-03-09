@@ -2664,6 +2664,62 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.token-owner-block {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.token-owner-block-compact {
+  align-items: flex-end;
+  text-align: right;
+}
+.token-owner-link {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.token-owner-trigger {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+}
+.token-owner-trigger .token-owner-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.token-owner-trigger-compact {
+  align-items: flex-end;
+  text-align: right;
+}
+.token-owner-trigger:hover .token-owner-link,
+.token-owner-trigger:hover .token-owner-secondary,
+.token-owner-trigger:focus-visible .token-owner-link,
+.token-owner-trigger:focus-visible .token-owner-secondary {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.token-owner-secondary {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: hsl(var(--muted-foreground));
+}
+.token-owner-empty {
+  color: hsl(var(--muted-foreground));
+  font-weight: 500;
+}
 .token-metric-card {
   gap: 10px;
 }
@@ -3380,24 +3436,53 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 
+
+.token-id-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.token-id-link {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.token-id-code {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-id-cell .status-badge,
+.token-id-cell .token-status-slot {
+  flex-shrink: 0;
+}
+
 .tokens-table th:nth-child(1),
 .tokens-table td:nth-child(1) {
   width: 10%;
 }
 
-.tokens-table th:nth-child(3),
-.tokens-table td:nth-child(3) {
+.tokens-table th:nth-child(4),
+.tokens-table td:nth-child(4) {
   width: 12ch;
 }
 
-.tokens-table th:nth-child(5),
-.tokens-table td:nth-child(5) {
+.tokens-table th:nth-child(6),
+.tokens-table td:nth-child(6) {
   width: 21ch;
 }
 
 /* Token table: keep the actions column wide enough for icon buttons */
-.tokens-table th:nth-child(6),
-.tokens-table td:nth-child(6) {
+.tokens-table th:nth-child(7),
+.tokens-table td:nth-child(7) {
   width: 182px;
 }
 

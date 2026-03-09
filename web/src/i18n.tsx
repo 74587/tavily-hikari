@@ -332,6 +332,7 @@ interface AdminTranslationsShape {
     table: {
       id: string
       note: string
+      owner: string
       usage: string
       quota: string
       lastUsed: string
@@ -340,6 +341,10 @@ interface AdminTranslationsShape {
     empty: {
       loading: string
       none: string
+    }
+    owner: {
+      label: string
+      unbound: string
     }
     actions: {
       copy: string
@@ -1078,6 +1083,7 @@ export const translations: Record<Language, TranslationShape> = {
         table: {
           id: 'ID',
           note: 'Note',
+          owner: 'Owner',
           usage: 'Usage',
           quota: 'Rate Limit',
           lastUsed: 'Last Used',
@@ -1086,6 +1092,10 @@ export const translations: Record<Language, TranslationShape> = {
         empty: {
           loading: 'Loading tokens…',
           none: 'No tokens yet.',
+        },
+        owner: {
+          label: 'Linked User',
+          unbound: 'Unbound',
         },
         actions: {
           copy: 'Copy full token',
@@ -1812,6 +1822,7 @@ export const translations: Record<Language, TranslationShape> = {
         table: {
           id: 'ID',
           note: '备注',
+          owner: '关联用户',
           usage: '用量',
           quota: '限额状态',
           lastUsed: '最近使用',
@@ -1820,6 +1831,10 @@ export const translations: Record<Language, TranslationShape> = {
         empty: {
           loading: '正在加载令牌…',
           none: '暂时没有令牌。',
+        },
+        owner: {
+          label: '关联用户',
+          unbound: '未关联用户',
         },
         actions: {
           copy: '复制完整令牌',

@@ -1001,6 +1001,25 @@ struct TokenGroupView {
     latest_created_at: i64,
 }
 
+async fn build_auth_token_views(
+    state: &Arc<AppState>,
+    items: Vec<AuthToken>,
+) -> Result<Vec<AuthTokenView>, ProxyError> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let token_ids: Vec<String> = items.iter().map(|token| token.id.clone()).collect();
+    let owners = state.proxy.get_admin_token_owners(&token_ids).await?;
+    Ok(items
+        .into_iter()
+        .map(|token| {
+            let owner = owners.get(&token.id);
+            AuthTokenView::from_token_and_owner(token, owner)
+        })
+        .collect())
+}
+
 async fn list_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1041,7 +1060,10 @@ async fn list_tokens(
                     filtered[start..end].to_vec()
                 };
                 Ok(Json(ListTokensResponse {
-                    items: slice.into_iter().map(AuthTokenView::from).collect(),
+                    items: build_auth_token_views(&state, slice).await.map_err(|err| {
+                        eprintln!("list tokens owner resolution error: {err}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
                     total,
                     page,
                     per_page,
@@ -1068,7 +1090,10 @@ async fn list_tokens(
                     filtered[start..end].to_vec()
                 };
                 Ok(Json(ListTokensResponse {
-                    items: slice.into_iter().map(AuthTokenView::from).collect(),
+                    items: build_auth_token_views(&state, slice).await.map_err(|err| {
+                        eprintln!("list tokens owner resolution error: {err}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
                     total,
                     page,
                     per_page,
@@ -1082,7 +1107,10 @@ async fn list_tokens(
     } else {
         match state.proxy.list_access_tokens_paged(page, per_page).await {
             Ok((items, total)) => Ok(Json(ListTokensResponse {
-                items: items.into_iter().map(AuthTokenView::from).collect(),
+                items: build_auth_token_views(&state, items).await.map_err(|err| {
+                    eprintln!("list tokens owner resolution error: {err}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?,
                 total,
                 page,
                 per_page,
