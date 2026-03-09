@@ -682,9 +682,7 @@
 
 .admin-nav-item {
   width: 100%;
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   background: transparent;
   border-radius: 10px;
   padding: 10px 12px;
@@ -878,9 +876,7 @@
     position: fixed;
     inset: 0;
     z-index: 1090;
-    min-width: 32px;
-  width: 32px;
-  height: 32px;
+    border: none;
     padding: 0;
     margin: 0;
     cursor: pointer;
@@ -1017,9 +1013,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   background: transparent;
   font-weight: 500;
   padding: 6px 10px;
@@ -1569,9 +1563,7 @@
   display: block;
   width: 100%;
   padding: 0;
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   border-radius: 0;
   background: none;
   box-shadow: none;
@@ -2824,9 +2816,7 @@ table {
 }
 
 .log-time-trigger {
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   background: transparent;
   padding: 0;
   font: inherit;
@@ -3347,9 +3337,7 @@ tbody tr:hover {
   justify-content: flex-end; /* 右对齐内容，让箭头靠右 */
   width: 100%; /* 占满单元格，避免内容拥挤 */
   padding: 0;
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   background: none;
   cursor: pointer;
   color: inherit;
@@ -3382,9 +3370,7 @@ tbody tr:hover {
   gap: 8px;
   width: 100%;
   padding: 0;
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   background: none;
   cursor: pointer;
   font: inherit;
@@ -4004,9 +3990,7 @@ tbody tr:hover {
 }
 
 .job-type-trigger {
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   background: transparent;
   padding: 0;
   font: inherit;
@@ -4258,9 +4242,7 @@ tbody .log-details-row:hover {
 
 .link-button {
   background: none;
-  min-width: 32px;
-  width: 32px;
-  height: 32px;
+  border: none;
   padding: 0;
   margin: 0;
   color: inherit;
@@ -5833,9 +5815,7 @@ tbody .log-details-row:hover {
     min-height: 0;
     overflow: visible;
     padding: 0;
-    min-width: 32px;
-  width: 32px;
-  height: 32px;
+    border: none;
     background: transparent;
     box-shadow: none;
     backdrop-filter: none;
@@ -5849,9 +5829,7 @@ tbody .log-details-row:hover {
     min-height: 0;
     height: auto;
     padding: 0;
-    min-width: 32px;
-  width: 32px;
-  height: 32px;
+    border: none;
     border-radius: 0;
     background: transparent;
     box-shadow: none;
