@@ -69,6 +69,10 @@
   When OAuth 回调完成
   Then 用户的 LinuxDo 等级标签被切换为新的单一等级；若 `trust_level` 缺失或越界，则不自动删除旧等级标签。
 
+- Given LinuxDo OAuth 回调中系统标签同步暂时失败
+  When 用户身份与 OAuth 账户信息已经写入成功
+  Then 登录流程仍然成功完成，并通过后续登录或启动期回填补齐 LinuxDo 系统标签绑定。
+
 - Given 用户基线额度仍跟随默认值
   When 服务重启且 env 默认额度变化
   Then 用户基线额度同步到新默认值。
@@ -99,6 +103,10 @@
 
 - Given 打开 `/admin/users/:id`
   Then 页面顺序固定为 `Identity → User Tags → Base Quota → Effective Quota Breakdown → Tokens`，且可即时看到标签变更与基线编辑后的有效额度刷新结果。
+
+- Given 管理员从带有标签筛选的 `/admin/users` 列表进入用户详情
+  When 点击详情页返回按钮
+  Then 页面恢复到进入详情前的用户列表筛选上下文，而不是丢失 `q` / `tagId` 条件。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
