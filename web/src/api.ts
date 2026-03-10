@@ -152,6 +152,18 @@ async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T
   return (await response.json()) as T
 }
 
+async function requestNoContent(input: RequestInfo, init?: RequestInit): Promise<void> {
+  const response = await fetch(input, init)
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText)
+    const err = new Error(message || `Request failed with status ${response.status}`) as Error & {
+      status?: number
+    }
+    err.status = response.status
+    throw err
+  }
+}
+
 async function requestJsonWithToken<T>(
   input: RequestInfo,
   token: string,
@@ -268,6 +280,55 @@ export function fetchProfile(signal?: AbortSignal): Promise<Profile> {
   return requestJson('/api/profile', { signal })
 }
 
+export interface AdminQuotaLimitSet {
+  hourlyAnyLimit: number
+  hourlyLimit: number
+  dailyLimit: number
+  monthlyLimit: number
+  inheritsDefaults: boolean
+}
+
+export interface AdminUserTag {
+  id: string
+  name: string
+  displayName: string
+  icon: string | null
+  systemKey: string | null
+  effectKind: string
+  hourlyAnyDelta: number
+  hourlyDelta: number
+  dailyDelta: number
+  monthlyDelta: number
+  userCount: number
+}
+
+export interface AdminUserTagBinding {
+  tagId: string
+  name: string
+  displayName: string
+  icon: string | null
+  systemKey: string | null
+  effectKind: string
+  hourlyAnyDelta: number
+  hourlyDelta: number
+  dailyDelta: number
+  monthlyDelta: number
+  source: string
+}
+
+export interface AdminUserQuotaBreakdownEntry {
+  kind: string
+  label: string
+  tagId: string | null
+  tagName: string | null
+  source: string | null
+  effectKind: string
+  hourlyAnyDelta: number
+  hourlyDelta: number
+  dailyDelta: number
+  monthlyDelta: number
+}
+
 export interface AdminUserSummary {
   userId: string
   displayName: string | null
@@ -275,6 +336,7 @@ export interface AdminUserSummary {
   active: boolean
   lastLoginAt: number | null
   tokenCount: number
+  tags: AdminUserTagBinding[]
   hourlyAnyUsed: number
   hourlyAnyLimit: number
   quotaHourlyUsed: number
@@ -309,6 +371,9 @@ export interface AdminUserTokenSummary {
 
 export interface AdminUserDetail extends AdminUserSummary {
   tokens: AdminUserTokenSummary[]
+  quotaBase: AdminQuotaLimitSet
+  effectiveQuota: AdminQuotaLimitSet
+  quotaBreakdown: AdminUserQuotaBreakdownEntry[]
 }
 
 export interface UpdateUserQuotaPayload {
@@ -316,6 +381,17 @@ export interface UpdateUserQuotaPayload {
   hourlyLimit: number
   dailyLimit: number
   monthlyLimit: number
+}
+
+export interface UpsertAdminUserTagPayload {
+  name: string
+  displayName: string
+  icon: string | null
+  effectKind: string
+  hourlyAnyDelta: number
+  hourlyDelta: number
+  dailyDelta: number
+  monthlyDelta: number
 }
 
 export interface UserTokenResponse {
@@ -689,14 +765,52 @@ export function fetchAdminUserDetail(id: string, signal?: AbortSignal): Promise<
 
 export async function updateAdminUserQuota(id: string, payload: UpdateUserQuotaPayload): Promise<void> {
   const encoded = encodeURIComponent(id)
-  const res = await fetch(`/api/users/${encoded}/quota`, {
+  await requestNoContent(`/api/users/${encoded}/quota`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!res.ok) {
-    throw new Error(`Failed to update user quota: ${res.status}`)
-  }
+}
+
+export function fetchAdminUserTags(signal?: AbortSignal): Promise<AdminUserTag[]> {
+  return requestJson<{ items: AdminUserTag[] }>('/api/user-tags', { signal }).then((response) => response.items)
+}
+
+export function createAdminUserTag(payload: UpsertAdminUserTagPayload): Promise<AdminUserTag> {
+  return requestJson('/api/user-tags', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateAdminUserTag(id: string, payload: UpsertAdminUserTagPayload): Promise<AdminUserTag> {
+  const encoded = encodeURIComponent(id)
+  return requestJson(`/api/user-tags/${encoded}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteAdminUserTag(id: string): Promise<void> {
+  const encoded = encodeURIComponent(id)
+  await requestNoContent(`/api/user-tags/${encoded}`, { method: 'DELETE' })
+}
+
+export async function bindAdminUserTag(userId: string, tagId: string): Promise<void> {
+  const encoded = encodeURIComponent(userId)
+  await requestNoContent(`/api/users/${encoded}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tagId }),
+  })
+}
+
+export async function unbindAdminUserTag(userId: string, tagId: string): Promise<void> {
+  const encodedUserId = encodeURIComponent(userId)
+  const encodedTagId = encodeURIComponent(tagId)
+  await requestNoContent(`/api/users/${encodedUserId}/tags/${encodedTagId}`, { method: 'DELETE' })
 }
 
 export interface TokenGroup {

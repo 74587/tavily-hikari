@@ -13,6 +13,9 @@ export type AdminPathRoute =
   | { name: 'token'; id: string }
   | { name: 'token-usage' }
   | { name: 'user'; id: string }
+  | { name: 'user-tags' }
+  | { name: 'user-tag-editor'; mode: 'create' }
+  | { name: 'user-tag-editor'; mode: 'edit'; id: string }
   | { name: 'key'; id: string }
 
 const ADMIN_BASE = '/admin'
@@ -66,6 +69,17 @@ export function parseAdminPath(pathname: string): AdminPathRoute {
   if (path === `${ADMIN_BASE}/users`) {
     return { name: 'module', module: 'users' }
   }
+  if (path === `${ADMIN_BASE}/users/tags`) {
+    return { name: 'user-tags' }
+  }
+  if (path === `${ADMIN_BASE}/users/tags/new`) {
+    return { name: 'user-tag-editor', mode: 'create' }
+  }
+  if (path.startsWith(`${ADMIN_BASE}/users/tags/`)) {
+    const id = decodeSegment(path.slice(`${ADMIN_BASE}/users/tags/`.length))
+    if (id) return { name: 'user-tag-editor', mode: 'edit', id }
+    return { name: 'user-tags' }
+  }
   if (path.startsWith(`${ADMIN_BASE}/users/`)) {
     const id = decodeSegment(path.slice(`${ADMIN_BASE}/users/`.length))
     if (id) return { name: 'user', id }
@@ -92,6 +106,14 @@ export function isSameAdminRoute(left: AdminPathRoute, right: AdminPathRoute): b
   if (left.name === 'user' && right.name === 'user') {
     return left.id === right.id
   }
+  if (left.name === 'user-tags' && right.name === 'user-tags') {
+    return true
+  }
+  if (left.name === 'user-tag-editor' && right.name === 'user-tag-editor') {
+    if (left.mode === 'create' && right.mode === 'create') return true
+    if (left.mode === 'edit' && right.mode === 'edit') return left.id === right.id
+    return false
+  }
   if (left.name === 'key' && right.name === 'key') {
     return left.id === right.id
   }
@@ -113,6 +135,18 @@ export function tokenLeaderboardPath(): string {
 
 export function userDetailPath(id: string): string {
   return `${ADMIN_BASE}/users/${encodeURIComponent(id)}`
+}
+
+export function userTagsPath(): string {
+  return `${ADMIN_BASE}/users/tags`
+}
+
+export function userTagCreatePath(): string {
+  return `${ADMIN_BASE}/users/tags/new`
+}
+
+export function userTagEditPath(id: string): string {
+  return `${ADMIN_BASE}/users/tags/${encodeURIComponent(id)}`
 }
 
 export function keyDetailPath(id: string): string {

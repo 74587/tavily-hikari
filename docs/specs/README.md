@@ -9,6 +9,7 @@
 
 |    ID | Title                                                  | Status           | Spec                                                       | Last       | Notes                                                                                                       |
 | ----: | ------------------------------------------------------ | ---------------- | ---------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------- |
+| 2mt2u | Admin 用户标签与额度叠加                               | 进行中（快车道） | `2mt2u-admin-user-tags-quota/SPEC.md`                      | 2026-03-09 | impl + tests + browser validation complete; pending PR/review-loop closeout                                 |
 | 2uv3g | 用户控制台管理员入口                                   | 已完成           | `2uv3g-user-console-admin-entry/SPEC.md`                   | 2026-03-08 | local branch: `/console` admin CTA + Storybook admin control + unit test                                    |
 | bcpru | Web 响应式双设备与 Storybook 断点验收收敛              | 已完成（6/6）    | `bcpru-web-responsive-breakpoint-convergence/SPEC.md`      | 2026-03-04 | fast-track: responsive convergence, Storybook coverage, and boundary validation completed                   |
 | vr67d | LinuxDo 登录复用既有 Token + 强制重登录 + 历史误建自愈 | 已完成（快车道） | `vr67d-linuxdo-token-rebind-relogin/SPEC.md`               | 2026-03-05 | hotfix: `/auth/linuxdo` use 303 to avoid POST body leak + fix upstream 405                                  |

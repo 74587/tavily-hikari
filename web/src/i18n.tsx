@@ -248,6 +248,7 @@ interface AdminTranslationsShape {
       username: string
       status: string
       tokenCount: string
+      tags: string
       hourlyAny: string
       hourly: string
       daily: string
@@ -278,6 +279,8 @@ interface AdminTranslationsShape {
       subtitle: string
       back: string
       userId: string
+      identityTitle: string
+      identityDescription: string
       tokensTitle: string
       tokensDescription: string
     }
@@ -294,6 +297,96 @@ interface AdminTranslationsShape {
       savedAt: string
       invalid: string
       saveFailed: string
+      inheritsDefaults: string
+      customized: string
+    }
+    catalog: {
+      title: string
+      description: string
+      summaryTitle: string
+      summaryDescription: string
+      summaryEmpty: string
+      summaryAccounts: string
+      loading: string
+      empty: string
+      invalid: string
+      loadFailed: string
+      saveFailed: string
+      deleteFailed: string
+      formCreateTitle: string
+      formEditTitle: string
+      formDescription: string
+      systemReadonly: string
+      iconPlaceholder: string
+      iconHint: string
+      scopeSystem: string
+      scopeSystemShort: string
+      scopeCustom: string
+      blockShort: string
+      blockDescription: string
+      deleteConfirm: string
+      deleteDialogTitle: string
+      deleteDialogCancel: string
+      deleteDialogConfirm: string
+      backToUsers: string
+      backToList: string
+      tagNotFound: string
+      columns: {
+        tag: string
+        scope: string
+        effect: string
+        delta: string
+        users: string
+        actions: string
+      }
+      fields: {
+        name: string
+        displayName: string
+        icon: string
+        effect: string
+        hourlyAny: string
+        hourly: string
+        daily: string
+        monthly: string
+      }
+      effectKinds: {
+        quotaDelta: string
+        blockAll: string
+      }
+      actions: {
+        create: string
+        save: string
+        saving: string
+        cancelEdit: string
+        edit: string
+        delete: string
+      }
+    }
+    userTags: {
+      title: string
+      description: string
+      empty: string
+      bindPlaceholder: string
+      bindAction: string
+      binding: string
+      unbindAction: string
+      bindFailed: string
+      unbindFailed: string
+      readOnly: string
+      sourceSystem: string
+      sourceManual: string
+      manageCatalog: string
+    }
+    effectiveQuota: {
+      title: string
+      description: string
+      blockAllNotice: string
+      baseLabel: string
+      columns: {
+        item: string
+        source: string
+        effect: string
+      }
     }
     tokens: {
       table: {
@@ -988,8 +1081,8 @@ export const translations: Record<Language, TranslationShape> = {
       },
       users: {
         title: 'User Management',
-        description: 'Account-level metrics, token visibility, and quota controls.',
-        searchPlaceholder: 'Search by user ID, display name, or username',
+        description: 'Account-level metrics, tag overlays, and shared quota controls.',
+        searchPlaceholder: 'Search by user ID, display name, username, or tag',
         search: 'Search',
         clear: 'Clear',
         pagination: 'Page {page} of {total}',
@@ -999,6 +1092,7 @@ export const translations: Record<Language, TranslationShape> = {
           username: 'Username',
           status: 'Status',
           tokenCount: 'Tokens',
+          tags: 'Tags',
           hourlyAny: '1h (any)',
           hourly: '1h',
           daily: '24h',
@@ -1029,22 +1123,114 @@ export const translations: Record<Language, TranslationShape> = {
           subtitle: 'Account {id}',
           back: 'Back to users',
           userId: 'User ID',
-          tokensTitle: 'Token List',
-          tokensDescription: 'Token-level metrics for this account.',
+          identityTitle: 'Identity',
+          identityDescription: 'Stable account identifiers and login status.',
+          tokensTitle: 'Tokens',
+          tokensDescription: 'All tokens under this account share the effective quota below.',
         },
         quota: {
-          title: 'Quota Settings',
-          description: 'Changes apply immediately and do not reset current usage counters.',
+          title: 'Base Quota',
+          description: 'Edit the account baseline. Tags are applied on top of this baseline.',
           hourlyAny: 'Hourly-any limit',
           hourly: 'Hourly business limit',
           daily: 'Daily business limit',
           monthly: 'Monthly business limit',
-          hint: 'Set positive integers only.',
-          save: 'Save quota',
+          hint: 'Base quota accepts positive integers only.',
+          save: 'Save base quota',
           saving: 'Saving…',
           savedAt: 'Saved at {time}',
-          invalid: 'All quota fields must be positive integers.',
-          saveFailed: 'Failed to update quota settings.',
+          invalid: 'All base quota fields must be positive integers.',
+          saveFailed: 'Failed to update base quota.',
+          inheritsDefaults: 'Following defaults',
+          customized: 'Customized baseline',
+        },
+        catalog: {
+          title: 'Tag Catalog',
+          description: 'Review reusable tags, account coverage, and effect settings.',
+          summaryTitle: 'Tag Coverage',
+          summaryDescription: 'See how many accounts are bound to each tag, then open the tag manager for full maintenance.',
+          summaryEmpty: 'No user tags available yet.',
+          summaryAccounts: 'accounts',
+          loading: 'Loading tag catalog…',
+          empty: 'No tags available yet.',
+          invalid: 'Please complete the required fields and use integer deltas.',
+          loadFailed: 'Failed to load tag catalog.',
+          saveFailed: 'Failed to save tag settings.',
+          deleteFailed: 'Failed to delete this tag.',
+          formCreateTitle: 'Create tag',
+          formEditTitle: 'Edit tag',
+          formDescription: 'Custom tags can group users, add quota, subtract quota, or block all access.',
+          systemReadonly: 'System tags keep their name and icon locked. Only quota effect fields are editable.',
+          iconPlaceholder: 'linuxdo or leave empty',
+          iconHint: 'Use `linuxdo` to render the local LinuxDo logo asset.',
+          scopeSystem: 'System',
+          scopeSystemShort: 'SYS',
+          scopeCustom: 'Custom',
+          blockShort: 'BLOCK',
+          blockDescription: 'block_all forces every effective quota dimension to display and enforce as 0.',
+          deleteConfirm: 'Delete tag “{name}”? Existing bindings will be removed too.',
+          deleteDialogTitle: 'Delete tag',
+          deleteDialogCancel: 'Cancel',
+          deleteDialogConfirm: 'Delete',
+          backToUsers: 'Back to users',
+          backToList: 'Back to tag list',
+          tagNotFound: 'Tag not found.',
+          columns: {
+            tag: 'Tag',
+            scope: 'Scope',
+            effect: 'Effect',
+            delta: 'Quota Delta',
+            users: 'Users',
+            actions: 'Actions',
+          },
+          fields: {
+            name: 'Tag name',
+            displayName: 'Display name',
+            icon: 'Icon key',
+            effect: 'Effect kind',
+            hourlyAny: 'Hourly-any delta',
+            hourly: 'Hourly delta',
+            daily: 'Daily delta',
+            monthly: 'Monthly delta',
+          },
+          effectKinds: {
+            quotaDelta: 'Quota delta',
+            blockAll: 'Block all',
+          },
+          actions: {
+            create: 'New tag',
+            save: 'Save tag',
+            saving: 'Saving…',
+            cancelEdit: 'Cancel edit',
+            edit: 'Edit tag',
+            delete: 'Delete tag',
+          },
+        },
+        userTags: {
+          title: 'User Tags',
+          description: 'Bind reusable tags to this user. System bindings stay read-only.',
+          empty: 'No tags are currently bound.',
+          bindPlaceholder: 'Select a custom tag to bind',
+          bindAction: 'Bind tag',
+          binding: 'Binding…',
+          unbindAction: 'Unbind',
+          bindFailed: 'Failed to bind this tag.',
+          unbindFailed: 'Failed to unbind this tag.',
+          readOnly: 'Read-only',
+          sourceSystem: 'System sync',
+          sourceManual: 'Manual bind',
+          manageCatalog: 'Manage catalog',
+        },
+        effectiveQuota: {
+          title: 'Effective Quota Breakdown',
+          description: 'Effective quota = base quota + all tag deltas, then clamped to zero for display and enforcement.',
+          blockAllNotice: 'A block_all tag is active. Effective quota is fully clamped to 0 for this user.',
+          baseLabel: 'Base quota',
+          columns: {
+            item: 'Item',
+            source: 'Source',
+            effect: 'Effect',
+          },
         },
         tokens: {
           table: {
@@ -1727,8 +1913,8 @@ export const translations: Record<Language, TranslationShape> = {
       },
       users: {
         title: '用户管理',
-        description: '查看账户层统计、绑定令牌与配额设置。',
-        searchPlaceholder: '按用户 ID、显示名或用户名搜索',
+        description: '查看账户层统计、用户标签叠加与共享额度设置。',
+        searchPlaceholder: '按用户 ID、显示名、用户名或标签搜索',
         search: '搜索',
         clear: '清空',
         pagination: '第 {page}/{total} 页',
@@ -1738,6 +1924,7 @@ export const translations: Record<Language, TranslationShape> = {
           username: '用户名',
           status: '状态',
           tokenCount: '令牌数',
+          tags: '标签',
           hourlyAny: '1h（任意）',
           hourly: '1h（业务）',
           daily: '24h',
@@ -1768,22 +1955,114 @@ export const translations: Record<Language, TranslationShape> = {
           subtitle: '账户 {id}',
           back: '返回用户列表',
           userId: '用户 ID',
+          identityTitle: '身份信息',
+          identityDescription: '查看该账户的稳定标识、登录状态与基础归属。',
           tokensTitle: '令牌列表',
-          tokensDescription: '该账户下所有令牌的统计信息。',
+          tokensDescription: '该账户下所有令牌共享同一份有效额度。',
         },
         quota: {
-          title: '配额设置',
-          description: '保存后立即生效，不会重置当前已用计数。',
+          title: '基础额度',
+          description: '这里只编辑用户基线额度，标签增减会在下方有效额度里叠加显示。',
           hourlyAny: '每小时任意请求限额',
           hourly: '每小时业务请求限额',
           daily: '每日业务请求限额',
           monthly: '每月业务请求限额',
-          hint: '请填写正整数。',
-          save: '保存配额',
+          hint: '基础额度只接受正整数。',
+          save: '保存基础额度',
           saving: '保存中…',
           savedAt: '已于 {time} 保存',
-          invalid: '所有配额字段必须为正整数。',
-          saveFailed: '保存配额失败。',
+          invalid: '所有基础额度字段必须为正整数。',
+          saveFailed: '保存基础额度失败。',
+          inheritsDefaults: '跟随默认值',
+          customized: '已自定义基线',
+        },
+        catalog: {
+          title: '标签目录',
+          description: '查看可复用标签、绑定账户数，以及对应的额度效果。',
+          summaryTitle: '标签账户统计',
+          summaryDescription: '这里只展示每个标签当前绑定了多少个账户；创建、编辑、删除都在独立标签管理页完成。',
+          summaryEmpty: '当前还没有任何用户标签。',
+          summaryAccounts: '个账户',
+          loading: '正在加载标签目录…',
+          empty: '当前还没有可用标签。',
+          invalid: '请补全必填字段，并确保额度增减填写为整数。',
+          loadFailed: '加载标签目录失败。',
+          saveFailed: '保存标签失败。',
+          deleteFailed: '删除标签失败。',
+          formCreateTitle: '创建标签',
+          formEditTitle: '编辑标签',
+          formDescription: '自定义标签可用于分组、叠加额度、扣减额度，或直接封禁全部额度。',
+          systemReadonly: '系统标签的名称与图标保持锁定，只允许调整额度效果。',
+          iconPlaceholder: '填 linuxdo 或留空',
+          iconHint: '填入 `linuxdo` 时会渲染本地 LinuxDo 图标。',
+          scopeSystem: '系统',
+          scopeSystemShort: '系统',
+          scopeCustom: '自定义',
+          blockShort: '拉黑',
+          blockDescription: 'block_all 会把所有有效额度维度统一钳制到 0，并参与真实限流。',
+          deleteConfirm: '确认删除标签“{name}”？现有绑定也会一起移除。',
+          deleteDialogTitle: '删除标签',
+          deleteDialogCancel: '取消',
+          deleteDialogConfirm: '删除',
+          backToUsers: '返回用户管理',
+          backToList: '返回标签列表',
+          tagNotFound: '未找到该标签。',
+          columns: {
+            tag: '标签',
+            scope: '范围',
+            effect: '效果',
+            delta: '额度增减',
+            users: '绑定用户',
+            actions: '操作',
+          },
+          fields: {
+            name: '标签名',
+            displayName: '显示名称',
+            icon: '图标键',
+            effect: '效果类型',
+            hourlyAny: '任意请求小时增减',
+            hourly: '业务小时增减',
+            daily: '日额度增减',
+            monthly: '月额度增减',
+          },
+          effectKinds: {
+            quotaDelta: '额度增减',
+            blockAll: '全部封禁',
+          },
+          actions: {
+            create: '新建标签',
+            save: '保存标签',
+            saving: '保存中…',
+            cancelEdit: '取消编辑',
+            edit: '编辑标签',
+            delete: '删除标签',
+          },
+        },
+        userTags: {
+          title: '用户标签',
+          description: '把可复用标签绑定到当前用户；系统同步标签保持只读。',
+          empty: '当前用户还没有绑定任何标签。',
+          bindPlaceholder: '选择一个自定义标签后绑定',
+          bindAction: '绑定标签',
+          binding: '绑定中…',
+          unbindAction: '解绑',
+          bindFailed: '绑定标签失败。',
+          unbindFailed: '解绑标签失败。',
+          readOnly: '只读',
+          sourceSystem: '系统同步',
+          sourceManual: '手动绑定',
+          manageCatalog: '管理标签目录',
+        },
+        effectiveQuota: {
+          title: '有效额度拆解',
+          description: '有效额度 = 基础额度 + 所有标签增减，然后统一按 0 做下限钳制。',
+          blockAllNotice: '当前存在 block_all 标签，这个用户的所有有效额度都会被钳制为 0。',
+          baseLabel: '基础额度',
+          columns: {
+            item: '项目',
+            source: '来源',
+            effect: '效果',
+          },
         },
         tokens: {
           table: {

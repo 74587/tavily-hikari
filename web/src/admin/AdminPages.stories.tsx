@@ -7,6 +7,8 @@ import { Fragment, type ReactNode, useState } from 'react'
 import type {
   AdminUserDetail,
   AdminUserSummary,
+  AdminUserTag,
+  AdminUserTagBinding,
   AdminUserTokenSummary,
   ApiKeyStats,
   AuthToken,
@@ -16,7 +18,11 @@ import type {
 import AdminPanelHeader from '../components/AdminPanelHeader'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
-import { useTranslate, type AdminTranslations } from '../i18n'
+import { Button } from '../components/ui/button'
+import { Input } from '../components/ui/input'
+import { Card } from '../components/ui/card'
+import { Badge } from '../components/ui/badge'
+import { LanguageProvider, useTranslate, type AdminTranslations } from '../i18n'
 
 import AdminShell, { type AdminNavItem } from './AdminShell'
 import DashboardOverview, { type DashboardMetricCard } from './DashboardOverview'
@@ -353,6 +359,170 @@ const MOCK_JOBS: JobLogView[] = [
   },
 ]
 
+const DEFAULT_LINUXDO_TAG_DELTA = {
+  hourlyAnyDelta: 500,
+  hourlyDelta: 100,
+  dailyDelta: 500,
+  monthlyDelta: 5_000,
+} as const
+
+const MOCK_TAG_CATALOG: AdminUserTag[] = [
+  {
+    id: 'linuxdo_l0',
+    name: 'linuxdo_l0',
+    displayName: 'L0',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l0',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    userCount: 0,
+  },
+  {
+    id: 'linuxdo_l1',
+    name: 'linuxdo_l1',
+    displayName: 'L1',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l1',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    userCount: 0,
+  },
+  {
+    id: 'linuxdo_l2',
+    name: 'linuxdo_l2',
+    displayName: 'L2',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l2',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    userCount: 1,
+  },
+  {
+    id: 'linuxdo_l3',
+    name: 'linuxdo_l3',
+    displayName: 'L3',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l3',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    userCount: 0,
+  },
+  {
+    id: 'linuxdo_l4',
+    name: 'linuxdo_l4',
+    displayName: 'L4',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l4',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    userCount: 1,
+  },
+  {
+    id: 'team_lead',
+    name: 'team_lead',
+    displayName: 'Team Lead',
+    icon: 'sparkles',
+    systemKey: null,
+    effectKind: 'quota_delta',
+    hourlyAnyDelta: 120,
+    hourlyDelta: 180,
+    dailyDelta: 2_000,
+    monthlyDelta: 100_000,
+    userCount: 1,
+  },
+  {
+    id: 'debt_cap',
+    name: 'debt_cap',
+    displayName: 'Debt Cap',
+    icon: 'minus-circle',
+    systemKey: null,
+    effectKind: 'quota_delta',
+    hourlyAnyDelta: -50,
+    hourlyDelta: -80,
+    dailyDelta: -1_000,
+    monthlyDelta: -700_000,
+    userCount: 1,
+  },
+  {
+    id: 'suspended_manual',
+    name: 'suspended_manual',
+    displayName: 'Suspended',
+    icon: 'ban',
+    systemKey: null,
+    effectKind: 'block_all',
+    hourlyAnyDelta: 0,
+    hourlyDelta: 0,
+    dailyDelta: 0,
+    monthlyDelta: 0,
+    userCount: 1,
+  },
+]
+
+const MOCK_ALICE_TAGS: AdminUserTagBinding[] = [
+  {
+    tagId: 'linuxdo_l2',
+    name: 'linuxdo_l2',
+    displayName: 'L2',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l2',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    source: 'system_linuxdo',
+  },
+  {
+    tagId: 'team_lead',
+    name: 'team_lead',
+    displayName: 'Team Lead',
+    icon: 'sparkles',
+    systemKey: null,
+    effectKind: 'quota_delta',
+    hourlyAnyDelta: 120,
+    hourlyDelta: 180,
+    dailyDelta: 2_000,
+    monthlyDelta: 100_000,
+    source: 'manual',
+  },
+  {
+    tagId: 'debt_cap',
+    name: 'debt_cap',
+    displayName: 'Debt Cap',
+    icon: 'minus-circle',
+    systemKey: null,
+    effectKind: 'quota_delta',
+    hourlyAnyDelta: -50,
+    hourlyDelta: -80,
+    dailyDelta: -1_000,
+    monthlyDelta: -700_000,
+    source: 'manual',
+  },
+]
+
+const MOCK_BOB_TAGS: AdminUserTagBinding[] = [
+  {
+    tagId: 'linuxdo_l4',
+    name: 'linuxdo_l4',
+    displayName: 'L4',
+    icon: 'linuxdo',
+    systemKey: 'linuxdo_l4',
+    effectKind: 'quota_delta',
+    ...DEFAULT_LINUXDO_TAG_DELTA,
+    source: 'system_linuxdo',
+  },
+  {
+    tagId: 'suspended_manual',
+    name: 'suspended_manual',
+    displayName: 'Suspended',
+    icon: 'ban',
+    systemKey: null,
+    effectKind: 'block_all',
+    hourlyAnyDelta: 0,
+    hourlyDelta: 0,
+    dailyDelta: 0,
+    monthlyDelta: 0,
+    source: 'manual',
+  },
+]
+
 const MOCK_USERS: AdminUserSummary[] = [
   {
     userId: 'usr_alice',
@@ -361,14 +531,15 @@ const MOCK_USERS: AdminUserSummary[] = [
     active: true,
     lastLoginAt: now - 420,
     tokenCount: 2,
+    tags: MOCK_ALICE_TAGS,
     hourlyAnyUsed: 312,
-    hourlyAnyLimit: 1_200,
+    hourlyAnyLimit: 1_770,
     quotaHourlyUsed: 298,
-    quotaHourlyLimit: 1_000,
+    quotaHourlyLimit: 1_200,
     quotaDailyUsed: 5_201,
-    quotaDailyLimit: 24_000,
+    quotaDailyLimit: 25_500,
     quotaMonthlyUsed: 142_922,
-    quotaMonthlyLimit: 600_000,
+    quotaMonthlyLimit: 5_000,
     dailySuccess: 4_998,
     dailyFailure: 203,
     monthlySuccess: 129_442,
@@ -381,14 +552,15 @@ const MOCK_USERS: AdminUserSummary[] = [
     active: true,
     lastLoginAt: now - 2_700,
     tokenCount: 1,
+    tags: MOCK_BOB_TAGS,
     hourlyAnyUsed: 611,
-    hourlyAnyLimit: 1_200,
+    hourlyAnyLimit: 0,
     quotaHourlyUsed: 602,
-    quotaHourlyLimit: 1_000,
+    quotaHourlyLimit: 0,
     quotaDailyUsed: 10_009,
-    quotaDailyLimit: 24_000,
+    quotaDailyLimit: 0,
     quotaMonthlyUsed: 231_008,
-    quotaMonthlyLimit: 600_000,
+    quotaMonthlyLimit: 0,
     dailySuccess: 9_800,
     dailyFailure: 209,
     monthlySuccess: 201_402,
@@ -401,6 +573,7 @@ const MOCK_USERS: AdminUserSummary[] = [
     active: false,
     lastLoginAt: now - 86_400 * 6,
     tokenCount: 0,
+    tags: [],
     hourlyAnyUsed: 0,
     hourlyAnyLimit: 600,
     quotaHourlyUsed: 0,
@@ -408,62 +581,115 @@ const MOCK_USERS: AdminUserSummary[] = [
     quotaDailyUsed: 0,
     quotaDailyLimit: 8_000,
     quotaMonthlyUsed: 0,
-    quotaMonthlyLimit: 120_000,
+    quotaMonthlyLimit: 96_000,
     dailySuccess: 0,
     dailyFailure: 0,
-    monthlySuccess: 0,
+    monthlySuccess: 122,
     lastActivity: null,
   },
 ]
 
 const MOCK_USER_TOKENS: AdminUserTokenSummary[] = [
   {
-    tokenId: '9vsN',
+    tokenId: 'V3P2',
     enabled: true,
-    note: 'Core production',
-    lastUsedAt: now - 19,
-    hourlyAnyUsed: 176,
+    note: 'Primary production',
+    lastUsedAt: now - 24,
+    hourlyAnyUsed: 188,
     hourlyAnyLimit: 600,
-    quotaHourlyUsed: 162,
+    quotaHourlyUsed: 180,
     quotaHourlyLimit: 500,
-    quotaDailyUsed: 2_811,
+    quotaDailyUsed: 2_840,
     quotaDailyLimit: 12_000,
-    quotaMonthlyUsed: 73_102,
-    quotaMonthlyLimit: 300_000,
-    dailySuccess: 2_704,
-    dailyFailure: 107,
-    monthlySuccess: 66_914,
+    quotaMonthlyUsed: 42_000,
+    quotaMonthlyLimit: 160_000,
+    dailySuccess: 2_701,
+    dailyFailure: 139,
+    monthlySuccess: 39_420,
   },
   {
-    tokenId: 'Vn7D',
+    tokenId: 'R8K1',
     enabled: true,
-    note: 'Realtime recommendation',
-    lastUsedAt: now - 42,
-    hourlyAnyUsed: 136,
+    note: 'Batch backfill',
+    lastUsedAt: now - 400,
+    hourlyAnyUsed: 124,
     hourlyAnyLimit: 600,
-    quotaHourlyUsed: 136,
+    quotaHourlyUsed: 118,
     quotaHourlyLimit: 500,
-    quotaDailyUsed: 2_390,
+    quotaDailyUsed: 2_361,
     quotaDailyLimit: 12_000,
-    quotaMonthlyUsed: 69_820,
-    quotaMonthlyLimit: 300_000,
-    dailySuccess: 2_294,
-    dailyFailure: 96,
-    monthlySuccess: 62_528,
+    quotaMonthlyUsed: 100_922,
+    quotaMonthlyLimit: 440_000,
+    dailySuccess: 2_297,
+    dailyFailure: 64,
+    monthlySuccess: 90_022,
   },
 ]
 
 const MOCK_USER_DETAIL: AdminUserDetail = {
   ...MOCK_USERS[0],
-  hourlyAnyUsed: 340,
-  hourlyAnyLimit: 500,
-  quotaHourlyUsed: 134,
-  quotaHourlyLimit: 262,
-  quotaDailyUsed: 528,
-  quotaDailyLimit: 1_022,
-  quotaMonthlyUsed: 528,
-  quotaMonthlyLimit: 5_000,
   tokens: MOCK_USER_TOKENS,
+  quotaBase: {
+    hourlyAnyLimit: 1_200,
+    hourlyLimit: 1_000,
+    dailyLimit: 24_000,
+    monthlyLimit: 600_000,
+    inheritsDefaults: false,
+  },
+  effectiveQuota: {
+    hourlyAnyLimit: 1_770,
+    hourlyLimit: 1_200,
+    dailyLimit: 25_500,
+    monthlyLimit: 5_000,
+    inheritsDefaults: false,
+  },
+  quotaBreakdown: [
+    {
+      kind: 'base',
+      label: 'Base quota',
+      tagId: null,
+      tagName: null,
+      source: null,
+      effectKind: 'base',
+      hourlyAnyDelta: 1_200,
+      hourlyDelta: 1_000,
+      dailyDelta: 24_000,
+      monthlyDelta: 600_000,
+    },
+    {
+      kind: 'tag',
+      label: 'L2',
+      tagId: 'linuxdo_l2',
+      tagName: 'linuxdo_l2',
+      source: 'system_linuxdo',
+      effectKind: 'quota_delta',
+      ...DEFAULT_LINUXDO_TAG_DELTA,
+    },
+    {
+      kind: 'tag',
+      label: 'Team Lead',
+      tagId: 'team_lead',
+      tagName: 'team_lead',
+      source: 'manual',
+      effectKind: 'quota_delta',
+      hourlyAnyDelta: 120,
+      hourlyDelta: 180,
+      dailyDelta: 2_000,
+      monthlyDelta: 100_000,
+    },
+    {
+      kind: 'tag',
+      label: 'Debt Cap',
+      tagId: 'debt_cap',
+      tagName: 'debt_cap',
+      source: 'manual',
+      effectKind: 'quota_delta',
+      hourlyAnyDelta: -50,
+      hourlyDelta: -80,
+      dailyDelta: -1_000,
+      monthlyDelta: -700_000,
+    },
+  ],
 }
 
 const numberFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
@@ -489,15 +715,272 @@ function formatTimestamp(value: number | null): string {
   return dateTimeFormatter.format(new Date(value * 1000))
 }
 
+function clampDisplayedQuota(value: number): number {
+  return Math.max(0, value)
+}
+
+function formatQuotaLimitValue(value: number): string {
+  return formatNumber(clampDisplayedQuota(value))
+}
+
+function formatQuotaUsagePair(used: number, limit: number): string {
+  return `${formatNumber(Math.max(0, used))} / ${formatQuotaLimitValue(limit)}`
+}
+
+function formatSignedQuotaDelta(value: number): string {
+  if (value > 0) return `+${formatNumber(value)}`
+  return formatNumber(value)
+}
+
+function getUserTagIconSrc(icon: string | null | undefined): string | null {
+  return icon === 'linuxdo' ? '/linuxdo-logo.svg' : null
+}
+
+function isSystemUserTag(tag: { systemKey?: string | null; source?: string | null }): boolean {
+  return Boolean(tag.systemKey) || tag.source === 'system_linuxdo'
+}
+
+function StoryUserTagBadge({
+  tag,
+  users,
+}: {
+  tag: Pick<AdminUserTagBinding, 'displayName' | 'icon' | 'systemKey' | 'effectKind'> & { source?: string | null }
+  users: AdminTranslations['users']
+}): JSX.Element {
+  const iconSrc = getUserTagIconSrc(tag.icon)
+  const isSystem = isSystemUserTag(tag)
+  const isBlockAll = tag.effectKind === 'block_all'
+  const classes = [
+    'user-tag-pill',
+    isSystem ? 'user-tag-pill-system' : '',
+    isBlockAll ? 'user-tag-pill-block' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return (
+    <Badge variant="outline" className={classes} title={tag.displayName}>
+      {iconSrc && <img src={iconSrc} alt="" className="user-tag-pill-icon" aria-hidden="true" />}
+      <span>{tag.displayName}</span>
+      {isSystem && <span className="user-tag-pill-meta">{users.catalog.scopeSystemShort}</span>}
+      {isBlockAll && <span className="user-tag-pill-meta">{users.catalog.blockShort}</span>}
+    </Badge>
+  )
+}
+
+function StoryUserTagBadgeList({
+  tags,
+  users,
+  emptyLabel,
+  limit,
+}: {
+  tags: AdminUserTagBinding[]
+  users: AdminTranslations['users']
+  emptyLabel: string
+  limit?: number
+}): JSX.Element {
+  if (tags.length === 0) {
+    return <span className="panel-description">{emptyLabel}</span>
+  }
+  const visibleTags = limit == null ? tags : tags.slice(0, limit)
+  const overflow = limit == null ? 0 : Math.max(0, tags.length - visibleTags.length)
+  return (
+    <div className="user-tag-pill-list">
+      {visibleTags.map((tag) => (
+        <StoryUserTagBadge key={`${tag.tagId}:${tag.source}`} tag={tag} users={users} />
+      ))}
+      {overflow > 0 && <Badge variant="outline" className="user-tag-pill-overflow">+{overflow}</Badge>}
+    </div>
+  )
+}
+
 type StoryQuotaSnapshot = Record<QuotaSliderField, QuotaSliderSeed>
 
 function buildStoryQuotaSnapshot(detail: AdminUserDetail): StoryQuotaSnapshot {
   return {
-    hourlyAnyLimit: createQuotaSliderSeed('hourlyAnyLimit', detail.hourlyAnyUsed, detail.hourlyAnyLimit),
-    hourlyLimit: createQuotaSliderSeed('hourlyLimit', detail.quotaHourlyUsed, detail.quotaHourlyLimit),
-    dailyLimit: createQuotaSliderSeed('dailyLimit', detail.quotaDailyUsed, detail.quotaDailyLimit),
-    monthlyLimit: createQuotaSliderSeed('monthlyLimit', detail.quotaMonthlyUsed, detail.quotaMonthlyLimit),
+    hourlyAnyLimit: createQuotaSliderSeed('hourlyAnyLimit', detail.hourlyAnyUsed, detail.quotaBase.hourlyAnyLimit),
+    hourlyLimit: createQuotaSliderSeed('hourlyLimit', detail.quotaHourlyUsed, detail.quotaBase.hourlyLimit),
+    dailyLimit: createQuotaSliderSeed('dailyLimit', detail.quotaDailyUsed, detail.quotaBase.dailyLimit),
+    monthlyLimit: createQuotaSliderSeed('monthlyLimit', detail.quotaMonthlyUsed, detail.quotaBase.monthlyLimit),
   }
+}
+
+type StoryTagCardMode = 'view' | 'edit' | 'new'
+
+function StoryUserTagEffectToggle({ users, active }: { users: AdminTranslations['users']; active: 'quota_delta' | 'block_all' }): JSX.Element {
+  return (
+    <div className="user-tag-effect-toggle" role="group" aria-label={users.catalog.fields.effect}>
+      {([
+        ['quota_delta', users.catalog.effectKinds.quotaDelta],
+        ['block_all', users.catalog.effectKinds.blockAll],
+      ] as const).map(([effectKind, label]) => (
+        <Button
+          key={effectKind}
+          type="button"
+          variant={active === effectKind ? 'secondary' : 'outline'}
+          size="xs"
+          className={`user-tag-effect-chip${active === effectKind ? ' is-active' : ''}`}
+        >
+          {label}
+        </Button>
+      ))}
+    </div>
+  )
+}
+
+function StoryUserTagCatalogCard({
+  tag,
+  users,
+  mode = 'view',
+}: {
+  tag?: AdminUserTag | null
+  users: AdminTranslations['users']
+  mode?: StoryTagCardMode
+}): JSX.Element {
+  const isNewCard = mode === 'new'
+  const isEditing = mode === 'edit' || mode === 'new'
+  const draft = tag ?? {
+    id: 'draft',
+    name: '',
+    displayName: '',
+    icon: '',
+    systemKey: null,
+    effectKind: 'quota_delta',
+    hourlyAnyDelta: 0,
+    hourlyDelta: 0,
+    dailyDelta: 0,
+    monthlyDelta: 0,
+    userCount: 0,
+  }
+  const isSystem = Boolean(draft.systemKey)
+  const isBlockAll = draft.effectKind === 'block_all'
+  const iconSrc = getUserTagIconSrc(draft.icon)
+  const classes = [
+    'user-tag-catalog-card',
+    isEditing ? 'user-tag-catalog-card-active' : '',
+    isNewCard ? 'user-tag-catalog-card-draft' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return (
+    <Card className={classes}>
+      <div className="user-tag-catalog-card-head">
+        <div className="user-tag-catalog-name">
+          {isEditing ? (
+            <div className="user-tag-inline-fields">
+              <Input
+                type="text"
+                className="user-tag-inline-input user-tag-inline-input-display"
+                defaultValue={draft.displayName}
+                disabled={isSystem}
+                placeholder={users.catalog.fields.displayName}
+              />
+              <div className="user-tag-inline-fields-row">
+                <Input
+                  type="text"
+                  className="user-tag-inline-input"
+                  defaultValue={draft.name}
+                  disabled={isSystem}
+                  placeholder={users.catalog.fields.name}
+                />
+                <Input
+                  type="text"
+                  className="user-tag-inline-input"
+                  defaultValue={draft.icon ?? ''}
+                  disabled={isSystem}
+                  placeholder={users.catalog.iconPlaceholder}
+                />
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="user-tag-pill-list">
+                <StoryUserTagBadge tag={{ ...draft }} users={users} />
+              </div>
+              <div className="panel-description user-tag-catalog-subtitle">
+                <code>{draft.name}</code>
+                {iconSrc ? ` · ${draft.icon}` : ''}
+              </div>
+            </>
+          )}
+        </div>
+        <div className="user-tag-catalog-actions">
+          {isEditing ? (
+            <>
+              <Button type="button" variant="ghost" size="sm" className="user-tag-catalog-icon-button" aria-label={users.catalog.actions.save}>
+                <Icon icon="mdi:check" width={16} height={16} />
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="user-tag-catalog-icon-button" aria-label={users.catalog.actions.cancelEdit}>
+                <Icon icon="mdi:close" width={16} height={16} />
+              </Button>
+              {!isSystem && !isNewCard && (
+                <Button type="button" variant="ghost" size="sm" className="user-tag-catalog-icon-button" aria-label={users.catalog.actions.delete}>
+                  <Icon icon="mdi:trash-can-outline" width={16} height={16} />
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <Button type="button" variant="ghost" size="sm" className="user-tag-catalog-icon-button" aria-label={users.catalog.actions.edit}>
+                <Icon icon="mdi:pencil-outline" width={16} height={16} />
+              </Button>
+              {!isSystem && (
+                <Button type="button" variant="ghost" size="sm" className="user-tag-catalog-icon-button" aria-label={users.catalog.actions.delete}>
+                  <Icon icon="mdi:trash-can-outline" width={16} height={16} />
+                </Button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="user-tag-catalog-card-meta">
+        <Badge variant={isSystem ? 'info' : 'neutral'} className="user-tag-meta-badge">
+          {isSystem ? users.catalog.scopeSystem : users.catalog.scopeCustom}
+        </Badge>
+        {isEditing ? (
+          <StoryUserTagEffectToggle users={users} active={isBlockAll ? 'block_all' : 'quota_delta'} />
+        ) : (
+          <Badge variant={isBlockAll ? 'destructive' : 'success'} className="user-tag-meta-badge">
+            {isBlockAll ? users.catalog.effectKinds.blockAll : users.catalog.effectKinds.quotaDelta}
+          </Badge>
+        )}
+        <Button type="button" variant="secondary" size="xs" className="user-tag-catalog-users user-tag-catalog-users-button" disabled={isNewCard}>
+          <span className="user-tag-catalog-users-label">{users.catalog.columns.users}</span>
+          <strong>{formatNumber(draft.userCount)}</strong>
+        </Button>
+      </div>
+
+      <div className="user-tag-catalog-body">
+        {isBlockAll ? (
+          <div className="alert alert-warning user-tag-catalog-block-note" role="note">
+            {users.catalog.blockDescription}
+          </div>
+        ) : (
+          <dl className="user-tag-catalog-delta-grid">
+            {([
+              [users.quota.hourlyAny, draft.hourlyAnyDelta],
+              [users.quota.hourly, draft.hourlyDelta],
+              [users.quota.daily, draft.dailyDelta],
+              [users.quota.monthly, draft.monthlyDelta],
+            ] as const).map(([label, value]) => (
+              <div className="user-tag-catalog-delta-item" key={label}>
+                <dt>{label}</dt>
+                <dd>
+                  {isEditing ? (
+                    <Input type="number" className="user-tag-delta-input" defaultValue={String(value)} />
+                  ) : (
+                    formatSignedQuotaDelta(value)
+                  )}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </div>
+    </Card>
+  )
 }
 
 function keyStatusTone(status: string): StatusTone {
@@ -1201,14 +1684,49 @@ function UsersPageCanvas(): JSX.Element {
     const displayName = item.displayName?.toLowerCase() ?? ''
     const username = item.username?.toLowerCase() ?? ''
     return (
-      item.userId.toLowerCase().includes(normalizedQuery) ||
-      displayName.includes(normalizedQuery) ||
-      username.includes(normalizedQuery)
+      item.userId.toLowerCase().includes(normalizedQuery)
+      || displayName.includes(normalizedQuery)
+      || username.includes(normalizedQuery)
     )
   })
 
   return (
     <AdminPageFrame activeModule="users">
+      <section className="surface panel">
+        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <h2>{users.catalog.summaryTitle}</h2>
+            <p className="panel-description">{users.catalog.summaryDescription}</p>
+          </div>
+          <button type="button" className="btn btn-outline">
+            {users.userTags.manageCatalog}
+          </button>
+        </div>
+        <div className="user-tag-summary-grid">
+          {MOCK_TAG_CATALOG.map((tag) => {
+            const isSystem = tag.systemKey != null
+            const isBlockAll = tag.effectKind === 'block_all'
+            const cardClasses = ['user-tag-summary-card', isBlockAll ? 'user-tag-summary-card-block' : '']
+              .filter(Boolean)
+              .join(' ')
+            return (
+              <article className={cardClasses} key={tag.id}>
+                <div className="user-tag-summary-card-head">
+                  <StoryUserTagBadge tag={{ ...tag }} users={users} />
+                  <StatusBadge tone={isSystem ? 'info' : isBlockAll ? 'error' : 'neutral'}>
+                    {isSystem ? users.catalog.scopeSystem : users.catalog.scopeCustom}
+                  </StatusBadge>
+                </div>
+                <div className="user-tag-summary-count">
+                  <strong>{formatNumber(tag.userCount)}</strong>
+                  <span className="panel-description">{users.catalog.summaryAccounts}</span>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      </section>
+
       <section className="surface panel">
         <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
           <div>
@@ -1239,6 +1757,7 @@ function UsersPageCanvas(): JSX.Element {
                   <th>{users.table.user}</th>
                   <th>{users.table.status}</th>
                   <th>{users.table.tokenCount}</th>
+                  <th>{users.table.tags}</th>
                   <th>{users.table.hourlyAny}</th>
                   <th>{users.table.hourly}</th>
                   <th>{users.table.daily}</th>
@@ -1254,7 +1773,9 @@ function UsersPageCanvas(): JSX.Element {
                 {filteredUsers.map((item) => (
                   <tr key={item.userId}>
                     <td>
-                      <strong>{item.displayName || item.username || item.userId}</strong>
+                      <button type="button" className="link-button">
+                        <strong>{item.displayName || item.username || item.userId}</strong>
+                      </button>
                       <div className="panel-description" style={{ marginTop: 4 }}>
                         <code>{item.userId}</code>
                         {item.username ? ` · @${item.username}` : ''}
@@ -1267,31 +1788,19 @@ function UsersPageCanvas(): JSX.Element {
                     </td>
                     <td>{formatNumber(item.tokenCount)}</td>
                     <td>
-                      {formatNumber(item.hourlyAnyUsed)} / {formatNumber(item.hourlyAnyLimit)}
+                      <StoryUserTagBadgeList tags={item.tags} users={users} emptyLabel={users.userTags.empty} />
                     </td>
-                    <td>
-                      {formatNumber(item.quotaHourlyUsed)} / {formatNumber(item.quotaHourlyLimit)}
-                    </td>
-                    <td>
-                      {formatNumber(item.quotaDailyUsed)} / {formatNumber(item.quotaDailyLimit)}
-                    </td>
-                    <td>
-                      {formatNumber(item.quotaMonthlyUsed)} / {formatNumber(item.quotaMonthlyLimit)}
-                    </td>
-                    <td>
-                      {formatNumber(item.dailySuccess)} / {formatNumber(item.dailyFailure)}
-                    </td>
+                    <td>{formatQuotaUsagePair(item.hourlyAnyUsed, item.hourlyAnyLimit)}</td>
+                    <td>{formatQuotaUsagePair(item.quotaHourlyUsed, item.quotaHourlyLimit)}</td>
+                    <td>{formatQuotaUsagePair(item.quotaDailyUsed, item.quotaDailyLimit)}</td>
+                    <td>{formatQuotaUsagePair(item.quotaMonthlyUsed, item.quotaMonthlyLimit)}</td>
+                    <td>{formatNumber(item.dailySuccess)} / {formatNumber(item.dailyFailure)}</td>
                     <td>{formatNumber(item.monthlySuccess)}</td>
                     <td>{formatTimestamp(item.lastActivity)}</td>
                     <td>{formatTimestamp(item.lastLoginAt)}</td>
                     <td>
-                      <button
-                        type="button"
-                        className="btn btn-circle btn-ghost btn-sm"
-                        title={users.actions.view}
-                        aria-label={users.actions.view}
-                      >
-                        <Icon icon="mdi:eye-outline" width={16} height={16} />
+                      <button type="button" className="btn btn-circle btn-ghost btn-sm" aria-label={users.actions.view}>
+                        <Icon icon="mdi:open-in-new" width={16} height={16} />
                       </button>
                     </td>
                   </tr>
@@ -1305,17 +1814,62 @@ function UsersPageCanvas(): JSX.Element {
   )
 }
 
+function UserTagsPageCanvas({ editorMode = 'view' }: { editorMode?: StoryTagCardMode }): JSX.Element {
+  const users = useTranslate().admin.users
+  const cards: Array<AdminUserTag | null> = editorMode === 'new' ? [null, ...MOCK_TAG_CATALOG] : MOCK_TAG_CATALOG
+  const editableTagId = 'team_lead'
+
+  return (
+    <AdminPageFrame activeModule="users">
+      <section className="surface panel">
+        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <h2>{users.catalog.title}</h2>
+            <p className="panel-description">{users.catalog.description}</p>
+          </div>
+          <div className="user-tag-page-actions">
+            <button type="button" className="btn btn-outline">{users.catalog.backToUsers}</button>
+            <button type="button" className="btn btn-primary" disabled={editorMode === 'new'}>
+              {users.catalog.actions.create}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="surface panel">
+        <div className="user-tag-catalog-grid">
+          {cards.map((tag, index) => {
+            const mode: StoryTagCardMode = editorMode === 'new' && index === 0
+              ? 'new'
+              : editorMode === 'edit' && tag?.id === editableTagId
+                ? 'edit'
+                : 'view'
+            return (
+              <StoryUserTagCatalogCard
+                key={tag?.id ?? `draft-${index}`}
+                tag={tag}
+                users={users}
+                mode={mode}
+              />
+            )
+          })}
+        </div>
+      </section>
+    </AdminPageFrame>
+  )
+}
+
 function UserDetailPageCanvas(): JSX.Element {
-  const admin = useTranslate().admin
-  const users = admin.users
+  const users = useTranslate().admin.users
   const detail = MOCK_USER_DETAIL
   const quotaSnapshot = buildStoryQuotaSnapshot(detail)
   const [quotaDraft, setQuotaDraft] = useState<Record<QuotaSliderField, string>>({
-    hourlyAnyLimit: String(detail.hourlyAnyLimit),
-    hourlyLimit: String(detail.quotaHourlyLimit),
-    dailyLimit: String(detail.quotaDailyLimit),
-    monthlyLimit: String(detail.quotaMonthlyLimit),
+    hourlyAnyLimit: String(detail.quotaBase.hourlyAnyLimit),
+    hourlyLimit: String(detail.quotaBase.hourlyLimit),
+    dailyLimit: String(detail.quotaBase.dailyLimit),
+    monthlyLimit: String(detail.quotaBase.monthlyLimit),
   })
+  const hasBlockAllTag = detail.tags.some((tag) => tag.effectKind === 'block_all')
 
   return (
     <AdminPageFrame activeModule="users">
@@ -1362,11 +1916,74 @@ function UserDetailPageCanvas(): JSX.Element {
       </section>
 
       <section className="surface panel">
-        <div className="panel-header">
+        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <h2>{users.userTags.title}</h2>
+            <p className="panel-description">{users.userTags.description}</p>
+          </div>
+          <button type="button" className="btn btn-outline">
+            {users.userTags.manageCatalog}
+          </button>
+        </div>
+        <div className="user-tag-binding-toolbar">
+          <StoryUserTagBadgeList tags={detail.tags} users={users} emptyLabel={users.userTags.empty} />
+          <div className="user-tag-bind-controls">
+            <select className="select select-bordered" defaultValue="">
+              <option value="">{users.userTags.bindPlaceholder}</option>
+              <option value="suspended_manual">Suspended</option>
+            </select>
+            <button type="button" className="btn btn-primary">{users.userTags.bindAction}</button>
+          </div>
+        </div>
+        <div className="user-tag-binding-list">
+          {detail.tags.map((tag) => {
+            const isSystem = isSystemUserTag(tag)
+            return (
+              <article className="user-tag-binding-card" key={`${tag.tagId}:${tag.source}`}>
+                <div className="user-tag-binding-card-head">
+                  <div className="user-tag-pill-list">
+                    <StoryUserTagBadge tag={tag} users={users} />
+                    <StatusBadge tone={isSystem ? 'info' : 'neutral'}>
+                      {tag.source === 'system_linuxdo' ? users.userTags.sourceSystem : users.userTags.sourceManual}
+                    </StatusBadge>
+                  </div>
+                  <button type="button" className="btn btn-ghost btn-sm" disabled={isSystem}>
+                    {isSystem ? users.userTags.readOnly : users.userTags.unbindAction}
+                  </button>
+                </div>
+                <div className="token-compact-pair">
+                  <div className="token-compact-field">
+                    <span className="token-compact-label">{users.quota.hourlyAny}</span>
+                    <span className="token-compact-value">{formatSignedQuotaDelta(tag.hourlyAnyDelta)}</span>
+                  </div>
+                  <div className="token-compact-field">
+                    <span className="token-compact-label">{users.quota.hourly}</span>
+                    <span className="token-compact-value">{formatSignedQuotaDelta(tag.hourlyDelta)}</span>
+                  </div>
+                  <div className="token-compact-field">
+                    <span className="token-compact-label">{users.quota.daily}</span>
+                    <span className="token-compact-value">{formatSignedQuotaDelta(tag.dailyDelta)}</span>
+                  </div>
+                  <div className="token-compact-field">
+                    <span className="token-compact-label">{users.quota.monthly}</span>
+                    <span className="token-compact-value">{formatSignedQuotaDelta(tag.monthlyDelta)}</span>
+                  </div>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      </section>
+
+      <section className="surface panel">
+        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
           <div>
             <h2>{users.quota.title}</h2>
             <p className="panel-description">{users.quota.description}</p>
           </div>
+          <StatusBadge tone={detail.quotaBase.inheritsDefaults ? 'info' : 'neutral'}>
+            {detail.quotaBase.inheritsDefaults ? users.quota.inheritsDefaults : users.quota.customized}
+          </StatusBadge>
         </div>
         <div className="quota-grid" style={{ marginTop: 12 }}>
           {([
@@ -1374,25 +1991,25 @@ function UserDetailPageCanvas(): JSX.Element {
               field: 'hourlyAnyLimit',
               label: users.quota.hourlyAny,
               used: detail.hourlyAnyUsed,
-              currentLimit: detail.hourlyAnyLimit,
+              currentLimit: detail.quotaBase.hourlyAnyLimit,
             },
             {
               field: 'hourlyLimit',
               label: users.quota.hourly,
               used: detail.quotaHourlyUsed,
-              currentLimit: detail.quotaHourlyLimit,
+              currentLimit: detail.quotaBase.hourlyLimit,
             },
             {
               field: 'dailyLimit',
               label: users.quota.daily,
               used: detail.quotaDailyUsed,
-              currentLimit: detail.quotaDailyLimit,
+              currentLimit: detail.quotaBase.dailyLimit,
             },
             {
               field: 'monthlyLimit',
               label: users.quota.monthly,
               used: detail.quotaMonthlyUsed,
-              currentLimit: detail.quotaMonthlyLimit,
+              currentLimit: detail.quotaBase.monthlyLimit,
             },
           ] as const).map((item) => {
             const sliderSeed = quotaSnapshot[item.field]
@@ -1424,37 +2041,108 @@ function UserDetailPageCanvas(): JSX.Element {
                       style={{ background: buildQuotaSliderTrack(sliderSeed.stages, sliderSeed.used, parsedDraft) }}
                       aria-label={item.label}
                     />
-                    <span className="panel-description">
-                      {formatNumber(sliderSeed.used)} / {formatNumber(parsedDraft)}
-                    </span>
+                    <div className="panel-description">{formatQuotaUsagePair(item.used, item.currentLimit)}</div>
                   </div>
                   <input
                     type="text"
-                    name={item.field}
                     inputMode="numeric"
-                    autoComplete="off"
+                    pattern="[0-9]*"
                     className="input input-bordered quota-input"
-                    value={formatQuotaDraftInput(draftValue)}
-                    onChange={(event) => {
-                      const normalizedValue = normalizeQuotaDraftInput(event.target.value)
-                      if (normalizedValue == null) return
-                      setQuotaDraft((prev) => ({
-                        ...prev,
-                        [item.field]: normalizedValue,
-                      }))
-                    }}
-                    aria-label={`${item.label} input`}
+                    value={draftValue}
+                    onChange={(event) => setQuotaDraft((prev) => ({
+                      ...prev,
+                      [item.field]: normalizeQuotaDraftInput(event.target.value),
+                    }))}
+                    onBlur={(event) => setQuotaDraft((prev) => ({
+                      ...prev,
+                      [item.field]: formatQuotaDraftInput(event.target.value),
+                    }))}
                   />
                 </div>
               </label>
             )
           })}
         </div>
-        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <span className="panel-description">{users.quota.hint}</span>
-          <button type="button" className="btn btn-primary">
-            {users.quota.save}
-          </button>
+      </section>
+
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>{users.effectiveQuota.title}</h2>
+            <p className="panel-description">{users.effectiveQuota.description}</p>
+          </div>
+        </div>
+        {hasBlockAllTag && <div className="alert alert-warning">{users.effectiveQuota.blockAllNotice}</div>}
+        <div className="token-info-grid">
+          {([
+            ['hourlyAny', users.quota.hourlyAny, detail.effectiveQuota.hourlyAnyLimit],
+            ['hourly', users.quota.hourly, detail.effectiveQuota.hourlyLimit],
+            ['daily', users.quota.daily, detail.effectiveQuota.dailyLimit],
+            ['monthly', users.quota.monthly, detail.effectiveQuota.monthlyLimit],
+          ] as const).map(([key, label, value]) => (
+            <div className="token-info-card" key={key}>
+              <span className="token-info-label">{label}</span>
+              <span className="token-info-value">{formatQuotaLimitValue(value)}</span>
+            </div>
+          ))}
+        </div>
+        <div className="table-wrapper jobs-table-wrapper" style={{ marginTop: 12 }}>
+          <table className="jobs-table admin-users-table user-tag-breakdown-table">
+            <thead>
+              <tr>
+                <th>{users.effectiveQuota.columns.item}</th>
+                <th>{users.effectiveQuota.columns.source}</th>
+                <th>{users.effectiveQuota.columns.effect}</th>
+                <th>{users.quota.hourlyAny}</th>
+                <th>{users.quota.hourly}</th>
+                <th>{users.quota.daily}</th>
+                <th>{users.quota.monthly}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail.quotaBreakdown.map((entry, index) => {
+                const isAbsoluteRow = entry.kind === 'base' || entry.kind === 'effective'
+                const formatBreakdownValue = (value: number) =>
+                  isAbsoluteRow ? formatQuotaLimitValue(value) : formatSignedQuotaDelta(value)
+                return (
+                  <tr key={`${entry.kind}:${entry.tagId ?? 'row'}:${index}`}>
+                    <td>
+                      <div className="token-compact-pair">
+                        <div className="token-compact-field">
+                          <span className="token-compact-value">{entry.label}</span>
+                        </div>
+                        {entry.tagName && (
+                          <div className="token-compact-field">
+                            <code className="token-compact-value">{entry.tagName}</code>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      {entry.source
+                        ? entry.source === 'system_linuxdo'
+                          ? users.userTags.sourceSystem
+                          : users.userTags.sourceManual
+                        : '—'}
+                    </td>
+                    <td>
+                      <StatusBadge tone={entry.effectKind === 'block_all' ? 'error' : 'neutral'}>
+                        {entry.effectKind === 'block_all'
+                          ? users.catalog.effectKinds.blockAll
+                          : entry.effectKind === 'base'
+                            ? users.effectiveQuota.baseLabel
+                            : users.catalog.effectKinds.quotaDelta}
+                      </StatusBadge>
+                    </td>
+                    <td>{formatBreakdownValue(entry.hourlyAnyDelta)}</td>
+                    <td>{formatBreakdownValue(entry.hourlyDelta)}</td>
+                    <td>{formatBreakdownValue(entry.dailyDelta)}</td>
+                    <td>{formatBreakdownValue(entry.monthlyDelta)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -1478,86 +2166,73 @@ function UserDetailPageCanvas(): JSX.Element {
               </tr>
             </thead>
             <tbody>
-              {detail.tokens.map((token) => {
-                const hourlyAnyText = `${formatNumber(token.hourlyAnyUsed)} / ${formatNumber(token.hourlyAnyLimit)}`
-                const hourlyText = `${formatNumber(token.quotaHourlyUsed)} / ${formatNumber(token.quotaHourlyLimit)}`
-                const dailyText = `${formatNumber(token.quotaDailyUsed)} / ${formatNumber(token.quotaDailyLimit)}`
-                const monthlyText = `${formatNumber(token.quotaMonthlyUsed)} / ${formatNumber(token.quotaMonthlyLimit)}`
-                const successDailyText = `${formatNumber(token.dailySuccess)} / ${formatNumber(token.dailyFailure)}`
-                const successMonthlyText = formatNumber(token.monthlySuccess)
-                return (
-                  <tr key={token.tokenId}>
-                    <td>
-                      <div className="token-compact-pair">
-                        <div className="token-compact-field">
-                          <code className="token-compact-value">{token.tokenId}</code>
-                        </div>
-                        <div className="token-compact-field">
-                          <span className="token-compact-value">{token.note || '—'}</span>
-                        </div>
+              {detail.tokens.map((token) => (
+                <tr key={token.tokenId}>
+                  <td>
+                    <div className="token-compact-pair">
+                      <div className="token-compact-field">
+                        <span className="token-compact-value"><code>{token.tokenId}</code></span>
                       </div>
-                    </td>
-                    <td>
-                      <div className="token-compact-pair">
-                        <div className="token-compact-field">
-                          <StatusBadge tone={token.enabled ? 'success' : 'neutral'}>
-                            {token.enabled ? users.status.enabled : users.status.disabled}
-                          </StatusBadge>
-                        </div>
-                        <div className="token-compact-field">
-                          <span className="token-compact-value">{formatTimestamp(token.lastUsedAt)}</span>
-                        </div>
+                      <div className="token-compact-field">
+                        <span className="token-compact-value">{token.note ?? '—'}</span>
                       </div>
-                    </td>
-                    <td>
-                      <div className="token-compact-pair">
-                        <div className="token-compact-field">
-                          <span className="token-compact-label">{users.tokens.table.hourlyAny}</span>
-                          <span className="token-compact-value">{hourlyAnyText}</span>
-                        </div>
-                        <div className="token-compact-field">
-                          <span className="token-compact-label">{users.tokens.table.hourly}</span>
-                          <span className="token-compact-value">{hourlyText}</span>
-                        </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="token-compact-pair">
+                      <div className="token-compact-field">
+                        <StatusBadge tone={token.enabled ? 'success' : 'neutral'}>
+                          {token.enabled ? users.status.enabled : users.status.disabled}
+                        </StatusBadge>
                       </div>
-                    </td>
-                    <td>
-                      <div className="token-compact-pair">
-                        <div className="token-compact-field">
-                          <span className="token-compact-label">{users.tokens.table.daily}</span>
-                          <span className="token-compact-value">{dailyText}</span>
-                        </div>
-                        <div className="token-compact-field">
-                          <span className="token-compact-label">{users.tokens.table.monthly}</span>
-                          <span className="token-compact-value">{monthlyText}</span>
-                        </div>
+                      <div className="token-compact-field">
+                        <span className="token-compact-value">{formatTimestamp(token.lastUsedAt)}</span>
                       </div>
-                    </td>
-                    <td>
-                      <div className="token-compact-pair">
-                        <div className="token-compact-field">
-                          <span className="token-compact-label">{users.tokens.table.successDaily}</span>
-                          <span className="token-compact-value">{successDailyText}</span>
-                        </div>
-                        <div className="token-compact-field">
-                          <span className="token-compact-label">{users.tokens.table.successMonthly}</span>
-                          <span className="token-compact-value">{successMonthlyText}</span>
-                        </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="token-compact-pair">
+                      <div className="token-compact-field">
+                        <span className="token-compact-label">{users.tokens.table.hourlyAny}</span>
+                        <span className="token-compact-value">{formatQuotaUsagePair(token.hourlyAnyUsed, token.hourlyAnyLimit)}</span>
                       </div>
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn btn-circle btn-ghost btn-sm"
-                        title={users.tokens.actions.view}
-                        aria-label={users.tokens.actions.view}
-                      >
-                        <Icon icon="mdi:eye-outline" width={16} height={16} />
-                      </button>
-                    </td>
-                  </tr>
-                )
-              })}
+                      <div className="token-compact-field">
+                        <span className="token-compact-label">{users.tokens.table.hourly}</span>
+                        <span className="token-compact-value">{formatQuotaUsagePair(token.quotaHourlyUsed, token.quotaHourlyLimit)}</span>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="token-compact-pair">
+                      <div className="token-compact-field">
+                        <span className="token-compact-label">{users.tokens.table.daily}</span>
+                        <span className="token-compact-value">{formatQuotaUsagePair(token.quotaDailyUsed, token.quotaDailyLimit)}</span>
+                      </div>
+                      <div className="token-compact-field">
+                        <span className="token-compact-label">{users.tokens.table.monthly}</span>
+                        <span className="token-compact-value">{formatQuotaUsagePair(token.quotaMonthlyUsed, token.quotaMonthlyLimit)}</span>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="token-compact-pair">
+                      <div className="token-compact-field">
+                        <span className="token-compact-label">{users.tokens.table.successDaily}</span>
+                        <span className="token-compact-value">{formatNumber(token.dailySuccess)} / {formatNumber(token.dailyFailure)}</span>
+                      </div>
+                      <div className="token-compact-field">
+                        <span className="token-compact-label">{users.tokens.table.successMonthly}</span>
+                        <span className="token-compact-value">{formatNumber(token.monthlySuccess)}</span>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <button type="button" className="btn btn-circle btn-ghost btn-sm" title={users.tokens.actions.view}>
+                      <Icon icon="mdi:eye-outline" width={16} height={16} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -1573,7 +2248,11 @@ function AlertsPageCanvas(): JSX.Element {
       <ModulePlaceholder
         title={admin.modules.alerts.title}
         description={admin.modules.alerts.description}
-        sections={[admin.modules.alerts.sections.rules, admin.modules.alerts.sections.thresholds, admin.modules.alerts.sections.channels]}
+        sections={[
+          admin.modules.alerts.sections.rules,
+          admin.modules.alerts.sections.thresholds,
+          admin.modules.alerts.sections.channels,
+        ]}
         comingSoonLabel={admin.modules.comingSoon}
       />
     </AdminPageFrame>
@@ -1600,11 +2279,31 @@ function ProxySettingsPageCanvas(): JSX.Element {
 
 const meta = {
   title: 'Admin/Pages',
-  component: DashboardPageCanvas,
   parameters: {
     layout: 'fullscreen',
   },
-} satisfies Meta<typeof DashboardPageCanvas>
+  decorators: [
+    (Story) => (
+      <LanguageProvider>
+        <div
+          style={{
+            minHeight: '100vh',
+            padding: 24,
+            color: 'hsl(var(--foreground))',
+            background: [
+              'radial-gradient(1000px 520px at 6% -8%, hsl(var(--primary) / 0.14), transparent 62%)',
+              'radial-gradient(900px 460px at 95% -14%, hsl(var(--accent) / 0.12), transparent 64%)',
+              'linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--background)) 62%, hsl(var(--muted) / 0.58) 100%)',
+              'hsl(var(--background))',
+            ].join(', '),
+          }}
+        >
+          <Story />
+        </div>
+      </LanguageProvider>
+    ),
+  ],
+} satisfies Meta
 
 export default meta
 
@@ -1624,7 +2323,7 @@ export const Tokens: Story = {
   },
 }
 
-export const ApiKeys: Story = {
+export const Keys: Story = {
   render: () => <KeysPageCanvas />,
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
@@ -1647,6 +2346,27 @@ export const Jobs: Story = {
 
 export const Users: Story = {
   render: () => <UsersPageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const UserTags: Story = {
+  render: () => <UserTagsPageCanvas />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const UserTagNew: Story = {
+  render: () => <UserTagsPageCanvas editorMode="new" />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const UserTagEdit: Story = {
+  render: () => <UserTagsPageCanvas editorMode="edit" />,
   parameters: {
     viewport: { defaultViewport: '1440-device-desktop' },
   },

@@ -3600,6 +3600,448 @@ tbody tr:hover {
   min-width: 260px;
 }
 
+.user-tag-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.user-tag-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid hsl(var(--border) / 0.82);
+  border-radius: 16px;
+  background: linear-gradient(180deg, hsl(var(--card) / 0.98), hsl(var(--card) / 0.92));
+  padding: 16px;
+}
+
+.user-tag-summary-card-block {
+  border-color: hsl(var(--destructive) / 0.4);
+}
+
+.user-tag-summary-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.user-tag-summary-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.user-tag-summary-count strong {
+  font-size: 1.55rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.user-tag-page-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.user-tag-editor-panel {
+  max-width: min(100%, 980px);
+  margin: 0 auto;
+}
+
+.user-tag-editor-badge-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.user-tag-catalog-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(340px, 380px);
+  gap: 18px;
+  align-items: start;
+}
+
+.user-tag-catalog-main {
+  min-width: 0;
+}
+
+.user-tag-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.user-tag-catalog-card {
+  display: grid;
+  grid-template-rows: minmax(88px, auto) minmax(36px, auto) minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+  min-height: 376px;
+  height: 100%;
+  box-sizing: border-box;
+  border: 1px solid hsl(var(--border) / 0.82);
+  border-radius: 16px;
+  background: linear-gradient(180deg, hsl(var(--card) / 0.98), hsl(var(--card) / 0.92));
+  padding: 16px;
+}
+
+.user-tag-catalog-card > * {
+  min-width: 0;
+}
+
+.user-tag-catalog-card-active {
+  border-color: hsl(var(--primary) / 0.45);
+  box-shadow: 0 0 0 1px hsl(var(--primary) / 0.12), 0 18px 32px hsl(var(--background) / 0.2);
+}
+
+.user-tag-catalog-card-draft {
+  border-style: dashed;
+}
+
+.user-tag-catalog-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  min-height: 88px;
+}
+
+.user-tag-catalog-name {
+  min-width: 0;
+  min-height: 88px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.user-tag-catalog-subtitle {
+  margin-top: 0;
+  min-height: 24px;
+  word-break: break-word;
+}
+
+.user-tag-inline-fields {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.user-tag-inline-fields-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.user-tag-inline-input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  font-size: 0.88rem;
+}
+
+.user-tag-inline-input-display {
+  font-weight: 600;
+}
+
+.user-tag-inline-note {
+  margin-top: -2px;
+}
+
+.user-tag-catalog-actions {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.user-tag-catalog-icon-button {
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.user-tag-catalog-card-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 36px;
+}
+
+.user-tag-meta-badge {
+  min-height: 28px;
+  border-radius: 999px;
+}
+
+.user-tag-effect-toggle {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.user-tag-effect-chip {
+  min-height: 28px;
+  border-radius: 999px;
+  padding-inline: 10px;
+  font-size: 0.76rem;
+  line-height: 1;
+}
+
+.user-tag-effect-chip.is-active {
+  border-color: hsl(var(--primary) / 0.42);
+  background: hsl(var(--primary) / 0.16);
+  color: hsl(var(--primary));
+}
+
+.user-tag-catalog-users {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-height: 28px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+}
+
+.user-tag-catalog-users-button {
+  cursor: pointer;
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.user-tag-catalog-users-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.user-tag-catalog-users-button:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.user-tag-catalog-users-label {
+  color: hsl(var(--muted-foreground));
+}
+
+.user-tag-catalog-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+.user-tag-catalog-delta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  align-content: start;
+}
+
+.user-tag-catalog-delta-item {
+  min-width: 0;
+  min-height: 88px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid hsl(var(--border) / 0.7);
+  background: hsl(var(--background) / 0.22);
+}
+
+.user-tag-catalog-delta-item dt {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.user-tag-catalog-delta-item dd {
+  margin: 8px 0 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.user-tag-delta-input {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.user-tag-catalog-block-note {
+  margin: 0;
+}
+
+.user-tag-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border) / 0.9);
+  background: hsl(var(--muted) / 0.58);
+  color: hsl(var(--foreground));
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: none;
+}
+
+.user-tag-pill-overflow {
+  border-radius: 999px;
+  font-size: 0.76rem;
+}
+
+.user-tag-pill-system {
+  border-color: hsl(var(--primary) / 0.4);
+  background: hsl(var(--primary) / 0.12);
+}
+
+.user-tag-pill-block {
+  border-color: hsl(var(--destructive) / 0.45);
+  background: hsl(var(--destructive) / 0.12);
+}
+
+.user-tag-pill-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.user-tag-pill-meta {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: hsl(var(--background) / 0.8);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.72rem;
+}
+
+.user-tag-binding-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.user-tag-bind-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.user-tag-binding-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.user-tag-binding-card {
+  border: 1px solid hsl(var(--border) / 0.82);
+  border-radius: 14px;
+  background: hsl(var(--card) / 0.94);
+  padding: 14px 16px;
+}
+
+.user-tag-binding-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.user-tag-breakdown-table {
+  min-width: 900px;
+}
+
+.user-tag-form-panel {
+  position: sticky;
+  top: 24px;
+}
+
+.user-tag-catalog-form {
+  border: 1px solid hsl(var(--border) / 0.82);
+  border-radius: 16px;
+  background: hsl(var(--card) / 0.94);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.user-tag-catalog-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.user-tag-catalog-form-grid .form-control:last-child {
+  grid-column: 1 / -1;
+}
+
+.user-tag-form-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1520px) {
+  .user-tag-catalog-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .user-tag-form-panel {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .user-tag-binding-card-head,
+  .user-tag-binding-toolbar,
+  .user-tag-bind-controls,
+  .user-tag-catalog-card-head,
+  .user-tag-form-actions,
+  .user-tag-page-actions,
+  .user-tag-editor-badge-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .user-tag-inline-fields-row,
+  .user-tag-catalog-form-grid,
+  .user-tag-catalog-delta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .user-tag-catalog-users {
+    margin-left: 0;
+  }
+}
+
 @media (max-width: 980px) {
   .users-search-controls {
     width: 100%;

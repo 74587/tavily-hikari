@@ -153,6 +153,7 @@ const META_KEY_HEAL_ORPHAN_TOKENS_V1: &str = "heal_orphan_auth_tokens_from_logs_
 const META_KEY_API_KEY_USAGE_BUCKETS_V1_DONE: &str = "api_key_usage_buckets_v1_done";
 const META_KEY_ACCOUNT_QUOTA_BACKFILL_V1: &str = "account_quota_backfill_v1";
 const META_KEY_FORCE_USER_RELOGIN_V1: &str = "force_user_relogin_v1";
+const META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1: &str = "linuxdo_system_tag_defaults_v1";
 // Cutover marker for switching business quota counters from "requests" to "credits".
 // We cannot retroactively convert legacy request counts into credits, so we reset the
 // lightweight counters once and start charging by upstream credits going forward.
@@ -417,12 +418,268 @@ struct CleanupState {
     last_pruned: i64,
 }
 
+const USER_TAG_EFFECT_QUOTA_DELTA: &str = "quota_delta";
+const USER_TAG_EFFECT_BLOCK_ALL: &str = "block_all";
+const USER_TAG_SOURCE_MANUAL: &str = "manual";
+const USER_TAG_SOURCE_SYSTEM_LINUXDO: &str = "system_linuxdo";
+const USER_TAG_SYSTEM_KEY_LINUXDO_PREFIX: &str = "linuxdo_l";
+const USER_TAG_ICON_LINUXDO: &str = "linuxdo";
+
+fn linuxdo_system_tag_default_deltas() -> (i64, i64, i64, i64) {
+    (
+        effective_token_hourly_request_limit(),
+        effective_token_hourly_limit(),
+        effective_token_daily_limit(),
+        effective_token_monthly_limit(),
+    )
+}
+
 #[derive(Debug, Clone)]
 struct AccountQuotaLimits {
     hourly_any_limit: i64,
     hourly_limit: i64,
     daily_limit: i64,
     monthly_limit: i64,
+    inherits_defaults: bool,
+}
+
+impl AccountQuotaLimits {
+    fn defaults() -> Self {
+        Self {
+            hourly_any_limit: effective_token_hourly_request_limit(),
+            hourly_limit: effective_token_hourly_limit(),
+            daily_limit: effective_token_daily_limit(),
+            monthly_limit: effective_token_monthly_limit(),
+            inherits_defaults: true,
+        }
+    }
+
+    fn clamped_non_negative(&self) -> Self {
+        Self {
+            hourly_any_limit: self.hourly_any_limit.max(0),
+            hourly_limit: self.hourly_limit.max(0),
+            daily_limit: self.daily_limit.max(0),
+            monthly_limit: self.monthly_limit.max(0),
+            inherits_defaults: self.inherits_defaults,
+        }
+    }
+
+    fn same_limits_as(&self, other: &Self) -> bool {
+        self.hourly_any_limit == other.hourly_any_limit
+            && self.hourly_limit == other.hourly_limit
+            && self.daily_limit == other.daily_limit
+            && self.monthly_limit == other.monthly_limit
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserTagRecord {
+    id: String,
+    name: String,
+    display_name: String,
+    icon: Option<String>,
+    system_key: Option<String>,
+    effect_kind: String,
+    hourly_any_delta: i64,
+    hourly_delta: i64,
+    daily_delta: i64,
+    monthly_delta: i64,
+    user_count: i64,
+}
+
+impl UserTagRecord {
+    fn is_system(&self) -> bool {
+        self.system_key.is_some()
+    }
+
+    fn is_block_all(&self) -> bool {
+        self.effect_kind == USER_TAG_EFFECT_BLOCK_ALL
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserTagBindingRecord {
+    source: String,
+    tag: UserTagRecord,
+}
+
+#[derive(Debug, Clone)]
+struct AccountQuotaBreakdownRecord {
+    kind: String,
+    label: String,
+    tag_id: Option<String>,
+    tag_name: Option<String>,
+    source: Option<String>,
+    effect_kind: String,
+    hourly_any_delta: i64,
+    hourly_delta: i64,
+    daily_delta: i64,
+    monthly_delta: i64,
+}
+
+#[derive(Debug, Clone)]
+struct AccountQuotaResolution {
+    base: AccountQuotaLimits,
+    effective: AccountQuotaLimits,
+    breakdown: Vec<AccountQuotaBreakdownRecord>,
+    tags: Vec<UserTagBindingRecord>,
+}
+
+fn clamp_i128_to_i64(value: i128) -> i64 {
+    value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+fn apply_quota_delta(value: i64, delta: i64) -> i64 {
+    clamp_i128_to_i64(i128::from(value) + i128::from(delta))
+}
+
+fn normalize_linuxdo_trust_level(trust_level: Option<i64>) -> Option<i64> {
+    trust_level.filter(|level| (0..=4).contains(level))
+}
+
+fn linuxdo_system_key_for_level(level: i64) -> String {
+    format!("{USER_TAG_SYSTEM_KEY_LINUXDO_PREFIX}{level}")
+}
+
+fn to_admin_quota_limit_set(limits: &AccountQuotaLimits) -> AdminQuotaLimitSet {
+    AdminQuotaLimitSet {
+        hourly_any_limit: limits.hourly_any_limit,
+        hourly_limit: limits.hourly_limit,
+        daily_limit: limits.daily_limit,
+        monthly_limit: limits.monthly_limit,
+        inherits_defaults: limits.inherits_defaults,
+    }
+}
+
+fn to_admin_user_tag(tag: &UserTagRecord) -> AdminUserTag {
+    AdminUserTag {
+        id: tag.id.clone(),
+        name: tag.name.clone(),
+        display_name: tag.display_name.clone(),
+        icon: tag.icon.clone(),
+        system_key: tag.system_key.clone(),
+        effect_kind: tag.effect_kind.clone(),
+        hourly_any_delta: tag.hourly_any_delta,
+        hourly_delta: tag.hourly_delta,
+        daily_delta: tag.daily_delta,
+        monthly_delta: tag.monthly_delta,
+        user_count: tag.user_count,
+    }
+}
+
+fn to_admin_user_tag_binding(binding: &UserTagBindingRecord) -> AdminUserTagBinding {
+    AdminUserTagBinding {
+        tag_id: binding.tag.id.clone(),
+        name: binding.tag.name.clone(),
+        display_name: binding.tag.display_name.clone(),
+        icon: binding.tag.icon.clone(),
+        system_key: binding.tag.system_key.clone(),
+        effect_kind: binding.tag.effect_kind.clone(),
+        hourly_any_delta: binding.tag.hourly_any_delta,
+        hourly_delta: binding.tag.hourly_delta,
+        daily_delta: binding.tag.daily_delta,
+        monthly_delta: binding.tag.monthly_delta,
+        source: binding.source.clone(),
+    }
+}
+
+fn to_admin_quota_breakdown_entry(
+    entry: &AccountQuotaBreakdownRecord,
+) -> AdminUserQuotaBreakdownEntry {
+    AdminUserQuotaBreakdownEntry {
+        kind: entry.kind.clone(),
+        label: entry.label.clone(),
+        tag_id: entry.tag_id.clone(),
+        tag_name: entry.tag_name.clone(),
+        source: entry.source.clone(),
+        effect_kind: entry.effect_kind.clone(),
+        hourly_any_delta: entry.hourly_any_delta,
+        hourly_delta: entry.hourly_delta,
+        daily_delta: entry.daily_delta,
+        monthly_delta: entry.monthly_delta,
+    }
+}
+
+fn build_account_quota_resolution(
+    base: AccountQuotaLimits,
+    tags: Vec<UserTagBindingRecord>,
+) -> AccountQuotaResolution {
+    let mut effective = base.clone();
+    let mut breakdown = vec![AccountQuotaBreakdownRecord {
+        kind: "base".to_string(),
+        label: "Base quota".to_string(),
+        tag_id: None,
+        tag_name: None,
+        source: None,
+        effect_kind: "base".to_string(),
+        hourly_any_delta: base.hourly_any_limit,
+        hourly_delta: base.hourly_limit,
+        daily_delta: base.daily_limit,
+        monthly_delta: base.monthly_limit,
+    }];
+    let mut block_all = false;
+
+    for binding in &tags {
+        breakdown.push(AccountQuotaBreakdownRecord {
+            kind: "tag".to_string(),
+            label: binding.tag.display_name.clone(),
+            tag_id: Some(binding.tag.id.clone()),
+            tag_name: Some(binding.tag.name.clone()),
+            source: Some(binding.source.clone()),
+            effect_kind: binding.tag.effect_kind.clone(),
+            hourly_any_delta: binding.tag.hourly_any_delta,
+            hourly_delta: binding.tag.hourly_delta,
+            daily_delta: binding.tag.daily_delta,
+            monthly_delta: binding.tag.monthly_delta,
+        });
+
+        if binding.tag.is_block_all() {
+            block_all = true;
+            continue;
+        }
+
+        effective.hourly_any_limit =
+            apply_quota_delta(effective.hourly_any_limit, binding.tag.hourly_any_delta);
+        effective.hourly_limit =
+            apply_quota_delta(effective.hourly_limit, binding.tag.hourly_delta);
+        effective.daily_limit = apply_quota_delta(effective.daily_limit, binding.tag.daily_delta);
+        effective.monthly_limit =
+            apply_quota_delta(effective.monthly_limit, binding.tag.monthly_delta);
+    }
+
+    effective = if block_all {
+        AccountQuotaLimits {
+            hourly_any_limit: 0,
+            hourly_limit: 0,
+            daily_limit: 0,
+            monthly_limit: 0,
+            inherits_defaults: base.inherits_defaults,
+        }
+    } else {
+        effective.clamped_non_negative()
+    };
+
+    if block_all {
+        breakdown.push(AccountQuotaBreakdownRecord {
+            kind: "effective".to_string(),
+            label: "Effective quota".to_string(),
+            tag_id: None,
+            tag_name: None,
+            source: None,
+            effect_kind: USER_TAG_EFFECT_BLOCK_ALL.to_string(),
+            hourly_any_delta: 0,
+            hourly_delta: 0,
+            daily_delta: 0,
+            monthly_delta: 0,
+        });
+    }
+
+    AccountQuotaResolution {
+        base,
+        effective,
+        breakdown,
+        tags,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2033,6 +2290,151 @@ impl TavilyProxy {
             .await
     }
 
+    /// Admin: list all user tag definitions.
+    pub async fn list_user_tags(&self) -> Result<Vec<AdminUserTag>, ProxyError> {
+        Ok(self
+            .key_store
+            .list_user_tags()
+            .await?
+            .into_iter()
+            .map(|tag| to_admin_user_tag(&tag))
+            .collect())
+    }
+
+    /// Admin: create a custom user tag.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_user_tag(
+        &self,
+        name: &str,
+        display_name: &str,
+        icon: Option<&str>,
+        effect_kind: &str,
+        hourly_any_delta: i64,
+        hourly_delta: i64,
+        daily_delta: i64,
+        monthly_delta: i64,
+    ) -> Result<AdminUserTag, ProxyError> {
+        self.key_store
+            .create_user_tag(
+                name,
+                display_name,
+                icon,
+                effect_kind,
+                hourly_any_delta,
+                hourly_delta,
+                daily_delta,
+                monthly_delta,
+            )
+            .await
+            .map(|tag| to_admin_user_tag(&tag))
+    }
+
+    /// Admin: update an existing user tag definition.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_user_tag(
+        &self,
+        tag_id: &str,
+        name: &str,
+        display_name: &str,
+        icon: Option<&str>,
+        effect_kind: &str,
+        hourly_any_delta: i64,
+        hourly_delta: i64,
+        daily_delta: i64,
+        monthly_delta: i64,
+    ) -> Result<Option<AdminUserTag>, ProxyError> {
+        self.key_store
+            .update_user_tag(
+                tag_id,
+                name,
+                display_name,
+                icon,
+                effect_kind,
+                hourly_any_delta,
+                hourly_delta,
+                daily_delta,
+                monthly_delta,
+            )
+            .await
+            .map(|tag| tag.map(|it| to_admin_user_tag(&it)))
+    }
+
+    /// Admin: delete a custom user tag definition.
+    pub async fn delete_user_tag(&self, tag_id: &str) -> Result<bool, ProxyError> {
+        self.key_store.delete_user_tag(tag_id).await
+    }
+
+    /// Admin: bind a custom tag to a user.
+    pub async fn bind_user_tag_to_user(
+        &self,
+        user_id: &str,
+        tag_id: &str,
+    ) -> Result<bool, ProxyError> {
+        self.key_store.bind_user_tag_to_user(user_id, tag_id).await
+    }
+
+    /// Admin: unbind a tag from a user.
+    pub async fn unbind_user_tag_from_user(
+        &self,
+        user_id: &str,
+        tag_id: &str,
+    ) -> Result<bool, ProxyError> {
+        self.key_store
+            .unbind_user_tag_from_user(user_id, tag_id)
+            .await
+    }
+
+    /// Admin: list tag bindings for a set of users.
+    pub async fn list_user_tag_bindings_for_users(
+        &self,
+        user_ids: &[String],
+    ) -> Result<HashMap<String, Vec<AdminUserTagBinding>>, ProxyError> {
+        let bindings = self
+            .key_store
+            .list_user_tag_bindings_for_users(user_ids)
+            .await?;
+        Ok(bindings
+            .into_iter()
+            .map(|(user_id, items)| {
+                (
+                    user_id,
+                    items
+                        .into_iter()
+                        .map(|binding| to_admin_user_tag_binding(&binding))
+                        .collect(),
+                )
+            })
+            .collect())
+    }
+
+    /// Admin: resolve base/effective quota and breakdown for a user.
+    pub async fn get_admin_user_quota_details(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<AdminUserQuotaDetails>, ProxyError> {
+        let Some(_) = self.key_store.get_admin_user_identity(user_id).await? else {
+            return Ok(None);
+        };
+        let resolution = self
+            .key_store
+            .resolve_account_quota_resolution(user_id)
+            .await?;
+        Ok(Some(AdminUserQuotaDetails {
+            base: to_admin_quota_limit_set(&resolution.base),
+            effective: to_admin_quota_limit_set(&resolution.effective),
+            breakdown: resolution
+                .breakdown
+                .iter()
+                .map(to_admin_quota_breakdown_entry)
+                .collect(),
+            tags: resolution
+                .tags
+                .iter()
+                .map(to_admin_user_tag_binding)
+                .collect(),
+        }))
+    }
+
     /// Create persisted user session.
     pub async fn create_user_session(
         &self,
@@ -2428,7 +2830,11 @@ impl TokenQuota {
 
         let verdict = match self.resolve_subject(token_id).await? {
             QuotaSubject::Account(user_id) => {
-                let limits = self.store.ensure_account_quota_limits(&user_id).await?;
+                let resolution = self
+                    .store
+                    .resolve_account_quota_resolution(&user_id)
+                    .await?;
+                let limits = resolution.effective;
                 self.store
                     .increment_account_usage_bucket(&user_id, minute_bucket, GRANULARITY_MINUTE)
                     .await?;
@@ -2583,7 +2989,11 @@ impl TokenQuota {
         let month_start = start_of_month(now).timestamp();
         match subject {
             QuotaSubject::Account(user_id) => {
-                let limits = self.store.ensure_account_quota_limits(user_id).await?;
+                let limits = self
+                    .store
+                    .resolve_account_quota_resolution(user_id)
+                    .await?
+                    .effective;
                 let hourly_used = self
                     .store
                     .sum_account_usage_buckets(user_id, GRANULARITY_MINUTE, hour_window_start)
@@ -2641,7 +3051,11 @@ impl TokenQuota {
         let hour_window_start = minute_bucket - 59 * SECS_PER_MINUTE;
         let day_window_start = hour_bucket - 23 * SECS_PER_HOUR;
         let month_start = start_of_month(now).timestamp();
-        let limits = self.store.ensure_account_quota_limits(user_id).await?;
+        let limits = self
+            .store
+            .resolve_account_quota_resolution(user_id)
+            .await?
+            .effective;
         let hourly_any_used = self
             .store
             .sum_account_usage_buckets(user_id, GRANULARITY_REQUEST_MINUTE, hour_window_start)
@@ -2731,12 +3145,9 @@ impl TokenQuota {
             );
         }
         if !account_user_ids.is_empty() {
-            self.store
-                .ensure_account_quota_limits_for_users(&account_user_ids)
-                .await?;
             let account_limits = self
                 .store
-                .fetch_account_quota_limits_bulk(&account_user_ids)
+                .resolve_account_quota_limits_bulk(&account_user_ids)
                 .await?;
             let account_hourly_totals = self
                 .store
@@ -2758,12 +3169,7 @@ impl TokenQuota {
                 .store
                 .fetch_account_monthly_counts(&account_user_ids, month_start)
                 .await?;
-            let default_limits = AccountQuotaLimits {
-                hourly_any_limit: effective_token_hourly_request_limit(),
-                hourly_limit: effective_token_hourly_limit(),
-                daily_limit: effective_token_daily_limit(),
-                monthly_limit: effective_token_monthly_limit(),
-            };
+            let default_limits = AccountQuotaLimits::defaults();
 
             for (token_id, user_id) in account_subjects {
                 let limits = account_limits
@@ -2836,7 +3242,11 @@ impl TokenRequestLimit {
         let verdict = if let Some(user_id) =
             self.store.find_user_id_by_token_fresh(token_id).await?
         {
-            let limits = self.store.ensure_account_quota_limits(&user_id).await?;
+            let limits = self
+                .store
+                .resolve_account_quota_resolution(&user_id)
+                .await?
+                .effective;
             self.store
                 .increment_account_usage_bucket(&user_id, minute_bucket, GRANULARITY_REQUEST_MINUTE)
                 .await?;
@@ -2908,12 +3318,9 @@ impl TokenRequestLimit {
         }
 
         if !account_user_ids.is_empty() {
-            self.store
-                .ensure_account_quota_limits_for_users(&account_user_ids)
-                .await?;
             let account_limits = self
                 .store
-                .fetch_account_quota_limits_bulk(&account_user_ids)
+                .resolve_account_quota_limits_bulk(&account_user_ids)
                 .await?;
             let account_totals = self
                 .store
@@ -2923,7 +3330,7 @@ impl TokenRequestLimit {
                     hour_window_start,
                 )
                 .await?;
-            let default_hourly_any_limit = effective_token_hourly_request_limit();
+            let default_hourly_any_limit = AccountQuotaLimits::defaults().hourly_any_limit;
             for (token_id, user_id) in account_subjects {
                 let used = account_totals.get(&user_id).copied().unwrap_or(0);
                 let limit = account_limits
@@ -3689,11 +4096,75 @@ impl KeyStore {
                 hourly_limit INTEGER NOT NULL,
                 daily_limit INTEGER NOT NULL,
                 monthly_limit INTEGER NOT NULL,
+                inherits_defaults INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        if !self
+            .table_column_exists("account_quota_limits", "inherits_defaults")
+            .await?
+        {
+            sqlx::query(
+                "ALTER TABLE account_quota_limits ADD COLUMN inherits_defaults INTEGER NOT NULL DEFAULT 1",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS user_tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                icon TEXT,
+                system_key TEXT UNIQUE,
+                effect_kind TEXT NOT NULL DEFAULT 'quota_delta',
+                hourly_any_delta INTEGER NOT NULL DEFAULT 0,
+                hourly_delta INTEGER NOT NULL DEFAULT 0,
+                daily_delta INTEGER NOT NULL DEFAULT 0,
+                monthly_delta INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS user_tag_bindings (
+                user_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, tag_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (tag_id) REFERENCES user_tags(id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_user_tag_bindings_user_updated
+               ON user_tag_bindings(user_id, updated_at DESC)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_user_tag_bindings_tag_user
+               ON user_tag_bindings(tag_id, user_id)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -3861,6 +4332,20 @@ impl KeyStore {
             self.set_meta_i64(META_KEY_FORCE_USER_RELOGIN_V1, Utc::now().timestamp())
                 .await?;
         }
+        self.seed_linuxdo_system_tags().await?;
+        if self
+            .get_meta_i64(META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1)
+            .await?
+            .is_none()
+        {
+            self.backfill_linuxdo_system_tag_default_deltas_v1().await?;
+            self.set_meta_i64(
+                META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1,
+                Utc::now().timestamp(),
+            )
+            .await?;
+        }
+        self.backfill_linuxdo_user_tag_bindings().await?;
         self.sync_account_quota_limits_with_defaults().await?;
 
         Ok(())
@@ -6431,11 +6916,23 @@ impl KeyStore {
         let total = if let Some(search) = search.as_ref() {
             sqlx::query_scalar::<_, i64>(
                 r#"SELECT COUNT(*)
-                   FROM users
-                   WHERE id LIKE ?
-                      OR COALESCE(display_name, '') LIKE ?
-                      OR COALESCE(username, '') LIKE ?"#,
+                   FROM users u
+                   WHERE u.id LIKE ?
+                      OR COALESCE(u.display_name, '') LIKE ?
+                      OR COALESCE(u.username, '') LIKE ?
+                      OR EXISTS (
+                           SELECT 1
+                           FROM user_tag_bindings utb
+                           JOIN user_tags ut ON ut.id = utb.tag_id
+                           WHERE utb.user_id = u.id
+                             AND (
+                               ut.name LIKE ?
+                               OR COALESCE(ut.display_name, '') LIKE ?
+                             )
+                       )"#,
             )
+            .bind(search)
+            .bind(search)
             .bind(search)
             .bind(search)
             .bind(search)
@@ -6471,10 +6968,22 @@ impl KeyStore {
                    WHERE u.id LIKE ?
                       OR COALESCE(u.display_name, '') LIKE ?
                       OR COALESCE(u.username, '') LIKE ?
+                      OR EXISTS (
+                           SELECT 1
+                           FROM user_tag_bindings utb
+                           JOIN user_tags ut ON ut.id = utb.tag_id
+                           WHERE utb.user_id = u.id
+                             AND (
+                               ut.name LIKE ?
+                               OR COALESCE(ut.display_name, '') LIKE ?
+                             )
+                       )
                    GROUP BY u.id, u.display_name, u.username, u.active, u.last_login_at
                    ORDER BY (u.last_login_at IS NULL) ASC, u.last_login_at DESC, u.id ASC
                    LIMIT ? OFFSET ?"#,
             )
+            .bind(search)
+            .bind(search)
             .bind(search)
             .bind(search)
             .bind(search)
@@ -6650,6 +7159,20 @@ impl KeyStore {
             return Ok(false);
         }
 
+        let defaults = AccountQuotaLimits::defaults();
+        let requested = AccountQuotaLimits {
+            hourly_any_limit,
+            hourly_limit,
+            daily_limit,
+            monthly_limit,
+            inherits_defaults: false,
+        };
+        let inherits_defaults = if requested.same_limits_as(&defaults) {
+            1
+        } else {
+            0
+        };
+
         let now = Utc::now().timestamp();
         sqlx::query(
             r#"INSERT INTO account_quota_limits (
@@ -6658,15 +7181,17 @@ impl KeyStore {
                     hourly_limit,
                     daily_limit,
                     monthly_limit,
+                    inherits_defaults,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     hourly_any_limit = excluded.hourly_any_limit,
                     hourly_limit = excluded.hourly_limit,
                     daily_limit = excluded.daily_limit,
                     monthly_limit = excluded.monthly_limit,
+                    inherits_defaults = excluded.inherits_defaults,
                     updated_at = excluded.updated_at"#,
         )
         .bind(user_id)
@@ -6674,6 +7199,7 @@ impl KeyStore {
         .bind(hourly_limit)
         .bind(daily_limit)
         .bind(monthly_limit)
+        .bind(inherits_defaults)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -6683,18 +7209,20 @@ impl KeyStore {
 
     async fn sync_account_quota_limits_with_defaults(&self) -> Result<(), ProxyError> {
         let now = Utc::now().timestamp();
+        let defaults = AccountQuotaLimits::defaults();
         sqlx::query(
             r#"UPDATE account_quota_limits
                SET hourly_any_limit = ?,
                    hourly_limit = ?,
                    daily_limit = ?,
                    monthly_limit = ?,
-                   updated_at = ?"#,
+                   updated_at = ?
+               WHERE inherits_defaults = 1"#,
         )
-        .bind(effective_token_hourly_request_limit())
-        .bind(effective_token_hourly_limit())
-        .bind(effective_token_daily_limit())
-        .bind(effective_token_monthly_limit())
+        .bind(defaults.hourly_any_limit)
+        .bind(defaults.hourly_limit)
+        .bind(defaults.daily_limit)
+        .bind(defaults.monthly_limit)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -6706,6 +7234,7 @@ impl KeyStore {
         user_id: &str,
     ) -> Result<AccountQuotaLimits, ProxyError> {
         let now = Utc::now().timestamp();
+        let defaults = AccountQuotaLimits::defaults();
         sqlx::query(
             r#"INSERT INTO account_quota_limits (
                     user_id,
@@ -6713,25 +7242,28 @@ impl KeyStore {
                     hourly_limit,
                     daily_limit,
                     monthly_limit,
+                    inherits_defaults,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO NOTHING"#,
         )
         .bind(user_id)
-        .bind(effective_token_hourly_request_limit())
-        .bind(effective_token_hourly_limit())
-        .bind(effective_token_daily_limit())
-        .bind(effective_token_monthly_limit())
+        .bind(defaults.hourly_any_limit)
+        .bind(defaults.hourly_limit)
+        .bind(defaults.daily_limit)
+        .bind(defaults.monthly_limit)
+        .bind(1)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
         .await?;
 
-        let (hourly_any_limit, hourly_limit, daily_limit, monthly_limit) =
-            sqlx::query_as::<_, (i64, i64, i64, i64)>(
-                r#"SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit
+        let (hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults) =
+            sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+                r#"SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit,
+                          COALESCE(inherits_defaults, 1)
                    FROM account_quota_limits
                    WHERE user_id = ?
                    LIMIT 1"#,
@@ -6744,6 +7276,7 @@ impl KeyStore {
             hourly_limit,
             daily_limit,
             monthly_limit,
+            inherits_defaults: inherits_defaults == 1,
         })
     }
 
@@ -6756,20 +7289,18 @@ impl KeyStore {
         }
 
         let now = Utc::now().timestamp();
-        let hourly_any_limit = effective_token_hourly_request_limit();
-        let hourly_limit = effective_token_hourly_limit();
-        let daily_limit = effective_token_daily_limit();
-        let monthly_limit = effective_token_monthly_limit();
+        let defaults = AccountQuotaLimits::defaults();
 
         let mut builder = QueryBuilder::new(
-            "INSERT INTO account_quota_limits (user_id, hourly_any_limit, hourly_limit, daily_limit, monthly_limit, created_at, updated_at) ",
+            "INSERT INTO account_quota_limits (user_id, hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults, created_at, updated_at) ",
         );
         builder.push_values(user_ids, |mut b, user_id| {
             b.push_bind(user_id)
-                .push_bind(hourly_any_limit)
-                .push_bind(hourly_limit)
-                .push_bind(daily_limit)
-                .push_bind(monthly_limit)
+                .push_bind(defaults.hourly_any_limit)
+                .push_bind(defaults.hourly_limit)
+                .push_bind(defaults.daily_limit)
+                .push_bind(defaults.monthly_limit)
+                .push_bind(1)
                 .push_bind(now)
                 .push_bind(now);
         });
@@ -6786,7 +7317,7 @@ impl KeyStore {
             return Ok(HashMap::new());
         }
         let mut builder = QueryBuilder::new(
-            "SELECT user_id, hourly_any_limit, hourly_limit, daily_limit, monthly_limit FROM account_quota_limits WHERE user_id IN (",
+            "SELECT user_id, hourly_any_limit, hourly_limit, daily_limit, monthly_limit, COALESCE(inherits_defaults, 1) FROM account_quota_limits WHERE user_id IN (",
         );
         {
             let mut separated = builder.separated(", ");
@@ -6797,11 +7328,19 @@ impl KeyStore {
         builder.push(")");
 
         let rows = builder
-            .build_query_as::<(String, i64, i64, i64, i64)>()
+            .build_query_as::<(String, i64, i64, i64, i64, i64)>()
             .fetch_all(&self.pool)
             .await?;
         let mut map = HashMap::new();
-        for (user_id, hourly_any_limit, hourly_limit, daily_limit, monthly_limit) in rows {
+        for (
+            user_id,
+            hourly_any_limit,
+            hourly_limit,
+            daily_limit,
+            monthly_limit,
+            inherits_defaults,
+        ) in rows
+        {
             map.insert(
                 user_id,
                 AccountQuotaLimits {
@@ -6809,10 +7348,684 @@ impl KeyStore {
                     hourly_limit,
                     daily_limit,
                     monthly_limit,
+                    inherits_defaults: inherits_defaults == 1,
                 },
             );
         }
         Ok(map)
+    }
+
+    async fn seed_linuxdo_system_tags(&self) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        let (hourly_any_delta, hourly_delta, daily_delta, monthly_delta) =
+            linuxdo_system_tag_default_deltas();
+        for level in 0..=4 {
+            let system_key = linuxdo_system_key_for_level(level);
+            let display_name = format!("L{level}");
+            sqlx::query(
+                r#"INSERT INTO user_tags (
+                        id,
+                        name,
+                        display_name,
+                        icon,
+                        system_key,
+                        effect_kind,
+                        hourly_any_delta,
+                        hourly_delta,
+                        daily_delta,
+                        monthly_delta,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(system_key) DO UPDATE SET
+                        name = excluded.name,
+                        display_name = excluded.display_name,
+                        icon = excluded.icon,
+                        updated_at = excluded.updated_at"#,
+            )
+            .bind(&system_key)
+            .bind(&system_key)
+            .bind(display_name)
+            .bind(USER_TAG_ICON_LINUXDO)
+            .bind(&system_key)
+            .bind(USER_TAG_EFFECT_QUOTA_DELTA)
+            .bind(hourly_any_delta)
+            .bind(hourly_delta)
+            .bind(daily_delta)
+            .bind(monthly_delta)
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn backfill_linuxdo_system_tag_default_deltas_v1(&self) -> Result<(), ProxyError> {
+        let zeroed_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*)
+               FROM user_tags
+               WHERE system_key LIKE 'linuxdo_l%'
+                 AND effect_kind = ?
+                 AND hourly_any_delta = 0
+                 AND hourly_delta = 0
+                 AND daily_delta = 0
+                 AND monthly_delta = 0"#,
+        )
+        .bind(USER_TAG_EFFECT_QUOTA_DELTA)
+        .fetch_one(&self.pool)
+        .await?;
+        if zeroed_count != 5 {
+            return Ok(());
+        }
+
+        let now = Utc::now().timestamp();
+        let (hourly_any_delta, hourly_delta, daily_delta, monthly_delta) =
+            linuxdo_system_tag_default_deltas();
+        sqlx::query(
+            r#"UPDATE user_tags
+               SET hourly_any_delta = ?,
+                   hourly_delta = ?,
+                   daily_delta = ?,
+                   monthly_delta = ?,
+                   updated_at = ?
+               WHERE system_key LIKE 'linuxdo_l%'
+                 AND effect_kind = ?
+                 AND hourly_any_delta = 0
+                 AND hourly_delta = 0
+                 AND daily_delta = 0
+                 AND monthly_delta = 0"#,
+        )
+        .bind(hourly_any_delta)
+        .bind(hourly_delta)
+        .bind(daily_delta)
+        .bind(monthly_delta)
+        .bind(now)
+        .bind(USER_TAG_EFFECT_QUOTA_DELTA)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn sync_linuxdo_system_tag_binding(
+        &self,
+        user_id: &str,
+        trust_level: Option<i64>,
+    ) -> Result<(), ProxyError> {
+        let Some(level) = normalize_linuxdo_trust_level(trust_level) else {
+            return Ok(());
+        };
+        let desired_key = linuxdo_system_key_for_level(level);
+        let Some((tag_id,)) =
+            sqlx::query_as::<_, (String,)>("SELECT id FROM user_tags WHERE system_key = ? LIMIT 1")
+                .bind(&desired_key)
+                .fetch_optional(&self.pool)
+                .await?
+        else {
+            return Err(ProxyError::Other(format!(
+                "missing system tag for LinuxDo trust level {level}"
+            )));
+        };
+
+        let now = Utc::now().timestamp();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"DELETE FROM user_tag_bindings
+               WHERE user_id = ?
+                 AND tag_id IN (
+                     SELECT id FROM user_tags WHERE system_key LIKE 'linuxdo_l%'
+                 )
+                 AND tag_id <> ?"#,
+        )
+        .bind(user_id)
+        .bind(&tag_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO user_tag_bindings (user_id, tag_id, source, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, tag_id) DO UPDATE SET
+                   source = excluded.source,
+                   updated_at = excluded.updated_at"#,
+        )
+        .bind(user_id)
+        .bind(&tag_id)
+        .bind(USER_TAG_SOURCE_SYSTEM_LINUXDO)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn backfill_linuxdo_user_tag_bindings(&self) -> Result<(), ProxyError> {
+        let rows = sqlx::query_as::<_, (String, Option<i64>)>(
+            r#"SELECT user_id, trust_level
+               FROM oauth_accounts
+               WHERE provider = 'linuxdo'"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for (user_id, trust_level) in rows {
+            self.sync_linuxdo_system_tag_binding(&user_id, trust_level)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn fetch_user_tag_by_id(
+        &self,
+        tag_id: &str,
+    ) -> Result<Option<UserTagRecord>, ProxyError> {
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+            ),
+        >(
+            r#"SELECT
+                 t.id,
+                 t.name,
+                 t.display_name,
+                 t.icon,
+                 t.system_key,
+                 t.effect_kind,
+                 t.hourly_any_delta,
+                 t.hourly_delta,
+                 t.daily_delta,
+                 t.monthly_delta,
+                 COALESCE(COUNT(b.user_id), 0) AS user_count
+               FROM user_tags t
+               LEFT JOIN user_tag_bindings b ON b.tag_id = t.id
+               WHERE t.id = ?
+               GROUP BY t.id, t.name, t.display_name, t.icon, t.system_key,
+                        t.effect_kind, t.hourly_any_delta, t.hourly_delta,
+                        t.daily_delta, t.monthly_delta
+               LIMIT 1"#,
+        )
+        .bind(tag_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(
+                id,
+                name,
+                display_name,
+                icon,
+                system_key,
+                effect_kind,
+                hourly_any_delta,
+                hourly_delta,
+                daily_delta,
+                monthly_delta,
+                user_count,
+            )| UserTagRecord {
+                id,
+                name,
+                display_name,
+                icon,
+                system_key,
+                effect_kind,
+                hourly_any_delta,
+                hourly_delta,
+                daily_delta,
+                monthly_delta,
+                user_count,
+            },
+        ))
+    }
+
+    async fn list_user_tags(&self) -> Result<Vec<UserTagRecord>, ProxyError> {
+        let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, String, i64, i64, i64, i64, i64)>(
+            r#"SELECT
+                 t.id,
+                 t.name,
+                 t.display_name,
+                 t.icon,
+                 t.system_key,
+                 t.effect_kind,
+                 t.hourly_any_delta,
+                 t.hourly_delta,
+                 t.daily_delta,
+                 t.monthly_delta,
+                 COALESCE(COUNT(b.user_id), 0) AS user_count
+               FROM user_tags t
+               LEFT JOIN user_tag_bindings b ON b.tag_id = t.id
+               GROUP BY t.id, t.name, t.display_name, t.icon, t.system_key,
+                        t.effect_kind, t.hourly_any_delta, t.hourly_delta,
+                        t.daily_delta, t.monthly_delta
+               ORDER BY (t.system_key IS NULL) ASC, COALESCE(t.system_key, t.name) ASC, t.display_name ASC"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    name,
+                    display_name,
+                    icon,
+                    system_key,
+                    effect_kind,
+                    hourly_any_delta,
+                    hourly_delta,
+                    daily_delta,
+                    monthly_delta,
+                    user_count,
+                )| UserTagRecord {
+                    id,
+                    name,
+                    display_name,
+                    icon,
+                    system_key,
+                    effect_kind,
+                    hourly_any_delta,
+                    hourly_delta,
+                    daily_delta,
+                    monthly_delta,
+                    user_count,
+                },
+            )
+            .collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_user_tag(
+        &self,
+        name: &str,
+        display_name: &str,
+        icon: Option<&str>,
+        effect_kind: &str,
+        hourly_any_delta: i64,
+        hourly_delta: i64,
+        daily_delta: i64,
+        monthly_delta: i64,
+    ) -> Result<UserTagRecord, ProxyError> {
+        if effect_kind != USER_TAG_EFFECT_QUOTA_DELTA && effect_kind != USER_TAG_EFFECT_BLOCK_ALL {
+            return Err(ProxyError::Other(
+                "invalid user tag effect kind".to_string(),
+            ));
+        }
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let now = Utc::now().timestamp();
+        for _ in 0..8 {
+            let id = random_string(ALPHABET, 8);
+            let inserted = sqlx::query(
+                r#"INSERT INTO user_tags (
+                        id,
+                        name,
+                        display_name,
+                        icon,
+                        system_key,
+                        effect_kind,
+                        hourly_any_delta,
+                        hourly_delta,
+                        daily_delta,
+                        monthly_delta,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(&id)
+            .bind(name)
+            .bind(display_name)
+            .bind(icon)
+            .bind(effect_kind)
+            .bind(hourly_any_delta)
+            .bind(hourly_delta)
+            .bind(daily_delta)
+            .bind(monthly_delta)
+            .bind(now)
+            .bind(now)
+            .execute(&self.pool)
+            .await;
+
+            match inserted {
+                Ok(_) => {
+                    return self
+                        .fetch_user_tag_by_id(&id)
+                        .await?
+                        .ok_or_else(|| ProxyError::Other("created user tag missing".to_string()));
+                }
+                Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                    if db_err.message().contains("user_tags.name") {
+                        return Err(ProxyError::Other(
+                            "user tag name already exists".to_string(),
+                        ));
+                    }
+                    continue;
+                }
+                Err(err) => return Err(ProxyError::Database(err)),
+            }
+        }
+        Err(ProxyError::Other(
+            "failed to allocate unique user tag id".to_string(),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_user_tag(
+        &self,
+        tag_id: &str,
+        name: &str,
+        display_name: &str,
+        icon: Option<&str>,
+        effect_kind: &str,
+        hourly_any_delta: i64,
+        hourly_delta: i64,
+        daily_delta: i64,
+        monthly_delta: i64,
+    ) -> Result<Option<UserTagRecord>, ProxyError> {
+        if effect_kind != USER_TAG_EFFECT_QUOTA_DELTA && effect_kind != USER_TAG_EFFECT_BLOCK_ALL {
+            return Err(ProxyError::Other(
+                "invalid user tag effect kind".to_string(),
+            ));
+        }
+        let Some(existing) = self.fetch_user_tag_by_id(tag_id).await? else {
+            return Ok(None);
+        };
+        let now = Utc::now().timestamp();
+        if existing.is_system() {
+            if existing.name != name
+                || existing.display_name != display_name
+                || existing.icon.as_deref() != icon
+            {
+                return Err(ProxyError::Other(
+                    "system user tags only allow effect updates".to_string(),
+                ));
+            }
+            sqlx::query(
+                r#"UPDATE user_tags
+                   SET effect_kind = ?,
+                       hourly_any_delta = ?,
+                       hourly_delta = ?,
+                       daily_delta = ?,
+                       monthly_delta = ?,
+                       updated_at = ?
+                   WHERE id = ?"#,
+            )
+            .bind(effect_kind)
+            .bind(hourly_any_delta)
+            .bind(hourly_delta)
+            .bind(daily_delta)
+            .bind(monthly_delta)
+            .bind(now)
+            .bind(tag_id)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            let updated = sqlx::query(
+                r#"UPDATE user_tags
+                   SET name = ?,
+                       display_name = ?,
+                       icon = ?,
+                       effect_kind = ?,
+                       hourly_any_delta = ?,
+                       hourly_delta = ?,
+                       daily_delta = ?,
+                       monthly_delta = ?,
+                       updated_at = ?
+                   WHERE id = ?"#,
+            )
+            .bind(name)
+            .bind(display_name)
+            .bind(icon)
+            .bind(effect_kind)
+            .bind(hourly_any_delta)
+            .bind(hourly_delta)
+            .bind(daily_delta)
+            .bind(monthly_delta)
+            .bind(now)
+            .bind(tag_id)
+            .execute(&self.pool)
+            .await;
+            match updated {
+                Ok(_) => {}
+                Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
+                    return Err(ProxyError::Other(
+                        "user tag name already exists".to_string(),
+                    ));
+                }
+                Err(err) => return Err(ProxyError::Database(err)),
+            }
+        }
+        self.fetch_user_tag_by_id(tag_id).await
+    }
+
+    async fn delete_user_tag(&self, tag_id: &str) -> Result<bool, ProxyError> {
+        let Some(existing) = self.fetch_user_tag_by_id(tag_id).await? else {
+            return Ok(false);
+        };
+        if existing.is_system() {
+            return Err(ProxyError::Other(
+                "system user tags cannot be deleted".to_string(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM user_tag_bindings WHERE tag_id = ?")
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM user_tags WHERE id = ?")
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn bind_user_tag_to_user(&self, user_id: &str, tag_id: &str) -> Result<bool, ProxyError> {
+        let user_exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await?;
+        if user_exists == 0 {
+            return Ok(false);
+        }
+        let Some(tag) = self.fetch_user_tag_by_id(tag_id).await? else {
+            return Ok(false);
+        };
+        if tag.is_system() {
+            return Err(ProxyError::Other(
+                "system user tags are managed by the server".to_string(),
+            ));
+        }
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            r#"INSERT INTO user_tag_bindings (user_id, tag_id, source, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, tag_id) DO UPDATE SET
+                   source = excluded.source,
+                   updated_at = excluded.updated_at"#,
+        )
+        .bind(user_id)
+        .bind(tag_id)
+        .bind(USER_TAG_SOURCE_MANUAL)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(true)
+    }
+
+    async fn unbind_user_tag_from_user(
+        &self,
+        user_id: &str,
+        tag_id: &str,
+    ) -> Result<bool, ProxyError> {
+        let binding = sqlx::query_as::<_, (String, Option<String>)>(
+            r#"SELECT b.source, t.system_key
+               FROM user_tag_bindings b
+               JOIN user_tags t ON t.id = b.tag_id
+               WHERE b.user_id = ? AND b.tag_id = ?
+               LIMIT 1"#,
+        )
+        .bind(user_id)
+        .bind(tag_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((source, system_key)) = binding else {
+            return Ok(false);
+        };
+        if source != USER_TAG_SOURCE_MANUAL || system_key.is_some() {
+            return Err(ProxyError::Other(
+                "system-managed user tag bindings are read-only".to_string(),
+            ));
+        }
+        sqlx::query("DELETE FROM user_tag_bindings WHERE user_id = ? AND tag_id = ?")
+            .bind(user_id)
+            .bind(tag_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(true)
+    }
+
+    async fn list_user_tag_bindings_for_users(
+        &self,
+        user_ids: &[String],
+    ) -> Result<HashMap<String, Vec<UserTagBindingRecord>>, ProxyError> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut builder = QueryBuilder::new(
+            r#"SELECT
+                 b.user_id,
+                 b.source,
+                 t.id,
+                 t.name,
+                 t.display_name,
+                 t.icon,
+                 t.system_key,
+                 t.effect_kind,
+                 t.hourly_any_delta,
+                 t.hourly_delta,
+                 t.daily_delta,
+                 t.monthly_delta
+               FROM user_tag_bindings b
+               JOIN user_tags t ON t.id = b.tag_id
+               WHERE b.user_id IN ("#,
+        );
+        {
+            let mut separated = builder.separated(", ");
+            for user_id in user_ids {
+                separated.push_bind(user_id);
+            }
+        }
+        builder.push(") ORDER BY (t.system_key IS NULL) ASC, COALESCE(t.system_key, t.name) ASC, t.display_name ASC");
+
+        let rows = builder
+            .build_query_as::<(
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+                i64,
+                i64,
+                i64,
+                i64,
+            )>()
+            .fetch_all(&self.pool)
+            .await?;
+        let mut map: HashMap<String, Vec<UserTagBindingRecord>> = HashMap::new();
+        for (
+            user_id,
+            source,
+            tag_id,
+            name,
+            display_name,
+            icon,
+            system_key,
+            effect_kind,
+            hourly_any_delta,
+            hourly_delta,
+            daily_delta,
+            monthly_delta,
+        ) in rows
+        {
+            map.entry(user_id.clone())
+                .or_default()
+                .push(UserTagBindingRecord {
+                    source,
+                    tag: UserTagRecord {
+                        id: tag_id,
+                        name,
+                        display_name,
+                        icon,
+                        system_key,
+                        effect_kind,
+                        hourly_any_delta,
+                        hourly_delta,
+                        daily_delta,
+                        monthly_delta,
+                        user_count: 0,
+                    },
+                });
+        }
+        Ok(map)
+    }
+
+    async fn list_user_tag_bindings_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserTagBindingRecord>, ProxyError> {
+        Ok(self
+            .list_user_tag_bindings_for_users(&[user_id.to_string()])
+            .await?
+            .remove(user_id)
+            .unwrap_or_default())
+    }
+
+    async fn resolve_account_quota_limits_bulk(
+        &self,
+        user_ids: &[String],
+    ) -> Result<HashMap<String, AccountQuotaLimits>, ProxyError> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.ensure_account_quota_limits_for_users(user_ids).await?;
+        let base_limits = self.fetch_account_quota_limits_bulk(user_ids).await?;
+        let tag_bindings = self.list_user_tag_bindings_for_users(user_ids).await?;
+        let defaults = AccountQuotaLimits::defaults();
+        let mut map = HashMap::new();
+        for user_id in user_ids {
+            let base = base_limits
+                .get(user_id)
+                .cloned()
+                .unwrap_or_else(|| defaults.clone());
+            let tags = tag_bindings.get(user_id).cloned().unwrap_or_default();
+            map.insert(
+                user_id.clone(),
+                build_account_quota_resolution(base, tags).effective,
+            );
+        }
+        Ok(map)
+    }
+
+    async fn resolve_account_quota_resolution(
+        &self,
+        user_id: &str,
+    ) -> Result<AccountQuotaResolution, ProxyError> {
+        let base = self.ensure_account_quota_limits(user_id).await?;
+        let tags = self.list_user_tag_bindings_for_user(user_id).await?;
+        Ok(build_account_quota_resolution(base, tags))
     }
 
     async fn fetch_user_success_failure(
@@ -7150,6 +8363,10 @@ impl KeyStore {
             .await?;
 
             tx.commit().await?;
+            if profile.provider == "linuxdo" {
+                self.sync_linuxdo_system_tag_binding(&user_id, profile.trust_level)
+                    .await?;
+            }
             return Ok(UserIdentity {
                 user_id,
                 provider: profile.provider.clone(),
@@ -9719,6 +10936,67 @@ pub struct AuthToken {
 pub struct AuthTokenSecret {
     pub id: String,
     pub token: String, // th-<id>-<secret>
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminQuotaLimitSet {
+    pub hourly_any_limit: i64,
+    pub hourly_limit: i64,
+    pub daily_limit: i64,
+    pub monthly_limit: i64,
+    pub inherits_defaults: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminUserTag {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+    pub icon: Option<String>,
+    pub system_key: Option<String>,
+    pub effect_kind: String,
+    pub hourly_any_delta: i64,
+    pub hourly_delta: i64,
+    pub daily_delta: i64,
+    pub monthly_delta: i64,
+    pub user_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminUserTagBinding {
+    pub tag_id: String,
+    pub name: String,
+    pub display_name: String,
+    pub icon: Option<String>,
+    pub system_key: Option<String>,
+    pub effect_kind: String,
+    pub hourly_any_delta: i64,
+    pub hourly_delta: i64,
+    pub daily_delta: i64,
+    pub monthly_delta: i64,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminUserQuotaBreakdownEntry {
+    pub kind: String,
+    pub label: String,
+    pub tag_id: Option<String>,
+    pub tag_name: Option<String>,
+    pub source: Option<String>,
+    pub effect_kind: String,
+    pub hourly_any_delta: i64,
+    pub hourly_delta: i64,
+    pub daily_delta: i64,
+    pub monthly_delta: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminUserQuotaDetails {
+    pub base: AdminQuotaLimitSet,
+    pub effective: AdminQuotaLimitSet,
+    pub breakdown: Vec<AdminUserQuotaBreakdownEntry>,
+    pub tags: Vec<AdminUserTagBinding>,
 }
 
 #[derive(Debug, Clone)]
@@ -14282,6 +15560,415 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             std::env::remove_var("TOKEN_DAILY_LIMIT");
             std::env::remove_var("TOKEN_MONTHLY_LIMIT");
         }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn build_account_quota_resolution_clamps_negative_tag_totals_to_zero() {
+        let base = AccountQuotaLimits {
+            hourly_any_limit: 10,
+            hourly_limit: 20,
+            daily_limit: 30,
+            monthly_limit: 40,
+            inherits_defaults: false,
+        };
+        let resolution = build_account_quota_resolution(
+            base.clone(),
+            vec![UserTagBindingRecord {
+                source: USER_TAG_SOURCE_MANUAL.to_string(),
+                tag: UserTagRecord {
+                    id: "custom-tag".to_string(),
+                    name: "custom_tag".to_string(),
+                    display_name: "Custom Tag".to_string(),
+                    icon: Some("sparkles".to_string()),
+                    system_key: None,
+                    effect_kind: USER_TAG_EFFECT_QUOTA_DELTA.to_string(),
+                    hourly_any_delta: -100,
+                    hourly_delta: -200,
+                    daily_delta: -300,
+                    monthly_delta: -400,
+                    user_count: 1,
+                },
+            }],
+        );
+
+        assert_eq!(resolution.base.hourly_any_limit, 10);
+        assert_eq!(resolution.effective.hourly_any_limit, 0);
+        assert_eq!(resolution.effective.hourly_limit, 0);
+        assert_eq!(resolution.effective.daily_limit, 0);
+        assert_eq!(resolution.effective.monthly_limit, 0);
+        assert_eq!(resolution.breakdown.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn linuxdo_system_tag_defaults_backfill_repairs_legacy_zero_seed() {
+        let db_path = temp_db_path("linuxdo-system-tag-defaults");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        sqlx::query(
+            r#"UPDATE user_tags
+               SET hourly_any_delta = 0,
+                   hourly_delta = 0,
+                   daily_delta = 0,
+                   monthly_delta = 0
+               WHERE system_key LIKE 'linuxdo_l%'"#,
+        )
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("zero system tag deltas");
+        sqlx::query("DELETE FROM meta WHERE key = ?")
+            .bind(META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("clear linuxdo defaults migration marker");
+        drop(proxy);
+
+        let repaired = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy recreated");
+        let defaults = linuxdo_system_tag_default_deltas();
+        let seeded_rows = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT hourly_any_delta, hourly_delta, daily_delta, monthly_delta FROM user_tags WHERE system_key LIKE 'linuxdo_l%' ORDER BY system_key",
+        )
+        .fetch_all(&repaired.key_store.pool)
+        .await
+        .expect("read repaired seeded tag rows");
+        assert_eq!(seeded_rows.len(), 5);
+        assert!(
+            seeded_rows
+                .iter()
+                .all(|row| *row == (defaults.0, defaults.1, defaults.2, defaults.3))
+        );
+    }
+
+    #[tokio::test]
+    async fn linuxdo_system_tags_seed_backfill_and_trust_level_sync() {
+        let db_path = temp_db_path("linuxdo-system-tags");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+
+        let seeded_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_tags WHERE system_key LIKE 'linuxdo_l%'")
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("count seeded tags");
+        assert_eq!(seeded_count, 5);
+
+        let defaults = linuxdo_system_tag_default_deltas();
+        let seeded_rows = sqlx::query_as::<_, (String, String, Option<String>, i64, i64, i64, i64)>(
+            "SELECT display_name, name, icon, hourly_any_delta, hourly_delta, daily_delta, monthly_delta FROM user_tags WHERE system_key LIKE 'linuxdo_l%' ORDER BY system_key",
+        )
+        .fetch_all(&proxy.key_store.pool)
+        .await
+        .expect("read seeded tag rows");
+        assert_eq!(seeded_rows.len(), 5);
+        assert_eq!(
+            seeded_rows[0],
+            (
+                "L0".to_string(),
+                "linuxdo_l0".to_string(),
+                Some("linuxdo".to_string()),
+                defaults.0,
+                defaults.1,
+                defaults.2,
+                defaults.3,
+            )
+        );
+        assert_eq!(
+            seeded_rows[4],
+            (
+                "L4".to_string(),
+                "linuxdo_l4".to_string(),
+                Some("linuxdo".to_string()),
+                defaults.0,
+                defaults.1,
+                defaults.2,
+                defaults.3,
+            )
+        );
+
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-system-user".to_string(),
+                username: Some("linuxdo_system_user".to_string()),
+                name: Some("LinuxDo System User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(3),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert linuxdo user");
+
+        let first_key: String = sqlx::query_scalar(
+            r#"SELECT t.system_key
+               FROM user_tag_bindings b
+               JOIN user_tags t ON t.id = b.tag_id
+               WHERE b.user_id = ? AND t.system_key LIKE 'linuxdo_l%'
+               LIMIT 1"#,
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read first linuxdo binding");
+        assert_eq!(first_key, "linuxdo_l3");
+
+        sqlx::query("DELETE FROM user_tag_bindings WHERE user_id = ?")
+            .bind(&user.user_id)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("delete bindings to simulate historical gap");
+        drop(proxy);
+
+        let proxy_after =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened");
+        let restored_key: String = sqlx::query_scalar(
+            r#"SELECT t.system_key
+               FROM user_tag_bindings b
+               JOIN user_tags t ON t.id = b.tag_id
+               WHERE b.user_id = ? AND t.system_key LIKE 'linuxdo_l%'
+               LIMIT 1"#,
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read restored linuxdo binding");
+        assert_eq!(restored_key, "linuxdo_l3");
+
+        proxy_after
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-system-user".to_string(),
+                username: Some("linuxdo_system_user".to_string()),
+                name: Some("LinuxDo System User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("update linuxdo trust level");
+        let sync_keys = sqlx::query_scalar::<_, String>(
+            r#"SELECT t.system_key
+               FROM user_tag_bindings b
+               JOIN user_tags t ON t.id = b.tag_id
+               WHERE b.user_id = ? AND t.system_key LIKE 'linuxdo_l%'
+               ORDER BY t.system_key"#,
+        )
+        .bind(&user.user_id)
+        .fetch_all(&proxy_after.key_store.pool)
+        .await
+        .expect("read synced linuxdo bindings");
+        assert_eq!(sync_keys, vec!["linuxdo_l1".to_string()]);
+
+        proxy_after
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-system-user".to_string(),
+                username: Some("linuxdo_system_user".to_string()),
+                name: Some("LinuxDo System User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: None,
+                raw_payload_json: None,
+            })
+            .await
+            .expect("update linuxdo trust level to none");
+        let retained_keys = sqlx::query_scalar::<_, String>(
+            r#"SELECT t.system_key
+               FROM user_tag_bindings b
+               JOIN user_tags t ON t.id = b.tag_id
+               WHERE b.user_id = ? AND t.system_key LIKE 'linuxdo_l%'
+               ORDER BY t.system_key"#,
+        )
+        .bind(&user.user_id)
+        .fetch_all(&proxy_after.key_store.pool)
+        .await
+        .expect("read retained linuxdo bindings");
+        assert_eq!(retained_keys, vec!["linuxdo_l1".to_string()]);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn custom_account_quota_limits_survive_default_resync() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("account-limit-custom-persist");
+        let db_str = db_path.to_string_lossy().to_string();
+        let env_keys = [
+            "TOKEN_HOURLY_REQUEST_LIMIT",
+            "TOKEN_HOURLY_LIMIT",
+            "TOKEN_DAILY_LIMIT",
+            "TOKEN_MONTHLY_LIMIT",
+        ];
+        let previous: Vec<Option<String>> =
+            env_keys.iter().map(|key| std::env::var(key).ok()).collect();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "limit-custom-user".to_string(),
+                username: Some("limit_custom_user".to_string()),
+                name: Some("Limit Custom User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:limit_custom_user"))
+            .await
+            .expect("bind token");
+        proxy
+            .user_dashboard_summary(&user.user_id)
+            .await
+            .expect("seed account quota row");
+        let updated = proxy
+            .update_account_quota_limits(&user.user_id, 101, 102, 103, 104)
+            .await
+            .expect("update custom base quota");
+        assert!(updated);
+
+        let first_limits: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read custom limits");
+        assert_eq!(first_limits, (101, 102, 103, 104, 0));
+
+        drop(proxy);
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "21");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "22");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "23");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "24");
+        }
+
+        let proxy_after =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened");
+        let second_limits: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read persisted custom limits");
+        assert_eq!(second_limits, (101, 102, 103, 104, 0));
+
+        unsafe {
+            for (key, old_value) in env_keys.iter().zip(previous.into_iter()) {
+                if let Some(value) = old_value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn block_all_user_tag_zeroes_effective_quota_and_blocks_account_usage() {
+        let db_path = temp_db_path("user-tag-block-all");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "block-all-user".to_string(),
+                username: Some("block_all_user".to_string()),
+                name: Some("Block All User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        let token = proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:block_all_user"))
+            .await
+            .expect("bind token");
+        let tag = proxy
+            .create_user_tag(
+                "blocked_all",
+                "Blocked All",
+                Some("ban"),
+                USER_TAG_EFFECT_BLOCK_ALL,
+                0,
+                0,
+                0,
+                0,
+            )
+            .await
+            .expect("create block all tag");
+        let bound = proxy
+            .bind_user_tag_to_user(&user.user_id, &tag.id)
+            .await
+            .expect("bind block all tag");
+        assert!(bound);
+
+        let details = proxy
+            .get_admin_user_quota_details(&user.user_id)
+            .await
+            .expect("quota details")
+            .expect("quota details present");
+        assert_eq!(details.effective.hourly_any_limit, 0);
+        assert_eq!(details.effective.hourly_limit, 0);
+        assert_eq!(details.effective.daily_limit, 0);
+        assert_eq!(details.effective.monthly_limit, 0);
+        assert!(
+            details
+                .breakdown
+                .iter()
+                .any(|entry| entry.effect_kind == USER_TAG_EFFECT_BLOCK_ALL)
+        );
+
+        let hourly_any_verdict = proxy
+            .check_token_hourly_requests(&token.id)
+            .await
+            .expect("hourly-any verdict");
+        assert!(!hourly_any_verdict.allowed);
+        assert_eq!(hourly_any_verdict.hourly_limit, 0);
+
+        let quota_verdict = proxy
+            .check_token_quota(&token.id)
+            .await
+            .expect("business quota verdict");
+        assert!(!quota_verdict.allowed);
+        assert_eq!(quota_verdict.hourly_limit, 0);
+        assert_eq!(quota_verdict.daily_limit, 0);
+        assert_eq!(quota_verdict.monthly_limit, 0);
+
         let _ = std::fs::remove_file(db_path);
     }
 }

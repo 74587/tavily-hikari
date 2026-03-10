@@ -682,6 +682,63 @@ struct ListUsersQuery {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AdminQuotaView {
+    hourly_any_limit: i64,
+    hourly_limit: i64,
+    daily_limit: i64,
+    monthly_limit: i64,
+    inherits_defaults: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserTagView {
+    id: String,
+    name: String,
+    display_name: String,
+    icon: Option<String>,
+    system_key: Option<String>,
+    effect_kind: String,
+    hourly_any_delta: i64,
+    hourly_delta: i64,
+    daily_delta: i64,
+    monthly_delta: i64,
+    user_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserTagBindingView {
+    tag_id: String,
+    name: String,
+    display_name: String,
+    icon: Option<String>,
+    system_key: Option<String>,
+    effect_kind: String,
+    hourly_any_delta: i64,
+    hourly_delta: i64,
+    daily_delta: i64,
+    monthly_delta: i64,
+    source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserQuotaBreakdownView {
+    kind: String,
+    label: String,
+    tag_id: Option<String>,
+    tag_name: Option<String>,
+    source: Option<String>,
+    effect_kind: String,
+    hourly_any_delta: i64,
+    hourly_delta: i64,
+    daily_delta: i64,
+    monthly_delta: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AdminUserSummaryView {
     user_id: String,
     display_name: Option<String>,
@@ -701,6 +758,7 @@ struct AdminUserSummaryView {
     daily_failure: i64,
     monthly_success: i64,
     last_activity: Option<i64>,
+    tags: Vec<AdminUserTagBindingView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -734,6 +792,12 @@ struct ListUsersResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ListUserTagsResponse {
+    items: Vec<AdminUserTagView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AdminUserDetailView {
     user_id: String,
     display_name: Option<String>,
@@ -753,6 +817,10 @@ struct AdminUserDetailView {
     daily_failure: i64,
     monthly_success: i64,
     last_activity: Option<i64>,
+    tags: Vec<AdminUserTagBindingView>,
+    quota_base: AdminQuotaView,
+    effective_quota: AdminQuotaView,
+    quota_breakdown: Vec<AdminUserQuotaBreakdownView>,
     tokens: Vec<AdminUserTokenSummaryView>,
 }
 
@@ -765,9 +833,110 @@ struct UpdateUserQuotaRequest {
     monthly_limit: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserTagMutationRequest {
+    name: String,
+    display_name: String,
+    icon: Option<String>,
+    effect_kind: String,
+    hourly_any_delta: i64,
+    hourly_delta: i64,
+    daily_delta: i64,
+    monthly_delta: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BindUserTagRequest {
+    tag_id: String,
+}
+
+fn build_admin_quota_view(quota: &tavily_hikari::AdminQuotaLimitSet) -> AdminQuotaView {
+    AdminQuotaView {
+        hourly_any_limit: quota.hourly_any_limit,
+        hourly_limit: quota.hourly_limit,
+        daily_limit: quota.daily_limit,
+        monthly_limit: quota.monthly_limit,
+        inherits_defaults: quota.inherits_defaults,
+    }
+}
+
+fn build_admin_user_tag_view(tag: &tavily_hikari::AdminUserTag) -> AdminUserTagView {
+    AdminUserTagView {
+        id: tag.id.clone(),
+        name: tag.name.clone(),
+        display_name: tag.display_name.clone(),
+        icon: tag.icon.clone(),
+        system_key: tag.system_key.clone(),
+        effect_kind: tag.effect_kind.clone(),
+        hourly_any_delta: tag.hourly_any_delta,
+        hourly_delta: tag.hourly_delta,
+        daily_delta: tag.daily_delta,
+        monthly_delta: tag.monthly_delta,
+        user_count: tag.user_count,
+    }
+}
+
+fn build_admin_user_tag_binding_view(
+    binding: &tavily_hikari::AdminUserTagBinding,
+) -> AdminUserTagBindingView {
+    AdminUserTagBindingView {
+        tag_id: binding.tag_id.clone(),
+        name: binding.name.clone(),
+        display_name: binding.display_name.clone(),
+        icon: binding.icon.clone(),
+        system_key: binding.system_key.clone(),
+        effect_kind: binding.effect_kind.clone(),
+        hourly_any_delta: binding.hourly_any_delta,
+        hourly_delta: binding.hourly_delta,
+        daily_delta: binding.daily_delta,
+        monthly_delta: binding.monthly_delta,
+        source: binding.source.clone(),
+    }
+}
+
+fn build_admin_quota_breakdown_view(
+    entry: &tavily_hikari::AdminUserQuotaBreakdownEntry,
+) -> AdminUserQuotaBreakdownView {
+    AdminUserQuotaBreakdownView {
+        kind: entry.kind.clone(),
+        label: entry.label.clone(),
+        tag_id: entry.tag_id.clone(),
+        tag_name: entry.tag_name.clone(),
+        source: entry.source.clone(),
+        effect_kind: entry.effect_kind.clone(),
+        hourly_any_delta: entry.hourly_any_delta,
+        hourly_delta: entry.hourly_delta,
+        daily_delta: entry.daily_delta,
+        monthly_delta: entry.monthly_delta,
+    }
+}
+
+fn admin_proxy_error_response(context: &str, err: ProxyError) -> (StatusCode, String) {
+    eprintln!("{context}: {err}");
+    let status = match err {
+        ProxyError::Other(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, err.to_string())
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|it| {
+        let trimmed = it.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn build_admin_user_summary_view(
     user: &tavily_hikari::AdminUserIdentity,
     summary: &tavily_hikari::UserDashboardSummary,
+    tags: Vec<tavily_hikari::AdminUserTagBinding>,
 ) -> AdminUserSummaryView {
     AdminUserSummaryView {
         user_id: user.user_id.clone(),
@@ -788,7 +957,161 @@ fn build_admin_user_summary_view(
         daily_failure: summary.daily_failure,
         monthly_success: summary.monthly_success,
         last_activity: summary.last_activity,
+        tags: tags.iter().map(build_admin_user_tag_binding_view).collect(),
     }
+}
+
+async fn list_user_tags(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ListUserTagsResponse>, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let items = state
+        .proxy
+        .list_user_tags()
+        .await
+        .map_err(|err| admin_proxy_error_response("list user tags error", err))?
+        .iter()
+        .map(build_admin_user_tag_view)
+        .collect();
+    Ok(Json(ListUserTagsResponse { items }))
+}
+
+async fn create_user_tag(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<UserTagMutationRequest>,
+) -> Result<Json<AdminUserTagView>, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let name = payload.name.trim();
+    let display_name = payload.display_name.trim();
+    if name.is_empty() || display_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name and displayName are required".to_string(),
+        ));
+    }
+    let icon = normalize_optional_text(payload.icon);
+    let tag = state
+        .proxy
+        .create_user_tag(
+            name,
+            display_name,
+            icon.as_deref(),
+            payload.effect_kind.trim(),
+            payload.hourly_any_delta,
+            payload.hourly_delta,
+            payload.daily_delta,
+            payload.monthly_delta,
+        )
+        .await
+        .map_err(|err| admin_proxy_error_response("create user tag error", err))?;
+    Ok(Json(build_admin_user_tag_view(&tag)))
+}
+
+async fn update_user_tag(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tag_id): Path<String>,
+    Json(payload): Json<UserTagMutationRequest>,
+) -> Result<Json<AdminUserTagView>, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let name = payload.name.trim();
+    let display_name = payload.display_name.trim();
+    if name.is_empty() || display_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name and displayName are required".to_string(),
+        ));
+    }
+    let icon = normalize_optional_text(payload.icon);
+    let Some(tag) = state
+        .proxy
+        .update_user_tag(
+            &tag_id,
+            name,
+            display_name,
+            icon.as_deref(),
+            payload.effect_kind.trim(),
+            payload.hourly_any_delta,
+            payload.hourly_delta,
+            payload.daily_delta,
+            payload.monthly_delta,
+        )
+        .await
+        .map_err(|err| admin_proxy_error_response("update user tag error", err))?
+    else {
+        return Err((StatusCode::NOT_FOUND, "user tag not found".to_string()));
+    };
+    Ok(Json(build_admin_user_tag_view(&tag)))
+}
+
+async fn delete_user_tag(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(tag_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let deleted = state
+        .proxy
+        .delete_user_tag(&tag_id)
+        .await
+        .map_err(|err| admin_proxy_error_response("delete user tag error", err))?;
+    if !deleted {
+        return Err((StatusCode::NOT_FOUND, "user tag not found".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn bind_user_tag(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<BindUserTagRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let tag_id = payload.tag_id.trim();
+    if tag_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "tagId is required".to_string()));
+    }
+    let bound = state
+        .proxy
+        .bind_user_tag_to_user(&id, tag_id)
+        .await
+        .map_err(|err| admin_proxy_error_response("bind user tag error", err))?;
+    if !bound {
+        return Err((StatusCode::NOT_FOUND, "user or tag not found".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unbind_user_tag(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, tag_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let unbound = state
+        .proxy
+        .unbind_user_tag_from_user(&id, &tag_id)
+        .await
+        .map_err(|err| admin_proxy_error_response("unbind user tag error", err))?;
+    if !unbound {
+        return Err((StatusCode::NOT_FOUND, "user tag binding not found".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_users(
@@ -809,6 +1132,15 @@ async fn list_users(
             eprintln!("list admin users error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    let user_ids: Vec<String> = users.iter().map(|user| user.user_id.clone()).collect();
+    let mut user_tags = state
+        .proxy
+        .list_user_tag_bindings_for_users(&user_ids)
+        .await
+        .map_err(|err| {
+            eprintln!("list admin user tags error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let mut items = Vec::with_capacity(users.len());
     for user in users {
         let summary = state
@@ -819,7 +1151,8 @@ async fn list_users(
                 eprintln!("list admin users dashboard summary error: {err}");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-        items.push(build_admin_user_summary_view(&user, &summary));
+        let tags = user_tags.remove(&user.user_id).unwrap_or_default();
+        items.push(build_admin_user_summary_view(&user, &summary, tags));
     }
     Ok(Json(ListUsersResponse {
         items,
@@ -843,6 +1176,18 @@ async fn get_user_detail(
         .await
         .map_err(|err| {
             eprintln!("get admin user identity error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let Some(quota_details) = state
+        .proxy
+        .get_admin_user_quota_details(&id)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user quota details error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
     else {
@@ -934,6 +1279,18 @@ async fn get_user_detail(
         daily_failure: summary.daily_failure,
         monthly_success: summary.monthly_success,
         last_activity: summary.last_activity,
+        tags: quota_details
+            .tags
+            .iter()
+            .map(build_admin_user_tag_binding_view)
+            .collect(),
+        quota_base: build_admin_quota_view(&quota_details.base),
+        effective_quota: build_admin_quota_view(&quota_details.effective),
+        quota_breakdown: quota_details
+            .breakdown
+            .iter()
+            .map(build_admin_quota_breakdown_view)
+            .collect(),
         tokens: token_items,
     }))
 }
@@ -943,16 +1300,19 @@ async fn update_user_quota(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(payload): Json<UpdateUserQuotaRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     if !is_admin_request(state.as_ref(), &headers) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
-    if payload.hourly_any_limit <= 0
-        || payload.hourly_limit <= 0
-        || payload.daily_limit <= 0
-        || payload.monthly_limit <= 0
+    if payload.hourly_any_limit < 0
+        || payload.hourly_limit < 0
+        || payload.daily_limit < 0
+        || payload.monthly_limit < 0
     {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "quota base values must be non-negative integers".to_string(),
+        ));
     }
     let updated = state
         .proxy
@@ -964,12 +1324,9 @@ async fn update_user_quota(
             payload.monthly_limit,
         )
         .await
-        .map_err(|err| {
-            eprintln!("update user quota error: {err}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(|err| admin_proxy_error_response("update user quota error", err))?;
     if !updated {
-        return Err(StatusCode::NOT_FOUND);
+        return Err((StatusCode::NOT_FOUND, "user not found".to_string()));
     }
     Ok(StatusCode::NO_CONTENT)
 }

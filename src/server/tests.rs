@@ -13,7 +13,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tavily_hikari::DEFAULT_UPSTREAM;
+    use tavily_hikari::{DEFAULT_UPSTREAM, effective_token_hourly_limit};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
 
@@ -2824,9 +2824,15 @@ mod tests {
         });
 
         let app = Router::new()
+            .route("/api/user-tags", get(list_user_tags))
+            .route("/api/user-tags", post(create_user_tag))
+            .route("/api/user-tags/:tag_id", patch(update_user_tag))
+            .route("/api/user-tags/:tag_id", delete(delete_user_tag))
             .route("/api/users", get(list_users))
             .route("/api/users/:id", get(get_user_detail))
             .route("/api/users/:id/quota", patch(update_user_quota))
+            .route("/api/users/:id/tags", post(bind_user_tag))
+            .route("/api/users/:id/tags/:tag_id", delete(unbind_user_tag))
             .with_state(state);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3731,12 +3737,6 @@ mod tests {
         assert_eq!(dashboard_resp.status(), reqwest::StatusCode::OK);
         let dashboard_body: serde_json::Value =
             dashboard_resp.json().await.expect("user dashboard json");
-        assert_eq!(
-            dashboard_body
-                .get("hourlyAnyLimit")
-                .and_then(|value| value.as_i64()),
-            Some(effective_token_hourly_request_limit())
-        );
 
         let tokens_url = format!("http://{}/api/user/tokens", addr);
         let tokens_resp = client
@@ -3749,10 +3749,18 @@ mod tests {
         let tokens_body: serde_json::Value = tokens_resp.json().await.expect("user tokens json");
         let items = tokens_body.as_array().expect("tokens response is array");
         assert_eq!(items.len(), 1);
+        let first_item = items.first().expect("user token row");
         assert_eq!(
-            items
-                .first()
-                .and_then(|item| item.get("tokenId"))
+            dashboard_body
+                .get("hourlyAnyLimit")
+                .and_then(|value| value.as_i64()),
+            first_item
+                .get("hourlyAnyLimit")
+                .and_then(|value| value.as_i64())
+        );
+        assert_eq!(
+            first_item
+                .get("tokenId")
                 .and_then(|value| value.as_str()),
             Some(bound_token.id.as_str())
         );
@@ -4318,6 +4326,23 @@ mod tests {
             .ensure_user_token_binding(&bob.user_id, Some("linuxdo:bob"))
             .await
             .expect("bind bob token");
+        let vip_tag = proxy
+            .create_user_tag(
+                "vip_plus",
+                "VIP+",
+                Some("star"),
+                "quota_delta",
+                5,
+                10,
+                20,
+                30,
+            )
+            .await
+            .expect("create vip tag");
+        proxy
+            .bind_user_tag_to_user(&alice.user_id, &vip_tag.id)
+            .await
+            .expect("bind vip tag");
 
         let _ = proxy
             .check_token_hourly_requests(&alice_token.id)
@@ -4399,6 +4424,39 @@ mod tests {
                 .unwrap_or_default()
                 >= 1
         );
+        let list_tags = alice_item
+            .get("tags")
+            .and_then(|value| value.as_array())
+            .expect("list tags array");
+        assert!(list_tags.iter().any(|value| {
+            value.get("displayName").and_then(|it| it.as_str()) == Some("VIP+")
+        }));
+        assert!(list_tags.iter().any(|value| {
+            value.get("systemKey").and_then(|it| it.as_str()) == Some("linuxdo_l2")
+        }));
+
+        let tag_search_url = format!(
+            "http://{}/api/users?page=1&per_page=20&q={}",
+            addr,
+            urlencoding::encode("VIP+")
+        );
+        let tag_search_resp = client
+            .get(&tag_search_url)
+            .send()
+            .await
+            .expect("tag search request");
+        assert_eq!(tag_search_resp.status(), reqwest::StatusCode::OK);
+        let tag_search_body: serde_json::Value =
+            tag_search_resp.json().await.expect("tag search json");
+        let tag_search_items = tag_search_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("tag search items array");
+        assert!(tag_search_items.iter().any(|item| {
+            item.get("userId")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == alice.user_id)
+        }));
 
         let detail_url = format!("http://{}/api/users/{}", addr, alice.user_id);
         let detail_resp = client
@@ -4423,6 +4481,61 @@ mod tests {
                 .and_then(|value| value.get("tokenId"))
                 .and_then(|value| value.as_str()),
             Some(alice_token.id.as_str())
+        );
+        let detail_tags = detail_body
+            .get("tags")
+            .and_then(|value| value.as_array())
+            .expect("detail tags array");
+        assert_eq!(detail_tags.len(), 2);
+        let system_tag = detail_tags
+            .iter()
+            .find(|value| value.get("systemKey").and_then(|it| it.as_str()) == Some("linuxdo_l2"))
+            .expect("linuxdo system tag in detail");
+        let system_hourly_any_delta = system_tag
+            .get("hourlyAnyDelta")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let system_hourly_delta = system_tag
+            .get("hourlyDelta")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let system_daily_delta = system_tag
+            .get("dailyDelta")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let system_monthly_delta = system_tag
+            .get("monthlyDelta")
+            .and_then(|value| value.as_i64())
+            .unwrap_or_default();
+        let quota_base = detail_body.get("quotaBase").expect("quotaBase present");
+        let effective_quota = detail_body
+            .get("effectiveQuota")
+            .expect("effectiveQuota present");
+        assert_eq!(
+            effective_quota
+                .get("hourlyAnyLimit")
+                .and_then(|value| value.as_i64()),
+            quota_base
+                .get("hourlyAnyLimit")
+                .and_then(|value| value.as_i64())
+                .map(|value| value + system_hourly_any_delta + 5)
+        );
+        assert_eq!(
+            effective_quota
+                .get("hourlyLimit")
+                .and_then(|value| value.as_i64()),
+            quota_base
+                .get("hourlyLimit")
+                .and_then(|value| value.as_i64())
+                .map(|value| value + system_hourly_delta + 10)
+        );
+        assert!(
+            detail_body
+                .get("quotaBreakdown")
+                .and_then(|value| value.as_array())
+                .is_some_and(|items| items.iter().any(|entry| {
+                    entry.get("tagId").and_then(|value| value.as_str()) == Some(vip_tag.id.as_str())
+                }))
         );
 
         let patch_url = format!("http://{}/api/users/{}/quota", addr, alice.user_id);
@@ -4451,27 +4564,83 @@ mod tests {
             .expect("user detail after patch json");
         assert_eq!(
             detail_after
-                .get("hourlyAnyLimit")
+                .get("quotaBase")
+                .and_then(|value| value.get("hourlyAnyLimit"))
                 .and_then(|value| value.as_i64()),
             Some(123)
         );
         assert_eq!(
             detail_after
-                .get("quotaHourlyLimit")
+                .get("quotaBase")
+                .and_then(|value| value.get("hourlyLimit"))
                 .and_then(|value| value.as_i64()),
             Some(45)
         );
         assert_eq!(
             detail_after
-                .get("quotaDailyLimit")
+                .get("quotaBase")
+                .and_then(|value| value.get("dailyLimit"))
                 .and_then(|value| value.as_i64()),
             Some(678)
         );
         assert_eq!(
             detail_after
-                .get("quotaMonthlyLimit")
+                .get("quotaBase")
+                .and_then(|value| value.get("monthlyLimit"))
                 .and_then(|value| value.as_i64()),
             Some(910)
+        );
+        assert_eq!(
+            detail_after
+                .get("effectiveQuota")
+                .and_then(|value| value.get("hourlyAnyLimit"))
+                .and_then(|value| value.as_i64()),
+            Some(123 + system_hourly_any_delta + 5)
+        );
+        assert_eq!(
+            detail_after
+                .get("effectiveQuota")
+                .and_then(|value| value.get("hourlyLimit"))
+                .and_then(|value| value.as_i64()),
+            Some(45 + system_hourly_delta + 10)
+        );
+        assert_eq!(
+            detail_after
+                .get("effectiveQuota")
+                .and_then(|value| value.get("dailyLimit"))
+                .and_then(|value| value.as_i64()),
+            Some(678 + system_daily_delta + 20)
+        );
+        assert_eq!(
+            detail_after
+                .get("effectiveQuota")
+                .and_then(|value| value.get("monthlyLimit"))
+                .and_then(|value| value.as_i64()),
+            Some(910 + system_monthly_delta + 30)
+        );
+        assert_eq!(
+            detail_after
+                .get("hourlyAnyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(123 + system_hourly_any_delta + 5)
+        );
+        assert_eq!(
+            detail_after
+                .get("quotaHourlyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(45 + system_hourly_delta + 10)
+        );
+        assert_eq!(
+            detail_after
+                .get("quotaDailyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(678 + system_daily_delta + 20)
+        );
+        assert_eq!(
+            detail_after
+                .get("quotaMonthlyLimit")
+                .and_then(|value| value.as_i64()),
+            Some(910 + system_monthly_delta + 30)
         );
         assert_eq!(
             detail_after
@@ -4483,7 +4652,7 @@ mod tests {
         let invalid_resp = client
             .patch(&patch_url)
             .json(&serde_json::json!({
-                "hourlyAnyLimit": 0,
+                "hourlyAnyLimit": -1,
                 "hourlyLimit": 45,
                 "dailyLimit": 678,
                 "monthlyLimit": 910,
@@ -4492,6 +4661,257 @@ mod tests {
             .await
             .expect("invalid patch request");
         assert_eq!(invalid_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_user_tag_crud_and_system_guards_work() {
+        let db_path = temp_db_path("admin-user-tags");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "admin-user-tags-user".to_string(),
+                username: Some("taguser".to_string()),
+                name: Some("Tag User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(4),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:taguser"))
+            .await
+            .expect("bind token");
+
+        let addr = spawn_admin_users_server(proxy, true).await;
+        let client = Client::new();
+
+        let list_tags_resp = client
+            .get(format!("http://{}/api/user-tags", addr))
+            .send()
+            .await
+            .expect("list user tags request");
+        assert_eq!(list_tags_resp.status(), reqwest::StatusCode::OK);
+        let list_tags_body: serde_json::Value = list_tags_resp
+            .json()
+            .await
+            .expect("list user tags json");
+        let items = list_tags_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("user tags items array");
+        assert_eq!(items.len(), 5);
+        let system_tag = items
+            .iter()
+            .find(|item| item.get("systemKey").and_then(|value| value.as_str()) == Some("linuxdo_l4"))
+            .expect("linuxdo_l4 system tag present");
+        assert!(
+            system_tag
+                .get("hourlyAnyDelta")
+                .and_then(|value| value.as_i64())
+                .is_some_and(|value| value > 0)
+        );
+        assert!(
+            system_tag
+                .get("hourlyDelta")
+                .and_then(|value| value.as_i64())
+                .is_some_and(|value| value > 0)
+        );
+        assert!(
+            system_tag
+                .get("dailyDelta")
+                .and_then(|value| value.as_i64())
+                .is_some_and(|value| value > 0)
+        );
+        assert!(
+            system_tag
+                .get("monthlyDelta")
+                .and_then(|value| value.as_i64())
+                .is_some_and(|value| value > 0)
+        );
+        let system_tag_id = system_tag
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("system tag id")
+            .to_string();
+
+        let update_system_effect_resp = client
+            .patch(format!("http://{}/api/user-tags/{}", addr, system_tag_id))
+            .json(&serde_json::json!({
+                "name": "linuxdo_l4",
+                "displayName": "L4",
+                "icon": "linuxdo",
+                "effectKind": "quota_delta",
+                "hourlyAnyDelta": 0,
+                "hourlyDelta": 0,
+                "dailyDelta": 0,
+                "monthlyDelta": 0,
+            }))
+            .send()
+            .await
+            .expect("update system tag effect request");
+        assert_eq!(update_system_effect_resp.status(), reqwest::StatusCode::OK);
+
+        let update_system_name_resp = client
+            .patch(format!("http://{}/api/user-tags/{}", addr, system_tag_id))
+            .json(&serde_json::json!({
+                "name": "linuxdo_l4",
+                "displayName": "L4 blocked",
+                "icon": "linuxdo",
+                "effectKind": "quota_delta",
+                "hourlyAnyDelta": 0,
+                "hourlyDelta": 0,
+                "dailyDelta": 0,
+                "monthlyDelta": 0,
+            }))
+            .send()
+            .await
+            .expect("update system tag display name request");
+        assert_eq!(update_system_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let bind_system_resp = client
+            .post(format!("http://{}/api/users/{}/tags", addr, user.user_id))
+            .json(&serde_json::json!({ "tagId": system_tag_id }))
+            .send()
+            .await
+            .expect("bind system tag request");
+        assert_eq!(bind_system_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let create_custom_resp = client
+            .post(format!("http://{}/api/user-tags", addr))
+            .json(&serde_json::json!({
+                "name": "suspended_manual",
+                "displayName": "Suspended",
+                "icon": "ban",
+                "effectKind": "quota_delta",
+                "hourlyAnyDelta": -9,
+                "hourlyDelta": -9,
+                "dailyDelta": -9,
+                "monthlyDelta": -9,
+            }))
+            .send()
+            .await
+            .expect("create custom tag request");
+        assert_eq!(create_custom_resp.status(), reqwest::StatusCode::OK);
+        let custom_tag: serde_json::Value = create_custom_resp
+            .json()
+            .await
+            .expect("custom tag json");
+        let custom_tag_id = custom_tag
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("custom tag id")
+            .to_string();
+
+        let update_custom_resp = client
+            .patch(format!("http://{}/api/user-tags/{}", addr, custom_tag_id))
+            .json(&serde_json::json!({
+                "name": "suspended_manual",
+                "displayName": "Suspended Now",
+                "icon": "ban",
+                "effectKind": "block_all",
+                "hourlyAnyDelta": 0,
+                "hourlyDelta": 0,
+                "dailyDelta": 0,
+                "monthlyDelta": 0,
+            }))
+            .send()
+            .await
+            .expect("update custom tag request");
+        assert_eq!(update_custom_resp.status(), reqwest::StatusCode::OK);
+
+        let bind_custom_resp = client
+            .post(format!("http://{}/api/users/{}/tags", addr, user.user_id))
+            .json(&serde_json::json!({ "tagId": custom_tag_id }))
+            .send()
+            .await
+            .expect("bind custom tag request");
+        assert_eq!(bind_custom_resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let detail_resp = client
+            .get(format!("http://{}/api/users/{}", addr, user.user_id))
+            .send()
+            .await
+            .expect("detail request");
+        assert_eq!(detail_resp.status(), reqwest::StatusCode::OK);
+        let detail_body: serde_json::Value = detail_resp.json().await.expect("detail json");
+        assert_eq!(
+            detail_body
+                .get("effectiveQuota")
+                .and_then(|value| value.get("hourlyAnyLimit"))
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
+        assert_eq!(
+            detail_body
+                .get("effectiveQuota")
+                .and_then(|value| value.get("monthlyLimit"))
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
+        assert!(
+            detail_body
+                .get("quotaBreakdown")
+                .and_then(|value| value.as_array())
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry.get("effectKind").and_then(|value| value.as_str()) == Some("block_all")
+                }))
+        );
+
+        let unbind_system_resp = client
+            .delete(format!("http://{}/api/users/{}/tags/{}", addr, user.user_id, system_tag_id))
+            .send()
+            .await
+            .expect("unbind system tag request");
+        assert_eq!(unbind_system_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let delete_system_resp = client
+            .delete(format!("http://{}/api/user-tags/{}", addr, system_tag_id))
+            .send()
+            .await
+            .expect("delete system tag request");
+        assert_eq!(delete_system_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let delete_custom_resp = client
+            .delete(format!("http://{}/api/user-tags/{}", addr, custom_tag_id))
+            .send()
+            .await
+            .expect("delete custom tag request");
+        assert_eq!(delete_custom_resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let detail_after_resp = client
+            .get(format!("http://{}/api/users/{}", addr, user.user_id))
+            .send()
+            .await
+            .expect("detail after delete request");
+        assert_eq!(detail_after_resp.status(), reqwest::StatusCode::OK);
+        let detail_after: serde_json::Value = detail_after_resp
+            .json()
+            .await
+            .expect("detail after delete json");
+        assert!(
+            detail_after
+                .get("tags")
+                .and_then(|value| value.as_array())
+                .is_some_and(|tags| tags.iter().all(|tag| {
+                    tag.get("tagId").and_then(|value| value.as_str()) != Some(custom_tag_id.as_str())
+                }))
+        );
+        assert!(
+            detail_after
+                .get("effectiveQuota")
+                .and_then(|value| value.get("monthlyLimit"))
+                .and_then(|value| value.as_i64())
+                .unwrap_or_default()
+                > 0
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
