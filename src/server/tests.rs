@@ -4640,7 +4640,7 @@ mod tests {
             .await
             .expect("record legacy log without credits");
 
-        proxy
+        let charged_log_id = proxy
             .record_pending_billing_attempt(
                 &token.id,
                 &Method::POST,
@@ -4655,6 +4655,13 @@ mod tests {
             )
             .await
             .expect("record pending billing log");
+        assert_eq!(
+            proxy
+                .settle_pending_billing_attempt(charged_log_id)
+                .await
+                .expect("settle pending billing log"),
+            PendingBillingSettleOutcome::Charged
+        );
 
         let addr = spawn_admin_tokens_server(proxy, true).await;
         let client = Client::new();
@@ -4695,13 +4702,24 @@ mod tests {
             .await
             .expect("events request");
         assert_eq!(events_resp.status(), reqwest::StatusCode::OK);
-        let first_chunk = events_resp
-            .chunk()
-            .await
-            .expect("read first event chunk")
-            .expect("snapshot chunk exists");
-        let first_text = String::from_utf8(first_chunk.to_vec()).expect("snapshot chunk utf8");
-        let snapshot_line = first_text
+        let mut first_text = String::new();
+        while !first_text.contains("
+
+") {
+            let chunk = events_resp
+                .chunk()
+                .await
+                .expect("read event chunk")
+                .expect("snapshot chunk exists");
+            first_text.push_str(&String::from_utf8(chunk.to_vec()).expect("snapshot chunk utf8"));
+        }
+        let snapshot_event = first_text
+            .split("
+
+")
+            .find(|chunk| chunk.contains("data: "))
+            .expect("snapshot event");
+        let snapshot_line = snapshot_event
             .lines()
             .find_map(|line| line.strip_prefix("data: "))
             .expect("snapshot data line");
@@ -4721,6 +4739,7 @@ mod tests {
         assert!(snapshot_logs[1]
             .get("business_credits")
             .is_some_and(|value| value.is_null()));
+        drop(events_resp);
 
         let _ = std::fs::remove_file(db_path);
     }

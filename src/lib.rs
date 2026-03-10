@@ -8042,20 +8042,25 @@ impl KeyStore {
     ) -> Result<Vec<TokenLogRecord>, ProxyError> {
         let limit = limit.clamp(1, 500) as i64;
         let rows = if let Some(bid) = before_id {
-            sqlx::query_as::<_, (
-                i64,
-                String,
-                String,
-                Option<String>,
-                Option<i64>,
-                Option<i64>,
-                Option<i64>,
-                String,
-                Option<String>,
-                i64,
-            )>(
+            sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    String,
+                    Option<String>,
+                    i64,
+                ),
+            >(
                 r#"
-                SELECT id, method, path, query, http_status, mcp_status, business_credits, result_status, error_message, created_at
+                SELECT id, method, path, query, http_status, mcp_status,
+                       CASE WHEN billing_state = 'charged' THEN business_credits ELSE NULL END,
+                       result_status, error_message, created_at
                 FROM auth_token_logs
                 WHERE token_id = ? AND id < ?
                 ORDER BY created_at DESC, id DESC
@@ -8068,20 +8073,25 @@ impl KeyStore {
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as::<_, (
-                i64,
-                String,
-                String,
-                Option<String>,
-                Option<i64>,
-                Option<i64>,
-                Option<i64>,
-                String,
-                Option<String>,
-                i64,
-            )>(
+            sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    String,
+                    Option<String>,
+                    i64,
+                ),
+            >(
                 r#"
-                SELECT id, method, path, query, http_status, mcp_status, business_credits, result_status, error_message, created_at
+                SELECT id, method, path, query, http_status, mcp_status,
+                       CASE WHEN billing_state = 'charged' THEN business_credits ELSE NULL END,
+                       result_status, error_message, created_at
                 FROM auth_token_logs
                 WHERE token_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -8225,20 +8235,25 @@ impl KeyStore {
         };
 
         let rows = if let Some(until) = until {
-            sqlx::query_as::<_, (
-                i64,
-                String,
-                String,
-                Option<String>,
-                Option<i64>,
-                Option<i64>,
-                Option<i64>,
-                String,
-                Option<String>,
-                i64,
-            )>(
+            sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    String,
+                    Option<String>,
+                    i64,
+                ),
+            >(
                 r#"
-            SELECT id, method, path, query, http_status, mcp_status, business_credits, result_status, error_message, created_at
+            SELECT id, method, path, query, http_status, mcp_status,
+                   CASE WHEN billing_state = 'charged' THEN business_credits ELSE NULL END,
+                   result_status, error_message, created_at
             FROM auth_token_logs
             WHERE token_id = ? AND created_at >= ? AND created_at < ?
             ORDER BY created_at DESC, id DESC
@@ -8253,32 +8268,37 @@ impl KeyStore {
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as::<_, (
-            i64,
-            String,
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<i64>,
-            String,
-            Option<String>,
-            i64,
-        )>(
-            r#"
-            SELECT id, method, path, query, http_status, mcp_status, business_credits, result_status, error_message, created_at
+            sqlx::query_as::<
+                _,
+                (
+                    i64,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    String,
+                    Option<String>,
+                    i64,
+                ),
+            >(
+                r#"
+            SELECT id, method, path, query, http_status, mcp_status,
+                   CASE WHEN billing_state = 'charged' THEN business_credits ELSE NULL END,
+                   result_status, error_message, created_at
             FROM auth_token_logs
             WHERE token_id = ? AND created_at >= ?
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             "#,
-        )
-        .bind(token_id)
-        .bind(since)
-        .bind(per_page)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?
+            )
+            .bind(token_id)
+            .bind(since)
+            .bind(per_page)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?
         };
 
         let items = rows
