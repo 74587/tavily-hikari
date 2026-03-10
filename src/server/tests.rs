@@ -4711,7 +4711,7 @@ mod tests {
                 .await
                 .expect("read event chunk")
                 .expect("snapshot chunk exists");
-            first_text.push_str(&String::from_utf8(chunk.to_vec()).expect("snapshot chunk utf8"));
+            first_text.push_str(std::str::from_utf8(&chunk).expect("snapshot chunk utf8"));
         }
         let snapshot_event = first_text
             .split("
