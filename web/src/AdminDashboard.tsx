@@ -3551,6 +3551,12 @@ function AdminDashboard(): JSX.Element {
                   <tbody>
                     {detail.quotaBreakdown.map((entry, index) => {
                       const isAbsoluteRow = entry.kind === 'base' || entry.kind === 'effective'
+                      const breakdownLabel =
+                        entry.kind === 'base'
+                          ? usersStrings.effectiveQuota.baseLabel
+                          : entry.kind === 'effective'
+                            ? usersStrings.effectiveQuota.effectiveLabel
+                            : entry.label
                       const formatBreakdownValue = (value: number) => (
                         isAbsoluteRow ? formatQuotaLimitValue(value) : formatSignedQuotaDelta(value)
                       )
@@ -3559,7 +3565,7 @@ function AdminDashboard(): JSX.Element {
                           <td>
                             <div className="token-compact-pair">
                               <div className="token-compact-field">
-                                <span className="token-compact-value">{entry.label}</span>
+                                <span className="token-compact-value">{breakdownLabel}</span>
                               </div>
                               {entry.tagName && (
                                 <div className="token-compact-field">

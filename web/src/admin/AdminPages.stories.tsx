@@ -646,7 +646,7 @@ const MOCK_USER_DETAIL: AdminUserDetail = {
   quotaBreakdown: [
     {
       kind: 'base',
-      label: 'Base quota',
+      label: 'base',
       tagId: null,
       tagName: null,
       source: null,
@@ -2102,6 +2102,12 @@ function UserDetailPageCanvas(): JSX.Element {
             <tbody>
               {detail.quotaBreakdown.map((entry, index) => {
                 const isAbsoluteRow = entry.kind === 'base' || entry.kind === 'effective'
+                const breakdownLabel =
+                  entry.kind === 'base'
+                    ? users.effectiveQuota.baseLabel
+                    : entry.kind === 'effective'
+                      ? users.effectiveQuota.effectiveLabel
+                      : entry.label
                 const formatBreakdownValue = (value: number) =>
                   isAbsoluteRow ? formatQuotaLimitValue(value) : formatSignedQuotaDelta(value)
                 return (
@@ -2109,7 +2115,7 @@ function UserDetailPageCanvas(): JSX.Element {
                     <td>
                       <div className="token-compact-pair">
                         <div className="token-compact-field">
-                          <span className="token-compact-value">{entry.label}</span>
+                          <span className="token-compact-value">{breakdownLabel}</span>
                         </div>
                         {entry.tagName && (
                           <div className="token-compact-field">

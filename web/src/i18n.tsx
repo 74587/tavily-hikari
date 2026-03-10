@@ -382,6 +382,7 @@ interface AdminTranslationsShape {
       description: string
       blockAllNotice: string
       baseLabel: string
+      effectiveLabel: string
       columns: {
         item: string
         source: string
@@ -1226,6 +1227,7 @@ export const translations: Record<Language, TranslationShape> = {
           description: 'Effective quota = base quota + all tag deltas, then clamped to zero for display and enforcement.',
           blockAllNotice: 'A block_all tag is active. Effective quota is fully clamped to 0 for this user.',
           baseLabel: 'Base quota',
+          effectiveLabel: 'Effective quota',
           columns: {
             item: 'Item',
             source: 'Source',
@@ -2058,6 +2060,7 @@ export const translations: Record<Language, TranslationShape> = {
           description: '有效额度 = 基础额度 + 所有标签增减，然后统一按 0 做下限钳制。',
           blockAllNotice: '当前存在 block_all 标签，这个用户的所有有效额度都会被钳制为 0。',
           baseLabel: '基础额度',
+          effectiveLabel: '最终有效额度',
           columns: {
             item: '项目',
             source: '来源',

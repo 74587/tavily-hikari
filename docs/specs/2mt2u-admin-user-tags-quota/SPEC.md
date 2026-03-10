@@ -15,7 +15,7 @@
 ### Goals
 
 - 新增用户标签模型，支持 custom tag 的增删改查与用户绑标/解绑。
-- 固定提供 5 个 LinuxDo 系统标签：`linuxdo_l0..linuxdo_l4`，显示名 `L0..L4`，图标键 `linuxdo`。
+- 固定提供 5 个 LinuxDo 系统标签：`linuxdo_l0..linuxdo_l4`，显示名 `L0..L4`，图标键 `linuxdo`，默认 delta 直接镜像旧 token 默认额度（`hourlyAny/hourly/daily/monthly`）。
 - 基于 `oauth_accounts.trust_level` 做系统标签同步：初始化回填历史 LinuxDo 用户，后续 LinuxDo 登录时维持“每用户最多一个当前等级标签”。
 - 将账户额度改为“用户基线 + 标签叠加”的有效额度模型，并让 `block_all` 标签可同时阻断 hourly-any 与 business quota。
 - 在 admin 用户列表与详情页展示标签、基线额度、有效额度与计算明细。
@@ -63,7 +63,7 @@
 
 - Given 历史 LinuxDo 用户存在且 `trust_level` 位于 `0..4`
   When 服务启动完成标签回填
-  Then 每个用户都绑定且仅绑定一个对应等级的 LinuxDo 系统标签。
+  Then 每个用户都绑定且仅绑定一个对应等级的 LinuxDo 系统标签，并按该系统标签默认 delta 参与有效额度叠加。
 
 - Given LinuxDo 用户再次登录且 `trust_level` 发生变化
   When OAuth 回调完成
@@ -77,7 +77,7 @@
   When 服务重启
   Then 该用户基线额度保持不变，不再被默认值覆盖。
 
-- Given 用户绑定多个标签
+- Given 用户绑定多个标签（包含自动同步的 LinuxDo 系统标签）
   When 读取用户列表、用户详情或执行额度判定
   Then 最终有效额度按“用户基线 + 全部标签 delta”汇总，并对每个维度执行 `max(0, value)`。
 

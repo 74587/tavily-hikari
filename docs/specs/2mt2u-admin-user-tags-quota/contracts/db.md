@@ -51,5 +51,6 @@
 
 - 启动时创建新表，并为 `account_quota_limits` 增列 `inherits_defaults`。
 - 初始化时 seed 5 个 LinuxDo 系统标签；重复启动必须幂等。
+- LinuxDo 系统标签默认 delta 直接镜像旧 token 默认额度，自动同步绑定后会按普通 tag delta 参与有效额度叠加。
 - 启动时对现有 LinuxDo 用户做一次回填：将 `trust_level` 映射为单一系统标签绑定。
 - 之后每次 LinuxDo 登录时按最新 `trust_level` 更新系统绑定；`trust_level` 缺失/越界不自动删除旧绑定。

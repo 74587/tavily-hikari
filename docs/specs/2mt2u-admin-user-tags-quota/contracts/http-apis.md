@@ -63,6 +63,8 @@
   - `quotaBase: AdminQuotaView`
   - `effectiveQuota: AdminQuotaView`
   - `quotaBreakdown: AdminUserQuotaBreakdownView[]`
+- Notes
+  - 自动同步的 LinuxDo 系统标签会像其他 tag 一样出现在 `tags` 与 `quotaBreakdown` 中，并把默认 delta 叠加到 `effectiveQuota`。
 
 ## PATCH `/api/users/:id/quota`
 

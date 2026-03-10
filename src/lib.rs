@@ -427,6 +427,9 @@ const USER_TAG_SOURCE_SYSTEM_LINUXDO: &str = "system_linuxdo";
 const USER_TAG_SYSTEM_KEY_LINUXDO_PREFIX: &str = "linuxdo_l";
 const USER_TAG_ICON_LINUXDO: &str = "linuxdo";
 
+// LinuxDo trust tiers intentionally ship with the legacy token quota tuple as their
+// additive delta, so auto-bound LinuxDo users receive that uplift on top of the
+// account base quota unless an admin edits the system tag effect later.
 fn linuxdo_system_tag_default_deltas() -> (i64, i64, i64, i64) {
     (
         effective_token_hourly_request_limit(),
@@ -609,7 +612,7 @@ fn build_account_quota_resolution(
     let mut effective = base.clone();
     let mut breakdown = vec![AccountQuotaBreakdownRecord {
         kind: "base".to_string(),
-        label: "Base quota".to_string(),
+        label: "base".to_string(),
         tag_id: None,
         tag_name: None,
         source: None,
@@ -664,7 +667,7 @@ fn build_account_quota_resolution(
     if block_all {
         breakdown.push(AccountQuotaBreakdownRecord {
             kind: "effective".to_string(),
-            label: "Effective quota".to_string(),
+            label: "effective".to_string(),
             tag_id: None,
             tag_name: None,
             source: None,
@@ -7230,6 +7233,8 @@ impl KeyStore {
                     AND hourly_limit = ?
                     AND daily_limit = ?
                     AND monthly_limit = ?
+                   THEN 1
+                   WHEN created_at = updated_at
                    THEN 1
                    ELSE 0
                END"#,
@@ -15599,6 +15604,101 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn legacy_default_account_quota_limits_keep_following_defaults_after_reclassification() {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("account-limit-legacy-default");
+        let db_str = db_path.to_string_lossy().to_string();
+        let env_keys = [
+            "TOKEN_HOURLY_REQUEST_LIMIT",
+            "TOKEN_HOURLY_LIMIT",
+            "TOKEN_DAILY_LIMIT",
+            "TOKEN_MONTHLY_LIMIT",
+        ];
+        let previous: Vec<Option<String>> =
+            env_keys.iter().map(|key| std::env::var(key).ok()).collect();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "legacy-default-user".to_string(),
+                username: Some("legacy_default_user".to_string()),
+                name: Some("Legacy Default User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(1),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert user");
+        proxy
+            .ensure_user_token_binding(&user.user_id, Some("linuxdo:legacy_default_user"))
+            .await
+            .expect("bind token");
+        proxy
+            .user_dashboard_summary(&user.user_id)
+            .await
+            .expect("seed account quota row");
+        sqlx::query(
+            r#"UPDATE account_quota_limits
+               SET inherits_defaults = 1,
+                   updated_at = created_at
+               WHERE user_id = ?"#,
+        )
+        .bind(&user.user_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate untouched legacy default row");
+        sqlx::query("DELETE FROM meta WHERE key = ?")
+            .bind(META_KEY_ACCOUNT_QUOTA_INHERITS_DEFAULTS_BACKFILL_V1)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("clear inherits defaults backfill marker");
+
+        drop(proxy);
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "21");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "22");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "23");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "24");
+        }
+
+        let proxy_after =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened");
+        let limits: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT hourly_any_limit, hourly_limit, daily_limit, monthly_limit, inherits_defaults FROM account_quota_limits WHERE user_id = ?",
+        )
+        .bind(&user.user_id)
+        .fetch_one(&proxy_after.key_store.pool)
+        .await
+        .expect("read persisted legacy default limits");
+        assert_eq!(limits, (21, 22, 23, 24, 1));
+
+        unsafe {
+            for (key, old_value) in env_keys.iter().zip(previous.into_iter()) {
+                if let Some(value) = old_value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn build_account_quota_resolution_clamps_negative_tag_totals_to_zero() {
         let base = AccountQuotaLimits {
@@ -15886,7 +15986,8 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                    hourly_limit = 102,
                    daily_limit = 103,
                    monthly_limit = 104,
-                   inherits_defaults = 1
+                   inherits_defaults = 1,
+                   updated_at = updated_at + 1
                WHERE user_id = ?"#,
         )
         .bind(&user.user_id)
