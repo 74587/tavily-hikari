@@ -113,6 +113,19 @@
 - [x] M4: admin UI、i18n、Storybook 完成
 - [ ] M5: 验证、快车道 PR、review-loop 收敛完成
 
+## Visual Evidence (PR)
+
+- 用户管理主页
+  ![用户管理主页](./assets/admin-users-list.png)
+- 标签目录页
+  ![标签目录页](./assets/admin-users-tags-catalog.png)
+- 标签编辑态（基线对齐后）
+  ![标签编辑态（基线对齐后）](./assets/admin-users-tags-editing.png)
+- 标签删除二次确认
+  ![标签删除二次确认](./assets/admin-users-tags-delete-dialog.png)
+- 用户详情页
+  ![用户详情页](./assets/admin-user-detail.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 风险：管理员基线额度输入沿用现有指数滑块 + 文本框组合，浏览器自动化在文本框覆盖时容易出现追加输入，需要以真实人工交互为最终体验确认。
@@ -123,3 +136,4 @@
 
 - 2026-03-09: 冻结快车道 spec、DB / HTTP contracts，并落地 `user_tags` / `user_tag_bindings`、LinuxDo 系统标签 seed / 回填、基线额度 + 标签叠加、`block_all` 限流语义，以及 admin 列表/详情标签与额度拆解 UI。
 - 2026-03-09: 通过 `cargo clippy -- -D warnings`、`cargo test`、`cd web && bun test`、`cd web && bun run build`、`cd web && bun run build-storybook`，并在 `http://127.0.0.1:55173/admin/users` 与 `http://127.0.0.1:55173/admin/users/demo-user` 完成真实浏览器验收。
+- 2026-03-10: 根据主人确认补齐 5 张管理端视觉证据，统一归档到 `docs/specs/2mt2u-admin-user-tags-quota/assets/`，并修正标签目录编辑卡片与非编辑卡片的基线对齐。

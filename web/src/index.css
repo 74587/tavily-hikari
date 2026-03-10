@@ -3681,7 +3681,7 @@ tbody tr:hover {
 
 .user-tag-catalog-card {
   display: grid;
-  grid-template-rows: minmax(88px, auto) minmax(36px, auto) minmax(0, 1fr);
+  grid-template-rows: minmax(82px, auto) minmax(34px, auto) minmax(0, 1fr);
   gap: 12px;
   min-width: 0;
   min-height: 376px;
@@ -3711,27 +3711,29 @@ tbody tr:hover {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 12px;
-  min-height: 88px;
+  min-height: 82px;
 }
 
 .user-tag-catalog-name {
   min-width: 0;
-  min-height: 88px;
+  min-height: 82px;
   display: grid;
   align-content: start;
-  gap: 8px;
+  gap: 6px;
 }
 
 .user-tag-catalog-subtitle {
   margin-top: 0;
-  min-height: 24px;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
   word-break: break-word;
 }
 
 .user-tag-inline-fields {
   display: grid;
   align-content: start;
-  gap: 8px;
+  gap: 6px;
 }
 
 .user-tag-inline-fields-row {
@@ -3743,11 +3745,14 @@ tbody tr:hover {
 .user-tag-inline-input {
   width: 100%;
   min-width: 0;
-  height: 40px;
-  font-size: 0.88rem;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 0.84rem;
+  line-height: 1.2;
 }
 
 .user-tag-inline-input-display {
+  font-size: 0.9rem;
   font-weight: 600;
 }
 
@@ -3772,14 +3777,14 @@ tbody tr:hover {
 
 .user-tag-catalog-card-meta {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  min-height: 36px;
+  min-height: 34px;
 }
 
 .user-tag-meta-badge {
-  min-height: 28px;
+  min-height: 26px;
   border-radius: 999px;
 }
 
@@ -3791,7 +3796,7 @@ tbody tr:hover {
 }
 
 .user-tag-effect-chip {
-  min-height: 28px;
+  min-height: 26px;
   border-radius: 999px;
   padding-inline: 10px;
   font-size: 0.76rem;
@@ -3809,7 +3814,7 @@ tbody tr:hover {
   align-items: center;
   gap: 8px;
   margin-left: auto;
-  min-height: 28px;
+  min-height: 26px;
   border-radius: 999px;
   font-size: 0.82rem;
 }
@@ -3864,7 +3869,7 @@ tbody tr:hover {
 
 .user-tag-catalog-delta-item dd {
   margin: 8px 0 0;
-  min-height: 40px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   font-size: 1rem;
@@ -3875,9 +3880,11 @@ tbody tr:hover {
 .user-tag-delta-input {
   width: 100%;
   min-width: 0;
-  height: 40px;
-  font-size: 1rem;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 0.95rem;
   font-weight: 600;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
