@@ -35,6 +35,7 @@ import {
   keyDetailPath,
   modulePath,
   parseAdminPath,
+  buildAdminUsersPath,
   tokenDetailPath,
   tokenLeaderboardPath,
   userDetailPath,
@@ -183,18 +184,10 @@ function getAdminUsersTagFilterFromLocation(): string | null {
   return tagId.length > 0 ? tagId : null
 }
 
-function buildAdminUsersPath(query?: string, tagId?: string | null): string {
-  const normalizedQuery = query?.trim() ?? ''
-  const normalizedTagId = tagId?.trim() ?? ''
-  if (!normalizedQuery && !normalizedTagId) return modulePath('users')
-  const params = new URLSearchParams()
-  if (normalizedQuery) {
-    params.set('q', normalizedQuery)
-  }
-  if (normalizedTagId) {
-    params.set('tagId', normalizedTagId)
-  }
-  return `${modulePath('users')}?${params.toString()}`
+function getAdminUsersPageFromLocation(): number {
+  const rawPage = new URLSearchParams(window.location.search).get('page')?.trim() ?? ''
+  const parsedPage = Number.parseInt(rawPage, 10)
+  return Number.isFinite(parsedPage) && parsedPage > 1 ? parsedPage : 1
 }
 
 function getUserTagIconSrc(icon: string | null | undefined): string | null {
@@ -1330,7 +1323,8 @@ function AdminDashboard(): JSX.Element {
     if (!(route.name === 'module' && route.module === 'users')) return
     const locationQuery = getAdminUsersQueryFromLocation()
     const locationTagFilterId = getAdminUsersTagFilterFromLocation()
-    setUsersPage(1)
+    const locationPage = getAdminUsersPageFromLocation()
+    setUsersPage((previous) => (previous === locationPage ? previous : locationPage))
     setUsersQueryInput((previous) => (previous === locationQuery ? previous : locationQuery))
     setUsersQuery((previous) => (previous === locationQuery ? previous : locationQuery))
     setUsersTagFilterId((previous) => (previous === locationTagFilterId ? previous : locationTagFilterId))
@@ -1542,36 +1536,48 @@ function AdminDashboard(): JSX.Element {
   const navigateUser = useCallback(
     (id: string, options?: { preserveUsersContext?: boolean }) => {
       if (options?.preserveUsersContext) {
-        navigateToPath(userDetailPath(id, usersQuery, usersTagFilterId))
+        navigateToPath(userDetailPath(id, usersQuery, usersTagFilterId, usersPage))
         return
       }
       navigateToPath(userDetailPath(id))
     },
-    [navigateToPath, usersQuery, usersTagFilterId],
+    [navigateToPath, usersPage, usersQuery, usersTagFilterId],
   )
 
   const navigateUsersSearch = useCallback(
-    (query: string, options?: { tagId?: string | null }) => {
+    (query: string, options?: { tagId?: string | null; page?: number | null }) => {
       const normalized = query.trim()
       const normalizedTagId = options?.tagId?.trim() ?? null
-      setUsersPage(1)
+      const normalizedPage = options?.page != null ? Math.max(1, options.page) : 1
+      setUsersPage(normalizedPage)
       setUsersQueryInput(normalized)
       setUsersQuery(normalized)
       setUsersTagFilterId(normalizedTagId)
-      navigateToPath(buildAdminUsersPath(normalized, normalizedTagId))
+      navigateToPath(buildAdminUsersPath(normalized, normalizedTagId, normalizedPage))
     },
     [navigateToPath],
   )
 
   const navigateUserTags = useCallback(() => {
-    navigateToPath(userTagsPath())
-  }, [navigateToPath])
+    const query = route.name === 'module' && route.module === 'users' ? usersQuery : getAdminUsersQueryFromLocation()
+    const tagId = route.name === 'module' && route.module === 'users'
+      ? usersTagFilterId
+      : getAdminUsersTagFilterFromLocation()
+    const page = route.name === 'module' && route.module === 'users' ? usersPage : getAdminUsersPageFromLocation()
+    navigateToPath(userTagsPath(query, tagId, page))
+  }, [navigateToPath, route, usersPage, usersQuery, usersTagFilterId])
 
   const navigateUserTagCreate = useCallback(() => {
     setActiveUserTagEditorId(NEW_USER_TAG_CARD_ID)
     setUserTagCatalogDraft({ ...EMPTY_USER_TAG_FORM })
     setTagCatalogError(null)
-    navigateToPath(userTagCreatePath())
+    navigateToPath(
+      userTagCreatePath(
+        getAdminUsersQueryFromLocation(),
+        getAdminUsersTagFilterFromLocation(),
+        getAdminUsersPageFromLocation(),
+      ),
+    )
   }, [navigateToPath])
 
   const navigateUserTagEdit = useCallback(
@@ -1582,7 +1588,14 @@ function AdminDashboard(): JSX.Element {
         setUserTagCatalogDraft(createUserTagFormState(editingTag))
         setTagCatalogError(null)
       }
-      navigateToPath(userTagEditPath(id))
+      navigateToPath(
+        userTagEditPath(
+          id,
+          getAdminUsersQueryFromLocation(),
+          getAdminUsersTagFilterFromLocation(),
+          getAdminUsersPageFromLocation(),
+        ),
+      )
     },
     [navigateToPath, tagCatalog],
   )
@@ -2319,11 +2332,11 @@ function AdminDashboard(): JSX.Element {
   }
 
   const applyUserSearch = () => {
-    navigateUsersSearch(usersQueryInput, { tagId: usersTagFilterId })
+    navigateUsersSearch(usersQueryInput, { tagId: usersTagFilterId, page: 1 })
   }
 
   const resetUserSearch = () => {
-    navigateUsersSearch('', { tagId: null })
+    navigateUsersSearch('', { tagId: null, page: 1 })
   }
 
   const refreshUsersList = async () => {
@@ -3143,7 +3156,19 @@ function AdminDashboard(): JSX.Element {
             <p className="panel-description">{usersStrings.catalog.description}</p>
           </div>
           <div className="user-tag-page-actions">
-            <button type="button" className="btn btn-outline" onClick={() => navigateModule('users')}>
+            <button
+              type="button"
+              className="btn btn-outline"
+              onClick={() =>
+                navigateToPath(
+                  buildAdminUsersPath(
+                    getAdminUsersQueryFromLocation(),
+                    getAdminUsersTagFilterFromLocation(),
+                    getAdminUsersPageFromLocation(),
+                  ),
+                )
+              }
+            >
               {usersStrings.catalog.backToUsers}
             </button>
             <button
@@ -3262,7 +3287,11 @@ function AdminDashboard(): JSX.Element {
               className="btn btn-outline"
               onClick={() =>
                 navigateToPath(
-                  buildAdminUsersPath(getAdminUsersQueryFromLocation(), getAdminUsersTagFilterFromLocation()),
+                  buildAdminUsersPath(
+                    getAdminUsersQueryFromLocation(),
+                    getAdminUsersTagFilterFromLocation(),
+                    getAdminUsersPageFromLocation(),
+                  ),
                 )
               }
             >

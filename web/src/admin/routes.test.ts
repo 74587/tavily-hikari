@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 
 import {
+  buildAdminUsersPath,
   isSameAdminRoute,
   parseAdminPath,
   userDetailPath,
@@ -33,8 +34,18 @@ describe('admin user tag routes', () => {
     expect(userTagEditPath('linuxdo l2')).toBe('/admin/users/tags/linuxdo%20l2')
   })
 
-  it('preserves users list filter context when building a user detail path', () => {
-    expect(userDetailPath('usr_alice', 'L2', 'linuxdo_l2')).toBe('/admin/users/usr_alice?q=L2&tagId=linuxdo_l2')
+  it('preserves full users list context when building cross-page routes', () => {
+    expect(buildAdminUsersPath('L2', 'linuxdo_l2', 3)).toBe('/admin/users?q=L2&tagId=linuxdo_l2&page=3')
+    expect(userDetailPath('usr_alice', 'L2', 'linuxdo_l2', 3)).toBe(
+      '/admin/users/usr_alice?q=L2&tagId=linuxdo_l2&page=3',
+    )
+    expect(userTagsPath('L2', 'linuxdo_l2', 3)).toBe('/admin/users/tags?q=L2&tagId=linuxdo_l2&page=3')
+    expect(userTagCreatePath('L2', 'linuxdo_l2', 3)).toBe(
+      '/admin/users/tags/new?q=L2&tagId=linuxdo_l2&page=3',
+    )
+    expect(userTagEditPath('linuxdo l2', 'L2', 'linuxdo_l2', 3)).toBe(
+      '/admin/users/tags/linuxdo%20l2?q=L2&tagId=linuxdo_l2&page=3',
+    )
     expect(userDetailPath('usr_alice')).toBe('/admin/users/usr_alice')
   })
 

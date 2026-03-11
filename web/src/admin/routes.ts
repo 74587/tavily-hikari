@@ -133,27 +133,36 @@ export function tokenLeaderboardPath(): string {
   return `${ADMIN_BASE}/tokens/leaderboard`
 }
 
-export function userDetailPath(id: string, query?: string, tagId?: string | null): string {
-  const path = `${ADMIN_BASE}/users/${encodeURIComponent(id)}`
+function appendUsersContext(path: string, query?: string, tagId?: string | null, page?: number | null): string {
   const params = new URLSearchParams()
   const normalizedQuery = query?.trim()
   const normalizedTagId = tagId?.trim()
+  const normalizedPage = Number.isFinite(page) ? Math.max(1, Math.trunc(page as number)) : 1
   if (normalizedQuery) params.set('q', normalizedQuery)
   if (normalizedTagId) params.set('tagId', normalizedTagId)
+  if (normalizedPage > 1) params.set('page', String(normalizedPage))
   const search = params.toString()
   return search ? `${path}?${search}` : path
 }
 
-export function userTagsPath(): string {
-  return `${ADMIN_BASE}/users/tags`
+export function buildAdminUsersPath(query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users`, query, tagId, page)
 }
 
-export function userTagCreatePath(): string {
-  return `${ADMIN_BASE}/users/tags/new`
+export function userDetailPath(id: string, query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/${encodeURIComponent(id)}`, query, tagId, page)
 }
 
-export function userTagEditPath(id: string): string {
-  return `${ADMIN_BASE}/users/tags/${encodeURIComponent(id)}`
+export function userTagsPath(query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/tags`, query, tagId, page)
+}
+
+export function userTagCreatePath(query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/tags/new`, query, tagId, page)
+}
+
+export function userTagEditPath(id: string, query?: string, tagId?: string | null, page?: number | null): string {
+  return appendUsersContext(`${ADMIN_BASE}/users/tags/${encodeURIComponent(id)}`, query, tagId, page)
 }
 
 export function keyDetailPath(id: string): string {
