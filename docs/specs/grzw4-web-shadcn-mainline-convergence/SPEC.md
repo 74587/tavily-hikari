@@ -1,104 +1,92 @@
-# Web：shadcn/ui 主通路收敛整改（#grzw4)
+# Web：shadcn/ui 主通路收敛收尾（#grzw4)
 
 ## 状态
 
 - Status: 已完成
 - Created: 2026-03-09
-- Last: 2026-03-10
+- Last: 2026-03-11
 
 ## 背景 / 问题陈述
 
-- 当前仓库虽然已有 shadcn/ui primitives，但 `PublicHome`、`TokenDetail`、`ApiKeysValidationDialog`、`AdminDashboard`、`AdminShell` 仍让 `.btn`、`.input`、`.modal`、`.table` 与散写原生控件承担生产页面主交互骨架。
-- 这让视觉和可访问性入口分散，后续新增页面也容易继续扩散 DaisyUI 兼容类依赖。
+- `main` 已吸收此前大部分 shadcn/ui 页面迁移与共享 wrapper 落地，当前分支相对主干只剩少量收尾差异。
+- 剩余尾差集中在 `web/.storybook/preview.tsx` 的 autodocs 保留点，以及历史 orphan wrapper `QuotaRangeInput` 的持续删除态确认。
+- 本轮需要把规格收缩到当前真实剩余工作，避免继续描述已被 `main` 吸收的大规模页面迁移。
 
 ## 目标 / 非目标
 
 ### Goals
 
-- 把上述五个 in-scope 文件的主交互收敛到现有 shadcn/ui primitives 或受控 wrapper。
-- 新增少量共享 wrapper，统一 token secret、表格、分页、quota range 与 admin nav 的样式入口。
-- 保持现有业务逻辑、接口协议、页面路由、交互语义与键盘可用性不回退。
+- 保持 `web/.storybook/preview.tsx` 作为 Storybook 全局 autodocs 配置入口，明确保留 `tags: ['autodocs']`。
+- 固化 `web/src/admin/QuotaRangeInput.tsx` 与 `web/src/admin/QuotaRangeInput.stories.tsx` 已删除且无代码层引用的状态。
+- 用前端构建结果验证本轮尾差收尾不引入行为回退。
 
 ### Non-goals
 
-- 不改后端 API、鉴权逻辑、数据库结构。
-- 不做品牌视觉重设计，不重写业务文案。
-- 不强行替换仓库里没有对应 primitive 的控件；slider 仅包到 wrapper，不要求替换成不存在的 shadcn primitive。
+- 不重做 `PublicHome.tsx`、`TokenDetail.tsx`、`AdminDashboard.tsx`、`ApiKeysValidationDialog.tsx` 的 shadcn 页面迁移。
+- 不新增新的 wrapper、stories 覆盖面或 UI 组件契约。
+- 不修改 Rust 后端、业务逻辑、接口、路由或权限行为。
 
 ## 范围（Scope）
 
 ### In scope
 
-- `web/src/PublicHome.tsx`
-- `web/src/pages/TokenDetail.tsx`
-- `web/src/components/ApiKeysValidationDialog.tsx`
-- `web/src/AdminDashboard.tsx`
-- `web/src/admin/AdminShell.tsx`
-- 必需的共享 wrapper、最小 CSS bridge、受影响的 stories 与 `docs/specs/README.md`
+- `docs/specs/grzw4-web-shadcn-mainline-convergence/SPEC.md`
+- `web/.storybook/preview.tsx`
+- `web/src/admin/QuotaRangeInput.tsx`
+- `web/src/admin/QuotaRangeInput.stories.tsx`
 
 ### Out of scope
 
-- `web/src/pages/AdminLogin.tsx`
+- `web/src/PublicHome.tsx`
+- `web/src/pages/TokenDetail.tsx`
+- `web/src/AdminDashboard.tsx`
+- `web/src/components/ApiKeysValidationDialog.tsx`
 - `src/**` Rust 后端代码
-- Storybook 独立重构
 
 ## 冻结约束（Frozen Constraints）
 
-- 继承并冻结既有 spec 约束：`rqbqk-shadcn-ui-rebuild`、`3rb68-public-home-token-access-modal`、`kgakn-admin-api-keys-validation-dialog`、`m4n7x-admin-path-routing-modular-dashboard`、`pv69t-admin-user-quota-slider-stability`。
-- `web/src/index.css` 中仍有生产消费者的 compat selectors 本轮只保留、不删除。
-- `ApiKeysValidationDialog` 移动端继续使用 `Drawer`。
-- `Quota slider` 继续使用原生 `input[type="range"]`，但业务页面只能通过 wrapper 接入。
+- `web/.storybook/preview.tsx` 现有 viewport、i18n 与 theme decorators 保持不变；本轮只允许补齐并保留全局 autodocs 标签。
+- `QuotaRangeInput` 仅做持续删除态收尾：若文件已不存在，不得恢复、迁移或用新 wrapper 替代。
+- 不扩展 Storybook story 数量，不修改页面级业务实现。
 
 ## 接口 / 组件契约
 
-- 新增共享组件：`TokenSecretField`、`AdminTableShell`、`AdminTablePagination`、`QuotaRangeField`、`AdminNavButton`。
-- `ApiKeysValidationDialog` 改为 controlled open 契约：由 `open` 驱动显示，保留现有 `onClose` / `onRetryFailed` / `onRetryOne` / `onImportValid` 行为。
-- `PublicHome`、`TokenDetail`、`AdminDashboard` 不再依赖 `HTMLDialogElement.showModal/close` 作为主路径。
+- `web/.storybook/preview.tsx` 的 `Preview` 默认导出必须包含 `tags: ['autodocs']`。
+- `QuotaRangeInput` 不再作为生产组件或 Storybook story 暴露；代码层引用数必须为零。
+- 本轮不新增或变更任何公共组件 props、业务接口与页面路由。
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `PublicHome` 的 token 输入与 token access 弹层
-  When 页面渲染与用户交互
-  Then 主输入、显隐、复制、确认按钮与弹层全部来自 `Input` / `Button` / `Dialog`
-  And token 持久化、复制反馈、密码管理器规避属性与 LinuxDo 登录行为不变。
+- Given `web/src/admin/QuotaRangeInput.tsx` 与 `web/src/admin/QuotaRangeInput.stories.tsx`
+  When 检查仓库代码路径
+  Then 两个文件均不存在
+  And `web/src` 与 Storybook 入口不存在 `QuotaRangeInput` 生产引用或 story 引用。
 
-- Given `TokenDetail`
-  When 用户切换 period、输入起始时间、翻页、展开日志、轮换 token
-  Then `Select` / `Input` / `Button` / `Table` / `Dialog` 成为主通路
-  And 筛选逻辑、分页逻辑、日志展开、SSE live 状态不回退。
+- Given `web/.storybook/preview.tsx`
+  When 检查 Storybook 全局配置
+  Then `tags: ['autodocs']` 保持存在
+  And 现有 viewport、语言切换与主题装饰器逻辑不回退。
 
-- Given `ApiKeysValidationDialog`
-  When 在桌面与移动端分别打开
-  Then 桌面端使用 `Dialog + Table`，移动端继续 `Drawer`
-  And 批量校验、失败重试、导入、关闭与自动关闭行为保持不变。
-
-- Given `AdminDashboard` 与 `AdminShell`
-  When 管理员使用各主模块
-  Then 主按钮、主要输入、文本域、主要弹层、可见主表格与侧边导航都走 shadcn primitives / wrappers
-  And 业务页不再直接依赖 `.range`、`.btn`、`.input`、`.modal`、`.table` 作为主交互骨架。
+- Given 前端构建校验
+  When 执行 `cd web && bun run build` 与 `cd web && bun run build-storybook`
+  Then 两条命令都成功通过。
 
 ## 非功能性验收 / 质量门槛
 
-- `cd web && bun install --frozen-lockfile`
 - `cd web && bun run build`
 - `cd web && bun run build-storybook`
-- 浏览器手工验证：`/`、Token Detail、desktop/mobile API keys validation、AdminShell、Admin 各模块表格/筛选/弹层
-- 键盘验收：Tab focus、ESC、backdrop click、Drawer/Dialog 关闭、分页/select 操作与 clipboard 反馈不低于当前状态
+- `rg -n "QuotaRangeInput" web/.storybook web/src`
 
 ## 实现里程碑
 
-- [x] M1: convergence spec + shared wrappers + CSS bridge
-- [x] M2: P0 页面（`PublicHome` / `TokenDetail` / `ApiKeysValidationDialog`）迁移
-- [x] M3: P1 页面（`AdminShell` / `AdminDashboard`）迁移
-- [x] M4: build / storybook / browser 验证
-- [x] M5: PR / checks / review-loop / spec-sync 收敛
+- [x] M1: 收缩 spec 到当前真实尾差范围
+- [x] M2: 保留 preview 全局 autodocs 配置并确认 orphan wrapper 持续删除态
+- [x] M3: 完成 build / storybook / 引用检索验证
+- [x] M4: PR / checks / review-loop 收敛
 
 ## 变更记录
 
-- 2026-03-09: 创建规格，冻结 shadcn 主通路收敛范围、约束与验收口径。
-- 2026-03-09: 完成 shared wrappers、P0/P1 页面迁移，并通过 `bun run build`、`bun run build-storybook` 与浏览器 smoke。
-- 2026-03-09: PR #110 已创建；review-loop 无 findings；GitHub checks 全绿；spec drift check 通过。
-- 2026-03-09: 根据 Storybook 验收反馈，恢复多个交互控件的 `border: none` 样式桥，修复 AdminShell active marker 缩成 32px 的回归。
-- 2026-03-09: 为 `TokenSecretField`、`AdminTableShell`、`AdminTablePagination`、`QuotaRangeField`、`AdminNavButton` 补充 direct Storybook stories。
-- 2026-03-09: 统一 Admin Storybook 信息架构，把共享复合组件归到 `Admin/Components/*`，wrappers 归到 `Admin/Wrappers/*` 与 `Public/Wrappers/*`。
-- 2026-03-09: PR #110 已合并到 `main`；主通路 shadcn 收敛、shared wrappers 与 Storybook 跟进项正式落地。
+- 2026-03-09: 创建规格，覆盖主通路 shadcn 收敛与共享 wrapper/page 迁移。
+- 2026-03-10: PR #110 合并到 `main` 后，主页面迁移已被主干吸收。
+- 2026-03-11: 将规格收缩为当前真实尾差收尾，仅保留 preview autodocs、`QuotaRangeInput` 持续删除态与构建验证。
+- 2026-03-11: PR #116 创建后完成本轮 review-loop 收敛，规格状态与里程碑同步为收尾完成。
