@@ -1261,7 +1261,6 @@ function AdminDashboard(): JSX.Element {
       setUsersQuery((previous) => {
         if (previous === normalized) return previous
         setUsersPage(1)
-        setUsersTagFilterId(null)
         return normalized
       })
     }, 250)
@@ -2320,11 +2319,11 @@ function AdminDashboard(): JSX.Element {
   }
 
   const applyUserSearch = () => {
-    navigateUsersSearch(usersQueryInput)
+    navigateUsersSearch(usersQueryInput, { tagId: usersTagFilterId })
   }
 
   const resetUserSearch = () => {
-    navigateUsersSearch('')
+    navigateUsersSearch('', { tagId: null })
   }
 
   const refreshUsersList = async () => {

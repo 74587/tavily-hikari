@@ -158,6 +158,7 @@ const META_KEY_ACCOUNT_QUOTA_INHERITS_DEFAULTS_BACKFILL_V1: &str =
     "account_quota_inherits_defaults_backfill_v1";
 const META_KEY_FORCE_USER_RELOGIN_V1: &str = "force_user_relogin_v1";
 const META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_V1: &str = "linuxdo_system_tag_defaults_v1";
+const META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_TUPLE_V1: &str = "linuxdo_system_tag_defaults_tuple_v1";
 // Cutover marker for switching business quota counters from "requests" to "credits".
 // We cannot retroactively convert legacy request counts into credits, so we reset the
 // lightweight counters once and start charging by upstream credits going forward.
@@ -439,6 +440,22 @@ fn linuxdo_system_tag_default_deltas() -> (i64, i64, i64, i64) {
         effective_token_daily_limit(),
         effective_token_monthly_limit(),
     )
+}
+
+fn format_linuxdo_system_tag_default_deltas(value: (i64, i64, i64, i64)) -> String {
+    format!("{},{},{},{}", value.0, value.1, value.2, value.3)
+}
+
+fn parse_linuxdo_system_tag_default_deltas(raw: &str) -> Option<(i64, i64, i64, i64)> {
+    let mut parts = raw.split(',').map(str::trim);
+    let hourly_any = parts.next()?.parse().ok()?;
+    let hourly = parts.next()?.parse().ok()?;
+    let daily = parts.next()?.parse().ok()?;
+    let monthly = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((hourly_any, hourly, daily, monthly))
 }
 
 #[derive(Debug, Clone)]
@@ -4418,6 +4435,8 @@ impl KeyStore {
             )
             .await?;
         }
+        self.sync_linuxdo_system_tag_default_deltas_with_env()
+            .await?;
         self.backfill_linuxdo_user_tag_bindings().await?;
         self.sync_account_quota_limits_with_defaults().await?;
 
@@ -7732,6 +7751,108 @@ impl KeyStore {
         Ok(())
     }
 
+    async fn infer_linuxdo_system_tag_default_deltas_from_rows(
+        &self,
+    ) -> Result<Option<(i64, i64, i64, i64)>, ProxyError> {
+        let rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            r#"SELECT effect_kind, hourly_any_delta, hourly_delta, daily_delta, monthly_delta
+               FROM user_tags
+               WHERE system_key LIKE 'linuxdo_l%'
+               ORDER BY system_key"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() != 5 {
+            return Ok(None);
+        }
+        let mut expected: Option<(i64, i64, i64, i64)> = None;
+        for (effect_kind, hourly_any_delta, hourly_delta, daily_delta, monthly_delta) in rows {
+            if effect_kind != USER_TAG_EFFECT_QUOTA_DELTA {
+                return Ok(None);
+            }
+            let current = (hourly_any_delta, hourly_delta, daily_delta, monthly_delta);
+            match expected {
+                Some(previous) if previous != current => return Ok(None),
+                Some(_) => {}
+                None => expected = Some(current),
+            }
+        }
+        Ok(expected)
+    }
+
+    async fn get_linuxdo_system_tag_default_deltas_meta(
+        &self,
+    ) -> Result<Option<(i64, i64, i64, i64)>, ProxyError> {
+        let Some(raw) = self
+            .get_meta_string(META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_TUPLE_V1)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(parse_linuxdo_system_tag_default_deltas(&raw))
+    }
+
+    async fn set_linuxdo_system_tag_default_deltas_meta(
+        &self,
+        value: (i64, i64, i64, i64),
+    ) -> Result<(), ProxyError> {
+        self.set_meta_string(
+            META_KEY_LINUXDO_SYSTEM_TAG_DEFAULTS_TUPLE_V1,
+            &format_linuxdo_system_tag_default_deltas(value),
+        )
+        .await
+    }
+
+    async fn sync_linuxdo_system_tag_default_deltas_with_env(&self) -> Result<(), ProxyError> {
+        let current = linuxdo_system_tag_default_deltas();
+        let previous = match self.get_linuxdo_system_tag_default_deltas_meta().await? {
+            Some(value) => value,
+            None => self
+                .infer_linuxdo_system_tag_default_deltas_from_rows()
+                .await?
+                .unwrap_or(current),
+        };
+        if previous == current {
+            self.set_linuxdo_system_tag_default_deltas_meta(current)
+                .await?;
+            return Ok(());
+        }
+
+        let now = Utc::now().timestamp();
+        let updated = sqlx::query(
+            r#"UPDATE user_tags
+               SET hourly_any_delta = ?,
+                   hourly_delta = ?,
+                   daily_delta = ?,
+                   monthly_delta = ?,
+                   updated_at = ?
+               WHERE system_key LIKE 'linuxdo_l%'
+                 AND effect_kind = ?
+                 AND hourly_any_delta = ?
+                 AND hourly_delta = ?
+                 AND daily_delta = ?
+                 AND monthly_delta = ?"#,
+        )
+        .bind(current.0)
+        .bind(current.1)
+        .bind(current.2)
+        .bind(current.3)
+        .bind(now)
+        .bind(USER_TAG_EFFECT_QUOTA_DELTA)
+        .bind(previous.0)
+        .bind(previous.1)
+        .bind(previous.2)
+        .bind(previous.3)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() > 0 {
+            self.invalidate_all_account_quota_resolutions().await;
+        }
+        self.set_linuxdo_system_tag_default_deltas_meta(current)
+            .await?;
+        Ok(())
+    }
+
     async fn backfill_linuxdo_system_tag_default_deltas_v1(&self) -> Result<(), ProxyError> {
         let zeroed_count: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*)
@@ -10864,11 +10985,16 @@ impl KeyStore {
         Ok((items, total))
     }
 
-    async fn get_meta_i64(&self, key: &str) -> Result<Option<i64>, ProxyError> {
-        let value = sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = ? LIMIT 1")
+    async fn get_meta_string(&self, key: &str) -> Result<Option<String>, ProxyError> {
+        sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = ? LIMIT 1")
             .bind(key)
             .fetch_optional(&self.pool)
-            .await?;
+            .await
+            .map_err(ProxyError::Database)
+    }
+
+    async fn get_meta_i64(&self, key: &str) -> Result<Option<i64>, ProxyError> {
+        let value = self.get_meta_string(key).await?;
 
         if let Some(v) = value {
             match v.parse::<i64>() {
@@ -10880,8 +11006,7 @@ impl KeyStore {
         }
     }
 
-    async fn set_meta_i64(&self, key: &str, value: i64) -> Result<(), ProxyError> {
-        let v = value.to_string();
+    async fn set_meta_string(&self, key: &str, value: &str) -> Result<(), ProxyError> {
         sqlx::query(
             r#"
             INSERT INTO meta (key, value)
@@ -10890,10 +11015,15 @@ impl KeyStore {
             "#,
         )
         .bind(key)
-        .bind(v)
+        .bind(value)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn set_meta_i64(&self, key: &str, value: i64) -> Result<(), ProxyError> {
+        let v = value.to_string();
+        self.set_meta_string(key, &v).await
     }
 
     async fn fetch_summary(&self) -> Result<ProxySummary, ProxyError> {
@@ -16394,6 +16524,136 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 .iter()
                 .all(|row| *row == (defaults.0, defaults.1, defaults.2, defaults.3))
         );
+    }
+
+    #[tokio::test]
+    async fn linuxdo_system_tag_defaults_follow_env_changes_without_overwriting_customized_system_tags()
+     {
+        let _guard = env_lock().lock_owned().await;
+        let db_path = temp_db_path("linuxdo-system-tag-default-sync");
+        let db_str = db_path.to_string_lossy().to_string();
+        let env_keys = [
+            "TOKEN_HOURLY_REQUEST_LIMIT",
+            "TOKEN_HOURLY_LIMIT",
+            "TOKEN_DAILY_LIMIT",
+            "TOKEN_MONTHLY_LIMIT",
+        ];
+        let previous: Vec<Option<String>> =
+            env_keys.iter().map(|key| std::env::var(key).ok()).collect();
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "11");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "12");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "13");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "14");
+        }
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let initial_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            r#"SELECT system_key, hourly_any_delta, hourly_delta, daily_delta, monthly_delta
+               FROM user_tags
+               WHERE system_key LIKE 'linuxdo_l%'
+               ORDER BY system_key"#,
+        )
+        .fetch_all(&proxy.key_store.pool)
+        .await
+        .expect("read initial linuxdo system tag rows");
+        assert_eq!(initial_rows.len(), 5);
+        assert!(
+            initial_rows
+                .iter()
+                .all(|(_, hourly_any, hourly, daily, monthly)| {
+                    (*hourly_any, *hourly, *daily, *monthly) == (11, 12, 13, 14)
+                })
+        );
+        drop(proxy);
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "21");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "22");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "23");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "24");
+        }
+
+        let proxy_after_default_change =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened after default change");
+        let synced_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            r#"SELECT system_key, hourly_any_delta, hourly_delta, daily_delta, monthly_delta
+               FROM user_tags
+               WHERE system_key LIKE 'linuxdo_l%'
+               ORDER BY system_key"#,
+        )
+        .fetch_all(&proxy_after_default_change.key_store.pool)
+        .await
+        .expect("read synced linuxdo system tag rows");
+        assert!(
+            synced_rows
+                .iter()
+                .all(|(_, hourly_any, hourly, daily, monthly)| {
+                    (*hourly_any, *hourly, *daily, *monthly) == (21, 22, 23, 24)
+                })
+        );
+
+        proxy_after_default_change
+            .update_user_tag(
+                "linuxdo_l2",
+                "linuxdo_l2",
+                "L2",
+                Some("linuxdo"),
+                USER_TAG_EFFECT_QUOTA_DELTA,
+                101,
+                102,
+                103,
+                104,
+            )
+            .await
+            .expect("update system tag")
+            .expect("system tag present");
+        drop(proxy_after_default_change);
+
+        unsafe {
+            std::env::set_var("TOKEN_HOURLY_REQUEST_LIMIT", "31");
+            std::env::set_var("TOKEN_HOURLY_LIMIT", "32");
+            std::env::set_var("TOKEN_DAILY_LIMIT", "33");
+            std::env::set_var("TOKEN_MONTHLY_LIMIT", "34");
+        }
+
+        let proxy_after_customization =
+            TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+                .await
+                .expect("proxy reopened after system tag customization");
+        let final_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(
+            r#"SELECT system_key, hourly_any_delta, hourly_delta, daily_delta, monthly_delta
+               FROM user_tags
+               WHERE system_key LIKE 'linuxdo_l%'
+               ORDER BY system_key"#,
+        )
+        .fetch_all(&proxy_after_customization.key_store.pool)
+        .await
+        .expect("read final linuxdo system tag rows");
+        assert_eq!(final_rows.len(), 5);
+        for (system_key, hourly_any, hourly, daily, monthly) in final_rows {
+            if system_key == "linuxdo_l2" {
+                assert_eq!((hourly_any, hourly, daily, monthly), (101, 102, 103, 104));
+            } else {
+                assert_eq!((hourly_any, hourly, daily, monthly), (31, 32, 33, 34));
+            }
+        }
+
+        unsafe {
+            for (key, old_value) in env_keys.iter().zip(previous.into_iter()) {
+                if let Some(value) = old_value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]

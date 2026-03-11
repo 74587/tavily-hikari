@@ -77,6 +77,10 @@
   When 服务重启且 env 默认额度变化
   Then 用户基线额度同步到新默认值。
 
+- Given LinuxDo 系统标签仍保持默认 delta
+  When 服务重启且 env 默认额度变化
+  Then 这些未被管理员改写的 LinuxDo 系统标签 delta 会同步到新的默认额度；管理员手工改写过的系统标签 delta 保持不变。
+
 - Given 管理员手工修改了用户基线额度
   When 服务重启
   Then 该用户基线额度保持不变，不再被默认值覆盖。
@@ -97,6 +101,10 @@
 - Given 打开 `/admin/users/tags` 并点击某个标签卡片的“绑定用户”入口
   When 跳转到用户管理列表
   Then 页面会自动带上这个标签对应的筛选条件，并使用该标签的精确绑定过滤结果。
+
+- Given 管理员已经从标签目录跳转到带 `tagId` 的 `/admin/users`
+  When 再输入关键字并点击搜索或按回车
+  Then 页面仍保留原有 `tagId` 精确过滤，并将关键字查询作为附加条件叠加，不会退化成纯模糊搜索。
 
 - Given 打开 `/admin/users`
   Then 表格中显示用户标签（最多 3 个 badge，超出显示 `+N`），并有 Tag Catalog 面板可管理标签定义。

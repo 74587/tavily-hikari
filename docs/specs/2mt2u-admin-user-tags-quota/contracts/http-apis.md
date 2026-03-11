@@ -53,6 +53,7 @@
 - Auth: admin only
 - Existing response remains paginated.
 - Supports optional `tagId` for exact tag-bound user filtering (used by the tag catalog jump-to-users action).
+- When `q` and `tagId` are both present, the server applies them conjunctively: fuzzy user search stays scoped to the exact tag-bound subset.
 - Each item extends with:
   - `tags: AdminUserTagCompactView[]`
 
