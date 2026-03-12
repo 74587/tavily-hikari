@@ -7412,13 +7412,6 @@ tbody .log-details-row:hover {
   background: linear-gradient(180deg, hsl(var(--card) / 0.98), hsl(var(--muted) / 0.2));
 }
 
-.forward-proxy-endpoint {
-  max-width: 100%;
-  white-space: normal;
-  word-break: normal;
-  overflow-wrap: anywhere;
-}
-
 .forward-proxy-table-wrapper {
   display: none;
   overflow: hidden;

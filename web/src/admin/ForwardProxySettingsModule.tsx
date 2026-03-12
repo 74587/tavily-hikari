@@ -866,10 +866,6 @@ export default function ForwardProxySettingsModule({
                         <CardContent className="forward-proxy-node-mobile-content">
                           <div className="forward-proxy-node-mobile-grid">
                             <div className="forward-proxy-node-mobile-block">
-                              <span className="forward-proxy-node-metric-label">{strings.nodes.table.endpoint}</span>
-                              <code className="forward-proxy-code-inline forward-proxy-endpoint">{node.endpointUrl ?? '—'}</code>
-                            </div>
-                            <div className="forward-proxy-node-mobile-block">
                               <span className="forward-proxy-node-metric-label">{strings.nodes.table.assignments}</span>
                               <span>
                                 {strings.nodes.primary}: <strong>{formatNumber(node.primaryAssignmentCount)}</strong>
@@ -885,11 +881,6 @@ export default function ForwardProxySettingsModule({
                               </span>
                               <span>
                                 {strings.nodes.failureCountLabel}: <strong>{formatNumber(activity.failure)}</strong>
-                              </span>
-                              <span className="panel-description">
-                                {node.last24h.length > 0
-                                  ? formatTimeRange(node.last24h[0]?.bucketStart, node.last24h[node.last24h.length - 1]?.bucketEnd)
-                                  : '—'}
                               </span>
                             </div>
                             <div className="forward-proxy-node-mobile-block">
@@ -955,29 +946,12 @@ export default function ForwardProxySettingsModule({
                                   <Badge variant={stateBadge.variant}>{stateBadge.label}</Badge>
                                 </div>
                                 <code className="forward-proxy-code-inline">{node.key}</code>
-                                <code className="forward-proxy-code-inline forward-proxy-endpoint">{node.endpointUrl ?? '—'}</code>
-                                <div className="forward-proxy-node-cell-meta">
-                                  <span>
-                                    {strings.nodes.successCountLabel}: <strong>{formatNumber(activity.success)}</strong>
-                                  </span>
-                                  <span>
-                                    {strings.nodes.failureCountLabel}: <strong>{formatNumber(activity.failure)}</strong>
-                                  </span>
-                                  <span>
-                                    {strings.nodes.weightLabel}: <strong>{formatDecimal(node.weight)}</strong>
-                                  </span>
-                                </div>
                                 <div className="forward-proxy-node-cell-meta">
                                   <span>
                                     {strings.nodes.primary}: <strong>{formatNumber(node.primaryAssignmentCount)}</strong>
                                   </span>
                                   <span>
                                     {strings.nodes.secondary}: <strong>{formatNumber(node.secondaryAssignmentCount)}</strong>
-                                  </span>
-                                  <span className="truncate">
-                                    {node.last24h.length > 0
-                                      ? formatTimeRange(node.last24h[0]?.bucketStart, node.last24h[node.last24h.length - 1]?.bucketEnd)
-                                      : '—'}
                                   </span>
                                 </div>
                               </div>
