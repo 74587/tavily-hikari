@@ -2738,6 +2738,7 @@ mod tests {
         let app = Router::new()
             .route("/api/admin/login", post(post_admin_login))
             .route("/api/admin/logout", post(post_admin_logout))
+            .route("/api/keys/:id", get(get_api_key_detail))
             .route("/api/keys/batch", post(create_api_keys_batch))
             .with_state(state);
 
@@ -4269,6 +4270,56 @@ mod tests {
             .await
             .expect("admin endpoint after revoke");
         assert_eq!(admin_after_resp.status(), reqwest::StatusCode::OK);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn api_key_detail_requires_admin_auth() {
+        let db_path = temp_db_path("api-key-detail-auth");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(vec!["tvly-detail-auth".to_string()], DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list api key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key")
+            .id;
+        let admin_password = "detail-auth-password";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build client");
+
+        let unauth_resp = client
+            .get(format!("http://{}/api/keys/{}", admin_addr, key_id))
+            .send()
+            .await
+            .expect("unauth key detail request");
+        assert_eq!(unauth_resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let auth_resp = client
+            .get(format!("http://{}/api/keys/{}", admin_addr, key_id))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("authed key detail request");
+        assert_eq!(auth_resp.status(), reqwest::StatusCode::OK);
 
         let _ = std::fs::remove_file(db_path);
     }

@@ -60,7 +60,11 @@ async fn list_jobs(
 async fn get_api_key_detail(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ApiKeyView>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let items = state
         .proxy
         .list_api_key_metrics()

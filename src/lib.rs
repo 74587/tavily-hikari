@@ -12889,16 +12889,6 @@ fn classify_quarantine_reason(status_code: Option<i64>, body: &[u8]) -> Option<Q
             "invalid_api_key",
             format!("Tavily rejected the API key as invalid (HTTP {code})"),
         )
-    } else if normalized.contains("unauthorized") || normalized.contains("not authorized") {
-        (
-            "unauthorized",
-            format!("Tavily rejected the API key as unauthorized (HTTP {code})"),
-        )
-    } else if normalized.contains("forbidden") {
-        (
-            "forbidden",
-            format!("Tavily rejected the API key as forbidden (HTTP {code})"),
-        )
     } else {
         return None;
     };
@@ -14583,6 +14573,15 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         assert_eq!(quarantine_count, 1);
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn classify_quarantine_reason_ignores_generic_unauthorized_errors() {
+        let unauthorized = classify_quarantine_reason(Some(401), br#"{"error":"unauthorized"}"#);
+        assert!(unauthorized.is_none());
+
+        let forbidden = classify_quarantine_reason(Some(403), br#"{"error":"forbidden"}"#);
+        assert!(forbidden.is_none());
     }
 
     #[tokio::test]
