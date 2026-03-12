@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 进行中（快车道）
+- Status: 已完成（快车道）
 - Created: 2026-03-12
 - Last: 2026-03-12
 
@@ -207,7 +207,7 @@
 - [x] M1: Spec 建立并冻结复制兼容范围与验收口径
 - [x] M2: 共享 clipboard helper + ManualCopyBubble 落地
 - [x] M3: 全站生产复制入口统一接入并补齐一次性 secret 恢复容器
-- [ ] M4: Bun 测试、build、浏览器验收已完成；PR / checks / review-loop 收口中
+- [x] M4: Bun 测试、build、浏览器验收已完成；PR / checks / review-loop 收口完成
 
 ## 方案概述（Approach, high-level）
 
@@ -232,6 +232,7 @@
 - 2026-03-12: 补齐复制 review 收口：同步优先的 legacy fallback 选项、UserConsole/Admin secret cache 预热、复制成功时自动关闭旧气泡，以及 PublicHome / rotated token 失败后的自动重新选中。
 - 2026-03-12: 收紧 secret 生命周期：移除 UserConsole/Admin 列表初载时的全量 secret 预取，仅保留 hover/focus 按需 warm-up；同时在 admin rotate token 后回写父级 secret cache，避免后续复制/分享读到旧 token。
 - 2026-03-12: 修正 UserConsole detail 失败恢复策略：由于复制按钮旁已有 Token 字段，失败时改为直接 reveal + select 现有字段，不再额外弹手动复制气泡。
+- 2026-03-12: 补入 Storybook 桌面端 Visual Evidence，并将规格状态切换为已完成，等待 PR 合并与分支回收。
 
 ## 参考（References）
 
