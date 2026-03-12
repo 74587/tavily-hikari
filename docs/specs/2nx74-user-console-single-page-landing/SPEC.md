@@ -168,6 +168,16 @@ None
   - `#/tokens` 仍进入同一落地页，并自动滚动到 Token 列表区块。
   - `#/tokens/tmK4` 保持独立 detail 页，点击 `返回 Token 列表` 后回到 `#/tokens` 并重新聚焦 Token 区块。
   - 从 `#/dashboard` 手动滚到 Token 区块进入 detail 后，浏览器 Back 会回到原始 `#/dashboard` 入口并保留滚动位置。
+- source_type=storybook_canvas
+  - story_id_or_title: `User Console/UserConsole / Console Home Root`
+  - state: `default`
+  - target_program: `mock-only`
+  - capture_scope: `browser-viewport`
+  - sensitive_exclusion: `N/A`
+  - submission_gate: `pending-owner-approval`
+  - evidence_note: 证明 merged landing 已直接进入账户概览与 Token 列表内容，不再保留额外区块导航条
+  - image:
+    ![Console Home Root](./assets/console-home-root-storybook.png)
 
 ## 资产晋升（Asset promotion）
 
