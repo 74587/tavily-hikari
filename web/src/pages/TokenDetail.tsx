@@ -506,7 +506,8 @@ export default function TokenDetail({
   )
 
   useEffect(() => {
-    setLogsContentMinHeight(320)
+    const preservedHeight = Math.max(320, logsContentRef.current?.offsetHeight ?? 0)
+    setLogsContentMinHeight(preservedHeight)
   }, [logsQueryBaseKey, page, perPage])
 
   useEffect(() => {
@@ -516,7 +517,7 @@ export default function TokenDetail({
   useLayoutEffect(() => {
     if (logsBlocking) return
     const nextHeight = Math.max(320, logsContentRef.current?.offsetHeight ?? 0)
-    setLogsContentMinHeight((prev) => (nextHeight > prev ? nextHeight : prev))
+    setLogsContentMinHeight(nextHeight)
   }, [logsBlocking, logs, expandedLogs, viewportMode, contentMode, isCompactLayout])
 
   const applyStartInput = (raw: string, nextPeriod: Period = period, opts?: { suppressWarning?: boolean }) => {

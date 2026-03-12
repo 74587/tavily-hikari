@@ -1,6 +1,6 @@
 use std::{
     cmp::min,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
@@ -10299,7 +10299,7 @@ impl KeyStore {
         stored_query.push(token_request_kind_needs_fallback_sql());
         stored_query.push(")");
 
-        let mut options = stored_query
+        let options = stored_query
             .build_query_as::<(String, String)>()
             .fetch_all(&self.pool)
             .await?;
@@ -10344,14 +10344,30 @@ impl KeyStore {
                 .fetch_all(&self.pool)
                 .await?
         };
-        options.extend(legacy_options);
-        options.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
-        options.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        let mut options_by_key = BTreeMap::<String, String>::new();
+        for (key, label) in options.into_iter().chain(legacy_options.into_iter()) {
+            match options_by_key.get_mut(&key) {
+                Some(current_label) if prefer_request_kind_label(current_label, &label) => {
+                    *current_label = label;
+                }
+                Some(_) => {}
+                None => {
+                    options_by_key.insert(key, label);
+                }
+            }
+        }
 
-        Ok(options
+        let mut normalized_options = options_by_key
             .into_iter()
             .map(|(key, label)| TokenRequestKindOption { key, label })
-            .collect())
+            .collect::<Vec<_>>();
+        normalized_options.sort_by(|left, right| {
+            left.label
+                .cmp(&right.label)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+
+        Ok(normalized_options)
     }
 
     pub async fn fetch_token_hourly_breakdown(
@@ -12672,6 +12688,55 @@ fn normalize_tavily_tool_name(tool: &str) -> Option<String> {
     Some(mapped.to_string())
 }
 
+fn normalize_request_kind_slug(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_separator = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+            continue;
+        }
+
+        if !previous_was_separator {
+            normalized.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    let slug = normalized.trim_matches('-');
+    if slug.is_empty() {
+        return None;
+    }
+
+    Some(slug.to_string())
+}
+
+fn request_kind_label_penalty(label: &str) -> (usize, usize, usize, String) {
+    let display = label.split('|').nth(1).unwrap_or(label).trim();
+    let underscore_count = display.chars().filter(|ch| *ch == '_').count();
+    let dash_count = display.chars().filter(|ch| *ch == '-').count();
+    let lowercase_only = usize::from(
+        display.chars().any(|ch| ch.is_ascii_alphabetic())
+            && !display.chars().any(|ch| ch.is_ascii_uppercase()),
+    );
+    (
+        underscore_count,
+        dash_count,
+        lowercase_only,
+        display.to_string(),
+    )
+}
+
+fn prefer_request_kind_label(current: &str, candidate: &str) -> bool {
+    request_kind_label_penalty(candidate) < request_kind_label_penalty(current)
+}
+
 fn classify_mcp_request_kind_from_message(value: &Value) -> Option<TokenRequestKind> {
     let method = value
         .get("method")
@@ -12697,7 +12762,12 @@ fn classify_mcp_request_kind_from_message(value: &Value) -> Option<TokenRequestK
         return match tool {
             Some(tool) => match normalize_tavily_tool_name(tool) {
                 Some(kind) => Some(build_mcp_request_kind(&kind)),
-                None => Some(build_mcp_request_kind_named(&format!("tool:{tool}"), tool)),
+                None => {
+                    let key = normalize_request_kind_slug(tool)
+                        .map(|slug| format!("tool:{slug}"))
+                        .unwrap_or_else(|| "tools/call".to_string());
+                    Some(build_mcp_request_kind_named(&key, tool))
+                }
             },
             None => Some(build_mcp_request_kind("tools/call")),
         };
@@ -13457,12 +13527,25 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         }"#;
         assert_eq!(
             classify_token_request_kind("/mcp", Some(tool_body)),
-            TokenRequestKind::new("mcp:tool:Acme Lookup", "MCP | Acme Lookup", None)
+            TokenRequestKind::new("mcp:tool:acme-lookup", "MCP | Acme Lookup", None)
+        );
+
+        let tool_variant_body = br#"{
+          "jsonrpc": "2.0",
+          "id": 3,
+          "method": "tools/call",
+          "params": {
+            "name": "  acme_lookup  "
+          }
+        }"#;
+        assert_eq!(
+            classify_token_request_kind("/mcp", Some(tool_variant_body)),
+            TokenRequestKind::new("mcp:tool:acme-lookup", "MCP | acme_lookup", None)
         );
 
         let init_body = br#"{
           "jsonrpc": "2.0",
-          "id": 3,
+          "id": 4,
           "method": "initialize"
         }"#;
         assert_eq!(
@@ -13666,6 +13749,40 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].key, "mcp:raw:/mcp/sse");
         assert_eq!(options[0].label, "MCP | /mcp/sse");
+
+        sqlx::query(
+            r#"
+            UPDATE auth_token_logs
+            SET request_kind_key = 'mcp:tool:acme-lookup',
+                request_kind_label = 'MCP | Acme Lookup'
+            WHERE token_id = ?
+            "#,
+        )
+        .bind(&token.id)
+        .execute(&repaired.key_store.pool)
+        .await
+        .expect("stamp stored request kind");
+        sqlx::query(
+            r#"
+            INSERT INTO auth_token_logs (
+                token_id, method, path, query, http_status, mcp_status, request_kind_key,
+                request_kind_label, result_status, error_message, created_at, counts_business_quota
+            ) VALUES (?, 'POST', '/mcp', NULL, 200, 200, 'mcp:tool:acme-lookup', 'MCP | acme_lookup', 'success', NULL, ?, 1)
+            "#,
+        )
+        .bind(&token.id)
+        .bind(Utc::now().timestamp())
+        .execute(&repaired.key_store.pool)
+        .await
+        .expect("insert mismatched duplicate option row");
+
+        let canonicalized_options = repaired
+            .token_log_request_kind_options(&token.id, 0, None)
+            .await
+            .expect("query canonicalized request kind options");
+        assert_eq!(canonicalized_options.len(), 1);
+        assert_eq!(canonicalized_options[0].key, "mcp:tool:acme-lookup");
+        assert_eq!(canonicalized_options[0].label, "MCP | Acme Lookup");
 
         let _ = std::fs::remove_file(db_path);
     }
