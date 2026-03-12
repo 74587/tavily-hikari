@@ -512,6 +512,7 @@ function TokenOwnerValue({
 function statusTone(status: string): StatusTone {
   const normalized = status.toLowerCase()
   if (normalized === 'active' || normalized === 'success' || normalized === 'completed') return 'success'
+  if (normalized === 'quarantined') return 'warning'
   if (normalized === 'exhausted' || normalized === 'quota_exhausted' || normalized === 'retry_exhausted') return 'warning'
   if (normalized === 'running' || normalized === 'in_progress' || normalized === 'queued' || normalized === 'pending') {
     return 'info'
@@ -534,6 +535,10 @@ function quotaTone(quotaState: string): StatusTone {
 function statusLabel(status: string, strings: AdminTranslations): string {
   const normalized = status.toLowerCase()
   return strings.statuses[normalized] ?? status
+}
+
+function keyBadgeStatus(item: Pick<ApiKeyStats, 'status' | 'quarantine'>): string {
+  return item.quarantine ? 'quarantined' : item.status
 }
 
 function jobTypeLabel(jobType: string, strings: AdminTranslations['jobs']): string {
@@ -4986,8 +4991,8 @@ function AdminDashboard(): JSX.Element {
                         </div>
                       </td>
                       <td>
-                        <StatusBadge tone={statusTone(item.status)}>
-                          {statusLabel(item.status, adminStrings)}
+                        <StatusBadge tone={statusTone(keyBadgeStatus(item))}>
+                          {statusLabel(keyBadgeStatus(item), adminStrings)}
                         </StatusBadge>
                         {item.quarantine && (
                           <div className="panel-description" style={{ marginTop: 4 }}>
@@ -5094,8 +5099,8 @@ function AdminDashboard(): JSX.Element {
                   <div className="admin-mobile-kv">
                     <span>{keyStrings.table.status}</span>
                     <div>
-                      <StatusBadge tone={statusTone(item.status)}>
-                        {statusLabel(item.status, adminStrings)}
+                      <StatusBadge tone={statusTone(keyBadgeStatus(item))}>
+                        {statusLabel(keyBadgeStatus(item), adminStrings)}
                       </StatusBadge>
                       {item.quarantine && (
                         <div className="panel-description" style={{ marginTop: 4 }}>

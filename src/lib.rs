@@ -11668,8 +11668,11 @@ impl KeyStore {
             r#"
             SELECT COALESCE(SUM(quota_limit), 0) AS total_quota_limit,
                    COALESCE(SUM(quota_remaining), 0) AS total_quota_remaining
-            FROM api_keys
-            WHERE deleted_at IS NULL
+            FROM api_keys ak
+            LEFT JOIN api_key_quarantines aq
+              ON aq.key_id = ak.id AND aq.cleared_at IS NULL
+            WHERE ak.deleted_at IS NULL
+              AND aq.key_id IS NULL
             "#,
         )
         .fetch_one(&self.pool)
@@ -12863,8 +12866,10 @@ fn extract_status_code(value: &Value) -> Option<i64> {
 }
 
 fn classify_quarantine_reason(status_code: Option<i64>, body: &[u8]) -> Option<QuarantineDecision> {
-    let code = status_code?;
-    if code != 401 && code != 403 {
+    if let Some(code) = status_code
+        && code != 401
+        && code != 403
+    {
         return None;
     }
 
@@ -12875,20 +12880,26 @@ fn classify_quarantine_reason(status_code: Option<i64>, body: &[u8]) -> Option<Q
     }
 
     let normalized = trimmed.to_ascii_lowercase();
+    let status_label = status_code
+        .map(|code| format!("HTTP {code}"))
+        .unwrap_or_else(|| "MCP error".to_string());
     let (reason_code, reason_summary) = if normalized.contains("deactivated") {
         (
             "account_deactivated",
-            format!("Tavily account deactivated (HTTP {code})"),
+            format!("Tavily account deactivated ({status_label})"),
         )
     } else if normalized.contains("revoked") {
-        ("key_revoked", format!("Tavily key revoked (HTTP {code})"))
+        (
+            "key_revoked",
+            format!("Tavily key revoked ({status_label})"),
+        )
     } else if normalized.contains("invalid api key")
         || normalized.contains("invalid key")
         || normalized.contains("invalid_token")
     {
         (
             "invalid_api_key",
-            format!("Tavily rejected the API key as invalid (HTTP {code})"),
+            format!("Tavily rejected the API key as invalid ({status_label})"),
         )
     } else {
         return None;
@@ -14576,6 +14587,64 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn proxy_request_quarantines_key_on_mcp_error_body_without_http_status() {
+        let db_path = temp_db_path("mcp-quarantine-jsonrpc-error");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let app = Router::new().route(
+            "/mcp",
+            post(|| async {
+                Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "message": "Unauthorized: invalid api key"
+                    },
+                    "id": 1
+                }))
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+
+        let expected_api_key = "tvly-mcp-jsonrpc-error-key";
+        let upstream = format!("http://{addr}/mcp");
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+
+        let request = ProxyRequest {
+            method: Method::POST,
+            path: "/mcp".to_string(),
+            query: None,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#),
+            auth_token_id: Some("tok1".to_string()),
+        };
+
+        let response = proxy.proxy_request(request).await.expect("proxy response");
+        assert_eq!(response.status, StatusCode::OK);
+
+        let quarantine_count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM api_key_quarantines
+               WHERE key_id = (SELECT id FROM api_keys WHERE api_key = ?) AND cleared_at IS NULL"#,
+        )
+        .bind(expected_api_key)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("count quarantine rows");
+        assert_eq!(quarantine_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn classify_quarantine_reason_ignores_generic_unauthorized_errors() {
         let unauthorized = classify_quarantine_reason(Some(401), br#"{"error":"unauthorized"}"#);
@@ -14781,6 +14850,70 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             .await
             .expect("list pending keys");
         assert_eq!(pending, vec![active_id]);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn summary_quota_totals_exclude_quarantined_keys() {
+        let db_path = temp_db_path("summary-quota-excludes-quarantine");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(
+            vec![
+                "tvly-summary-quota-a".to_string(),
+                "tvly-summary-quota-b".to_string(),
+            ],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT id, api_key FROM api_keys ORDER BY api_key ASC",
+        )
+        .fetch_all(&proxy.key_store.pool)
+        .await
+        .expect("fetch keys");
+        let (quarantined_id, active_id) =
+            rows.into_iter()
+                .fold((None, None), |mut acc, (id, secret)| {
+                    if secret == "tvly-summary-quota-a" {
+                        acc.0 = Some(id);
+                    } else if secret == "tvly-summary-quota-b" {
+                        acc.1 = Some(id);
+                    }
+                    acc
+                });
+        let quarantined_id = quarantined_id.expect("quarantined key exists");
+        let active_id = active_id.expect("active key exists");
+
+        proxy
+            .key_store
+            .update_quota_for_key(&quarantined_id, 100, 80, Utc::now().timestamp())
+            .await
+            .expect("update quarantined key quota");
+        proxy
+            .key_store
+            .update_quota_for_key(&active_id, 50, 40, Utc::now().timestamp())
+            .await
+            .expect("update active key quota");
+        proxy
+            .key_store
+            .quarantine_key_by_id(
+                &quarantined_id,
+                "/api/tavily/search",
+                "account_deactivated",
+                "Tavily account deactivated (HTTP 401)",
+                "deactivated",
+            )
+            .await
+            .expect("quarantine key");
+
+        let summary = proxy.summary().await.expect("summary");
+        assert_eq!(summary.total_quota_limit, 50);
+        assert_eq!(summary.total_quota_remaining, 40);
 
         let _ = std::fs::remove_file(db_path);
     }

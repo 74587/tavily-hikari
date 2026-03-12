@@ -1627,6 +1627,7 @@ export const translations: Record<Language, TranslationShape> = {
       },
       statuses: {
         active: 'Active',
+        quarantined: 'Quarantined',
         exhausted: 'Exhausted',
         success: 'Success',
         running: 'Running',
@@ -2485,6 +2486,7 @@ export const translations: Record<Language, TranslationShape> = {
       },
       statuses: {
         active: '活跃',
+        quarantined: '隔离中',
         exhausted: '耗尽',
         success: '成功',
         running: '运行中',
