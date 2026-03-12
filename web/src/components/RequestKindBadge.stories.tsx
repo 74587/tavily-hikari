@@ -2,22 +2,98 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 
 import RequestKindBadge from './RequestKindBadge'
 
-const requestKindExamples = [
-  { requestKindKey: 'api:search', requestKindLabel: 'API | search' },
-  { requestKindKey: 'api:extract', requestKindLabel: 'API | extract' },
-  { requestKindKey: 'api:crawl', requestKindLabel: 'API | crawl' },
-  { requestKindKey: 'api:map', requestKindLabel: 'API | map' },
-  { requestKindKey: 'api:research', requestKindLabel: 'API | research' },
-  { requestKindKey: 'api:research-result', requestKindLabel: 'API | research result' },
-  { requestKindKey: 'api:usage', requestKindLabel: 'API | usage' },
-  { requestKindKey: 'api:raw:/api/internal/report', requestKindLabel: 'API | /api/internal/report' },
-  { requestKindKey: 'mcp:search', requestKindLabel: 'MCP | search' },
-  { requestKindKey: 'mcp:batch', requestKindLabel: 'MCP | batch' },
-  { requestKindKey: 'mcp:tool:Acme Lookup', requestKindLabel: 'MCP | Acme Lookup' },
-  { requestKindKey: 'mcp:initialize', requestKindLabel: 'MCP | initialize' },
-  { requestKindKey: 'mcp:resources/subscribe', requestKindLabel: 'MCP | resources/subscribe' },
-  { requestKindKey: 'mcp:raw:/mcp/sse', requestKindLabel: 'MCP | /mcp/sse' },
+const requestKindSections = [
+  {
+    title: 'API request kinds',
+    description: 'HTTP routes, result fetches, and raw fallback endpoints.',
+    items: [
+      { requestKindKey: 'api:search', requestKindLabel: 'API | search' },
+      { requestKindKey: 'api:extract', requestKindLabel: 'API | extract' },
+      { requestKindKey: 'api:crawl', requestKindLabel: 'API | crawl' },
+      { requestKindKey: 'api:map', requestKindLabel: 'API | map' },
+      { requestKindKey: 'api:research', requestKindLabel: 'API | research' },
+      { requestKindKey: 'api:research-result', requestKindLabel: 'API | research result' },
+      { requestKindKey: 'api:usage', requestKindLabel: 'API | usage' },
+      { requestKindKey: 'api:raw:/api/internal/report', requestKindLabel: 'API | /api/internal/report' },
+    ],
+  },
+  {
+    title: 'MCP request kinds',
+    description: 'Tool calls, protocol methods, batched calls, and raw transport fallbacks.',
+    items: [
+      { requestKindKey: 'mcp:search', requestKindLabel: 'MCP | search' },
+      { requestKindKey: 'mcp:batch', requestKindLabel: 'MCP | batch' },
+      { requestKindKey: 'mcp:tool:Acme Lookup', requestKindLabel: 'MCP | Acme Lookup' },
+      { requestKindKey: 'mcp:initialize', requestKindLabel: 'MCP | initialize' },
+      { requestKindKey: 'mcp:resources/subscribe', requestKindLabel: 'MCP | resources/subscribe' },
+      { requestKindKey: 'mcp:raw:/mcp/sse', requestKindLabel: 'MCP | /mcp/sse' },
+    ],
+  },
 ] as const
+
+function RequestKindStoryCard(props: {
+  requestKindKey: string
+  requestKindLabel: string
+}): JSX.Element {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gap: 12,
+        minWidth: 0,
+        padding: '14px 16px',
+        borderRadius: 16,
+        border: '1px solid hsl(var(--border) / 0.72)',
+        background: 'hsl(var(--background) / 0.56)',
+      }}
+    >
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+        <span
+          style={{
+            fontSize: '0.72rem',
+            fontWeight: 700,
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            color: 'hsl(var(--muted-foreground))',
+          }}
+        >
+          Preview
+        </span>
+        <RequestKindBadge {...props} />
+      </div>
+      <div style={{ display: 'grid', gap: 6, minWidth: 0 }}>
+        <span
+          style={{
+            fontSize: '0.72rem',
+            fontWeight: 700,
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            color: 'hsl(var(--muted-foreground))',
+          }}
+        >
+          Stable key
+        </span>
+        <code
+          style={{
+            display: 'block',
+            minWidth: 0,
+            padding: '10px 12px',
+            borderRadius: 12,
+            border: '1px solid hsl(var(--border) / 0.58)',
+            background: 'hsl(var(--background) / 0.78)',
+            color: 'hsl(var(--foreground) / 0.82)',
+            fontSize: '0.84rem',
+            lineHeight: 1.5,
+            whiteSpace: 'normal',
+            wordBreak: 'break-word',
+          }}
+        >
+          {props.requestKindKey}
+        </code>
+      </div>
+    </div>
+  )
+}
 
 function ThemeCatalogPanel(): JSX.Element {
   return (
@@ -47,30 +123,45 @@ function ThemeCatalogPanel(): JSX.Element {
           Use the Storybook theme toolbar to preview the badge palette in light, dark, or system mode.
         </div>
       </div>
-      <div
-        style={{
-          display: 'grid',
-          gap: 12,
-          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-        }}
-      >
-        {requestKindExamples.map((example) => (
-          <div
-            key={example.requestKindKey}
+      <div style={{ display: 'grid', gap: 18 }}>
+        {requestKindSections.map((section) => (
+          <section
+            key={section.title}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
+              display: 'grid',
               gap: 12,
-              padding: '10px 12px',
-              borderRadius: 16,
-              border: '1px solid hsl(var(--border) / 0.72)',
-              background: 'hsl(var(--background) / 0.58)',
+              padding: '16px 18px',
+              borderRadius: 18,
+              border: '1px solid hsl(var(--border) / 0.66)',
+              background: 'hsl(var(--background) / 0.42)',
             }}
           >
-            <code style={{ fontSize: '0.8rem', color: 'hsl(var(--muted-foreground))' }}>{example.requestKindKey}</code>
-            <RequestKindBadge {...example} />
-          </div>
+            <div style={{ display: 'grid', gap: 4 }}>
+              <div
+                style={{
+                  fontSize: '0.78rem',
+                  fontWeight: 700,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  color: 'hsl(var(--muted-foreground))',
+                }}
+              >
+                {section.title}
+              </div>
+              <div style={{ fontSize: '0.9rem', color: 'hsl(var(--muted-foreground))' }}>{section.description}</div>
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gap: 12,
+                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+              }}
+            >
+              {section.items.map((example) => (
+                <RequestKindStoryCard key={example.requestKindKey} {...example} />
+              ))}
+            </div>
+          </section>
         ))}
       </div>
     </div>
