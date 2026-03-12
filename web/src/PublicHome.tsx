@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from './components/ui/dialog'
 import { useLanguage, useTranslate, type Language } from './i18n'
+import { copyText, selectAllReadonlyText } from './lib/clipboard'
 import { useResponsiveModes } from './lib/responsive'
 
 type GuideLanguage = 'toml' | 'json' | 'bash'
@@ -106,6 +107,8 @@ function PublicHome(): JSX.Element {
   const updateBanner = useUpdateAvailable()
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const pageRef = useRef<HTMLElement>(null)
+  const accessTokenFieldRef = useRef<HTMLInputElement | null>(null)
+  const accessTokenModalFieldRef = useRef<HTMLInputElement | null>(null)
   const { viewportMode, contentMode, isCompactLayout } = useResponsiveModes(pageRef)
   const [recentTokenUsage, setRecentTokenUsage] = useState<TokenMetrics | null>(null)
   const [userTokenHydrationDone, setUserTokenHydrationDone] = useState(false)
@@ -283,16 +286,34 @@ function PublicHome(): JSX.Element {
     ? `${REPO_URL}/tree/v${encodeURIComponent(updateBanner.currentVersion)}`
     : null
 
+  const focusManualTokenField = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const target = isTokenAccessDialogOpen ? accessTokenModalFieldRef.current : accessTokenFieldRef.current
+      selectAllReadonlyText(target)
+    })
+  }, [isTokenAccessDialogOpen])
+
   const handleCopyToken = useCallback(async (value: string) => {
-    try {
-      await navigator.clipboard.writeText(value)
+    const normalizedValue = value.trim()
+    const result = await copyText(normalizedValue, { preferExecCommand: true })
+    if (result.ok) {
       setCopyState('copied')
       window.setTimeout(() => setCopyState('idle'), 2500)
-    } catch {
-      setCopyState('error')
-      window.setTimeout(() => setCopyState('idle'), 2500)
+      return
     }
-  }, [])
+    if (normalizedValue.length > 0) {
+      if (isTokenAccessDialogOpen) {
+        setTokenDraft(normalizedValue)
+      } else {
+        setToken(normalizedValue)
+        setTokenDraft(normalizedValue)
+      }
+      setTokenVisible(true)
+      focusManualTokenField()
+    }
+    setCopyState('error')
+    window.setTimeout(() => setCopyState('idle'), 2500)
+  }, [focusManualTokenField, isTokenAccessDialogOpen])
 
   const startLinuxDoLogin = useCallback((candidateToken?: string) => {
     const form = document.createElement('form')
@@ -530,6 +551,7 @@ function PublicHome(): JSX.Element {
               <div className="access-token-box">
                 <TokenSecretField
                   inputId="access-token"
+                  inputRef={accessTokenFieldRef}
                   name="not-a-login-field"
                   value={token}
                   visible={tokenVisible}
@@ -787,6 +809,7 @@ function PublicHome(): JSX.Element {
           </DialogHeader>
           <TokenSecretField
             inputId="access-token-modal"
+            inputRef={accessTokenModalFieldRef}
             name="not-a-login-field"
             value={tokenDraft}
             visible={tokenVisible}

@@ -7155,3 +7155,112 @@ tbody .log-details-row:hover {
     padding-inline: 0.42rem;
   }
 }
+
+.manual-copy-bubble {
+  position: fixed;
+  z-index: 1300;
+  width: min(420px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid hsl(var(--border) / 0.88);
+  border-radius: 18px;
+  background: hsl(var(--popover) / 0.98);
+  color: hsl(var(--popover-foreground));
+  box-shadow: 0 24px 60px hsl(222 47% 11% / 0.22);
+  backdrop-filter: blur(16px);
+}
+
+.manual-copy-bubble::before {
+  content: '';
+  position: absolute;
+  left: var(--manual-copy-arrow-left, 50%);
+  width: 16px;
+  height: 16px;
+  border-left: 1px solid hsl(var(--border) / 0.88);
+  border-top: 1px solid hsl(var(--border) / 0.88);
+  background: hsl(var(--popover) / 0.98);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.manual-copy-bubble[data-placement='bottom']::before {
+  top: -9px;
+}
+
+.manual-copy-bubble[data-placement='top']::before {
+  bottom: -9px;
+  transform: translateX(-50%) rotate(225deg);
+}
+
+.manual-copy-bubble-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.manual-copy-bubble-copy {
+  min-width: 0;
+}
+
+.manual-copy-bubble-title {
+  display: block;
+  font-size: 0.97rem;
+  line-height: 1.35;
+}
+
+.manual-copy-bubble-description {
+  margin: 4px 0 0;
+  color: hsl(var(--popover-foreground) / 0.74);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.manual-copy-bubble-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: hsl(var(--popover-foreground) / 0.7);
+  cursor: pointer;
+}
+
+.manual-copy-bubble-close:hover,
+.manual-copy-bubble-close:focus-visible {
+  background: hsl(var(--accent) / 0.7);
+  color: hsl(var(--accent-foreground));
+  outline: none;
+}
+
+.manual-copy-bubble-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: hsl(var(--popover-foreground) / 0.72);
+}
+
+.manual-copy-bubble-field {
+  user-select: all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  word-break: break-all;
+  background: hsl(var(--background));
+}
+
+.manual-copy-bubble-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 767px) {
+  .manual-copy-bubble {
+    width: min(360px, calc(100vw - 20px));
+    padding: 12px;
+    gap: 8px;
+    border-radius: 16px;
+  }
+}

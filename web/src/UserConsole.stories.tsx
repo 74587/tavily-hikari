@@ -17,6 +17,8 @@ type TokenDetailPreview =
   | 'Authentication Failed'
   | 'Quota Blocked'
 
+type CopyRecoveryMode = 'none' | 'list-manual-bubble' | 'detail-inline'
+
 type ProbeMockMode = 'none' | 'running' | 'success' | 'partial' | 'auth-fail' | 'exhausted'
 
 interface UserConsoleStoryArgs {
@@ -375,25 +377,76 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
   }
 }
 
-function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
+function installClipboardFailureMock(): () => void {
+  const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  const originalExecCommand = document.execCommand
+  let clipboardMockInstalled = false
+
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          throw new Error('storybook-copy-blocked')
+        },
+      },
+    })
+    clipboardMockInstalled = true
+  } catch {
+    // Ignore if the browser refuses to override clipboard in the mock canvas.
+  }
+
+  try {
+    document.execCommand = (() => false) as typeof document.execCommand
+  } catch {
+    // Ignore if execCommand cannot be replaced in the current runtime.
+  }
+
+  return () => {
+    try {
+      if (originalClipboardDescriptor) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+      } else if (clipboardMockInstalled) {
+        Reflect.deleteProperty(navigator, 'clipboard')
+      }
+    } catch {
+      // Ignore restore failures inside Storybook.
+    }
+
+    try {
+      document.execCommand = originalExecCommand
+    } catch {
+      // Ignore restore failures inside Storybook.
+    }
+  }
+}
+
+function UserConsoleStory(
+  args: UserConsoleStoryArgs & {
+    copyRecoveryMode?: CopyRecoveryMode
+  },
+): JSX.Element {
   const [ready, setReady] = useState(false)
   const storyState = useMemo(
     () => resolveStoryState(args),
     [args.consoleView, args.isAdmin, args.landingFocus, args.tokenListState, args.tokenDetailPreview, args.routeHashOverride],
   )
+  const copyRecoveryMode = args.copyRecoveryMode ?? 'none'
 
   useLayoutEffect(() => {
     const previousHash = window.location.hash
     const cleanupFetch = installUserConsoleFetchMock(storyState)
+    const cleanupClipboard = copyRecoveryMode === 'none' ? null : installClipboardFailureMock()
     window.location.hash = storyState.routeHash
     setReady(true)
 
     return () => {
       cleanupFetch()
+      cleanupClipboard?.()
       window.location.hash = previousHash
       setReady(false)
     }
-  }, [storyState.isAdmin, storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
+  }, [copyRecoveryMode, storyState.isAdmin, storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
 
   useEffect(() => {
     if (!ready || !storyState.autoRevealToken) return
@@ -413,6 +466,18 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
     }, 80)
     return () => window.clearTimeout(timer)
   }, [ready, storyState.autoProbeTarget])
+
+  useEffect(() => {
+    if (!ready || copyRecoveryMode === 'none') return
+    const timer = window.setTimeout(() => {
+      const selector = copyRecoveryMode === 'list-manual-bubble'
+        ? 'tbody .table-actions button'
+        : '.user-console-token-box .token-copy-button'
+      const button = document.querySelector<HTMLButtonElement>(selector)
+      button?.click()
+    }, 180)
+    return () => window.clearTimeout(timer)
+  }, [copyRecoveryMode, ready])
 
   if (!ready) {
     return <div style={{ minHeight: '100vh' }} />
@@ -566,6 +631,17 @@ export const ConsoleHomeEmptyTokens: Story = {
   },
 }
 
+export const ConsoleHomeCopyFailureRecovery: Story = {
+  name: 'Console Home Copy Failure Recovery',
+  args: {
+    consoleView: 'Console Home',
+    isAdmin: false,
+    landingFocus: 'Token Focus',
+    tokenListState: 'Default List',
+  },
+  render: (args) => <UserConsoleStory {...args} copyRecoveryMode="list-manual-bubble" />,
+}
+
 export const TokenDetailOverview: Story = {
   name: 'Token Detail Overview',
   args: {
@@ -574,6 +650,17 @@ export const TokenDetailOverview: Story = {
     landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Overview',
   },
+}
+
+export const TokenDetailCopyFailureRecovery: Story = {
+  name: 'Token Detail Copy Failure Recovery',
+  args: {
+    consoleView: 'Token Detail',
+    isAdmin: false,
+    landingFocus: 'Overview Focus',
+    tokenDetailPreview: 'Overview',
+  },
+  render: (args) => <UserConsoleStory {...args} copyRecoveryMode="detail-inline" />,
 }
 
 export const TokenRevealed: Story = {

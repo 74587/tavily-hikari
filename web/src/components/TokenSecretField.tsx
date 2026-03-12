@@ -1,13 +1,14 @@
 import { Icon } from '@iconify/react'
-import type { InputHTMLAttributes } from 'react'
+import type { InputHTMLAttributes, KeyboardEvent as ReactKeyboardEvent, Ref } from 'react'
 
+import { isCopyIntentKey } from '../lib/clipboard'
 import { cn } from '../lib/utils'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 
 export type TokenSecretCopyState = 'idle' | 'copied' | 'error'
 
-interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange'> {
+interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'value' | 'onChange' | 'onCopy'> {
   inputId: string
   label: string
   value: string
@@ -17,7 +18,9 @@ interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElemen
   copyState: TokenSecretCopyState
   onValueChange: (value: string) => void
   onToggleVisibility: () => void
-  onCopy: () => void | Promise<void>
+  onCopy: (anchorEl: HTMLButtonElement) => void | Promise<void>
+  onCopyIntent?: () => void | Promise<void>
+  onCopyIntentCancel?: () => void
   visibilityShowLabel: string
   visibilityHideLabel: string
   visibilityIconAlt: string
@@ -31,6 +34,7 @@ interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElemen
   inputClassName?: string
   copyButtonClassName?: string
   copyDisabled?: boolean
+  inputRef?: Ref<HTMLInputElement>
 }
 
 export default function TokenSecretField({
@@ -44,6 +48,8 @@ export default function TokenSecretField({
   onValueChange,
   onToggleVisibility,
   onCopy,
+  onCopyIntent,
+  onCopyIntentCancel,
   visibilityShowLabel,
   visibilityHideLabel,
   visibilityIconAlt,
@@ -57,6 +63,7 @@ export default function TokenSecretField({
   inputClassName,
   copyButtonClassName,
   copyDisabled = false,
+  inputRef,
   className,
   onBlur,
   ...inputProps
@@ -77,6 +84,10 @@ export default function TokenSecretField({
         : 'mdi:content-copy'
   const copyText = copyState === 'copied' ? copiedLabel : copyState === 'error' ? copyErrorLabel : copyLabel
   const shouldMaskValue = !visible && hiddenDisplayValue == null
+  const handleCopyIntentKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!isCopyIntentKey(event.key)) return
+    void onCopyIntent?.()
+  }
 
   return (
     <div className={cn('token-input-wrapper', wrapperClassName)}>
@@ -88,6 +99,7 @@ export default function TokenSecretField({
           <Input
             {...inputProps}
             id={inputId}
+            ref={inputRef}
             className={cn('token-input', shouldMaskValue && 'masked', inputClassName, className)}
             type="text"
             value={displayValue}
@@ -120,7 +132,12 @@ export default function TokenSecretField({
           type="button"
           variant={copyVariant}
           className={cn('token-copy-button', copyStateClassName, copyButtonClassName)}
-          onClick={() => void onCopy()}
+          onPointerEnter={() => void onCopyIntent?.()}
+          onPointerLeave={() => onCopyIntentCancel?.()}
+          onBlur={() => onCopyIntentCancel?.()}
+          onPointerDown={() => void onCopyIntent?.()}
+          onKeyDown={handleCopyIntentKeyDown}
+          onClick={(event) => void onCopy(event.currentTarget)}
           aria-label={copyAriaLabel}
           disabled={copyDisabled}
         >

@@ -2,6 +2,7 @@ import React, { ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, use
 import { Icon } from '@iconify/react'
 import CherryStudioMock from './components/CherryStudioMock'
 import TokenSecretField, { type TokenSecretCopyState } from './components/TokenSecretField'
+import ManualCopyBubble from './components/ManualCopyBubble'
 
 import {
   fetchProfile,
@@ -29,6 +30,7 @@ import { StatusBadge, type StatusTone } from './components/StatusBadge'
 import ThemeToggle from './components/ThemeToggle'
 import { Button } from './components/ui/button'
 import { useLanguage, useTranslate, type Language } from './i18n'
+import { copyText, isCopyIntentKey, selectAllReadonlyText, shouldPrewarmSecretCopy } from './lib/clipboard'
 import {
   type McpProbeStepState,
   type ProbeQuotaWindow,
@@ -56,6 +58,8 @@ const VSCODE_DOC_URL = 'https://code.visualstudio.com/docs/copilot/customization
 const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
 const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
 const ICONIFY_ENDPOINT = 'https://api.iconify.design'
+const USER_CONSOLE_SECRET_CACHE_TTL_MS = 2_000
+const USER_CONSOLE_SECRET_PREWARM_DELAY_MS = 120
 
 type GuideLanguage = 'toml' | 'json' | 'bash'
 type GuideKey = 'codex' | 'claude' | 'vscode' | 'claudeDesktop' | 'cursor' | 'windsurf' | 'cherryStudio' | 'other'
@@ -72,6 +76,11 @@ interface GuideContent {
   snippetLanguage?: GuideLanguage
   snippet?: string
   reference?: GuideReference
+}
+
+interface ManualCopyBubbleState {
+  anchorEl: HTMLElement | null
+  value: string
 }
 
 const GUIDE_KEY_ORDER: GuideKey[] = [
@@ -246,12 +255,20 @@ export default function UserConsole(): JSX.Element {
   const [probeBubble, setProbeBubble] = useState<ProbeBubbleModel | null>(null)
   const [probeBubbleShift, setProbeBubbleShift] = useState(0)
   const probeBubbleRef = useRef<HTMLDivElement | null>(null)
+  const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
+  const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
+  const tokenSecretCacheTimerRef = useRef<Map<string, number>>(new Map())
+  const tokenSecretWarmTimerRef = useRef<Map<string, number>>(new Map())
+  const tokenSecretWarmAbortRef = useRef<Map<string, AbortController>>(new Map())
+  const tokenSecretRequestRef = useRef<Map<string, Promise<string>>>(new Map())
+  const tokenSecretRequestAbortRef = useRef<Map<string, AbortController>>(new Map())
   const probeRunIdRef = useRef(0)
   const tokenSecretRunIdRef = useRef(0)
   const pageRef = useRef<HTMLElement>(null)
   const dashboardSectionRef = useRef<HTMLElement | null>(null)
   const tokensSectionRef = useRef<HTMLElement | null>(null)
   const detailHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const detailTokenFieldRef = useRef<HTMLInputElement | null>(null)
   const historyTraversalRef = useRef(false)
   const landingScrollBehaviorRef = useRef<ScrollBehavior>('auto')
   const shouldScrollLandingSectionRef = useRef(route.name === 'landing' && route.section !== null)
@@ -360,7 +377,25 @@ export default function UserConsole(): JSX.Element {
     setApiProbe(createProbeButtonModel(6))
     setProbeBubble(null)
     setProbeBubbleShift(0)
+    setManualCopyBubble(null)
   }, [route.name === 'token' ? route.id : route.section ?? 'landing'])
+
+  const abortPendingTokenSecretRequest = useCallback((tokenId: string) => {
+    const controller = tokenSecretRequestAbortRef.current.get(tokenId)
+    if (controller) {
+      controller.abort()
+      tokenSecretRequestAbortRef.current.delete(tokenId)
+    }
+    tokenSecretRequestRef.current.delete(tokenId)
+  }, [])
+
+  const abortAllPendingTokenSecretRequests = useCallback(() => {
+    for (const controller of tokenSecretRequestAbortRef.current.values()) {
+      controller.abort()
+    }
+    tokenSecretRequestAbortRef.current.clear()
+    tokenSecretRequestRef.current.clear()
+  }, [])
 
   useEffect(() => {
     tokenSecretRunIdRef.current += 1
@@ -369,7 +404,36 @@ export default function UserConsole(): JSX.Element {
     setTokenSecretValue(null)
     setTokenSecretLoading(false)
     setTokenSecretError(null)
-  }, [consoleAvailability, route.name === 'token' ? route.id : route.name])
+    for (const timer of tokenSecretWarmTimerRef.current.values()) {
+      window.clearTimeout(timer)
+    }
+    for (const timer of tokenSecretCacheTimerRef.current.values()) {
+      window.clearTimeout(timer)
+    }
+    for (const controller of tokenSecretWarmAbortRef.current.values()) {
+      controller.abort()
+    }
+    abortAllPendingTokenSecretRequests()
+    tokenSecretWarmTimerRef.current.clear()
+    tokenSecretCacheTimerRef.current.clear()
+    tokenSecretWarmAbortRef.current.clear()
+    tokenSecretCacheRef.current.clear()
+  }, [abortAllPendingTokenSecretRequests, consoleAvailability, route.name === 'token' ? route.id : route.name])
+
+  useEffect(() => {
+    return () => {
+      for (const timer of tokenSecretWarmTimerRef.current.values()) {
+        window.clearTimeout(timer)
+      }
+      for (const timer of tokenSecretCacheTimerRef.current.values()) {
+        window.clearTimeout(timer)
+      }
+      for (const controller of tokenSecretWarmAbortRef.current.values()) {
+        controller.abort()
+      }
+      abortAllPendingTokenSecretRequests()
+    }
+  }, [abortAllPendingTokenSecretRequests])
 
   useLayoutEffect(() => {
     if (!probeBubble?.visible || probeBubble.items.length === 0) {
@@ -402,18 +466,168 @@ export default function UserConsole(): JSX.Element {
     }
   }, [probeBubble])
 
-  const copyToken = useCallback(async (tokenId: string) => {
+  const clearCachedTokenSecret = useCallback((tokenId: string) => {
+    const cacheTimer = tokenSecretCacheTimerRef.current.get(tokenId)
+    if (cacheTimer != null) {
+      window.clearTimeout(cacheTimer)
+      tokenSecretCacheTimerRef.current.delete(tokenId)
+    }
+    tokenSecretCacheRef.current.delete(tokenId)
+  }, [])
+
+  const cacheTokenSecret = useCallback((tokenId: string, token: string) => {
+    clearCachedTokenSecret(tokenId)
+    tokenSecretCacheRef.current.set(tokenId, token)
+    const timer = window.setTimeout(() => {
+      tokenSecretCacheTimerRef.current.delete(tokenId)
+      tokenSecretCacheRef.current.delete(tokenId)
+    }, USER_CONSOLE_SECRET_CACHE_TTL_MS)
+    tokenSecretCacheTimerRef.current.set(tokenId, timer)
+  }, [clearCachedTokenSecret])
+
+  const clearWarmTokenSecretTimer = useCallback((tokenId: string) => {
+    const timer = tokenSecretWarmTimerRef.current.get(tokenId)
+    if (timer != null) {
+      window.clearTimeout(timer)
+      tokenSecretWarmTimerRef.current.delete(tokenId)
+    }
+  }, [])
+
+  const cancelWarmTokenSecret = useCallback((tokenId: string) => {
+    clearWarmTokenSecretTimer(tokenId)
+    const controller = tokenSecretWarmAbortRef.current.get(tokenId)
+    if (controller) {
+      tokenSecretWarmAbortRef.current.delete(tokenId)
+      abortPendingTokenSecretRequest(tokenId)
+    }
+  }, [abortPendingTokenSecretRequest, clearWarmTokenSecretTimer])
+
+  const commitWarmTokenSecret = useCallback((tokenId: string) => {
+    clearWarmTokenSecretTimer(tokenId)
+    tokenSecretWarmAbortRef.current.delete(tokenId)
+  }, [clearWarmTokenSecretTimer])
+
+  const resolveTokenSecret = useCallback(async (tokenId: string, signal?: AbortSignal) => {
+    const revealedToken =
+      route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId
+        ? tokenSecretValue
+        : null
+    if (revealedToken) {
+      return revealedToken
+    }
+    const cachedToken = tokenSecretCacheRef.current.get(tokenId)
+    if (cachedToken) {
+      return cachedToken
+    }
+    const pending = tokenSecretRequestRef.current.get(tokenId)
+    if (pending) {
+      return await pending
+    }
+
+    const requestController = new AbortController()
+    tokenSecretRequestAbortRef.current.set(tokenId, requestController)
+    const forwardAbort = () => requestController.abort()
+    if (signal) {
+      if (signal.aborted) {
+        requestController.abort()
+      } else {
+        signal.addEventListener('abort', forwardAbort, { once: true })
+      }
+    }
+    const requestRunId = tokenSecretRunIdRef.current
+    const request = fetchUserTokenSecret(tokenId, requestController.signal)
+      .then(({ token }) => {
+        if (!requestController.signal.aborted && requestRunId === tokenSecretRunIdRef.current) {
+          cacheTokenSecret(tokenId, token)
+        }
+        return token
+      })
+      .finally(() => {
+        if (signal) {
+          signal.removeEventListener('abort', forwardAbort)
+        }
+        if (tokenSecretRequestRef.current.get(tokenId) === request) {
+          tokenSecretRequestRef.current.delete(tokenId)
+        }
+        if (tokenSecretRequestAbortRef.current.get(tokenId) === requestController) {
+          tokenSecretRequestAbortRef.current.delete(tokenId)
+        }
+      })
+
+    tokenSecretRequestRef.current.set(tokenId, request)
+    return await request
+  }, [cacheTokenSecret, route, tokenSecretTokenId, tokenSecretValue])
+
+  const shouldPrewarmTokenCopy = useMemo(() => shouldPrewarmSecretCopy(), [])
+
+  const warmTokenSecret = useCallback((tokenId: string) => {
+    if (consoleAvailability !== 'enabled' || !shouldPrewarmTokenCopy) return
+    clearWarmTokenSecretTimer(tokenId)
+    if (tokenSecretCacheRef.current.has(tokenId) || tokenSecretRequestRef.current.has(tokenId)) return
+    const controller = new AbortController()
+    tokenSecretWarmAbortRef.current.set(tokenId, controller)
+    void resolveTokenSecret(tokenId, controller.signal)
+      .then((token) => {
+        if (tokenSecretWarmAbortRef.current.get(tokenId) !== controller) return
+        cacheTokenSecret(tokenId, token)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (tokenSecretWarmAbortRef.current.get(tokenId) === controller) {
+          tokenSecretWarmAbortRef.current.delete(tokenId)
+        }
+      })
+  }, [cacheTokenSecret, clearWarmTokenSecretTimer, consoleAvailability, resolveTokenSecret, shouldPrewarmTokenCopy])
+
+  const scheduleWarmTokenSecret = useCallback((tokenId: string) => {
+    if (consoleAvailability !== 'enabled' || !shouldPrewarmTokenCopy) return
+    if (tokenSecretCacheRef.current.has(tokenId) || tokenSecretRequestRef.current.has(tokenId)) return
+    clearWarmTokenSecretTimer(tokenId)
+    const timer = window.setTimeout(() => {
+      tokenSecretWarmTimerRef.current.delete(tokenId)
+      void warmTokenSecret(tokenId)
+    }, USER_CONSOLE_SECRET_PREWARM_DELAY_MS)
+    tokenSecretWarmTimerRef.current.set(tokenId, timer)
+  }, [clearWarmTokenSecretTimer, consoleAvailability, shouldPrewarmTokenCopy, warmTokenSecret])
+
+  const revealDetailTokenForManualCopy = useCallback((tokenId: string, token: string) => {
+    if (route.name !== 'token' || route.id !== tokenId) return false
+    setTokenSecretTokenId(tokenId)
+    setTokenSecretValue(token)
+    setTokenSecretVisible(true)
+    setTokenSecretLoading(false)
+    setTokenSecretError(null)
+    window.requestAnimationFrame(() => {
+      selectAllReadonlyText(detailTokenFieldRef.current)
+    })
+    return true
+  }, [route])
+
+  const copyToken = useCallback(async (tokenId: string, anchorEl?: HTMLElement | null) => {
+    setManualCopyBubble(null)
+    commitWarmTokenSecret(tokenId)
     try {
-      const cachedToken =
-        route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId
+      const inlineToken =
+        route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId && tokenSecretValue != null
           ? tokenSecretValue
           : null
-      let token = cachedToken
-      if (!token) {
-        const secret = await fetchUserTokenSecret(tokenId)
-        token = secret.token
+      const cachedToken = inlineToken ?? tokenSecretCacheRef.current.get(tokenId)
+      const token = cachedToken ?? await resolveTokenSecret(tokenId)
+      const result = await copyText(token, cachedToken ? { preferExecCommand: true } : undefined)
+      if (cachedToken && tokenId !== tokenSecretTokenId) {
+        clearCachedTokenSecret(tokenId)
       }
-      await navigator.clipboard.writeText(token)
+      if (!result.ok) {
+        if (!revealDetailTokenForManualCopy(tokenId, token) && anchorEl) {
+          setManualCopyBubble({ anchorEl, value: token })
+        }
+        setCopyState((prev) => ({ ...prev, [tokenId]: 'error' }))
+        window.setTimeout(() => {
+          setCopyState((prev) => ({ ...prev, [tokenId]: 'idle' }))
+        }, 1800)
+        return
+      }
+      setManualCopyBubble(null)
       setCopyState((prev) => ({ ...prev, [tokenId]: 'copied' }))
     } catch {
       setCopyState((prev) => ({ ...prev, [tokenId]: 'error' }))
@@ -421,7 +635,7 @@ export default function UserConsole(): JSX.Element {
     window.setTimeout(() => {
       setCopyState((prev) => ({ ...prev, [tokenId]: 'idle' }))
     }, 1800)
-  }, [route, tokenSecretTokenId, tokenSecretValue])
+  }, [clearCachedTokenSecret, commitWarmTokenSecret, resolveTokenSecret, revealDetailTokenForManualCopy, route, tokenSecretTokenId, tokenSecretValue])
 
   const toggleTokenSecretVisibility = useCallback(async () => {
     if (route.name !== 'token') return
@@ -449,6 +663,7 @@ export default function UserConsole(): JSX.Element {
       if (tokenSecretRunIdRef.current !== runId) return
       setTokenSecretTokenId(route.id)
       setTokenSecretValue(secret.token)
+      cacheTokenSecret(route.id, secret.token)
       setTokenSecretVisible(true)
     } catch (err) {
       if (tokenSecretRunIdRef.current !== runId) return
@@ -1235,7 +1450,15 @@ export default function UserConsole(): JSX.Element {
                               <button
                                 type="button"
                                 className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
-                                onClick={() => void copyToken(item.tokenId)}
+                                onPointerEnter={() => scheduleWarmTokenSecret(item.tokenId)}
+                                onPointerLeave={() => cancelWarmTokenSecret(item.tokenId)}
+                                onBlur={() => cancelWarmTokenSecret(item.tokenId)}
+                                onPointerDown={() => warmTokenSecret(item.tokenId)}
+                                onKeyDown={(event) => {
+                                  if (!isCopyIntentKey(event.key)) return
+                                  warmTokenSecret(item.tokenId)
+                                }}
+                                onClick={(event) => void copyToken(item.tokenId, event.currentTarget)}
                               >
                                 {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
                               </button>
@@ -1297,7 +1520,15 @@ export default function UserConsole(): JSX.Element {
                         <button
                           type="button"
                           className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
-                          onClick={() => void copyToken(item.tokenId)}
+                          onPointerEnter={() => scheduleWarmTokenSecret(item.tokenId)}
+                          onPointerLeave={() => cancelWarmTokenSecret(item.tokenId)}
+                          onBlur={() => cancelWarmTokenSecret(item.tokenId)}
+                          onPointerDown={() => warmTokenSecret(item.tokenId)}
+                          onKeyDown={(event) => {
+                            if (!isCopyIntentKey(event.key)) return
+                            warmTokenSecret(item.tokenId)
+                          }}
+                          onClick={(event) => void copyToken(item.tokenId, event.currentTarget)}
                         >
                           {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
                         </button>
@@ -1372,6 +1603,7 @@ export default function UserConsole(): JSX.Element {
 
             <TokenSecretField
               inputId={`user-console-token-${route.id}`}
+              inputRef={detailTokenFieldRef}
               value={detailTokenValue}
               visible={detailTokenVisible}
               hiddenDisplayValue={tokenLabel(route.id)}
@@ -1379,7 +1611,9 @@ export default function UserConsole(): JSX.Element {
               copyState={detailTokenCopyState}
               onValueChange={() => undefined}
               onToggleVisibility={() => void toggleTokenSecretVisibility()}
-              onCopy={() => copyToken(route.id)}
+              onCopyIntent={() => scheduleWarmTokenSecret(route.id)}
+              onCopyIntentCancel={() => cancelWarmTokenSecret(route.id)}
+              onCopy={(anchorEl) => copyToken(route.id, anchorEl)}
               label={text.detail.tokenLabel}
               visibilityShowLabel={text.detail.tokenSecret.show}
               visibilityHideLabel={text.detail.tokenSecret.hide}
@@ -1606,6 +1840,16 @@ export default function UserConsole(): JSX.Element {
           </footer>
         </>
       )}
+      <ManualCopyBubble
+        open={manualCopyBubble != null}
+        anchorEl={manualCopyBubble?.anchorEl ?? null}
+        title={text.tokens.manualCopy.title}
+        description={text.tokens.manualCopy.description}
+        fieldLabel={text.tokens.manualCopy.fieldLabel}
+        value={manualCopyBubble?.value ?? ''}
+        closeLabel={text.tokens.manualCopy.close}
+        onClose={() => setManualCopyBubble(null)}
+      />
     </main>
   )
 }
@@ -1929,6 +2173,12 @@ const EN = {
     copied: 'Copied',
     copyFailed: 'Copy failed',
     detail: 'Details',
+    manualCopy: {
+      title: 'Manual copy required',
+      description: 'This browser blocked automatic copy. The full token is selected below for manual copy.',
+      fieldLabel: 'Full Token',
+      close: 'Close',
+    },
     table: {
       id: 'Token ID',
       quotas: 'Quota Windows',
@@ -2065,6 +2315,12 @@ const ZH = {
     copied: '已复制',
     copyFailed: '复制失败',
     detail: '详情',
+    manualCopy: {
+      title: '请手动复制',
+      description: '当前浏览器拦截了自动复制，下面已选中完整 Token，可直接手动复制。',
+      fieldLabel: '完整 Token',
+      close: '关闭',
+    },
     table: {
       id: 'Token ID',
       quotas: '配额窗口',

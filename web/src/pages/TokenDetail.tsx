@@ -31,8 +31,10 @@ import {
 import { Input } from '../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { Textarea } from '../components/ui/textarea'
 import { useTranslate } from '../i18n'
 import { ADMIN_USER_CONSOLE_HREF } from '../lib/adminUserConsoleEntry'
+import { copyText, selectAllReadonlyText } from '../lib/clipboard'
 import { useResponsiveModes } from '../lib/responsive'
 import {
   buildVisibleRequestKindOptions,
@@ -376,10 +378,12 @@ export default function TokenDetail({
   id,
   onBack,
   onOpenUser,
+  onSecretRotated,
 }: {
   id: string
   onBack?: () => void
   onOpenUser?: (userId: string) => void
+  onSecretRotated?: (id: string, token: string) => void
 }): JSX.Element {
   const translations = useTranslate()
   const tokenStrings = translations.admin.tokens
@@ -419,6 +423,7 @@ export default function TokenDetail({
   const [isRotatedDialogOpen, setIsRotatedDialogOpen] = useState(false)
   const [rotating, setRotating] = useState(false)
   const [rotatedToken, setRotatedToken] = useState<string | null>(null)
+  const [rotatedCopyState, setRotatedCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
   const [sseConnected, setSseConnected] = useState(false)
   const [logsContentMinHeight, setLogsContentMinHeight] = useState(320)
   const perPageRef = useRef(20)
@@ -430,6 +435,7 @@ export default function TokenDetail({
   const requestKindOptionsAbortRef = useRef<AbortController | null>(null)
   const summaryQueryKeyRef = useRef<string | null>(null)
   const logsQueryKeyRef = useRef<string | null>(null)
+  const rotatedTokenFieldRef = useRef<HTMLTextAreaElement | null>(null)
   const logsQueryBaseKeyRef = useRef<string>('')
 
   useEffect(() => {
@@ -457,6 +463,14 @@ export default function TokenDetail({
   useEffect(() => {
     perPageRef.current = perPage
   }, [perPage])
+
+  useEffect(() => {
+    if (!isRotatedDialogOpen || !rotatedToken) return
+    const frame = window.requestAnimationFrame(() => {
+      selectAllReadonlyText(rotatedTokenFieldRef.current)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [isRotatedDialogOpen, rotatedToken])
 
   const { sinceIso, untilIso } = useMemo(() => {
     const start = computeStartDate(period, debouncedSinceInput)
@@ -961,9 +975,9 @@ export default function TokenDetail({
       setRotating(true)
       const res = await rotateTokenSecret(id)
       setRotatedToken(res.token)
-      try {
-        await navigator.clipboard?.writeText(res.token)
-      } catch {}
+      onSecretRotated?.(id, res.token)
+      const copyResult = await copyText(res.token)
+      setRotatedCopyState(copyResult.ok ? 'copied' : 'error')
       setIsRotateDialogOpen(false)
       setIsRotatedDialogOpen(true)
     } catch (e) {
@@ -972,13 +986,17 @@ export default function TokenDetail({
     } finally {
       setRotating(false)
     }
-  }, [id])
+  }, [id, onSecretRotated])
 
   const handleCopyRotatedToken = useCallback(async () => {
     if (!rotatedToken) return
-    try {
-      await navigator.clipboard?.writeText(rotatedToken)
-    } catch {}
+    const copyResult = await copyText(rotatedToken, { preferExecCommand: true })
+    setRotatedCopyState(copyResult.ok ? 'copied' : 'error')
+    if (!copyResult.ok) {
+      window.requestAnimationFrame(() => {
+        selectAllReadonlyText(rotatedTokenFieldRef.current)
+      })
+    }
   }, [rotatedToken])
 
   return (
@@ -1422,15 +1440,27 @@ export default function TokenDetail({
       <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle>New Token Generated</DialogTitle>
-          <DialogDescription>Full token (copied to clipboard):</DialogDescription>
+          <DialogDescription>
+            {rotatedCopyState === 'error'
+              ? 'Automatic copy was blocked. The full token is selected below for manual copy.'
+              : 'Full token copied to clipboard:'}
+          </DialogDescription>
         </DialogHeader>
-        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{rotatedToken ?? '—'}</pre>
+        <Textarea
+          ref={rotatedTokenFieldRef}
+          readOnly
+          rows={3}
+          className="manual-copy-bubble-field min-h-[96px] resize-none font-mono text-xs"
+          value={rotatedToken ?? '—'}
+          onClick={(event) => selectAllReadonlyText(event.currentTarget)}
+          onFocus={(event) => selectAllReadonlyText(event.currentTarget)}
+        />
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" onClick={() => setIsRotatedDialogOpen(false)}>
             Close
           </Button>
           <Button type="button" onClick={() => void handleCopyRotatedToken()}>
-            Copy
+            {rotatedCopyState === 'copied' ? 'Copied' : rotatedCopyState === 'error' ? 'Copy Failed' : 'Copy'}
           </Button>
         </div>
       </DialogContent>

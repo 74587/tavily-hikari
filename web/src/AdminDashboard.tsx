@@ -4,6 +4,7 @@ import AdminTablePagination from './components/AdminTablePagination'
 import AdminLoadingRegion from './components/AdminLoadingRegion'
 import AdminTableShell from './components/AdminTableShell'
 import { ApiKeysValidationDialog } from './components/ApiKeysValidationDialog'
+import ManualCopyBubble from './components/ManualCopyBubble'
 import QuotaRangeField from './components/QuotaRangeField'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -74,9 +75,16 @@ import {
   userTagEditPath,
   userTagsPath,
 } from './admin/routes'
-import { useTranslate, type AdminTranslations } from './i18n'
+import { useLanguage, useTranslate, type AdminTranslations } from './i18n'
 import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
 import { ADMIN_USER_CONSOLE_HREF } from './lib/adminUserConsoleEntry'
+import {
+  copyText,
+  isCopyIntentKey,
+  selectAllReadonlyText,
+  shouldPrewarmSecretCopy,
+  type CopyTextOptions,
+} from './lib/clipboard'
 import {
   fetchApiKeys,
   fetchApiKeySecret,
@@ -728,8 +736,20 @@ function formatErrorMessage(log: RequestLog, errorsStrings: AdminTranslations['l
   return errorsStrings.none
 }
 
+interface ManualCopyBubbleState {
+  anchorEl: HTMLElement | null
+  title: string
+  description: string
+  fieldLabel: string
+  value: string
+  multiline?: boolean
+}
+
+type ManualCopyDialogState = Omit<ManualCopyBubbleState, 'anchorEl'>
+
 function AdminDashboard(): JSX.Element {
   const [route, setRoute] = useState<AdminPathRoute>(() => parseAdminPath(window.location.pathname))
+  const { language } = useLanguage()
   const translations = useTranslate()
   const adminStrings = translations.admin
   const headerStrings = adminStrings.header
@@ -834,9 +854,17 @@ function AdminDashboard(): JSX.Element {
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const secretCacheRef = useRef<Map<string, string>>(new Map())
+  const secretRequestCacheRef = useRef<Map<string, Promise<string>>>(new Map())
   const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
+  const tokenSecretRequestCacheRef = useRef<Map<string, Promise<string>>>(new Map())
+  const tokenSecretVersionRef = useRef<Map<string, number>>(new Map())
+  const secretWarmTimerRef = useRef<Map<string, number>>(new Map())
+  const secretWarmAbortRef = useRef<Map<string, AbortController>>(new Map())
   const tokenGroupsListRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<Map<string, 'loading' | 'copied'>>(() => new Map())
+  const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
+  const [manualCopyDialog, setManualCopyDialog] = useState<ManualCopyDialogState | null>(null)
+  const manualCopyDialogFieldRef = useRef<HTMLInputElement | null>(null)
   const [expandedLogs, setExpandedLogs] = useState<Set<number>>(() => new Set())
   type AddKeysBatchReportState =
     | { kind: 'success'; response: AddApiKeysBatchResponse }
@@ -917,6 +945,59 @@ function AdminDashboard(): JSX.Element {
   const [batchShareText, setBatchShareText] = useState<string | null>(null)
   const isAdmin = profile?.isAdmin ?? false
   const keysBatchVisible = keysBatchExpanded || keysBatchClosing
+  const manualCopyText = useMemo(
+    () => (
+      language === 'zh'
+        ? {
+            title: '请手动复制',
+            description: '当前浏览器拦截了自动复制，下面已选中原文，可直接手动复制。',
+            close: '关闭',
+            fields: {
+              apiKey: '完整 API Key',
+              token: '完整 Token',
+              shareLink: '分享链接',
+            },
+            createToken: {
+              title: '令牌已创建，请手动复制',
+              description: '自动复制失败，下面保留了完整令牌，请先手动复制后再继续操作。',
+            },
+          }
+        : {
+            title: 'Manual copy required',
+            description: 'This browser blocked automatic copy. The original value is selected below for manual copy.',
+            close: 'Close',
+            fields: {
+              apiKey: 'Full API Key',
+              token: 'Full Token',
+              shareLink: 'Share Link',
+            },
+            createToken: {
+              title: 'Token created — copy manually',
+              description: 'Automatic copy failed. The full token is selected below so you can copy it before continuing.',
+            },
+          }
+    ),
+    [language],
+  )
+
+  useEffect(() => {
+    if (!manualCopyDialog) return
+    const frame = window.requestAnimationFrame(() => {
+      selectAllReadonlyText(manualCopyDialogFieldRef.current)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [manualCopyDialog])
+
+  useEffect(() => {
+    return () => {
+      for (const timer of secretWarmTimerRef.current.values()) {
+        window.clearTimeout(timer)
+      }
+      for (const controller of secretWarmAbortRef.current.values()) {
+        controller.abort()
+      }
+    }
+  }, [])
 
   const clearKeysBatchAutoCollapseTimer = useCallback(() => {
     if (keysBatchAutoCollapseTimerRef.current != null) {
@@ -936,6 +1017,11 @@ function AdminDashboard(): JSX.Element {
     clearKeysBatchAutoCollapseTimer()
     clearKeysBatchCloseTimer()
   }, [clearKeysBatchAutoCollapseTimer, clearKeysBatchCloseTimer])
+
+  useEffect(() => {
+    setManualCopyBubble(null)
+    setManualCopyDialog(null)
+  }, [route])
 
   useEffect(() => {
     if (!keysBatchExpanded) return
@@ -1085,32 +1171,167 @@ function AdminDashboard(): JSX.Element {
     })
   }, [])
 
-  const copyToClipboard = useCallback(async (value: string) => {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value)
-      return
-    }
-
-    const textarea = document.createElement('textarea')
-    textarea.value = value
-    textarea.style.position = 'fixed'
-    textarea.style.opacity = '0'
-    textarea.style.left = '-9999px'
-    document.body.appendChild(textarea)
-    textarea.focus()
-    textarea.select()
-    document.execCommand('copy')
-    document.body.removeChild(textarea)
+  const copyToClipboard = useCallback(async (value: string, options?: CopyTextOptions) => {
+    return await copyText(value, options)
   }, [])
 
-  const resolveTokenSecret = useCallback(async (id: string) => {
-    let secret = tokenSecretCacheRef.current.get(id)
-    if (!secret) {
-      const result = await fetchTokenSecret(id)
-      secret = result.token
-      tokenSecretCacheRef.current.set(id, secret)
+  const openManualCopyBubble = useCallback((state: ManualCopyBubbleState) => {
+    setManualCopyBubble(state)
+  }, [])
+
+  const resolveApiKeySecret = useCallback(async (id: string, signal?: AbortSignal) => {
+    const cached = secretCacheRef.current.get(id)
+    if (cached) {
+      return cached
     }
-    return secret
+
+    const pending = secretRequestCacheRef.current.get(id)
+    if (pending) {
+      return await pending
+    }
+
+    const request = fetchApiKeySecret(id, signal)
+      .then((result) => {
+        if (!signal?.aborted) {
+          secretCacheRef.current.set(id, result.api_key)
+        }
+        return result.api_key
+      })
+      .finally(() => {
+        secretRequestCacheRef.current.delete(id)
+      })
+
+    secretRequestCacheRef.current.set(id, request)
+    return await request
+  }, [])
+
+  const resolveTokenSecret = useCallback(async (id: string, signal?: AbortSignal) => {
+    const cached = tokenSecretCacheRef.current.get(id)
+    if (cached) {
+      return cached
+    }
+
+    const pending = tokenSecretRequestCacheRef.current.get(id)
+    if (pending) {
+      return await pending
+    }
+
+    const requestVersion = tokenSecretVersionRef.current.get(id) ?? 0
+    let request: Promise<string>
+    request = fetchTokenSecret(id, signal)
+      .then((result) => {
+        if (!signal?.aborted && (tokenSecretVersionRef.current.get(id) ?? 0) === requestVersion) {
+          tokenSecretCacheRef.current.set(id, result.token)
+        }
+        return result.token
+      })
+      .finally(() => {
+        if (tokenSecretRequestCacheRef.current.get(id) === request) {
+          tokenSecretRequestCacheRef.current.delete(id)
+        }
+      })
+
+    tokenSecretRequestCacheRef.current.set(id, request)
+    return await request
+  }, [])
+
+  const shouldPrewarmAdminSecretCopy = useMemo(() => shouldPrewarmSecretCopy(), [])
+
+  const clearSecretWarmTimer = useCallback((key: string) => {
+    const timer = secretWarmTimerRef.current.get(key)
+    if (timer != null) {
+      window.clearTimeout(timer)
+      secretWarmTimerRef.current.delete(key)
+    }
+  }, [])
+
+  const dropSecretWarmRequest = useCallback((key: string) => {
+    const separatorIndex = key.indexOf(':')
+    if (separatorIndex < 0) return
+    const scope = key.slice(0, separatorIndex)
+    const id = key.slice(separatorIndex + 1)
+    if (!id) return
+    if (scope === 'token') {
+      tokenSecretRequestCacheRef.current.delete(id)
+      return
+    }
+    if (scope === 'key') {
+      secretRequestCacheRef.current.delete(id)
+    }
+  }, [])
+
+  const cancelSecretWarm = useCallback((key: string) => {
+    clearSecretWarmTimer(key)
+    const controller = secretWarmAbortRef.current.get(key)
+    if (controller) {
+      controller.abort()
+      secretWarmAbortRef.current.delete(key)
+      dropSecretWarmRequest(key)
+    }
+  }, [clearSecretWarmTimer, dropSecretWarmRequest])
+
+  const commitSecretWarm = useCallback((key: string) => {
+    clearSecretWarmTimer(key)
+    secretWarmAbortRef.current.delete(key)
+  }, [clearSecretWarmTimer])
+
+  const warmTokenSecret = useCallback((id: string) => {
+    if (!shouldPrewarmAdminSecretCopy) return
+    const key = `token:${id}`
+    clearSecretWarmTimer(key)
+    if (tokenSecretCacheRef.current.has(id) || tokenSecretRequestCacheRef.current.has(id)) return
+    const controller = new AbortController()
+    const requestVersion = tokenSecretVersionRef.current.get(id) ?? 0
+    secretWarmAbortRef.current.set(key, controller)
+    void resolveTokenSecret(id, controller.signal)
+      .then((token) => {
+        if (secretWarmAbortRef.current.get(key) !== controller) return
+        if ((tokenSecretVersionRef.current.get(id) ?? 0) === requestVersion) {
+          tokenSecretCacheRef.current.set(id, token)
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (secretWarmAbortRef.current.get(key) === controller) {
+          secretWarmAbortRef.current.delete(key)
+        }
+      })
+  }, [clearSecretWarmTimer, resolveTokenSecret, shouldPrewarmAdminSecretCopy])
+
+  const warmApiKeySecret = useCallback((id: string) => {
+    if (!shouldPrewarmAdminSecretCopy) return
+    const key = `key:${id}`
+    clearSecretWarmTimer(key)
+    if (secretCacheRef.current.has(id) || secretRequestCacheRef.current.has(id)) return
+    const controller = new AbortController()
+    secretWarmAbortRef.current.set(key, controller)
+    void resolveApiKeySecret(id, controller.signal)
+      .then((secret) => {
+        if (secretWarmAbortRef.current.get(key) !== controller) return
+        secretCacheRef.current.set(id, secret)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (secretWarmAbortRef.current.get(key) === controller) {
+          secretWarmAbortRef.current.delete(key)
+        }
+      })
+  }, [clearSecretWarmTimer, resolveApiKeySecret, shouldPrewarmAdminSecretCopy])
+
+  const scheduleSecretWarm = useCallback((key: string, warmup: () => void) => {
+    if (!shouldPrewarmAdminSecretCopy) return
+    clearSecretWarmTimer(key)
+    const timer = window.setTimeout(() => {
+      secretWarmTimerRef.current.delete(key)
+      warmup()
+    }, 120)
+    secretWarmTimerRef.current.set(key, timer)
+  }, [clearSecretWarmTimer, shouldPrewarmAdminSecretCopy])
+
+  const handleTokenSecretRotated = useCallback((id: string, token: string) => {
+    tokenSecretVersionRef.current.set(id, (tokenSecretVersionRef.current.get(id) ?? 0) + 1)
+    tokenSecretRequestCacheRef.current.delete(id)
+    tokenSecretCacheRef.current.set(id, token)
   }, [])
 
   const beginManagedRequest = useCallback(
@@ -1165,17 +1386,31 @@ function AdminDashboard(): JSX.Element {
   }, [])
 
   const handleCopySecret = useCallback(
-    async (id: string, stateKey: string) => {
+    async (id: string, stateKey: string, anchorEl?: HTMLElement | null) => {
+      setManualCopyBubble(null)
+      commitSecretWarm(`key:${id}`)
       updateCopyState(stateKey, 'loading')
       try {
-        let secret = secretCacheRef.current.get(id)
-        if (!secret) {
-          const result = await fetchApiKeySecret(id)
-          secret = result.api_key
-          secretCacheRef.current.set(id, secret)
+        const hasCachedSecret = secretCacheRef.current.has(id)
+        const secret = await resolveApiKeySecret(id)
+        const copyResult = await copyToClipboard(
+          secret,
+          hasCachedSecret ? { preferExecCommand: true } : undefined,
+        )
+        if (!copyResult.ok) {
+          updateCopyState(stateKey, null)
+          if (anchorEl) {
+            openManualCopyBubble({
+              anchorEl,
+              title: manualCopyText.title,
+              description: manualCopyText.description,
+              fieldLabel: manualCopyText.fields.apiKey,
+              value: secret,
+            })
+          }
+          return
         }
-
-        await copyToClipboard(secret)
+        setManualCopyBubble(null)
         updateCopyState(stateKey, 'copied')
         window.setTimeout(() => updateCopyState(stateKey, null), 2000)
       } catch (err) {
@@ -1184,7 +1419,16 @@ function AdminDashboard(): JSX.Element {
         updateCopyState(stateKey, null)
       }
     },
-    [copyToClipboard, setError, updateCopyState],
+    [
+      copyToClipboard,
+      errorStrings.copyKey,
+      manualCopyText,
+      openManualCopyBubble,
+      resolveApiKeySecret,
+      setError,
+      commitSecretWarm,
+      updateCopyState,
+    ],
   )
 
   const loadData = useCallback(
@@ -2650,13 +2894,24 @@ function AdminDashboard(): JSX.Element {
     }
   }
 
-  const handleAddToken = async () => {
+  const handleAddToken = async (anchorEl?: HTMLElement | null) => {
     const note = newTokenNote.trim()
+    void anchorEl
+    setManualCopyBubble(null)
+    setManualCopyDialog(null)
     setSubmitting(true)
     try {
       const { token } = await createToken(note || undefined)
       setNewTokenNote('')
-      try { await navigator.clipboard?.writeText(token) } catch {}
+      const copyResult = await copyToClipboard(token)
+      if (!copyResult.ok) {
+        setManualCopyDialog({
+          title: manualCopyText.createToken.title,
+          description: manualCopyText.createToken.description,
+          fieldLabel: manualCopyText.fields.token,
+          value: token,
+        })
+      }
       const controller = new AbortController()
       setLoading(true)
       await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
@@ -2995,11 +3250,31 @@ function AdminDashboard(): JSX.Element {
     setKeysBatchReport(null)
   }
 
-  const handleCopyToken = async (id: string, stateKey: string) => {
+  const handleCopyToken = async (id: string, stateKey: string, anchorEl?: HTMLElement | null) => {
+    setManualCopyBubble(null)
+    commitSecretWarm(`token:${id}`)
     updateCopyState(stateKey, 'loading')
     try {
+      const hasCachedToken = tokenSecretCacheRef.current.has(id)
       const token = await resolveTokenSecret(id)
-      await copyToClipboard(token)
+      const copyResult = await copyToClipboard(
+        token,
+        hasCachedToken ? { preferExecCommand: true } : undefined,
+      )
+      if (!copyResult.ok) {
+        updateCopyState(stateKey, null)
+        if (anchorEl) {
+          openManualCopyBubble({
+            anchorEl,
+            title: manualCopyText.title,
+            description: manualCopyText.description,
+            fieldLabel: manualCopyText.fields.token,
+            value: token,
+          })
+        }
+        return
+      }
+      setManualCopyBubble(null)
       updateCopyState(stateKey, 'copied')
       window.setTimeout(() => updateCopyState(stateKey, null), 2000)
     } catch (err) {
@@ -3009,12 +3284,32 @@ function AdminDashboard(): JSX.Element {
     }
   }
 
-  const handleShareToken = async (id: string, stateKey: string) => {
+  const handleShareToken = async (id: string, stateKey: string, anchorEl?: HTMLElement | null) => {
+    setManualCopyBubble(null)
+    commitSecretWarm(`token:${id}`)
     updateCopyState(stateKey, 'loading')
     try {
+      const hasCachedToken = tokenSecretCacheRef.current.has(id)
       const token = await resolveTokenSecret(id)
       const shareUrl = `${window.location.origin}/#${encodeURIComponent(token)}`
-      await copyToClipboard(shareUrl)
+      const copyResult = await copyToClipboard(
+        shareUrl,
+        hasCachedToken ? { preferExecCommand: true } : undefined,
+      )
+      if (!copyResult.ok) {
+        updateCopyState(stateKey, null)
+        if (anchorEl) {
+          openManualCopyBubble({
+            anchorEl,
+            title: manualCopyText.title,
+            description: manualCopyText.description,
+            fieldLabel: manualCopyText.fields.shareLink,
+            value: shareUrl,
+          })
+        }
+        return
+      }
+      setManualCopyBubble(null)
       updateCopyState(stateKey, 'copied')
       window.setTimeout(() => updateCopyState(stateKey, null), 2000)
     } catch (err) {
@@ -3604,7 +3899,13 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectModule={navigateModule}
       >
-        <TokenDetail key={route.id} id={route.id} onBack={() => navigateModule('tokens')} onOpenUser={navigateUser} />
+        <TokenDetail
+          key={route.id}
+          id={route.id}
+          onBack={() => navigateModule('tokens')}
+          onOpenUser={navigateUser}
+          onSecretRotated={handleTokenSecretRotated}
+        />
       </AdminShell>
     )
   }
@@ -4555,7 +4856,7 @@ function AdminDashboard(): JSX.Element {
 />
 <Button
   type="button"
-  onClick={() => void handleAddToken()}
+  onClick={(event) => void handleAddToken(event.currentTarget)}
   disabled={submitting}
 >
   {submitting ? tokenStrings.creating : tokenStrings.newToken}
@@ -4729,7 +5030,12 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.copy}
   aria-label={tokenStrings.actions.copy}
-  onClick={() => void handleCopyToken(t.id, stateKey)}
+  onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
+  onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
+  onBlur={() => cancelSecretWarm(`token:${t.id}`)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
+  onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
   <Icon icon={state === 'copied' ? 'mdi:check' : 'mdi:content-copy'} width={16} height={16} />
@@ -4741,7 +5047,12 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.share}
   aria-label={tokenStrings.actions.share}
-  onClick={() => void handleShareToken(t.id, shareStateKey)}
+  onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
+  onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
+  onBlur={() => cancelSecretWarm(`token:${t.id}`)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
+  onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
   <Icon icon={shareState === 'copied' ? 'mdi:check' : 'mdi:share-variant'} width={16} height={16} />
@@ -4859,7 +5170,12 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onClick={() => void handleCopyToken(t.id, stateKey)}
+  onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
+  onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
+  onBlur={() => cancelSecretWarm(`token:${t.id}`)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
+  onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
   {tokenStrings.actions.copy}
@@ -4868,7 +5184,12 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={shareState === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onClick={() => void handleShareToken(t.id, shareStateKey)}
+  onPointerEnter={() => scheduleSecretWarm(`token:${t.id}`, () => warmTokenSecret(t.id))}
+  onPointerLeave={() => cancelSecretWarm(`token:${t.id}`)}
+  onBlur={() => cancelSecretWarm(`token:${t.id}`)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmTokenSecret(t.id) }}
+  onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
   {tokenStrings.actions.share}
@@ -5157,7 +5478,12 @@ function AdminDashboard(): JSX.Element {
   className="h-8 w-8 rounded-full p-0 shadow-none"
   title={keyStrings.actions.copy}
   aria-label={keyStrings.actions.copy}
-  onClick={() => void handleCopySecret(item.id, stateKey)}
+  onPointerEnter={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}
+  onPointerLeave={() => cancelSecretWarm(`key:${item.id}`)}
+  onBlur={() => cancelSecretWarm(`key:${item.id}`)}
+  onPointerDown={() => warmApiKeySecret(item.id)}
+  onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmApiKeySecret(item.id) }}
+  onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
   <Icon icon={state === 'copied' ? 'mdi:check' : 'mdi:content-copy'} width={18} height={18} />
@@ -5328,7 +5654,12 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onClick={() => void handleCopySecret(item.id, stateKey)}
+  onPointerEnter={() => scheduleSecretWarm(`key:${item.id}`, () => warmApiKeySecret(item.id))}
+  onPointerLeave={() => cancelSecretWarm(`key:${item.id}`)}
+  onBlur={() => cancelSecretWarm(`key:${item.id}`)}
+  onPointerDown={() => warmApiKeySecret(item.id)}
+  onKeyDown={(event) => { if (!isCopyIntentKey(event.key)) return; warmApiKeySecret(item.id) }}
+  onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
   {keyStrings.actions.copy}
@@ -6147,15 +6478,20 @@ function AdminDashboard(): JSX.Element {
                   overflowY: 'auto',
                 }}
                 value={batchShareText ?? ''}
+                onClick={(event) => selectAllReadonlyText(event.currentTarget)}
+                onFocus={(event) => selectAllReadonlyText(event.currentTarget)}
               />
             </div>
             <DialogFooter className="modal-action">
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => {
+                onClick={async () => {
                   if (!batchShareText) return
-                  void copyToClipboard(batchShareText)
+                  const copyResult = await copyToClipboard(batchShareText, { preferExecCommand: true })
+                  if (!copyResult.ok) {
+                    setError(errorStrings.copyToken)
+                  }
                 }}
               >
                 {tokenStrings.batchDialog.copyAll}
@@ -6366,6 +6702,48 @@ function AdminDashboard(): JSX.Element {
     </DialogFooter>
   </DialogContent>
 </Dialog>
+<Dialog open={manualCopyDialog != null} onOpenChange={(open) => { if (!open) setManualCopyDialog(null) }}>
+  <DialogContent
+    className="max-w-lg"
+    onEscapeKeyDown={(event) => event.preventDefault()}
+    onInteractOutside={(event) => event.preventDefault()}
+  >
+    <DialogHeader>
+      <DialogTitle>{manualCopyDialog?.title ?? manualCopyText.createToken.title}</DialogTitle>
+      <DialogDescription>{manualCopyDialog?.description ?? manualCopyText.createToken.description}</DialogDescription>
+    </DialogHeader>
+    <div className="grid gap-2">
+      <label className="manual-copy-bubble-label" htmlFor="admin-manual-copy-dialog-field">
+        {manualCopyDialog?.fieldLabel ?? manualCopyText.fields.token}
+      </label>
+      <Input
+        id="admin-manual-copy-dialog-field"
+        ref={manualCopyDialogFieldRef}
+        className="manual-copy-bubble-field"
+        readOnly
+        value={manualCopyDialog?.value ?? ''}
+        onFocus={(event) => selectAllReadonlyText(event.currentTarget)}
+        onClick={(event) => selectAllReadonlyText(event.currentTarget)}
+      />
+    </div>
+    <DialogFooter className="modal-action">
+      <Button type="button" onClick={() => setManualCopyDialog(null)}>
+        {manualCopyText.close}
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+      <ManualCopyBubble
+        open={manualCopyBubble != null}
+        anchorEl={manualCopyBubble?.anchorEl ?? null}
+        title={manualCopyBubble?.title ?? manualCopyText.title}
+        description={manualCopyBubble?.description ?? manualCopyText.description}
+        fieldLabel={manualCopyBubble?.fieldLabel ?? manualCopyText.fields.token}
+        value={manualCopyBubble?.value ?? ''}
+        multiline={manualCopyBubble?.multiline ?? false}
+        closeLabel={manualCopyText.close}
+        onClose={() => setManualCopyBubble(null)}
+      />
     </>
   )
 }
