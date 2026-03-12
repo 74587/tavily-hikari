@@ -380,6 +380,7 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
 function installClipboardFailureMock(): () => void {
   const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
   const originalExecCommand = document.execCommand
+  let clipboardMockInstalled = false
 
   try {
     Object.defineProperty(navigator, 'clipboard', {
@@ -390,6 +391,7 @@ function installClipboardFailureMock(): () => void {
         },
       },
     })
+    clipboardMockInstalled = true
   } catch {
     // Ignore if the browser refuses to override clipboard in the mock canvas.
   }
@@ -404,6 +406,8 @@ function installClipboardFailureMock(): () => void {
     try {
       if (originalClipboardDescriptor) {
         Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+      } else if (clipboardMockInstalled) {
+        Reflect.deleteProperty(navigator, 'clipboard')
       }
     } catch {
       // Ignore restore failures inside Storybook.
