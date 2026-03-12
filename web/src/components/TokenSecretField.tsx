@@ -1,6 +1,7 @@
 import { Icon } from '@iconify/react'
-import type { InputHTMLAttributes, Ref } from 'react'
+import type { InputHTMLAttributes, KeyboardEvent as ReactKeyboardEvent, Ref } from 'react'
 
+import { isCopyIntentKey } from '../lib/clipboard'
 import { cn } from '../lib/utils'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -81,6 +82,10 @@ export default function TokenSecretField({
         : 'mdi:content-copy'
   const copyText = copyState === 'copied' ? copiedLabel : copyState === 'error' ? copyErrorLabel : copyLabel
   const shouldMaskValue = !visible && hiddenDisplayValue == null
+  const handleCopyIntentKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!isCopyIntentKey(event.key)) return
+    void onCopyIntent?.()
+  }
 
   return (
     <div className={cn('token-input-wrapper', wrapperClassName)}>
@@ -125,8 +130,8 @@ export default function TokenSecretField({
           type="button"
           variant={copyVariant}
           className={cn('token-copy-button', copyStateClassName, copyButtonClassName)}
-          onPointerEnter={() => void onCopyIntent?.()}
-          onFocus={() => void onCopyIntent?.()}
+          onPointerDown={() => void onCopyIntent?.()}
+          onKeyDown={handleCopyIntentKeyDown}
           onClick={(event) => void onCopy(event.currentTarget)}
           aria-label={copyAriaLabel}
           disabled={copyDisabled}

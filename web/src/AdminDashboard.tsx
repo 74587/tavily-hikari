@@ -6,7 +6,7 @@ import AdminTableShell from './components/AdminTableShell'
 import { ApiKeysValidationDialog } from './components/ApiKeysValidationDialog'
 import ManualCopyBubble from './components/ManualCopyBubble'
 import QuotaRangeField from './components/QuotaRangeField'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import ThemeToggle from './components/ThemeToggle'
 import AdminReturnToConsoleLink from './components/AdminReturnToConsoleLink'
@@ -69,7 +69,7 @@ import {
 import { useLanguage, useTranslate, type AdminTranslations } from './i18n'
 import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
 import { ADMIN_USER_CONSOLE_HREF } from './lib/adminUserConsoleEntry'
-import { copyText, selectAllReadonlyText, type CopyTextOptions } from './lib/clipboard'
+import { copyText, isCopyIntentKey, selectAllReadonlyText, type CopyTextOptions } from './lib/clipboard'
 import {
   fetchApiKeys,
   fetchApiKeySecret,
@@ -1100,6 +1100,19 @@ function AdminDashboard(): JSX.Element {
 
     tokenSecretRequestCacheRef.current.set(id, request)
     return await request
+  }, [])
+
+  const warmTokenSecret = useCallback((id: string) => {
+    void resolveTokenSecret(id).catch(() => undefined)
+  }, [resolveTokenSecret])
+
+  const warmApiKeySecret = useCallback((id: string) => {
+    void resolveApiKeySecret(id).catch(() => undefined)
+  }, [resolveApiKeySecret])
+
+  const warmSecretOnKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, warmup: () => void) => {
+    if (!isCopyIntentKey(event.key)) return
+    warmup()
   }, [])
 
   const handleTokenSecretRotated = useCallback((id: string, token: string) => {
@@ -4751,8 +4764,8 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.copy}
   aria-label={tokenStrings.actions.copy}
-  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
-  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -4765,8 +4778,8 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.share}
   aria-label={tokenStrings.actions.share}
-  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
-  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
@@ -4885,8 +4898,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
-  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -4896,8 +4909,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={shareState === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onPointerEnter={() => void resolveTokenSecret(t.id).catch(() => undefined)}
-  onFocus={() => void resolveTokenSecret(t.id).catch(() => undefined)}
+  onPointerDown={() => warmTokenSecret(t.id)}
+  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
@@ -5144,8 +5157,8 @@ function AdminDashboard(): JSX.Element {
   className="h-8 w-8 rounded-full p-0 shadow-none"
   title={keyStrings.actions.copy}
   aria-label={keyStrings.actions.copy}
-  onPointerEnter={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
-  onFocus={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
+  onPointerDown={() => warmApiKeySecret(item.id)}
+  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmApiKeySecret(item.id))}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -5295,8 +5308,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onPointerEnter={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
-  onFocus={() => void resolveApiKeySecret(item.id).catch(() => undefined)}
+  onPointerDown={() => warmApiKeySecret(item.id)}
+  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmApiKeySecret(item.id))}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >

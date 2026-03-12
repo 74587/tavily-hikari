@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 
-import { copyText, selectAllReadonlyText } from './clipboard'
+import { copyText, isCopyIntentKey, selectAllReadonlyText } from './clipboard'
 
 function createDocumentMock(execResult: boolean) {
   const textarea = {
@@ -29,16 +29,25 @@ function createDocumentMock(execResult: boolean) {
     removeChild: mock(() => textarea),
   }
 
+  const execState = {
+    contentEditableAtExec: null as string | null,
+    readOnlyAtExec: null as boolean | null,
+  }
+
   const doc = {
     body,
     activeElement: null,
     createElement: mock(() => textarea),
     createRange: mock(() => range),
-    execCommand: mock(() => execResult),
+    execCommand: mock(() => {
+      execState.contentEditableAtExec = textarea.contentEditable
+      execState.readOnlyAtExec = textarea.readOnly
+      return execResult
+    }),
     getSelection: mock(() => selection),
   }
 
-  return { doc: doc as unknown as Document, textarea, body, range, selection }
+  return { doc: doc as unknown as Document, textarea, body, range, selection, execState }
 }
 
 describe('clipboard helpers', () => {
@@ -131,7 +140,7 @@ describe('clipboard helpers', () => {
     const writeText = mock(async () => {
       throw new Error('NotAllowedError')
     })
-    const { doc, textarea, range, selection } = createDocumentMock(true)
+    const { doc, textarea, range, selection, execState } = createDocumentMock(true)
 
     const result = await copyText('th-a1b2-secret', {
       nav: {
@@ -149,8 +158,18 @@ describe('clipboard helpers', () => {
     expect(selection.removeAllRanges).toHaveBeenCalledTimes(2)
     expect(selection.addRange).toHaveBeenCalledTimes(1)
     expect(textarea.setSelectionRange).toHaveBeenCalledWith(0, 'th-a1b2-secret'.length)
+    expect(execState.contentEditableAtExec).toBe('true')
+    expect(execState.readOnlyAtExec).toBe(false)
     expect(textarea.readOnly).toBe(true)
     expect(textarea.contentEditable).toBe('inherit')
+  })
+
+  it('only warms copy intents on activation keys', () => {
+    expect(isCopyIntentKey('Enter')).toBe(true)
+    expect(isCopyIntentKey(' ')).toBe(true)
+    expect(isCopyIntentKey('Spacebar')).toBe(true)
+    expect(isCopyIntentKey('Tab')).toBe(false)
+    expect(isCopyIntentKey('ArrowDown')).toBe(false)
   })
 
   it('selects the full readonly value on focus', () => {

@@ -23,6 +23,10 @@ export interface CopyTextOptions {
   preferExecCommand?: boolean
 }
 
+export function isCopyIntentKey(key: string): boolean {
+  return key === 'Enter' || key === ' ' || key === 'Spacebar'
+}
+
 export async function copyText(value: string, options: CopyTextOptions = {}): Promise<CopyTextResult> {
   const nav = options.nav ?? (typeof navigator !== 'undefined' ? navigator : undefined)
   const doc = options.doc ?? (typeof document !== 'undefined' ? document : undefined)
@@ -100,15 +104,16 @@ export function copyTextWithExecCommand(value: string, doc?: Document, nav?: Nav
   textarea.style.whiteSpace = 'pre'
 
   doc.body.appendChild(textarea)
+  const restoreExecCommandTarget = selectExecCommandTarget(textarea, doc, nav)
 
   try {
-    selectExecCommandTarget(textarea, doc, nav)
     const copied = doc.execCommand('copy')
     if (!copied) {
       throw new Error('document.execCommand("copy") returned false')
     }
     return true
   } finally {
+    restoreExecCommandTarget?.()
     doc.body.removeChild(textarea)
     if (selection) {
       selection.removeAllRanges()
@@ -131,7 +136,7 @@ function selectExecCommandTarget(
   target: HTMLTextAreaElement,
   doc: Document,
   nav?: Navigator,
-): void {
+): (() => void) | void {
   if (requiresIOSSelectionHack(nav)) {
     const selection = doc.getSelection?.() ?? null
     const range = doc.createRange()
@@ -145,9 +150,10 @@ function selectExecCommandTarget(
     selection?.removeAllRanges()
     selection?.addRange(range)
     target.setSelectionRange(0, target.value.length)
-    target.contentEditable = originalContentEditable
-    target.readOnly = originalReadOnly
-    return
+    return () => {
+      target.contentEditable = originalContentEditable
+      target.readOnly = originalReadOnly
+    }
   }
 
   selectAllReadonlyText(target)
