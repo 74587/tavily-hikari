@@ -1333,6 +1333,12 @@ export default function TokenDetail({
                       className="user-console-mobile-request-kind"
                     />
                   </div>
+                  {log.request_kind_detail ? (
+                    <div className="user-console-mobile-kv user-console-mobile-kv--stacked">
+                      <span>Request Type Detail</span>
+                      <strong className="user-console-mobile-detail">{log.request_kind_detail}</strong>
+                    </div>
+                  ) : null}
                   <div className="user-console-mobile-kv">
                     <span>HTTP Status</span>
                     <strong>{log.http_status ?? '—'}</strong>

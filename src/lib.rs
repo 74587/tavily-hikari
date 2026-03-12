@@ -9402,22 +9402,15 @@ impl KeyStore {
     async fn backfill_auth_token_log_request_kinds(&self) -> Result<(), ProxyError> {
         let fallback_key_sql = token_request_kind_fallback_key_sql();
         let fallback_label_sql = token_request_kind_fallback_label_sql();
-        // Keep startup backfill bounded to a single set-based update instead of fetch-all + row-by-row writes.
+        let needs_fallback_sql = token_request_kind_needs_fallback_sql();
+        // Normalize legacy rows once at startup so read paths can filter directly on stored request kind columns.
         let query = format!(
             r#"
             UPDATE auth_token_logs
             SET
                 request_kind_key = {fallback_key_sql},
                 request_kind_label = {fallback_label_sql}
-            WHERE request_kind_key IS NULL
-               OR request_kind_label IS NULL
-               OR (
-                    path LIKE '/mcp/%'
-                    AND (
-                        request_kind_key = 'mcp:raw:/mcp'
-                        OR request_kind_label = 'MCP | /mcp'
-                    )
-               )
+            WHERE {needs_fallback_sql}
             "#,
         );
         sqlx::query(query.as_str()).execute(&self.pool).await?;
@@ -10116,8 +10109,8 @@ impl KeyStore {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .collect();
-        let effective_request_kind_key_sql = token_request_kind_effective_key_sql();
-        let effective_request_kind_label_sql = token_request_kind_effective_label_sql();
+        let needs_fallback_sql = token_request_kind_needs_fallback_sql();
+        let fallback_key_sql = token_request_kind_fallback_key_sql();
 
         let mut total_query =
             QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM auth_token_logs WHERE token_id = ");
@@ -10129,32 +10122,46 @@ impl KeyStore {
             total_query.push_bind(until);
         }
         if !filtered_request_kinds.is_empty() {
-            total_query.push(" AND ");
-            total_query.push(effective_request_kind_key_sql.as_str());
-            total_query.push(" IN (");
-            let mut separated = total_query.separated(", ");
-            for kind in &filtered_request_kinds {
-                separated.push_bind(kind);
+            total_query.push(" AND (request_kind_key IN (");
+            {
+                let mut separated = total_query.separated(", ");
+                for kind in &filtered_request_kinds {
+                    separated.push_bind(kind);
+                }
+                separated.push_unseparated(")");
             }
-            separated.push_unseparated(")");
+            total_query.push(" OR (");
+            total_query.push(needs_fallback_sql);
+            total_query.push(" AND ");
+            total_query.push(fallback_key_sql);
+            total_query.push(" IN (");
+            {
+                let mut separated = total_query.separated(", ");
+                for kind in &filtered_request_kinds {
+                    separated.push_bind(kind);
+                }
+                separated.push_unseparated(")");
+            }
+            total_query.push("))");
         }
         let total: i64 = total_query
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await?;
 
-        let mut rows_query = QueryBuilder::<Sqlite>::new(format!(
+        let mut rows_query = QueryBuilder::<Sqlite>::new(
             r#"
             SELECT id, method, path, query, http_status, mcp_status,
                    CASE WHEN billing_state = 'charged' THEN business_credits ELSE NULL END,
-                   {effective_request_kind_key_sql} AS request_kind_key,
-                   {effective_request_kind_label_sql} AS request_kind_label,
+                   request_kind_key,
+                   request_kind_label,
                    request_kind_detail,
                    result_status, error_message, created_at
             FROM auth_token_logs
             WHERE token_id =
-            "#,
-        ));
+            "#
+            .to_string(),
+        );
         rows_query.push_bind(token_id);
         rows_query.push(" AND created_at >= ");
         rows_query.push_bind(since);
@@ -10163,14 +10170,27 @@ impl KeyStore {
             rows_query.push_bind(until);
         }
         if !filtered_request_kinds.is_empty() {
-            rows_query.push(" AND ");
-            rows_query.push(effective_request_kind_key_sql.as_str());
-            rows_query.push(" IN (");
-            let mut separated = rows_query.separated(", ");
-            for kind in &filtered_request_kinds {
-                separated.push_bind(kind);
+            rows_query.push(" AND (request_kind_key IN (");
+            {
+                let mut separated = rows_query.separated(", ");
+                for kind in &filtered_request_kinds {
+                    separated.push_bind(kind);
+                }
+                separated.push_unseparated(")");
             }
-            separated.push_unseparated(")");
+            rows_query.push(" OR (");
+            rows_query.push(needs_fallback_sql);
+            rows_query.push(" AND ");
+            rows_query.push(fallback_key_sql);
+            rows_query.push(" IN (");
+            {
+                let mut separated = rows_query.separated(", ");
+                for kind in &filtered_request_kinds {
+                    separated.push_bind(kind);
+                }
+                separated.push_unseparated(")");
+            }
+            rows_query.push("))");
         }
         rows_query.push(" ORDER BY created_at DESC, id DESC LIMIT ");
         rows_query.push_bind(per_page);
@@ -10235,49 +10255,83 @@ impl KeyStore {
         since: i64,
         until: Option<i64>,
     ) -> Result<Vec<TokenRequestKindOption>, ProxyError> {
-        let effective_request_kind_key_sql = token_request_kind_effective_key_sql();
-        let effective_request_kind_label_sql = token_request_kind_effective_label_sql();
-        let query = if until.is_some() {
+        let fallback_key_sql = token_request_kind_fallback_key_sql();
+        let fallback_label_sql = token_request_kind_fallback_label_sql();
+        let needs_fallback_sql = token_request_kind_needs_fallback_sql();
+        let mut stored_query = QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT DISTINCT request_kind_key, request_kind_label
+            FROM auth_token_logs
+            WHERE token_id =
+            "#,
+        );
+        stored_query.push_bind(token_id);
+        stored_query.push(" AND created_at >= ");
+        stored_query.push_bind(since);
+        if let Some(until) = until {
+            stored_query.push(" AND created_at < ");
+            stored_query.push_bind(until);
+        }
+        stored_query.push(
+            r#"
+              AND request_kind_key IS NOT NULL
+              AND TRIM(request_kind_key) <> ''
+              AND request_kind_label IS NOT NULL
+              AND TRIM(request_kind_label) <> ''
+              AND NOT (
+            "#,
+        );
+        stored_query.push(token_request_kind_needs_fallback_sql());
+        stored_query.push(")");
+
+        let mut options = stored_query
+            .build_query_as::<(String, String)>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let legacy_fallback_query = if until.is_some() {
             format!(
                 r#"
                 SELECT DISTINCT
-                    {effective_request_kind_key_sql} AS request_kind_key,
-                    {effective_request_kind_label_sql} AS request_kind_label
+                    {fallback_key_sql} AS request_kind_key,
+                    {fallback_label_sql} AS request_kind_label
                 FROM auth_token_logs
                 WHERE token_id = ?
                   AND created_at >= ?
                   AND created_at < ?
-                ORDER BY request_kind_label ASC, request_kind_key ASC
+                  AND {needs_fallback_sql}
                 "#
             )
         } else {
             format!(
                 r#"
                 SELECT DISTINCT
-                    {effective_request_kind_key_sql} AS request_kind_key,
-                    {effective_request_kind_label_sql} AS request_kind_label
+                    {fallback_key_sql} AS request_kind_key,
+                    {fallback_label_sql} AS request_kind_label
                 FROM auth_token_logs
                 WHERE token_id = ?
                   AND created_at >= ?
-                ORDER BY request_kind_label ASC, request_kind_key ASC
+                  AND {needs_fallback_sql}
                 "#
             )
         };
-
-        let options = if let Some(until) = until {
-            sqlx::query_as::<_, (String, String)>(query.as_str())
+        let legacy_options = if let Some(until) = until {
+            sqlx::query_as::<_, (String, String)>(legacy_fallback_query.as_str())
                 .bind(token_id)
                 .bind(since)
                 .bind(until)
                 .fetch_all(&self.pool)
                 .await?
         } else {
-            sqlx::query_as::<_, (String, String)>(query.as_str())
+            sqlx::query_as::<_, (String, String)>(legacy_fallback_query.as_str())
                 .bind(token_id)
                 .bind(since)
                 .fetch_all(&self.pool)
                 .await?
         };
+        options.extend(legacy_options);
+        options.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+        options.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
 
         Ok(options
             .into_iter()
@@ -12731,50 +12785,20 @@ fn token_request_kind_fallback_label_sql() -> &'static str {
     "#
 }
 
-fn token_request_kind_effective_key_sql() -> String {
-    format!(
-        r#"
-        CASE
-            WHEN request_kind_key IS NOT NULL
-             AND TRIM(request_kind_key) <> ''
-             AND request_kind_label IS NOT NULL
-             AND TRIM(request_kind_label) <> ''
-             AND NOT (
-                 path LIKE '/mcp/%'
-                 AND (
-                     request_kind_key = 'mcp:raw:/mcp'
-                     OR request_kind_label = 'MCP | /mcp'
-                 )
-             )
-            THEN request_kind_key
-            ELSE {}
-        END
-        "#,
-        token_request_kind_fallback_key_sql()
+fn token_request_kind_needs_fallback_sql() -> &'static str {
+    r#"
+    request_kind_key IS NULL
+    OR TRIM(request_kind_key) = ''
+    OR request_kind_label IS NULL
+    OR TRIM(request_kind_label) = ''
+    OR (
+        path LIKE '/mcp/%'
+        AND (
+            request_kind_key = 'mcp:raw:/mcp'
+            OR request_kind_label = 'MCP | /mcp'
+        )
     )
-}
-
-fn token_request_kind_effective_label_sql() -> String {
-    format!(
-        r#"
-        CASE
-            WHEN request_kind_key IS NOT NULL
-             AND TRIM(request_kind_key) <> ''
-             AND request_kind_label IS NOT NULL
-             AND TRIM(request_kind_label) <> ''
-             AND NOT (
-                 path LIKE '/mcp/%'
-                 AND (
-                     request_kind_key = 'mcp:raw:/mcp'
-                     OR request_kind_label = 'MCP | /mcp'
-                 )
-             )
-            THEN request_kind_label
-            ELSE {}
-        END
-        "#,
-        token_request_kind_fallback_label_sql()
-    )
+    "#
 }
 
 fn derive_token_request_kind_fallback(
@@ -13572,6 +13596,63 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
     fn temp_db_path(prefix: &str) -> PathBuf {
         let file = format!("{}-{}.db", prefix, nanoid!(8));
         std::env::temp_dir().join(file)
+    }
+
+    #[tokio::test]
+    async fn token_log_filters_and_options_use_backfilled_request_kind_columns() {
+        let db_path = temp_db_path("token-log-request-kind-backfill");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let token = proxy
+            .create_access_token(Some("request-kind-backfill"))
+            .await
+            .expect("token created");
+
+        let stale_kind = TokenRequestKind::new("mcp:raw:/mcp", "MCP | /mcp", None);
+        proxy
+            .record_token_attempt_with_kind(
+                &token.id,
+                &Method::POST,
+                "/mcp/sse",
+                None,
+                Some(200),
+                Some(200),
+                false,
+                OUTCOME_SUCCESS,
+                None,
+                &stale_kind,
+            )
+            .await
+            .expect("record stale request kind row");
+
+        drop(proxy);
+
+        let repaired = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy reopened");
+
+        let filters = vec!["mcp:raw:/mcp/sse".to_string()];
+        let (logs, total) = repaired
+            .token_logs_page(&token.id, 1, 20, 0, None, &filters)
+            .await
+            .expect("query filtered token logs");
+        assert_eq!(total, 1);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_kind_key, "mcp:raw:/mcp/sse");
+        assert_eq!(logs[0].request_kind_label, "MCP | /mcp/sse");
+
+        let options = repaired
+            .token_log_request_kind_options(&token.id, 0, None)
+            .await
+            .expect("query request kind options");
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].key, "mcp:raw:/mcp/sse");
+        assert_eq!(options[0].label, "MCP | /mcp/sse");
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]

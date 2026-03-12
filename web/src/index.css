@@ -5889,6 +5889,11 @@ tbody .log-details-row:hover {
   font-size: 0.9rem;
 }
 
+.user-console-mobile-kv--stacked {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
 .user-console-mobile-kv span {
   color: hsl(var(--muted-foreground));
 }
@@ -5905,6 +5910,14 @@ tbody .log-details-row:hover {
 .user-console-mobile-request-kind {
   margin-left: auto;
   max-width: min(72%, 18rem);
+}
+
+.user-console-mobile-detail {
+  width: 100%;
+  text-align: left;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .user-console-mobile-status {
