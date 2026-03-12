@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 
-import { copyText, isCopyIntentKey, selectAllReadonlyText } from './clipboard'
+import { copyText, isCopyIntentKey, selectAllReadonlyText, shouldPrewarmSecretCopy } from './clipboard'
 
 function createDocumentMock(execResult: boolean) {
   const textarea = {
@@ -25,8 +25,14 @@ function createDocumentMock(execResult: boolean) {
   }
 
   const body = {
-    appendChild: mock(() => textarea),
-    removeChild: mock(() => textarea),
+    appendChild: mock(() => {
+      ;(textarea as { parentNode?: unknown }).parentNode = body
+      return textarea
+    }),
+    removeChild: mock(() => {
+      ;(textarea as { parentNode?: unknown }).parentNode = null
+      return textarea
+    }),
   }
 
   const execState = {
@@ -162,6 +168,47 @@ describe('clipboard helpers', () => {
     expect(execState.readOnlyAtExec).toBe(false)
     expect(textarea.readOnly).toBe(true)
     expect(textarea.contentEditable).toBe('inherit')
+  })
+
+  it('cleans up the temporary textarea when iOS selection prep throws', async () => {
+    const { doc, body } = createDocumentMock(true)
+    ;(doc.createRange as ReturnType<typeof mock>).mockImplementationOnce(() => {
+      throw new Error('createRange failed')
+    })
+
+    const result = await copyText('th-a1b2-secret', {
+      nav: {
+        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+        platform: 'iPhone',
+        maxTouchPoints: 5,
+      } as unknown as Navigator,
+      doc,
+      preferExecCommand: true,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.errors?.execCommand).toBeInstanceOf(Error)
+    expect(body.appendChild).toHaveBeenCalledTimes(1)
+    expect(body.removeChild).toHaveBeenCalledTimes(1)
+  })
+
+  it('prewarms secret copy only when the async clipboard path is likely unreliable', () => {
+    const modernNavigator = {
+      clipboard: { writeText: () => Promise.resolve() },
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+      platform: 'MacIntel',
+      maxTouchPoints: 0,
+    } as unknown as Navigator
+
+    expect(shouldPrewarmSecretCopy(modernNavigator, true)).toBe(false)
+    expect(shouldPrewarmSecretCopy({ userAgent: 'Mozilla/5.0', platform: 'Linux x86_64' } as Navigator, true)).toBe(true)
+    expect(shouldPrewarmSecretCopy(modernNavigator, false)).toBe(true)
+    expect(shouldPrewarmSecretCopy({
+      clipboard: { writeText: () => Promise.resolve() },
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+      platform: 'iPhone',
+      maxTouchPoints: 5,
+    } as unknown as Navigator, true)).toBe(true)
   })
 
   it('only warms copy intents on activation keys', () => {

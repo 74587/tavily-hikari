@@ -34,6 +34,7 @@ interface TokenSecretFieldProps extends Omit<InputHTMLAttributes<HTMLInputElemen
   copyButtonClassName?: string
   copyDisabled?: boolean
   inputRef?: Ref<HTMLInputElement>
+  prewarmOnHover?: boolean
 }
 
 export default function TokenSecretField({
@@ -62,6 +63,7 @@ export default function TokenSecretField({
   copyButtonClassName,
   copyDisabled = false,
   inputRef,
+  prewarmOnHover = false,
   className,
   onBlur,
   ...inputProps
@@ -130,6 +132,14 @@ export default function TokenSecretField({
           type="button"
           variant={copyVariant}
           className={cn('token-copy-button', copyStateClassName, copyButtonClassName)}
+          onPointerEnter={() => {
+            if (!prewarmOnHover) return
+            void onCopyIntent?.()
+          }}
+          onFocus={() => {
+            if (!prewarmOnHover) return
+            void onCopyIntent?.()
+          }}
           onPointerDown={() => void onCopyIntent?.()}
           onKeyDown={handleCopyIntentKeyDown}
           onClick={(event) => void onCopy(event.currentTarget)}

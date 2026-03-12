@@ -69,7 +69,13 @@ import {
 import { useLanguage, useTranslate, type AdminTranslations } from './i18n'
 import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
 import { ADMIN_USER_CONSOLE_HREF } from './lib/adminUserConsoleEntry'
-import { copyText, isCopyIntentKey, selectAllReadonlyText, type CopyTextOptions } from './lib/clipboard'
+import {
+  copyText,
+  isCopyIntentKey,
+  selectAllReadonlyText,
+  shouldPrewarmSecretCopy,
+  type CopyTextOptions,
+} from './lib/clipboard'
 import {
   fetchApiKeys,
   fetchApiKeySecret,
@@ -1109,6 +1115,13 @@ function AdminDashboard(): JSX.Element {
   const warmApiKeySecret = useCallback((id: string) => {
     void resolveApiKeySecret(id).catch(() => undefined)
   }, [resolveApiKeySecret])
+
+  const shouldPrewarmAdminSecretCopy = useMemo(() => shouldPrewarmSecretCopy(), [])
+
+  const warmSecretOnPreview = useCallback((warmup: () => void) => {
+    if (!shouldPrewarmAdminSecretCopy) return
+    warmup()
+  }, [shouldPrewarmAdminSecretCopy])
 
   const warmSecretOnKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, warmup: () => void) => {
     if (!isCopyIntentKey(event.key)) return
@@ -4764,6 +4777,8 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.copy}
   aria-label={tokenStrings.actions.copy}
+  onPointerEnter={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
+  onFocus={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
@@ -4778,6 +4793,8 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.share}
   aria-label={tokenStrings.actions.share}
+  onPointerEnter={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
+  onFocus={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
@@ -4898,6 +4915,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
+  onPointerEnter={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
+  onFocus={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
@@ -4909,6 +4928,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={shareState === 'copied' ? 'success' : 'outline'}
   size="sm"
+  onPointerEnter={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
+  onFocus={() => warmSecretOnPreview(() => warmTokenSecret(t.id))}
   onPointerDown={() => warmTokenSecret(t.id)}
   onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
@@ -5157,6 +5178,8 @@ function AdminDashboard(): JSX.Element {
   className="h-8 w-8 rounded-full p-0 shadow-none"
   title={keyStrings.actions.copy}
   aria-label={keyStrings.actions.copy}
+  onPointerEnter={() => warmSecretOnPreview(() => warmApiKeySecret(item.id))}
+  onFocus={() => warmSecretOnPreview(() => warmApiKeySecret(item.id))}
   onPointerDown={() => warmApiKeySecret(item.id)}
   onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmApiKeySecret(item.id))}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
@@ -5308,6 +5331,8 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
+  onPointerEnter={() => warmSecretOnPreview(() => warmApiKeySecret(item.id))}
+  onFocus={() => warmSecretOnPreview(() => warmApiKeySecret(item.id))}
   onPointerDown={() => warmApiKeySecret(item.id)}
   onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmApiKeySecret(item.id))}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}

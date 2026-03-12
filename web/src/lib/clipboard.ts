@@ -27,6 +27,17 @@ export function isCopyIntentKey(key: string): boolean {
   return key === 'Enter' || key === ' ' || key === 'Spacebar'
 }
 
+export function shouldPrewarmSecretCopy(
+  nav?: Navigator,
+  secureContext = typeof window !== 'undefined' ? window.isSecureContext : true,
+): boolean {
+  const resolvedNav = nav ?? (typeof navigator !== 'undefined' ? navigator : undefined)
+  if (!resolvedNav) return false
+  if (!secureContext) return true
+  if (typeof resolvedNav.clipboard?.writeText !== 'function') return true
+  return requiresIOSSelectionHack(resolvedNav)
+}
+
 export async function copyText(value: string, options: CopyTextOptions = {}): Promise<CopyTextResult> {
   const nav = options.nav ?? (typeof navigator !== 'undefined' ? navigator : undefined)
   const doc = options.doc ?? (typeof document !== 'undefined' ? document : undefined)
@@ -104,9 +115,10 @@ export function copyTextWithExecCommand(value: string, doc?: Document, nav?: Nav
   textarea.style.whiteSpace = 'pre'
 
   doc.body.appendChild(textarea)
-  const restoreExecCommandTarget = selectExecCommandTarget(textarea, doc, nav)
+  let restoreExecCommandTarget: (() => void) | void = undefined
 
   try {
+    restoreExecCommandTarget = selectExecCommandTarget(textarea, doc, nav)
     const copied = doc.execCommand('copy')
     if (!copied) {
       throw new Error('document.execCommand("copy") returned false')
@@ -114,7 +126,9 @@ export function copyTextWithExecCommand(value: string, doc?: Document, nav?: Nav
     return true
   } finally {
     restoreExecCommandTarget?.()
-    doc.body.removeChild(textarea)
+    if (textarea.parentNode === doc.body) {
+      doc.body.removeChild(textarea)
+    }
     if (selection) {
       selection.removeAllRanges()
       for (const range of ranges) {

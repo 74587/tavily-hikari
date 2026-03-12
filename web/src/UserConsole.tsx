@@ -30,7 +30,7 @@ import { StatusBadge, type StatusTone } from './components/StatusBadge'
 import ThemeToggle from './components/ThemeToggle'
 import { Button } from './components/ui/button'
 import { useLanguage, useTranslate, type Language } from './i18n'
-import { copyText, isCopyIntentKey, selectAllReadonlyText } from './lib/clipboard'
+import { copyText, isCopyIntentKey, selectAllReadonlyText, shouldPrewarmSecretCopy } from './lib/clipboard'
 import {
   type McpProbeStepState,
   type ProbeQuotaWindow,
@@ -449,6 +449,13 @@ export default function UserConsole(): JSX.Element {
     if (consoleAvailability !== 'enabled') return
     void resolveTokenSecret(tokenId).catch(() => undefined)
   }, [consoleAvailability, resolveTokenSecret])
+
+  const shouldPrewarmTokenCopy = useMemo(() => shouldPrewarmSecretCopy(), [])
+
+  const warmTokenSecretOnPreview = useCallback((tokenId: string) => {
+    if (!shouldPrewarmTokenCopy) return
+    void warmTokenSecret(tokenId)
+  }, [shouldPrewarmTokenCopy, warmTokenSecret])
 
   const warmTokenSecretOnKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>, tokenId: string) => {
     if (!isCopyIntentKey(event.key)) return
@@ -1309,6 +1316,8 @@ export default function UserConsole(): JSX.Element {
                               <button
                                 type="button"
                                 className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
+                                onPointerEnter={() => void warmTokenSecretOnPreview(item.tokenId)}
+                                onFocus={() => void warmTokenSecretOnPreview(item.tokenId)}
                                 onPointerDown={() => void warmTokenSecret(item.tokenId)}
                                 onKeyDown={(event) => warmTokenSecretOnKeyDown(event, item.tokenId)}
                                 onClick={(event) => void copyToken(item.tokenId, event.currentTarget)}
@@ -1373,6 +1382,8 @@ export default function UserConsole(): JSX.Element {
                         <button
                           type="button"
                           className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
+                          onPointerEnter={() => void warmTokenSecretOnPreview(item.tokenId)}
+                          onFocus={() => void warmTokenSecretOnPreview(item.tokenId)}
                           onPointerDown={() => void warmTokenSecret(item.tokenId)}
                           onKeyDown={(event) => warmTokenSecretOnKeyDown(event, item.tokenId)}
                           onClick={(event) => void copyToken(item.tokenId, event.currentTarget)}
@@ -1460,6 +1471,7 @@ export default function UserConsole(): JSX.Element {
               onToggleVisibility={() => void toggleTokenSecretVisibility()}
               onCopyIntent={() => warmTokenSecret(route.id)}
               onCopy={(anchorEl) => copyToken(route.id, anchorEl)}
+              prewarmOnHover={shouldPrewarmTokenCopy}
               label={text.detail.tokenLabel}
               visibilityShowLabel={text.detail.tokenSecret.show}
               visibilityHideLabel={text.detail.tokenSecret.hide}
