@@ -30,8 +30,7 @@ import { StatusBadge, type StatusTone } from './components/StatusBadge'
 import ThemeToggle from './components/ThemeToggle'
 import { Button } from './components/ui/button'
 import { useLanguage, useTranslate, type Language } from './i18n'
-import { copyText, isCopyIntentKey, selectAllReadonlyText } from './lib/clipboard'
-import { createExpiringValueCache } from './lib/expiringValueCache'
+import { copyText, selectAllReadonlyText } from './lib/clipboard'
 import {
   type McpProbeStepState,
   type ProbeQuotaWindow,
@@ -59,7 +58,6 @@ const VSCODE_DOC_URL = 'https://code.visualstudio.com/docs/copilot/customization
 const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
 const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
 const ICONIFY_ENDPOINT = 'https://api.iconify.design'
-const USER_CONSOLE_SECRET_CACHE_TTL_MS = 15_000
 
 type GuideLanguage = 'toml' | 'json' | 'bash'
 type GuideKey = 'codex' | 'claude' | 'vscode' | 'claudeDesktop' | 'cursor' | 'windsurf' | 'cherryStudio' | 'other'
@@ -256,7 +254,6 @@ export default function UserConsole(): JSX.Element {
   const [probeBubbleShift, setProbeBubbleShift] = useState(0)
   const probeBubbleRef = useRef<HTMLDivElement | null>(null)
   const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
-  const tokenSecretCacheRef = useRef(createExpiringValueCache<string>(USER_CONSOLE_SECRET_CACHE_TTL_MS))
   const tokenSecretRequestRef = useRef<Map<string, Promise<string>>>(new Map())
   const probeRunIdRef = useRef(0)
   const tokenSecretRunIdRef = useRef(0)
@@ -424,21 +421,13 @@ export default function UserConsole(): JSX.Element {
     if (revealedToken) {
       return revealedToken
     }
-    const cached = tokenSecretCacheRef.current.get(tokenId)
-    if (cached) {
-      return cached
-    }
-
     const pending = tokenSecretRequestRef.current.get(tokenId)
     if (pending) {
       return await pending
     }
 
     const request = fetchUserTokenSecret(tokenId, signal)
-      .then(({ token }) => {
-        tokenSecretCacheRef.current.set(tokenId, token)
-        return token
-      })
+      .then(({ token }) => token)
       .finally(() => {
         tokenSecretRequestRef.current.delete(tokenId)
       })
@@ -446,16 +435,6 @@ export default function UserConsole(): JSX.Element {
     tokenSecretRequestRef.current.set(tokenId, request)
     return await request
   }, [route, tokenSecretTokenId, tokenSecretValue])
-
-  const warmTokenSecret = useCallback((tokenId: string) => {
-    if (consoleAvailability !== 'enabled') return
-    void resolveTokenSecret(tokenId).catch(() => undefined)
-  }, [consoleAvailability, resolveTokenSecret])
-
-  const warmTokenSecretOnKeyDown = useCallback((event: React.KeyboardEvent<HTMLButtonElement>, tokenId: string) => {
-    if (!isCopyIntentKey(event.key)) return
-    void warmTokenSecret(tokenId)
-  }, [warmTokenSecret])
 
   const revealDetailTokenForManualCopy = useCallback((tokenId: string, token: string) => {
     if (route.name !== 'token' || route.id !== tokenId) return false
@@ -477,9 +456,8 @@ export default function UserConsole(): JSX.Element {
         route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId && tokenSecretValue != null
           ? tokenSecretValue
           : null
-      const cachedToken = inlineToken ?? tokenSecretCacheRef.current.get(tokenId)
-      const token = cachedToken ?? await resolveTokenSecret(tokenId)
-      const result = await copyText(token, cachedToken ? { preferExecCommand: true } : undefined)
+      const token = inlineToken ?? await resolveTokenSecret(tokenId)
+      const result = await copyText(token, inlineToken ? { preferExecCommand: true } : undefined)
       if (!result.ok) {
         if (!revealDetailTokenForManualCopy(tokenId, token) && anchorEl) {
           setManualCopyBubble({ anchorEl, value: token })
@@ -526,7 +504,6 @@ export default function UserConsole(): JSX.Element {
       if (tokenSecretRunIdRef.current !== runId) return
       setTokenSecretTokenId(route.id)
       setTokenSecretValue(secret.token)
-      tokenSecretCacheRef.current.set(route.id, secret.token)
       setTokenSecretVisible(true)
     } catch (err) {
       if (tokenSecretRunIdRef.current !== runId) return
@@ -1313,8 +1290,6 @@ export default function UserConsole(): JSX.Element {
                               <button
                                 type="button"
                                 className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
-                                onPointerDown={() => void warmTokenSecret(item.tokenId)}
-                                onKeyDown={(event) => warmTokenSecretOnKeyDown(event, item.tokenId)}
                                 onClick={(event) => void copyToken(item.tokenId, event.currentTarget)}
                               >
                                 {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
@@ -1377,8 +1352,6 @@ export default function UserConsole(): JSX.Element {
                         <button
                           type="button"
                           className={`btn btn-outline btn-sm ${state === 'copied' ? 'btn-success' : state === 'error' ? 'btn-warning' : ''}`}
-                          onPointerDown={() => void warmTokenSecret(item.tokenId)}
-                          onKeyDown={(event) => warmTokenSecretOnKeyDown(event, item.tokenId)}
                           onClick={(event) => void copyToken(item.tokenId, event.currentTarget)}
                         >
                           {state === 'copied' ? text.tokens.copied : state === 'error' ? text.tokens.copyFailed : text.tokens.copy}
@@ -1462,7 +1435,6 @@ export default function UserConsole(): JSX.Element {
               copyState={detailTokenCopyState}
               onValueChange={() => undefined}
               onToggleVisibility={() => void toggleTokenSecretVisibility()}
-              onCopyIntent={() => warmTokenSecret(route.id)}
               onCopy={(anchorEl) => copyToken(route.id, anchorEl)}
               label={text.detail.tokenLabel}
               visibilityShowLabel={text.detail.tokenSecret.show}

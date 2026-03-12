@@ -6,7 +6,7 @@ import AdminTableShell from './components/AdminTableShell'
 import { ApiKeysValidationDialog } from './components/ApiKeysValidationDialog'
 import ManualCopyBubble from './components/ManualCopyBubble'
 import QuotaRangeField from './components/QuotaRangeField'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import ThemeToggle from './components/ThemeToggle'
 import AdminReturnToConsoleLink from './components/AdminReturnToConsoleLink'
@@ -71,7 +71,6 @@ import { extractTvlyDevApiKeysFromText } from './lib/api-key-extract'
 import { ADMIN_USER_CONSOLE_HREF } from './lib/adminUserConsoleEntry'
 import {
   copyText,
-  isCopyIntentKey,
   selectAllReadonlyText,
   type CopyTextOptions,
 } from './lib/clipboard'
@@ -642,6 +641,8 @@ interface ManualCopyBubbleState {
   multiline?: boolean
 }
 
+type ManualCopyDialogState = Omit<ManualCopyBubbleState, 'anchorEl'>
+
 function AdminDashboard(): JSX.Element {
   const [route, setRoute] = useState<AdminPathRoute>(() => parseAdminPath(window.location.pathname))
   const { language } = useLanguage()
@@ -757,6 +758,8 @@ function AdminDashboard(): JSX.Element {
   const keyGroupsListRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<Map<string, 'loading' | 'copied'>>(() => new Map())
   const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
+  const [manualCopyDialog, setManualCopyDialog] = useState<ManualCopyDialogState | null>(null)
+  const manualCopyDialogFieldRef = useRef<HTMLInputElement | null>(null)
   const [expandedLogs, setExpandedLogs] = useState<Set<number>>(() => new Set())
   type AddKeysBatchReportState =
     | { kind: 'success'; response: AddApiKeysBatchResponse }
@@ -873,6 +876,14 @@ function AdminDashboard(): JSX.Element {
     ),
     [language],
   )
+
+  useEffect(() => {
+    if (!manualCopyDialog) return
+    const frame = window.requestAnimationFrame(() => {
+      selectAllReadonlyText(manualCopyDialogFieldRef.current)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [manualCopyDialog])
 
   const clearKeysBatchAutoCollapseTimer = useCallback(() => {
     if (keysBatchAutoCollapseTimerRef.current != null) {
@@ -1105,19 +1116,6 @@ function AdminDashboard(): JSX.Element {
 
     tokenSecretRequestCacheRef.current.set(id, request)
     return await request
-  }, [])
-
-  const warmTokenSecret = useCallback((id: string) => {
-    void resolveTokenSecret(id).catch(() => undefined)
-  }, [resolveTokenSecret])
-
-  const warmApiKeySecret = useCallback((id: string) => {
-    void resolveApiKeySecret(id).catch(() => undefined)
-  }, [resolveApiKeySecret])
-
-  const warmSecretOnKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, warmup: () => void) => {
-    if (!isCopyIntentKey(event.key)) return
-    warmup()
   }, [])
 
   const handleTokenSecretRotated = useCallback((id: string, token: string) => {
@@ -2635,15 +2633,16 @@ function AdminDashboard(): JSX.Element {
 
   const handleAddToken = async (anchorEl?: HTMLElement | null) => {
     const note = newTokenNote.trim()
+    void anchorEl
     setManualCopyBubble(null)
+    setManualCopyDialog(null)
     setSubmitting(true)
     try {
       const { token } = await createToken(note || undefined)
       setNewTokenNote('')
       const copyResult = await copyToClipboard(token)
-      if (!copyResult.ok && anchorEl) {
-        openManualCopyBubble({
-          anchorEl,
+      if (!copyResult.ok) {
+        setManualCopyDialog({
           title: manualCopyText.createToken.title,
           description: manualCopyText.createToken.description,
           fieldLabel: manualCopyText.fields.token,
@@ -4769,8 +4768,6 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.copy}
   aria-label={tokenStrings.actions.copy}
-  onPointerDown={() => warmTokenSecret(t.id)}
-  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -4783,8 +4780,6 @@ function AdminDashboard(): JSX.Element {
   className="token-action-button shadow-none"
   title={tokenStrings.actions.share}
   aria-label={tokenStrings.actions.share}
-  onPointerDown={() => warmTokenSecret(t.id)}
-  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
@@ -4903,8 +4898,6 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onPointerDown={() => warmTokenSecret(t.id)}
-  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleCopyToken(t.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -4914,8 +4907,6 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={shareState === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onPointerDown={() => warmTokenSecret(t.id)}
-  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmTokenSecret(t.id))}
   onClick={(event) => void handleShareToken(t.id, shareStateKey, event.currentTarget)}
   disabled={shareState === 'loading'}
 >
@@ -5162,8 +5153,6 @@ function AdminDashboard(): JSX.Element {
   className="h-8 w-8 rounded-full p-0 shadow-none"
   title={keyStrings.actions.copy}
   aria-label={keyStrings.actions.copy}
-  onPointerDown={() => warmApiKeySecret(item.id)}
-  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmApiKeySecret(item.id))}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -5313,8 +5302,6 @@ function AdminDashboard(): JSX.Element {
   type="button"
   variant={state === 'copied' ? 'success' : 'outline'}
   size="sm"
-  onPointerDown={() => warmApiKeySecret(item.id)}
-  onKeyDown={(event) => warmSecretOnKeyDown(event, () => warmApiKeySecret(item.id))}
   onClick={(event) => void handleCopySecret(item.id, stateKey, event.currentTarget)}
   disabled={state === 'loading'}
 >
@@ -6354,6 +6341,37 @@ function AdminDashboard(): JSX.Element {
       </Button>
       <Button type="button" onClick={() => void saveTokenNote()} disabled={savingTokenNote}>
         {savingTokenNote ? tokenStrings.dialogs.note.saving : tokenStrings.dialogs.note.confirm}
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+<Dialog open={manualCopyDialog != null} onOpenChange={(open) => { if (!open) setManualCopyDialog(null) }}>
+  <DialogContent
+    className="max-w-lg"
+    onEscapeKeyDown={(event) => event.preventDefault()}
+    onInteractOutside={(event) => event.preventDefault()}
+  >
+    <DialogHeader>
+      <DialogTitle>{manualCopyDialog?.title ?? manualCopyText.createToken.title}</DialogTitle>
+      <DialogDescription>{manualCopyDialog?.description ?? manualCopyText.createToken.description}</DialogDescription>
+    </DialogHeader>
+    <div className="grid gap-2">
+      <label className="manual-copy-bubble-label" htmlFor="admin-manual-copy-dialog-field">
+        {manualCopyDialog?.fieldLabel ?? manualCopyText.fields.token}
+      </label>
+      <Input
+        id="admin-manual-copy-dialog-field"
+        ref={manualCopyDialogFieldRef}
+        className="manual-copy-bubble-field"
+        readOnly
+        value={manualCopyDialog?.value ?? ''}
+        onFocus={(event) => selectAllReadonlyText(event.currentTarget)}
+        onClick={(event) => selectAllReadonlyText(event.currentTarget)}
+      />
+    </div>
+    <DialogFooter className="modal-action">
+      <Button type="button" onClick={() => setManualCopyDialog(null)}>
+        {manualCopyText.close}
       </Button>
     </DialogFooter>
   </DialogContent>
