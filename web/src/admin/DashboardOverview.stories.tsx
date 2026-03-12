@@ -180,7 +180,7 @@ export const QuarantineState: Story = {
       { id: 1, key_id: 'Qn8R', auth_token_id: '9vsN', method: 'POST', path: '/mcp', query: null, http_status: 401, mcp_status: -1, result_status: 'error', created_at: 1, error_message: 'account deactivated', request_body: null, response_body: null, forwarded_headers: [], dropped_headers: [] },
     ],
     jobs: [
-      { id: 1, job_type: 'quota_sync', key_id: 'Qn8R', status: 'error', attempt: 1, message: 'account deactivated', started_at: 1, finished_at: 2 },
+      { id: 1, job_type: 'quota_sync', key_id: 'Qn8R', key_group: 'ops', status: 'error', attempt: 1, message: 'account deactivated', started_at: 1, finished_at: 2 },
     ],
     onOpenModule: () => {},
     onOpenToken: () => {},
