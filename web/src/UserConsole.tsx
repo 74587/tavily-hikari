@@ -246,13 +246,29 @@ export default function UserConsole(): JSX.Element {
   const dashboardSectionRef = useRef<HTMLElement | null>(null)
   const tokensSectionRef = useRef<HTMLElement | null>(null)
   const detailHeadingRef = useRef<HTMLHeadingElement | null>(null)
+  const historyTraversalRef = useRef(false)
   const landingScrollBehaviorRef = useRef<ScrollBehavior>('auto')
+  const shouldScrollLandingSectionRef = useRef(route.name === 'landing' && route.section !== null)
   const { viewportMode, contentMode, isCompactLayout } = useResponsiveModes(pageRef)
 
   useEffect(() => {
-    const syncRoute = () => setRoute(parseUserConsoleHash(window.location.hash || ''))
+    const handlePopState = () => {
+      historyTraversalRef.current = true
+    }
+    const syncRoute = () => {
+      const nextRoute = parseUserConsoleHash(window.location.hash || '')
+      if (nextRoute.name === 'landing' && nextRoute.section && !historyTraversalRef.current) {
+        shouldScrollLandingSectionRef.current = true
+      }
+      setRoute(nextRoute)
+      historyTraversalRef.current = false
+    }
+    window.addEventListener('popstate', handlePopState)
     window.addEventListener('hashchange', syncRoute)
-    return () => window.removeEventListener('hashchange', syncRoute)
+    return () => {
+      window.removeEventListener('popstate', handlePopState)
+      window.removeEventListener('hashchange', syncRoute)
+    }
   }, [])
 
   const reloadBase = useCallback(async (signal: AbortSignal) => {
@@ -429,10 +445,15 @@ export default function UserConsole(): JSX.Element {
 
   useEffect(() => {
     if (consoleUnavailable || route.name !== 'landing' || !route.section) return
+    if (!shouldScrollLandingSectionRef.current) {
+      landingScrollBehaviorRef.current = 'auto'
+      return
+    }
     const section = route.section
     const behavior = landingScrollBehaviorRef.current
     const frame = window.requestAnimationFrame(() => {
       scrollToLandingSection(section, behavior)
+      shouldScrollLandingSectionRef.current = false
       landingScrollBehaviorRef.current = 'auto'
     })
     return () => window.cancelAnimationFrame(frame)
@@ -926,6 +947,7 @@ export default function UserConsole(): JSX.Element {
   }
 
   const goDashboard = (behavior: ScrollBehavior = 'auto') => {
+    shouldScrollLandingSectionRef.current = true
     landingScrollBehaviorRef.current = behavior
     navigateToRoute({ name: 'landing', section: 'dashboard' })
   }
@@ -933,10 +955,22 @@ export default function UserConsole(): JSX.Element {
     window.location.href = '/'
   }
   const goTokens = (behavior: ScrollBehavior = 'auto') => {
+    shouldScrollLandingSectionRef.current = true
     landingScrollBehaviorRef.current = behavior
     navigateToRoute({ name: 'landing', section: 'tokens' })
   }
   const goTokenDetail = (tokenId: string) => {
+    if (route.name === 'landing') {
+      // Normalize the current entry so browser Back returns to the token section instead of a stale dashboard hash.
+      const landingTokensHash = userConsoleRouteToHash({ name: 'landing', section: 'tokens' })
+      if (window.location.hash !== landingTokensHash) {
+        window.history.replaceState(
+          window.history.state,
+          '',
+          `${window.location.pathname}${window.location.search}${landingTokensHash}`,
+        )
+      }
+    }
     navigateToRoute({ name: 'token', id: tokenId })
   }
 
@@ -965,6 +999,7 @@ export default function UserConsole(): JSX.Element {
     ],
     [text.nav.dashboard, text.nav.tokens],
   )
+  const activeLandingNavSection = route.name === 'token' ? 'tokens' : landingSection
 
   return (
     <main
@@ -998,14 +1033,14 @@ export default function UserConsole(): JSX.Element {
         </div>
       </section>
 
-      {!consoleUnavailable && route.name === 'landing' && (
+      {!consoleUnavailable && (
         <section className="surface panel user-console-section-nav-panel">
           <div className="user-console-section-nav-copy">
             <h2>{text.landing.title}</h2>
             <p className="panel-description">{text.landing.description}</p>
           </div>
           <SegmentedTabs<UserConsoleLandingSection>
-            value={landingSection}
+            value={activeLandingNavSection}
             onChange={(section) => {
               if (section === 'dashboard') {
                 goDashboard('smooth')
