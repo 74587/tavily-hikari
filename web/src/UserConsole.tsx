@@ -1,6 +1,7 @@
 import React, { ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@iconify/react'
 import CherryStudioMock from './components/CherryStudioMock'
+import TokenSecretField, { type TokenSecretCopyState } from './components/TokenSecretField'
 
 import {
   fetchProfile,
@@ -232,7 +233,12 @@ export default function UserConsole(): JSX.Element {
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [copyState, setCopyState] = useState<Record<string, 'idle' | 'copied' | 'error'>>({})
+  const [copyState, setCopyState] = useState<Record<string, TokenSecretCopyState>>({})
+  const [tokenSecretTokenId, setTokenSecretTokenId] = useState<string | null>(null)
+  const [tokenSecretVisible, setTokenSecretVisible] = useState(false)
+  const [tokenSecretValue, setTokenSecretValue] = useState<string | null>(null)
+  const [tokenSecretLoading, setTokenSecretLoading] = useState(false)
+  const [tokenSecretError, setTokenSecretError] = useState<string | null>(null)
   const [activeGuide, setActiveGuide] = useState<GuideKey>('codex')
   const [isMobileGuide, setIsMobileGuide] = useState(false)
   const [mcpProbe, setMcpProbe] = useState<ProbeButtonModel>(() => createProbeButtonModel(2))
@@ -241,6 +247,7 @@ export default function UserConsole(): JSX.Element {
   const [probeBubbleShift, setProbeBubbleShift] = useState(0)
   const probeBubbleRef = useRef<HTMLDivElement | null>(null)
   const probeRunIdRef = useRef(0)
+  const tokenSecretRunIdRef = useRef(0)
   const pageRef = useRef<HTMLElement>(null)
   const dashboardSectionRef = useRef<HTMLElement | null>(null)
   const tokensSectionRef = useRef<HTMLElement | null>(null)
@@ -355,6 +362,15 @@ export default function UserConsole(): JSX.Element {
     setProbeBubbleShift(0)
   }, [route.name === 'token' ? route.id : route.section ?? 'landing'])
 
+  useEffect(() => {
+    tokenSecretRunIdRef.current += 1
+    setTokenSecretTokenId(null)
+    setTokenSecretVisible(false)
+    setTokenSecretValue(null)
+    setTokenSecretLoading(false)
+    setTokenSecretError(null)
+  }, [consoleAvailability, route.name === 'token' ? route.id : route.name])
+
   useLayoutEffect(() => {
     if (!probeBubble?.visible || probeBubble.items.length === 0) {
       setProbeBubbleShift(0)
@@ -388,7 +404,15 @@ export default function UserConsole(): JSX.Element {
 
   const copyToken = useCallback(async (tokenId: string) => {
     try {
-      const { token } = await fetchUserTokenSecret(tokenId)
+      const cachedToken =
+        route.name === 'token' && route.id === tokenId && tokenSecretTokenId === tokenId
+          ? tokenSecretValue
+          : null
+      let token = cachedToken
+      if (!token) {
+        const secret = await fetchUserTokenSecret(tokenId)
+        token = secret.token
+      }
       await navigator.clipboard.writeText(token)
       setCopyState((prev) => ({ ...prev, [tokenId]: 'copied' }))
     } catch {
@@ -397,7 +421,49 @@ export default function UserConsole(): JSX.Element {
     window.setTimeout(() => {
       setCopyState((prev) => ({ ...prev, [tokenId]: 'idle' }))
     }, 1800)
-  }, [])
+  }, [route, tokenSecretTokenId, tokenSecretValue])
+
+  const toggleTokenSecretVisibility = useCallback(async () => {
+    if (route.name !== 'token') return
+    if (tokenSecretVisible) {
+      tokenSecretRunIdRef.current += 1
+      setTokenSecretTokenId(null)
+      setTokenSecretVisible(false)
+      setTokenSecretValue(null)
+      setTokenSecretLoading(false)
+      setTokenSecretError(null)
+      return
+    }
+    if (tokenSecretLoading) return
+
+    const runId = tokenSecretRunIdRef.current + 1
+    tokenSecretRunIdRef.current = runId
+    setTokenSecretTokenId(route.id)
+    setTokenSecretVisible(false)
+    setTokenSecretValue(null)
+    setTokenSecretLoading(true)
+    setTokenSecretError(null)
+
+    try {
+      const secret = await fetchUserTokenSecret(route.id)
+      if (tokenSecretRunIdRef.current !== runId) return
+      setTokenSecretTokenId(route.id)
+      setTokenSecretValue(secret.token)
+      setTokenSecretVisible(true)
+    } catch (err) {
+      if (tokenSecretRunIdRef.current !== runId) return
+      setTokenSecretTokenId(route.id)
+      setTokenSecretVisible(false)
+      setTokenSecretValue(null)
+      setTokenSecretError(formatTemplate(text.detail.tokenSecret.revealFailed, {
+        message: getProbeErrorMessage(err),
+      }))
+    } finally {
+      if (tokenSecretRunIdRef.current === runId) {
+        setTokenSecretLoading(false)
+      }
+    }
+  }, [route, text.detail.tokenSecret.revealFailed, tokenSecretLoading, tokenSecretVisible])
 
   const subtitle = useMemo(() => {
     const user = profile?.userDisplayName?.trim()
@@ -413,6 +479,13 @@ export default function UserConsole(): JSX.Element {
     }
     return 'th-xxxx-xxxxxxxxxxxx'
   }, [route])
+
+  const detailTokenCopyState = route.name === 'token' ? copyState[route.id] ?? 'idle' : 'idle'
+  const detailTokenMatchesRoute = route.name === 'token' && tokenSecretTokenId === route.id
+  const detailTokenVisible = detailTokenMatchesRoute && tokenSecretVisible && tokenSecretValue != null
+  const detailTokenValue = detailTokenVisible ? tokenSecretValue ?? '' : ''
+  const detailTokenLoading = detailTokenMatchesRoute && tokenSecretLoading
+  const detailTokenError = detailTokenMatchesRoute ? tokenSecretError : null
 
   const guideDescription = useMemo<GuideContent>(() => {
     const baseUrl = window.location.origin
@@ -1297,18 +1370,35 @@ export default function UserConsole(): JSX.Element {
               </div>
             </div>
 
-            <div className="access-token-box user-console-token-box">
-              <label className="token-label">{text.detail.tokenLabel}</label>
-              <div className="token-input-row">
-                <div className="token-input-shell">
-                  <input className="token-input" type="text" value={tokenLabel(route.id)} readOnly />
-                </div>
-                <button type="button" className="btn token-copy-button btn-outline" onClick={() => void copyToken(route.id)}>
-                  <Icon icon="mdi:content-copy" className="token-copy-icon" />
-                  <span>{text.tokens.copy}</span>
-                </button>
-              </div>
-            </div>
+            <TokenSecretField
+              inputId={`user-console-token-${route.id}`}
+              value={detailTokenValue}
+              visible={detailTokenVisible}
+              hiddenDisplayValue={tokenLabel(route.id)}
+              visibilityBusy={detailTokenLoading}
+              copyState={detailTokenCopyState}
+              onValueChange={() => undefined}
+              onToggleVisibility={() => void toggleTokenSecretVisibility()}
+              onCopy={() => copyToken(route.id)}
+              label={text.detail.tokenLabel}
+              visibilityShowLabel={text.detail.tokenSecret.show}
+              visibilityHideLabel={text.detail.tokenSecret.hide}
+              visibilityIconAlt={text.detail.tokenSecret.iconAlt}
+              copyAriaLabel={text.tokens.copy}
+              copyLabel={text.tokens.copy}
+              copiedLabel={text.tokens.copied}
+              copyErrorLabel={text.tokens.copyFailed}
+              wrapperClassName="access-token-box user-console-token-box"
+              readOnly
+            />
+            {detailTokenLoading ? (
+              <p className="sr-only" role="status" aria-live="polite">
+                {text.detail.tokenSecret.loading}
+              </p>
+            ) : null}
+            {detailTokenError ? (
+              <p className="user-console-token-error" role="status" aria-live="polite">{detailTokenError}</p>
+            ) : null}
 
             <div className="user-console-probe-box">
               <div className="user-console-probe-label-row">
@@ -1862,6 +1952,13 @@ const EN = {
     subtitle: 'Same token-level modules as home page (without global site card).',
     back: 'Back to Token List',
     tokenLabel: 'Token',
+    tokenSecret: {
+      show: 'Show full token',
+      hide: 'Hide full token',
+      iconAlt: 'token visibility toggle',
+      loading: 'Loading full token…',
+      revealFailed: 'Failed to reveal token: {message}',
+    },
     probe: {
       title: 'Connectivity Checks',
       costHint: "This check uses this token's own quota/credits.",
@@ -1991,6 +2088,13 @@ const ZH = {
     subtitle: '保留首页 token 相关模块（不展示首个站点全局卡片）。',
     back: '返回 Token 列表',
     tokenLabel: 'Token',
+    tokenSecret: {
+      show: '显示完整 Token',
+      hide: '隐藏完整 Token',
+      iconAlt: 'Token 显隐切换',
+      loading: '正在读取完整 Token…',
+      revealFailed: '读取完整 Token 失败：{message}',
+    },
     probe: {
       title: '连通性检测',
       costHint: '该检测会消耗当前 Token 自身额度。',

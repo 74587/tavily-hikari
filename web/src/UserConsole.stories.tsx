@@ -10,6 +10,7 @@ type LandingFocus = 'Overview Focus' | 'Token Focus'
 type TokenListState = 'Default List' | 'Empty'
 type TokenDetailPreview =
   | 'Overview'
+  | 'Token Revealed'
   | 'API Check Running'
   | 'All Checks Pass'
   | 'Partial Availability'
@@ -29,6 +30,7 @@ interface UserConsoleStoryArgs {
 
 interface UserConsoleStoryState {
   autoProbeTarget: 'mcp' | 'api' | null
+  autoRevealToken: boolean
   isAdmin: boolean
   probeMode: ProbeMockMode
   routeHash: string
@@ -169,6 +171,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function probeModeFromPreview(preview: TokenDetailPreview): ProbeMockMode {
+  if (preview === 'Token Revealed') return 'none'
   if (preview === 'API Check Running') return 'running'
   if (preview === 'All Checks Pass') return 'success'
   if (preview === 'Partial Availability') return 'partial'
@@ -205,6 +208,7 @@ function resolveStoryState(args: UserConsoleStoryArgs): UserConsoleStoryState {
     autoProbeTarget: args.consoleView === 'Token Detail'
       ? autoProbeTargetFromPreview(args.tokenDetailPreview)
       : null,
+    autoRevealToken: args.consoleView === 'Token Detail' && args.tokenDetailPreview === 'Token Revealed',
     isAdmin: args.isAdmin,
     probeMode: args.consoleView === 'Token Detail'
       ? probeModeFromPreview(args.tokenDetailPreview)
@@ -392,6 +396,15 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
   }, [storyState.isAdmin, storyState.probeMode, storyState.routeHash, storyState.tokenListEmpty])
 
   useEffect(() => {
+    if (!ready || !storyState.autoRevealToken) return
+    const timer = window.setTimeout(() => {
+      const button = document.querySelector<HTMLButtonElement>('.user-console-token-box .token-visibility-button')
+      button?.click()
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [ready, storyState.autoRevealToken])
+
+  useEffect(() => {
     if (!ready || !storyState.autoProbeTarget) return
     const timer = window.setTimeout(() => {
       const selector = `[data-probe-kind="${storyState.autoProbeTarget}"]`
@@ -409,6 +422,7 @@ function UserConsoleStory(args: UserConsoleStoryArgs): JSX.Element {
     storyState.routeHash,
     storyState.isAdmin ? 'admin' : 'user',
     storyState.tokenListEmpty ? 'empty' : 'default',
+    storyState.autoRevealToken ? 'revealed' : 'hidden',
     storyState.probeMode,
   ].join(':')
 
@@ -461,6 +475,7 @@ const meta = {
       description: 'Pick the overview or special state to preview on the Token Detail page.',
       options: [
         'Overview',
+        'Token Revealed',
         'API Check Running',
         'All Checks Pass',
         'Partial Availability',
@@ -558,6 +573,15 @@ export const TokenDetailOverview: Story = {
     isAdmin: false,
     landingFocus: 'Overview Focus',
     tokenDetailPreview: 'Overview',
+  },
+}
+
+export const TokenRevealed: Story = {
+  name: 'Token Revealed',
+  args: {
+    consoleView: 'Token Detail',
+    isAdmin: false,
+    tokenDetailPreview: 'Token Revealed',
   },
 }
 
