@@ -67,11 +67,11 @@ async fn get_api_key_detail(
     }
     let items = state
         .proxy
-        .list_api_key_metrics()
+        .get_api_key_metric(&id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(found) = items.into_iter().find(|k| k.id == id) {
-        Ok(Json(ApiKeyView::from(found)))
+    if let Some(found) = items {
+        Ok(Json(ApiKeyView::from_detail(found)))
     } else {
         Err(StatusCode::NOT_FOUND)
     }

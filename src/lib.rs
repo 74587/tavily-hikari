@@ -1926,7 +1926,15 @@ impl TavilyProxy {
 
     /// 获取全部 API key 的统计信息，按状态与最近使用时间排序。
     pub async fn list_api_key_metrics(&self) -> Result<Vec<ApiKeyMetrics>, ProxyError> {
-        self.key_store.fetch_api_key_metrics().await
+        self.key_store.fetch_api_key_metrics(false).await
+    }
+
+    /// 获取单个 API key 的完整统计信息，包含隔离详情。
+    pub async fn get_api_key_metric(
+        &self,
+        key_id: &str,
+    ) -> Result<Option<ApiKeyMetrics>, ProxyError> {
+        self.key_store.fetch_api_key_metric_by_id(key_id).await
     }
 
     /// 获取最近的请求日志，按时间倒序排列。
@@ -11104,8 +11112,16 @@ impl KeyStore {
         Ok(())
     }
 
-    async fn fetch_api_key_metrics(&self) -> Result<Vec<ApiKeyMetrics>, ProxyError> {
-        let rows = sqlx::query(
+    async fn fetch_api_key_metrics(
+        &self,
+        include_quarantine_detail: bool,
+    ) -> Result<Vec<ApiKeyMetrics>, ProxyError> {
+        let quarantine_detail_sql = if include_quarantine_detail {
+            "aq.reason_detail AS quarantine_reason_detail,"
+        } else {
+            "NULL AS quarantine_reason_detail,"
+        };
+        let query = format!(
             r#"
             SELECT
                 ak.id,
@@ -11120,7 +11136,7 @@ impl KeyStore {
                 aq.source AS quarantine_source,
                 aq.reason_code AS quarantine_reason_code,
                 aq.reason_summary AS quarantine_reason_summary,
-                aq.reason_detail AS quarantine_reason_detail,
+                {quarantine_detail_sql}
                 aq.created_at AS quarantine_created_at,
                 COALESCE(stats.total_requests, 0) AS total_requests,
                 COALESCE(stats.success_count, 0) AS success_count,
@@ -11144,9 +11160,8 @@ impl KeyStore {
             WHERE ak.deleted_at IS NULL
             ORDER BY ak.status ASC, ak.last_used_at ASC, ak.id ASC
             "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        );
+        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
 
         let metrics = rows
             .into_iter()
@@ -11206,6 +11221,110 @@ impl KeyStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(metrics)
+    }
+
+    async fn fetch_api_key_metric_by_id(
+        &self,
+        key_id: &str,
+    ) -> Result<Option<ApiKeyMetrics>, ProxyError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                ak.id,
+                ak.status,
+                ak.group_name,
+                ak.status_changed_at,
+                ak.last_used_at,
+                ak.deleted_at,
+                ak.quota_limit,
+                ak.quota_remaining,
+                ak.quota_synced_at,
+                aq.source AS quarantine_source,
+                aq.reason_code AS quarantine_reason_code,
+                aq.reason_summary AS quarantine_reason_summary,
+                aq.reason_detail AS quarantine_reason_detail,
+                aq.created_at AS quarantine_created_at,
+                COALESCE(stats.total_requests, 0) AS total_requests,
+                COALESCE(stats.success_count, 0) AS success_count,
+                COALESCE(stats.error_count, 0) AS error_count,
+                COALESCE(stats.quota_exhausted_count, 0) AS quota_exhausted_count
+            FROM api_keys ak
+            LEFT JOIN (
+                SELECT
+                    api_key_id,
+                    COALESCE(SUM(total_requests), 0) AS total_requests,
+                    COALESCE(SUM(success_count), 0) AS success_count,
+                    COALESCE(SUM(error_count), 0) AS error_count,
+                    COALESCE(SUM(quota_exhausted_count), 0) AS quota_exhausted_count
+                FROM api_key_usage_buckets
+                WHERE bucket_secs = 86400
+                GROUP BY api_key_id
+            ) AS stats
+            ON stats.api_key_id = ak.id
+            LEFT JOIN api_key_quarantines aq
+            ON aq.key_id = ak.id AND aq.cleared_at IS NULL
+            WHERE ak.deleted_at IS NULL AND ak.id = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(key_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| -> Result<ApiKeyMetrics, sqlx::Error> {
+            let id: String = row.try_get("id")?;
+            let status: String = row.try_get("status")?;
+            let group_name: Option<String> = row.try_get("group_name")?;
+            let status_changed_at: Option<i64> = row.try_get("status_changed_at")?;
+            let last_used_at: i64 = row.try_get("last_used_at")?;
+            let deleted_at: Option<i64> = row.try_get("deleted_at")?;
+            let quota_limit: Option<i64> = row.try_get("quota_limit")?;
+            let quota_remaining: Option<i64> = row.try_get("quota_remaining")?;
+            let quota_synced_at: Option<i64> = row.try_get("quota_synced_at")?;
+            let total_requests: i64 = row.try_get("total_requests")?;
+            let success_count: i64 = row.try_get("success_count")?;
+            let error_count: i64 = row.try_get("error_count")?;
+            let quota_exhausted_count: i64 = row.try_get("quota_exhausted_count")?;
+            let quarantine_source: Option<String> = row.try_get("quarantine_source")?;
+            let quarantine_reason_code: Option<String> = row.try_get("quarantine_reason_code")?;
+            let quarantine_reason_summary: Option<String> =
+                row.try_get("quarantine_reason_summary")?;
+            let quarantine_reason_detail: Option<String> =
+                row.try_get("quarantine_reason_detail")?;
+            let quarantine_created_at: Option<i64> = row.try_get("quarantine_created_at")?;
+
+            Ok(ApiKeyMetrics {
+                id,
+                status,
+                group_name: group_name.and_then(|name| {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_owned())
+                    }
+                }),
+                status_changed_at: status_changed_at.and_then(normalize_timestamp),
+                last_used_at: normalize_timestamp(last_used_at),
+                deleted_at: deleted_at.and_then(normalize_timestamp),
+                quota_limit,
+                quota_remaining,
+                quota_synced_at: quota_synced_at.and_then(normalize_timestamp),
+                total_requests,
+                success_count,
+                error_count,
+                quota_exhausted_count,
+                quarantine: quarantine_source.map(|source| ApiKeyQuarantine {
+                    source,
+                    reason_code: quarantine_reason_code.unwrap_or_default(),
+                    reason_summary: quarantine_reason_summary.unwrap_or_default(),
+                    reason_detail: quarantine_reason_detail.unwrap_or_default(),
+                    created_at: quarantine_created_at.unwrap_or_default(),
+                }),
+            })
+        })
+        .transpose()
+        .map_err(ProxyError::from)
     }
 
     async fn fetch_recent_logs(&self, limit: usize) -> Result<Vec<RequestLogRecord>, ProxyError> {

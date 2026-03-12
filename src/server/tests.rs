@@ -2739,6 +2739,7 @@ mod tests {
             .route("/api/admin/login", post(post_admin_login))
             .route("/api/admin/logout", post(post_admin_logout))
             .route("/api/summary", get(fetch_summary))
+            .route("/api/keys", get(list_keys))
             .route("/api/keys/:id", get(get_api_key_detail))
             .route("/api/keys/batch", post(create_api_keys_batch))
             .with_state(state);
@@ -4290,6 +4291,30 @@ mod tests {
             .next()
             .expect("seeded key")
             .id;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true)
+                    .journal_mode(SqliteJournalMode::Wal),
+            )
+            .await
+            .expect("open db pool");
+        sqlx::query(
+            r#"INSERT INTO api_key_quarantines
+               (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+        )
+        .bind(&key_id)
+        .bind("/api/tavily/search")
+        .bind("account_deactivated")
+        .bind("Tavily account deactivated (HTTP 401)")
+        .bind("The account associated with this API key has been deactivated.")
+        .bind(Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .expect("insert quarantine");
         let admin_password = "detail-auth-password";
         let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
         let client = Client::builder()
@@ -4316,11 +4341,40 @@ mod tests {
 
         let auth_resp = client
             .get(format!("http://{}/api/keys/{}", admin_addr, key_id))
-            .header(reqwest::header::COOKIE, admin_cookie)
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
             .send()
             .await
             .expect("authed key detail request");
         assert_eq!(auth_resp.status(), reqwest::StatusCode::OK);
+        let detail_body: serde_json::Value = auth_resp.json().await.expect("detail json");
+        assert_eq!(
+            detail_body
+                .get("quarantine")
+                .and_then(|value| value.get("reasonDetail"))
+                .and_then(|value| value.as_str()),
+            Some("The account associated with this API key has been deactivated.")
+        );
+
+        let list_resp = client
+            .get(format!("http://{}/api/keys", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("authed key list request");
+        assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
+        let list_body: serde_json::Value = list_resp.json().await.expect("list json");
+        let listed = list_body
+            .as_array()
+            .expect("key list array")
+            .iter()
+            .find(|value| value.get("id").and_then(|v| v.as_str()) == Some(key_id.as_str()))
+            .expect("key in list");
+        assert_eq!(
+            listed
+                .get("quarantine")
+                .and_then(|value| value.get("reasonDetail")),
+            None
+        );
 
         let _ = std::fs::remove_file(db_path);
     }

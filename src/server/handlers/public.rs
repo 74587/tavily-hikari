@@ -566,7 +566,7 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<Event> {
 
     let payload = DashboardSnapshot {
         summary: summary.into(),
-        keys: keys.into_iter().map(ApiKeyView::from).collect(),
+        keys: keys.into_iter().map(ApiKeyView::from_list).collect(),
         logs: logs.into_iter().map(RequestLogView::from).collect(),
     };
 

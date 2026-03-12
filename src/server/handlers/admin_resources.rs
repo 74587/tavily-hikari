@@ -68,7 +68,7 @@ async fn list_keys(
         .proxy
         .list_api_key_metrics()
         .await
-        .map(|metrics| Json(metrics.into_iter().map(ApiKeyView::from).collect()))
+        .map(|metrics| Json(metrics.into_iter().map(ApiKeyView::from_list).collect()))
         .map_err(|err| {
             eprintln!("list keys error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR

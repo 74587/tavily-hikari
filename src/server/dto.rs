@@ -4,7 +4,8 @@ struct ApiKeyQuarantineView {
     source: String,
     reason_code: String,
     reason_summary: String,
-    reason_detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_detail: Option<String>,
     created_at: i64,
 }
 

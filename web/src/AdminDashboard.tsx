@@ -929,6 +929,7 @@ function AdminDashboard(): JSX.Element {
   const [submitting, setSubmitting] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
+  const [clearingQuarantineId, setClearingQuarantineId] = useState<string | null>(null)
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
   const [pendingDisableId, setPendingDisableId] = useState<string | null>(null)
   const [pendingTokenDeleteId, setPendingTokenDeleteId] = useState<string | null>(null)
@@ -3437,6 +3438,23 @@ function AdminDashboard(): JSX.Element {
     }
   }
 
+  const handleClearQuarantine = async (id: string) => {
+    if (!id) return
+    setClearingQuarantineId(id)
+    try {
+      await clearApiKeyQuarantine(id)
+      const controller = new AbortController()
+      setLoading(true)
+      await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
+      controller.abort()
+    } catch (err) {
+      console.error(err)
+      setError(err instanceof Error ? err.message : errorStrings.clearQuarantine)
+    } finally {
+      setClearingQuarantineId(null)
+    }
+  }
+
   // Disable confirm flow
   const openDisableConfirm = (id: string) => {
     if (!id) return
@@ -5524,7 +5542,24 @@ function AdminDashboard(): JSX.Element {
                       {isAdmin && (
                         <td>
                           <div className="table-actions" style={{ flexWrap: 'nowrap' }}>
-                            {item.status === 'disabled' ? (
+                            {item.quarantine ? (
+  <Button
+    type="button"
+    variant="ghost"
+    size="icon"
+    className="h-8 w-8 rounded-full p-0 shadow-none"
+    title={keyStrings.actions.clearQuarantine}
+    aria-label={keyStrings.actions.clearQuarantine}
+    onClick={() => void handleClearQuarantine(item.id)}
+    disabled={clearingQuarantineId === item.id}
+  >
+    <Icon
+      icon={clearingQuarantineId === item.id ? 'mdi:progress-helper' : 'mdi:shield-check-outline'}
+      width={18}
+      height={18}
+    />
+  </Button>
+) : item.status === 'disabled' ? (
   <Button
     type="button"
     variant="ghost"
@@ -5559,7 +5594,7 @@ function AdminDashboard(): JSX.Element {
   title={keyStrings.actions.delete}
   aria-label={keyStrings.actions.delete}
   onClick={() => openDeleteConfirm(item.id)}
-  disabled={deletingId === item.id}
+  disabled={deletingId === item.id || clearingQuarantineId === item.id}
 >
   <Icon
     icon={deletingId === item.id ? 'mdi:progress-helper' : 'mdi:trash-outline'}
@@ -5664,13 +5699,23 @@ function AdminDashboard(): JSX.Element {
 >
   {keyStrings.actions.copy}
 </Button>
-{item.status === 'disabled' ? (
+{item.quarantine ? (
+  <Button
+    type="button"
+    variant="outline"
+    size="sm"
+    onClick={() => void handleClearQuarantine(item.id)}
+    disabled={clearingQuarantineId === item.id}
+  >
+    {keyStrings.actions.clearQuarantine}
+  </Button>
+) : item.status === 'disabled' ? (
   <Button
     type="button"
     variant="outline"
     size="sm"
     onClick={() => void handleToggleDisable(item.id, false)}
-    disabled={togglingId === item.id}
+    disabled={togglingId === item.id || clearingQuarantineId === item.id}
   >
     {keyStrings.actions.enable}
   </Button>
@@ -5680,7 +5725,7 @@ function AdminDashboard(): JSX.Element {
     variant="outline"
     size="sm"
     onClick={() => openDisableConfirm(item.id)}
-    disabled={togglingId === item.id}
+    disabled={togglingId === item.id || clearingQuarantineId === item.id}
   >
     {keyStrings.actions.disable}
   </Button>
@@ -7146,7 +7191,9 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
           </div>
           <div style={{ marginTop: 12 }}>
             <div className="panel-description" style={{ marginBottom: 4 }}>{keyDetailsStrings.quarantine.detail}</div>
-            <pre className="log-details-pre">{detail.quarantine.reasonDetail}</pre>
+            <pre className="log-details-pre">
+              {detail.quarantine.reasonDetail || detail.quarantine.reasonSummary || keyStrings.quarantine.noReason}
+            </pre>
           </div>
         </section>
       )}

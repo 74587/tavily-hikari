@@ -74,7 +74,7 @@ export interface ApiKeyQuarantine {
   source: string
   reasonCode: string
   reasonSummary: string
-  reasonDetail: string
+  reasonDetail?: string | null
   createdAt: number
 }
 

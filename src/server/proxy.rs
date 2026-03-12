@@ -1004,8 +1004,16 @@ fn quota_window_stats(verdict: &TokenQuotaVerdict, projected_delta: i64) -> (i64
     }
 }
 
-impl From<ApiKeyMetrics> for ApiKeyView {
-    fn from(metrics: ApiKeyMetrics) -> Self {
+impl ApiKeyView {
+    fn from_list(metrics: ApiKeyMetrics) -> Self {
+        Self::from_metrics(metrics, false)
+    }
+
+    fn from_detail(metrics: ApiKeyMetrics) -> Self {
+        Self::from_metrics(metrics, true)
+    }
+
+    fn from_metrics(metrics: ApiKeyMetrics, include_quarantine_detail: bool) -> Self {
         Self {
             id: metrics.id,
             status: metrics.status,
@@ -1024,7 +1032,7 @@ impl From<ApiKeyMetrics> for ApiKeyView {
                 source: quarantine.source,
                 reason_code: quarantine.reason_code,
                 reason_summary: quarantine.reason_summary,
-                reason_detail: quarantine.reason_detail,
+                reason_detail: include_quarantine_detail.then_some(quarantine.reason_detail),
                 created_at: quarantine.created_at,
             }),
         }
