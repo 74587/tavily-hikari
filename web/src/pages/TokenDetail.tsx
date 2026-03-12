@@ -8,6 +8,7 @@ import AdminLoadingRegion from '../components/AdminLoadingRegion'
 import AdminReturnToConsoleLink from '../components/AdminReturnToConsoleLink'
 import AdminTablePagination from '../components/AdminTablePagination'
 import AdminTableShell from '../components/AdminTableShell'
+import RequestKindBadge from '../components/RequestKindBadge'
 import ThemeToggle from '../components/ThemeToggle'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
 import { Button } from '../components/ui/button'
@@ -1213,7 +1214,7 @@ export default function TokenDetail({
                       onSelect={(event) => event.preventDefault()}
                       onCheckedChange={() => handleToggleRequestKind(option.key)}
                     >
-                      {option.label}
+                      <RequestKindBadge requestKindKey={option.key} requestKindLabel={option.label} size="sm" />
                     </DropdownMenuCheckboxItem>
                   ))
                 )}
@@ -1245,7 +1246,13 @@ export default function TokenDetail({
                 <Fragment key={l.id}>
                   <TableRow>
                     <TableCell>{formatLogTime(l.created_at, period)}</TableCell>
-                    <TableCell>{l.request_kind_label}</TableCell>
+                    <TableCell>
+                      <RequestKindBadge
+                        requestKindKey={l.request_kind_key}
+                        requestKindLabel={l.request_kind_label}
+                        size="sm"
+                      />
+                    </TableCell>
                     <TableCell>{l.http_status ?? '—'}</TableCell>
                     <TableCell>{l.mcp_status ?? '—'}</TableCell>
                     <TableCell>{formatChargedCredits(l.business_credits)}</TableCell>
@@ -1311,7 +1318,12 @@ export default function TokenDetail({
                   </div>
                   <div className="user-console-mobile-kv">
                     <span>Request Type</span>
-                    <strong>{log.request_kind_label}</strong>
+                    <RequestKindBadge
+                      requestKindKey={log.request_kind_key}
+                      requestKindLabel={log.request_kind_label}
+                      size="sm"
+                      className="user-console-mobile-request-kind"
+                    />
                   </div>
                   <div className="user-console-mobile-kv">
                     <span>HTTP Status</span>
@@ -1446,7 +1458,13 @@ function TokenLogDetails({ log, period }: { log: TokenLog; period: Period }) {
         </div>
         <div>
           <span className="log-details-label">Request Type</span>
-          <span className="log-details-value">{log.request_kind_label}</span>
+          <span className="log-details-value">
+            <RequestKindBadge
+              requestKindKey={log.request_kind_key}
+              requestKindLabel={log.request_kind_label}
+              size="sm"
+            />
+          </span>
         </div>
         <div>
           <span className="log-details-label">Outcome</span>
