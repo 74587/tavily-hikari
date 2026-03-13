@@ -974,6 +974,8 @@ export interface ForwardProxyNode {
   displayName: string
   endpointUrl: string | null
   weight: number
+  available: boolean
+  lastError?: string | null
   penalized: boolean
   primaryAssignmentCount: number
   secondaryAssignmentCount: number
@@ -1018,6 +1020,7 @@ export interface ForwardProxyValidationResponse {
   normalizedValue?: string | null
   discoveredNodes?: number | null
   latencyMs?: number | null
+  errorCode?: string | null
 }
 
 export interface ForwardProxyActivityBucket {

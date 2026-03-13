@@ -1432,7 +1432,7 @@ impl TavilyProxy {
                     .map(Url::to_string)
                     .or_else(|| endpoint.raw_url.clone());
                 runtime.available = endpoint.is_selectable();
-                if endpoint.is_direct() {
+                if endpoint.is_direct() || endpoint.is_selectable() {
                     runtime.last_error = None;
                 } else if !endpoint.is_selectable() {
                     runtime.last_error = Some("xray_missing".to_string());

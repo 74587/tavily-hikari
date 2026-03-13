@@ -7188,19 +7188,17 @@ tbody .log-details-row:hover {
 }
 
 .forward-proxy-summary-header {
-  display: block;
-  min-height: 8.25rem;
-}
-
-.forward-proxy-summary-panel .forward-proxy-panel-heading {
-  max-width: min(44rem, calc(100% - 23rem));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 1.5rem;
+  row-gap: 1rem;
 }
 
 .forward-proxy-summary-panel .forward-proxy-panel-meta {
-  position: absolute;
-  top: 1.5rem;
-  right: 1.5rem;
+  position: static;
   align-items: flex-end;
+  justify-self: end;
 }
 
 .forward-proxy-summary-content {
@@ -7504,6 +7502,11 @@ tbody .log-details-row:hover {
   color: hsl(var(--muted-foreground));
 }
 
+.forward-proxy-node-status-detail {
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+}
+
 .forward-proxy-window-card {
   font-size: 0.78rem;
 }
@@ -7556,17 +7559,14 @@ tbody .log-details-row:hover {
   }
 
   .forward-proxy-summary-header {
-    min-height: 0;
-  }
-
-  .forward-proxy-summary-panel .forward-proxy-panel-heading {
-    max-width: none;
+    grid-template-columns: 1fr;
   }
 
   .forward-proxy-summary-panel .forward-proxy-panel-meta {
     position: static;
     margin-top: 1rem;
     align-items: flex-start;
+    justify-self: stretch;
   }
 
   .forward-proxy-range-row {

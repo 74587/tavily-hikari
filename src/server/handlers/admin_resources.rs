@@ -202,6 +202,7 @@ struct ForwardProxyValidationView {
     normalized_value: Option<String>,
     discovered_nodes: Option<usize>,
     latency_ms: Option<f64>,
+    error_code: Option<String>,
 }
 
 fn default_forward_proxy_subscription_update_interval_secs() -> u64 {
@@ -285,6 +286,7 @@ async fn post_forward_proxy_candidate_validation(
             normalized_value: result.normalized_value,
             discovered_nodes: result.discovered_nodes,
             latency_ms: result.latency_ms,
+            error_code: result.error_code,
         }
     } else if let Some(error) = validation.first_error {
         ForwardProxyValidationView {
@@ -293,6 +295,7 @@ async fn post_forward_proxy_candidate_validation(
             normalized_value: None,
             discovered_nodes: Some(validation.discovered_nodes),
             latency_ms: validation.latency_ms,
+            error_code: Some(error.code),
         }
     } else {
         ForwardProxyValidationView {
@@ -305,6 +308,7 @@ async fn post_forward_proxy_candidate_validation(
             normalized_value: validation.normalized_values.into_iter().next(),
             discovered_nodes: Some(validation.discovered_nodes),
             latency_ms: validation.latency_ms,
+            error_code: None,
         }
     };
     Ok(Json(response))

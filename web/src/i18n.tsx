@@ -324,6 +324,11 @@ interface AdminTranslationsShape {
       discoveredNodes: string
       latency: string
       requestFailed: string
+      timeout: string
+      unreachable: string
+      xrayMissing: string
+      subscriptionUnreachable: string
+      validationFailed: string
     }
     nodes: {
       title: string
@@ -357,6 +362,14 @@ interface AdminTranslationsShape {
       penalized: string
       penalizedHint: string
       direct: string
+      timeout: string
+      timeoutHint: string
+      unreachable: string
+      unreachableHint: string
+      unavailable: string
+      unavailableHint: string
+      xrayMissing: string
+      xrayMissingHint: string
     }
     sources: {
       manual: string
@@ -1239,7 +1252,7 @@ export const translations: Record<Language, TranslationShape> = {
           configuredNodes: 'Configured nodes',
           configuredNodesHint: 'Current selectable pool across manual, subscription, and Direct fallback.',
           readyNodes: 'Ready nodes',
-          readyNodesHint: 'Nodes that are not currently penalized.',
+          readyNodesHint: 'Nodes that are both selectable and not currently penalized.',
           penalizedNodes: 'Penalized nodes',
           penalizedNodesHint: 'Nodes under temporary recovery or failure pressure.',
           subscriptions: 'Subscriptions',
@@ -1306,6 +1319,11 @@ export const translations: Record<Language, TranslationShape> = {
           discoveredNodes: 'Discovered nodes',
           latency: 'Latency',
           requestFailed: 'Validation request failed.',
+          timeout: 'Timed out',
+          unreachable: 'Unreachable',
+          xrayMissing: 'Xray unavailable',
+          subscriptionUnreachable: 'Subscription unavailable',
+          validationFailed: 'Validation failed',
         },
         nodes: {
           title: 'Node pool & live stats',
@@ -1339,6 +1357,14 @@ export const translations: Record<Language, TranslationShape> = {
           penalized: 'Penalized',
           penalizedHint: 'Temporarily deprioritized until recovery probes succeed.',
           direct: 'Direct',
+          timeout: 'Timeout',
+          timeoutHint: 'Recent probes timed out before the node could answer.',
+          unreachable: 'Unreachable',
+          unreachableHint: 'The node is currently failing connection attempts or transport setup.',
+          unavailable: 'Unavailable',
+          unavailableHint: 'The node is not selectable right now.',
+          xrayMissing: 'Xray missing',
+          xrayMissingHint: 'Share-link parsing succeeded, but the local Xray runtime is unavailable.',
         },
         sources: {
           manual: 'Manual',
@@ -2209,7 +2235,7 @@ export const translations: Record<Language, TranslationShape> = {
           configuredNodes: '当前节点数',
           configuredNodesHint: '包含手工节点、订阅节点与 Direct 兜底节点。',
           readyNodes: '可用节点',
-          readyNodesHint: '当前未处于惩罚状态的节点数量。',
+          readyNodesHint: '当前既可选又未处于惩罚状态的节点数量。',
           penalizedNodes: '惩罚中节点',
           penalizedNodesHint: '等待恢复探测或刚发生失败的节点。',
           subscriptions: '订阅源',
@@ -2276,6 +2302,11 @@ export const translations: Record<Language, TranslationShape> = {
           discoveredNodes: '发现节点',
           latency: '延迟',
           requestFailed: '验证请求失败。',
+          timeout: '超时',
+          unreachable: '不可达',
+          xrayMissing: 'Xray 不可用',
+          subscriptionUnreachable: '订阅不可达',
+          validationFailed: '验证失败',
         },
         nodes: {
           title: '节点池与实时统计',
@@ -2309,6 +2340,14 @@ export const translations: Record<Language, TranslationShape> = {
           penalized: '惩罚中',
           penalizedHint: '暂时降权，等待恢复探测通过后再提升。',
           direct: 'Direct',
+          timeout: '超时',
+          timeoutHint: '最近探测在超时前没有收到节点响应。',
+          unreachable: '不可达',
+          unreachableHint: '当前连接建立或传输层探测失败。',
+          unavailable: '不可用',
+          unavailableHint: '节点当前不在可选集合内。',
+          xrayMissing: '缺少 Xray',
+          xrayMissingHint: '分享链接解析成功，但本地 Xray 运行时不可用。',
         },
         sources: {
           manual: '手工',

@@ -585,17 +585,80 @@ function getSourceLabel(strings: AdminTranslations['proxySettings'], source: str
   return strings.sources.unknown
 }
 
+type StatusBadgeVariant = 'success' | 'warning' | 'info' | 'neutral' | 'destructive'
+
+function mapValidationErrorLabel(
+  strings: AdminTranslations['proxySettings'],
+  errorCode: string | null | undefined,
+): string {
+  switch (errorCode) {
+    case 'proxy_timeout':
+      return strings.validation.timeout
+    case 'proxy_unreachable':
+      return strings.validation.unreachable
+    case 'xray_missing':
+      return strings.validation.xrayMissing
+    case 'subscription_unreachable':
+      return strings.validation.subscriptionUnreachable
+    default:
+      return strings.validation.validationFailed
+  }
+}
+
+function mapNodeErrorDetail(
+  strings: AdminTranslations['proxySettings'],
+  errorCode: string | null | undefined,
+): string | null {
+  switch (errorCode) {
+    case 'proxy_timeout':
+      return strings.states.timeoutHint
+    case 'proxy_unreachable':
+      return strings.states.unreachableHint
+    case 'xray_missing':
+      return strings.states.xrayMissingHint
+    case 'subscription_unreachable':
+    case 'validation_failed':
+      return strings.states.unavailableHint
+    default:
+      return null
+  }
+}
+
 function getNodeStateBadge(
   strings: AdminTranslations['proxySettings'],
   node: ForwardProxyStatsNode,
-): { label: string; variant: 'success' | 'warning' | 'info' | 'neutral' } {
+): { label: string; variant: StatusBadgeVariant; detail: string | null } {
   if (node.source === 'direct') {
-    return { label: strings.states.direct, variant: 'info' }
+    return { label: strings.states.direct, variant: 'info', detail: null }
   }
   if (node.penalized) {
-    return { label: strings.states.penalized, variant: 'warning' }
+    return { label: strings.states.penalized, variant: 'warning', detail: strings.states.penalizedHint }
   }
-  return { label: strings.states.ready, variant: 'success' }
+  if (!node.available) {
+    switch (node.lastError) {
+      case 'proxy_timeout':
+        return { label: strings.states.timeout, variant: 'destructive', detail: strings.states.timeoutHint }
+      case 'proxy_unreachable':
+        return {
+          label: strings.states.unreachable,
+          variant: 'destructive',
+          detail: strings.states.unreachableHint,
+        }
+      case 'xray_missing':
+        return {
+          label: strings.states.xrayMissing,
+          variant: 'warning',
+          detail: strings.states.xrayMissingHint,
+        }
+      default:
+        return {
+          label: strings.states.unavailable,
+          variant: 'neutral',
+          detail: mapNodeErrorDetail(strings, node.lastError),
+        }
+    }
+  }
+  return { label: strings.states.ready, variant: 'success', detail: strings.states.readyHint }
 }
 
 export default function ForwardProxySettingsModule({
@@ -637,7 +700,7 @@ export default function ForwardProxySettingsModule({
   const totalPrimaryAssignments = mergedNodes.reduce((sum, node) => sum + node.primaryAssignmentCount, 0)
   const totalSecondaryAssignments = mergedNodes.reduce((sum, node) => sum + node.secondaryAssignmentCount, 0)
   const penalizedCount = mergedNodes.filter((node) => node.penalized).length
-  const readyCount = mergedNodes.length - penalizedCount
+  const readyCount = mergedNodes.filter((node) => node.available && !node.penalized).length
   const manualUrls = settings?.proxyUrls ?? []
   const subscriptionUrls = settings?.subscriptionUrls ?? []
   const draft = buildDraftFromSettings(settings)
@@ -912,6 +975,9 @@ export default function ForwardProxySettingsModule({
                           </div>
                         </CardHeader>
                         <CardContent className="forward-proxy-node-mobile-content">
+                          {stateBadge.detail && (
+                            <p className="forward-proxy-node-status-detail">{stateBadge.detail}</p>
+                          )}
                           <div className="forward-proxy-node-mobile-grid">
                             <div className="forward-proxy-node-mobile-block">
                               <span className="forward-proxy-node-metric-label">{strings.nodes.table.assignments}</span>
@@ -1001,6 +1067,9 @@ export default function ForwardProxySettingsModule({
                                     {strings.nodes.secondary}: <strong>{formatNumber(node.secondaryAssignmentCount)}</strong>
                                   </span>
                                 </div>
+                                {stateBadge.detail && (
+                                  <div className="forward-proxy-node-status-detail">{stateBadge.detail}</div>
+                                )}
                               </div>
                             </TableCell>
                             {WINDOW_KEYS.map((windowDefinition, index) => {
@@ -1308,9 +1377,16 @@ export default function ForwardProxySettingsModule({
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant={entry.result.ok ? 'success' : 'destructive'}>
-                            {entry.result.ok ? strings.validation.ok : strings.validation.failed}
-                          </Badge>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge variant={entry.result.ok ? 'success' : 'destructive'}>
+                              {entry.result.ok
+                                ? strings.validation.ok
+                                : mapValidationErrorLabel(strings, entry.result.errorCode)}
+                            </Badge>
+                            {!entry.result.ok && (
+                              <span className="text-[11px] text-muted-foreground">{entry.result.message}</span>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="text-right text-muted-foreground">{formatLatency(entry.result.latencyMs)}</TableCell>
                         <TableCell className="text-right">
@@ -1335,7 +1411,9 @@ export default function ForwardProxySettingsModule({
                 <CardContent className="forward-proxy-validation-card-content">
                   <div className="forward-proxy-validation-head">
                     <Badge variant={dialogResults[0].result.ok ? 'success' : 'destructive'}>
-                      {dialogResults[0].result.ok ? strings.validation.ok : strings.validation.failed}
+                      {dialogResults[0].result.ok
+                        ? strings.validation.ok
+                        : mapValidationErrorLabel(strings, dialogResults[0].result.errorCode)}
                     </Badge>
                     <Badge variant="outline">{strings.validation.subscriptionKind}</Badge>
                   </div>
