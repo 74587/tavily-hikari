@@ -262,7 +262,7 @@ export function fetchApiKeys(
     params.append('group', normalized)
   }
   for (const status of options?.statuses ?? []) {
-    const normalized = status.trim()
+    const normalized = status.trim().toLowerCase()
     if (!normalized) continue
     params.append('status', normalized)
   }

@@ -173,12 +173,16 @@ export interface AdminKeyListContext {
   statuses?: string[] | null
 }
 
-function normalizeKeyContextValues(values?: string[] | null, preserveEmpty = false): string[] {
+function normalizeKeyContextValues(
+  values?: string[] | null,
+  preserveEmpty = false,
+  normalizeCase: 'preserve' | 'lower' = 'preserve',
+): string[] {
   const normalized = new Set<string>()
   for (const value of values ?? []) {
     const trimmed = value.trim()
     if (!trimmed && !preserveEmpty) continue
-    normalized.add(trimmed)
+    normalized.add(normalizeCase === 'lower' ? trimmed.toLowerCase() : trimmed)
   }
   return Array.from(normalized)
 }
@@ -197,7 +201,7 @@ function appendKeysContext(path: string, context?: AdminKeyListContext): string 
   for (const group of normalizeKeyContextValues(context?.groups, true)) {
     params.append('group', group)
   }
-  for (const status of normalizeKeyContextValues(context?.statuses)) {
+  for (const status of normalizeKeyContextValues(context?.statuses, false, 'lower')) {
     params.append('status', status)
   }
 

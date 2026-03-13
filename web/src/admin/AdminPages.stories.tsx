@@ -2,7 +2,7 @@ import { Icon } from '@iconify/react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { addons } from 'storybook/preview-api'
 import { SELECT_STORY } from 'storybook/internal/core-events'
-import { Fragment, type ReactNode, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useState } from 'react'
 
 import type {
   AdminUserDetail,
@@ -1491,9 +1491,11 @@ function KeysPageCanvas({
     keyStrings.filters.selectedSuffix,
   )
 
-  if (page !== safePage) {
-    setPage(safePage)
-  }
+  useEffect(() => {
+    if (page !== safePage) {
+      setPage(safePage)
+    }
+  }, [page, safePage])
 
   return (
     <AdminPageFrame activeModule="keys">

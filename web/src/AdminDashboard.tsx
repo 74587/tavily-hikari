@@ -341,7 +341,7 @@ function getAdminKeysValuesFromLocation(name: 'group' | 'status'): string[] {
   for (const value of values) {
     const trimmed = value.trim()
     if (!trimmed && name !== 'group') continue
-    normalized.add(trimmed)
+    normalized.add(name === 'status' ? trimmed.toLowerCase() : trimmed)
   }
   return Array.from(normalized)
 }
@@ -3169,11 +3169,14 @@ function AdminDashboard(): JSX.Element {
     })
   }
 
-  const refreshBaseData = async () => {
+  const refreshBaseData = async (options?: { includeKeys?: boolean }) => {
     const controller = new AbortController()
     setLoading(true)
     try {
       await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
+      if (options?.includeKeys && route.name === 'module' && route.module === 'keys') {
+        await refreshKeysList()
+      }
     } finally {
       controller.abort()
     }
@@ -3661,7 +3664,7 @@ function AdminDashboard(): JSX.Element {
     try {
       await deleteApiKey(id)
       setPendingDeleteId(null)
-      await Promise.all([refreshBaseData(), refreshKeysList()])
+      await refreshBaseData({ includeKeys: true })
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : errorStrings.deleteKey)
@@ -3679,7 +3682,7 @@ function AdminDashboard(): JSX.Element {
     setTogglingId(id)
     try {
       await setKeyStatus(id, toDisabled ? 'disabled' : 'active')
-      await Promise.all([refreshBaseData(), refreshKeysList()])
+      await refreshBaseData({ includeKeys: true })
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : errorStrings.toggleKey)
@@ -3693,7 +3696,7 @@ function AdminDashboard(): JSX.Element {
     setClearingQuarantineId(id)
     try {
       await clearApiKeyQuarantine(id)
-      await Promise.all([refreshBaseData(), refreshKeysList()])
+      await refreshBaseData({ includeKeys: true })
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : errorStrings.clearQuarantine)

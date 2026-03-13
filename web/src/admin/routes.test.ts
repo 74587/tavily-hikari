@@ -58,7 +58,7 @@ describe('admin user tag routes', () => {
         page: 2,
         perPage: 50,
         groups: ['ops', '', 'ops'],
-        statuses: ['active', 'quarantined', 'active'],
+        statuses: ['active', 'Quarantined', 'active'],
       }),
     ).toBe('/admin/keys?page=2&perPage=50&group=ops&group=&status=active&status=quarantined')
     expect(

@@ -105,7 +105,7 @@ describe('admin user tag api helpers', () => {
 
     const result = await fetchApiKeys(2, 50, {
       groups: ['ops', ''],
-      statuses: ['quarantined', 'disabled'],
+      statuses: ['Quarantined', 'disabled'],
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
