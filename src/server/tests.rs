@@ -11,8 +11,8 @@ mod tests {
     use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use tavily_hikari::{DEFAULT_UPSTREAM, effective_token_hourly_limit};
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
@@ -35,7 +35,9 @@ mod tests {
 
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
-            let lock = env_var_test_lock().lock().expect("env var test lock poisoned");
+            let lock = env_var_test_lock()
+                .lock()
+                .expect("env var test lock poisoned");
             let previous = std::env::var(key).ok();
             unsafe {
                 std::env::set_var(key, value);
@@ -1020,12 +1022,16 @@ mod tests {
 
                             if name == "tavily-search" {
                                 search_id = Some(
-                                    map.get("id").cloned().unwrap_or_else(|| serde_json::json!(1)),
+                                    map.get("id")
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!(1)),
                                 );
                             }
                             if name == "tavily-extract" {
                                 extract_id = Some(
-                                    map.get("id").cloned().unwrap_or_else(|| serde_json::json!(2)),
+                                    map.get("id")
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!(2)),
                                 );
                             }
                         }
@@ -1132,12 +1138,16 @@ mod tests {
 
                             if name == "tavily-search" {
                                 search_id = Some(
-                                    map.get("id").cloned().unwrap_or_else(|| serde_json::json!(1)),
+                                    map.get("id")
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!(1)),
                                 );
                             }
                             if name == "tavily-extract" {
                                 extract_id = Some(
-                                    map.get("id").cloned().unwrap_or_else(|| serde_json::json!(2)),
+                                    map.get("id")
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!(2)),
                                 );
                             }
                         }
@@ -1934,7 +1944,12 @@ mod tests {
                         let hits = hits.clone();
                         async move {
                             hits.fetch_add(1, Ordering::SeqCst);
-                            assert_upstream_json_auth(&headers, &body, &expected_api_key, "/extract");
+                            assert_upstream_json_auth(
+                                &headers,
+                                &body,
+                                &expected_api_key,
+                                "/extract",
+                            );
                             (
                                 StatusCode::OK,
                                 Json(serde_json::json!({
@@ -2170,7 +2185,12 @@ mod tests {
                         let research_calls = research_calls.clone();
                         async move {
                             research_calls.fetch_add(1, Ordering::SeqCst);
-                            assert_upstream_json_auth(&headers, &body, &expected_api_key, "/research");
+                            assert_upstream_json_auth(
+                                &headers,
+                                &body,
+                                &expected_api_key,
+                                "/research",
+                            );
                             (
                                 StatusCode::OK,
                                 Json(serde_json::json!({
@@ -2237,7 +2257,12 @@ mod tests {
                         let research_calls = research_calls.clone();
                         async move {
                             research_calls.fetch_add(1, Ordering::SeqCst);
-                            assert_upstream_json_auth(&headers, &body, &expected_api_key, "/research");
+                            assert_upstream_json_auth(
+                                &headers,
+                                &body,
+                                &expected_api_key,
+                                "/research",
+                            );
                             (
                                 StatusCode::OK,
                                 Json(serde_json::json!({
@@ -2295,7 +2320,12 @@ mod tests {
                         let research_calls = research_calls.clone();
                         async move {
                             research_calls.fetch_add(1, Ordering::SeqCst);
-                            assert_upstream_json_auth(&headers, &body, &expected_api_key, "/research");
+                            assert_upstream_json_auth(
+                                &headers,
+                                &body,
+                                &expected_api_key,
+                                "/research",
+                            );
                             (
                                 StatusCode::OK,
                                 Json(serde_json::json!({
@@ -2317,7 +2347,6 @@ mod tests {
         });
         (addr, usage_calls, research_calls)
     }
-
 
     async fn spawn_http_research_mock_with_follow_up_usage_probe_failure(
         expected_api_key: String,
@@ -2367,7 +2396,12 @@ mod tests {
                         let research_calls = research_calls.clone();
                         async move {
                             research_calls.fetch_add(1, Ordering::SeqCst);
-                            assert_upstream_json_auth(&headers, &body, &expected_api_key, "/research");
+                            assert_upstream_json_auth(
+                                &headers,
+                                &body,
+                                &expected_api_key,
+                                "/research",
+                            );
                             (
                                 StatusCode::OK,
                                 Json(serde_json::json!({
@@ -2405,7 +2439,11 @@ mod tests {
                             request_id, expected_request_id,
                             "upstream research result path should contain the request id"
                         );
-                        assert_upstream_bearer_auth(&headers, &expected_api_key, "/research/:request_id");
+                        assert_upstream_bearer_auth(
+                            &headers,
+                            &expected_api_key,
+                            "/research/:request_id",
+                        );
                         (
                             StatusCode::OK,
                             Json(serde_json::json!({
@@ -2429,7 +2467,8 @@ mod tests {
     }
 
     async fn spawn_http_research_mock_requiring_same_key_for_result() -> SocketAddr {
-        let request_key_map: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let request_key_map: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let usage_calls = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route(
@@ -2943,7 +2982,12 @@ mod tests {
                     let access_token = access_token.clone();
                     move || {
                         let access_token = access_token.clone();
-                        async move { (StatusCode::OK, Json(json!({ "access_token": access_token }))) }
+                        async move {
+                            (
+                                StatusCode::OK,
+                                Json(json!({ "access_token": access_token })),
+                            )
+                        }
                     }
                 }),
             )
@@ -2982,17 +3026,17 @@ mod tests {
         addr
     }
 
-    fn find_cookie_pair(
-        headers: &reqwest::header::HeaderMap,
-        cookie_name: &str,
-    ) -> Option<String> {
+    fn find_cookie_pair(headers: &reqwest::header::HeaderMap, cookie_name: &str) -> Option<String> {
         headers
             .get_all(reqwest::header::SET_COOKIE)
             .iter()
             .filter_map(|value| value.to_str().ok())
             .filter_map(|value| value.split(';').next())
             .map(str::trim)
-            .find(|pair| pair.split_once('=').is_some_and(|(name, _)| name == cookie_name))
+            .find(|pair| {
+                pair.split_once('=')
+                    .is_some_and(|(name, _)| name == cookie_name)
+            })
             .map(str::to_string)
     }
 
@@ -3776,9 +3820,7 @@ mod tests {
                 .and_then(|value| value.as_i64())
         );
         assert_eq!(
-            first_item
-                .get("tokenId")
-                .and_then(|value| value.as_str()),
+            first_item.get("tokenId").and_then(|value| value.as_str()),
             Some(bound_token.id.as_str())
         );
 
@@ -3880,7 +3922,8 @@ mod tests {
             .await
             .expect("create proxy");
 
-        let addr = spawn_user_oauth_server_with_options(proxy, LinuxDoOAuthOptions::disabled()).await;
+        let addr =
+            spawn_user_oauth_server_with_options(proxy, LinuxDoOAuthOptions::disabled()).await;
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -4069,7 +4112,8 @@ mod tests {
             .expect("create preferred token");
 
         let method_probe = Arc::new(Mutex::new(None));
-        let oauth_upstream = spawn_linuxdo_authorize_method_probe_server(method_probe.clone()).await;
+        let oauth_upstream =
+            spawn_linuxdo_authorize_method_probe_server(method_probe.clone()).await;
         let mut oauth_options = linuxdo_oauth_options_for_test();
         oauth_options.authorize_url = format!("http://{oauth_upstream}/oauth2/authorize");
 
@@ -4138,20 +4182,18 @@ mod tests {
             .connect_with(options)
             .await
             .expect("open db pool");
-        sqlx::query("UPDATE user_token_bindings SET token_id = ?, updated_at = ? WHERE user_id = ?")
-            .bind(&mistaken.id)
-            .bind(Utc::now().timestamp() - 30)
-            .bind(&user.user_id)
-            .execute(&pool)
-            .await
-            .expect("simulate mistaken historical binding");
-
-        let oauth_upstream = spawn_linuxdo_oauth_mock_server(
-            "linuxdo-e2e-user",
-            "linuxdo_e2e",
-            "LinuxDO E2E",
+        sqlx::query(
+            "UPDATE user_token_bindings SET token_id = ?, updated_at = ? WHERE user_id = ?",
         )
-        .await;
+        .bind(&mistaken.id)
+        .bind(Utc::now().timestamp() - 30)
+        .bind(&user.user_id)
+        .execute(&pool)
+        .await
+        .expect("simulate mistaken historical binding");
+
+        let oauth_upstream =
+            spawn_linuxdo_oauth_mock_server("linuxdo-e2e-user", "linuxdo_e2e", "LinuxDO E2E").await;
         let mut oauth_options = linuxdo_oauth_options_for_test();
         oauth_options.authorize_url = format!("http://{oauth_upstream}/oauth2/authorize");
         oauth_options.token_url = format!("http://{oauth_upstream}/oauth2/token");
@@ -4185,7 +4227,10 @@ mod tests {
         let binding_cookie = find_cookie_pair(auth_resp.headers(), OAUTH_LOGIN_BINDING_COOKIE_NAME)
             .expect("oauth binding cookie");
 
-        let callback_url = format!("http://{}/auth/linuxdo/callback?code=e2e-code&state={state}", addr);
+        let callback_url = format!(
+            "http://{}/auth/linuxdo/callback?code=e2e-code&state={state}",
+            addr
+        );
         let callback_resp = no_redirect
             .get(&callback_url)
             .header(reqwest::header::COOKIE, binding_cookie)
@@ -4230,26 +4275,28 @@ mod tests {
             "preferred token should be added while keeping existing bound token"
         );
 
-        let preferred_owner =
-            sqlx::query_scalar::<_, Option<String>>("SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1")
-                .bind(&preferred.id)
-                .fetch_optional(&pool)
-                .await
-                .expect("query preferred owner")
-                .flatten();
+        let preferred_owner = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
+        )
+        .bind(&preferred.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("query preferred owner")
+        .flatten();
         assert_eq!(
             preferred_owner.as_deref(),
             Some(user.user_id.as_str()),
             "preferred token should belong to the current user"
         );
 
-        let mistaken_owner =
-            sqlx::query_scalar::<_, Option<String>>("SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1")
-                .bind(&mistaken.id)
-                .fetch_optional(&pool)
-                .await
-                .expect("query mistaken owner")
-                .flatten();
+        let mistaken_owner = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT user_id FROM user_token_bindings WHERE token_id = ? LIMIT 1",
+        )
+        .bind(&mistaken.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("query mistaken owner")
+        .flatten();
         assert_eq!(
             mistaken_owner.as_deref(),
             Some(user.user_id.as_str()),
@@ -4263,10 +4310,15 @@ mod tests {
             .await
             .expect("get user tokens");
         assert_eq!(tokens_resp.status(), reqwest::StatusCode::OK);
-        let token_items: Vec<serde_json::Value> = tokens_resp.json().await.expect("token list body");
+        let token_items: Vec<serde_json::Value> =
+            tokens_resp.json().await.expect("token list body");
         let token_ids: std::collections::HashSet<String> = token_items
             .into_iter()
-            .filter_map(|item| item.get("tokenId").and_then(|value| value.as_str()).map(str::to_string))
+            .filter_map(|item| {
+                item.get("tokenId")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
             .collect();
         assert!(
             token_ids.contains(&preferred.id),
@@ -4701,9 +4753,13 @@ mod tests {
     async fn api_key_detail_requires_admin_auth() {
         let db_path = temp_db_path("api-key-detail-auth");
         let db_str = db_path.to_string_lossy().to_string();
-        let proxy = TavilyProxy::with_endpoint(vec!["tvly-detail-auth".to_string()], DEFAULT_UPSTREAM, &db_str)
-            .await
-            .expect("proxy created");
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-detail-auth".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
         let key_id = proxy
             .list_api_key_metrics()
             .await
@@ -4785,8 +4841,9 @@ mod tests {
         assert_eq!(list_resp.status(), reqwest::StatusCode::OK);
         let list_body: serde_json::Value = list_resp.json().await.expect("list json");
         let listed = list_body
-            .as_array()
-            .expect("key list array")
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("key list items array")
             .iter()
             .find(|value| value.get("id").and_then(|v| v.as_str()) == Some(key_id.as_str()))
             .expect("key in list");
@@ -4801,12 +4858,358 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_key_list_supports_pagination_filters_and_facets() {
+        let db_path = temp_db_path("admin-key-list-pagination");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-pagination-seed".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let seeded_key_id = proxy
+            .list_api_key_metrics()
+            .await
+            .expect("list initial key metrics")
+            .into_iter()
+            .next()
+            .expect("seeded key")
+            .id;
+        proxy
+            .soft_delete_key_by_id(&seeded_key_id)
+            .await
+            .expect("soft delete seeded key");
+
+        let (alpha_active_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group(
+                "tvly-pagination-alpha-active",
+                Some("team-a"),
+            )
+            .await
+            .expect("create alpha active");
+        let (alpha_quarantined_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group(
+                "tvly-pagination-alpha-quarantine",
+                Some("team-a"),
+            )
+            .await
+            .expect("create alpha quarantined");
+        let (beta_disabled_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group(
+                "tvly-pagination-beta-disabled",
+                Some("team-b"),
+            )
+            .await
+            .expect("create beta disabled");
+        let (beta_active_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group("tvly-pagination-beta-active", Some("team-b"))
+            .await
+            .expect("create beta active");
+        let (ungrouped_exhausted_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group("tvly-pagination-gamma-exhausted", None)
+            .await
+            .expect("create gamma exhausted");
+
+        proxy
+            .disable_key_by_id(&beta_disabled_id)
+            .await
+            .expect("disable beta key");
+        proxy
+            .mark_key_quota_exhausted_by_secret("tvly-pagination-gamma-exhausted")
+            .await
+            .expect("mark gamma exhausted");
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open db pool");
+
+        for (key_id, last_used_at) in [
+            (&alpha_active_id, 500_i64),
+            (&alpha_quarantined_id, 400_i64),
+            (&beta_active_id, 300_i64),
+            (&beta_disabled_id, 200_i64),
+            (&ungrouped_exhausted_id, 100_i64),
+        ] {
+            sqlx::query(
+                r#"UPDATE api_keys
+                   SET last_used_at = ?, status_changed_at = ?
+                   WHERE id = ?"#,
+            )
+            .bind(last_used_at)
+            .bind(last_used_at)
+            .bind(key_id)
+            .execute(&pool)
+            .await
+            .expect("update last_used_at");
+        }
+
+        sqlx::query(
+            r#"INSERT INTO api_key_quarantines
+               (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
+        )
+        .bind(&alpha_quarantined_id)
+        .bind("/api/tavily/search")
+        .bind("account_deactivated")
+        .bind("Tavily account deactivated (HTTP 401)")
+        .bind("The account associated with this API key has been deactivated.")
+        .bind(401_i64)
+        .execute(&pool)
+        .await
+        .expect("insert quarantine");
+
+        let admin_password = "key-pagination-password";
+        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build client");
+
+        let login_resp = client
+            .post(format!("http://{}/api/admin/login", admin_addr))
+            .json(&serde_json::json!({ "password": admin_password }))
+            .send()
+            .await
+            .expect("admin login");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let admin_cookie = find_cookie_pair(login_resp.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+            .expect("admin session cookie");
+
+        let page_one_resp = client
+            .get(format!("http://{}/api/keys?page=1&per_page=2", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .send()
+            .await
+            .expect("page one request");
+        assert_eq!(page_one_resp.status(), reqwest::StatusCode::OK);
+        let page_one_body: serde_json::Value = page_one_resp.json().await.expect("page one json");
+        assert_eq!(
+            page_one_body.get("total").and_then(|value| value.as_i64()),
+            Some(5)
+        );
+        assert_eq!(
+            page_one_body.get("page").and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            page_one_body
+                .get("perPage")
+                .and_then(|value| value.as_i64()),
+            Some(2)
+        );
+        let page_one_items = page_one_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("page one items");
+        assert_eq!(page_one_items.len(), 2);
+        assert_eq!(
+            page_one_items[0].get("id").and_then(|value| value.as_str()),
+            Some(alpha_active_id.as_str())
+        );
+        assert_eq!(
+            page_one_items[1].get("id").and_then(|value| value.as_str()),
+            Some(alpha_quarantined_id.as_str())
+        );
+
+        let group_facets = page_one_body
+            .get("facets")
+            .and_then(|value| value.get("groups"))
+            .and_then(|value| value.as_array())
+            .expect("group facets");
+        let group_counts = group_facets
+            .iter()
+            .map(|value| {
+                (
+                    value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    value
+                        .get("count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(group_counts.get("").copied(), Some(1));
+        assert_eq!(group_counts.get("team-a").copied(), Some(2));
+        assert_eq!(group_counts.get("team-b").copied(), Some(2));
+
+        let status_facets = page_one_body
+            .get("facets")
+            .and_then(|value| value.get("statuses"))
+            .and_then(|value| value.as_array())
+            .expect("status facets");
+        let status_counts = status_facets
+            .iter()
+            .map(|value| {
+                (
+                    value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    value
+                        .get("count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(status_counts.get("active").copied(), Some(2));
+        assert_eq!(status_counts.get("disabled").copied(), Some(1));
+        assert_eq!(status_counts.get("exhausted").copied(), Some(1));
+        assert_eq!(status_counts.get("quarantined").copied(), Some(1));
+
+        let filtered_resp = client
+            .get(format!(
+                "http://{}/api/keys?page=1&per_page=10&group=team-a&group=team-b&status=quarantined&status=disabled",
+                admin_addr
+            ))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .send()
+            .await
+            .expect("filtered request");
+        assert_eq!(filtered_resp.status(), reqwest::StatusCode::OK);
+        let filtered_body: serde_json::Value = filtered_resp.json().await.expect("filtered json");
+        assert_eq!(
+            filtered_body.get("total").and_then(|value| value.as_i64()),
+            Some(2)
+        );
+        let filtered_items = filtered_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("filtered items");
+        assert_eq!(filtered_items.len(), 2);
+        assert_eq!(
+            filtered_items[0].get("id").and_then(|value| value.as_str()),
+            Some(alpha_quarantined_id.as_str())
+        );
+        assert_eq!(
+            filtered_items[1].get("id").and_then(|value| value.as_str()),
+            Some(beta_disabled_id.as_str())
+        );
+
+        let filtered_group_counts = filtered_body
+            .get("facets")
+            .and_then(|value| value.get("groups"))
+            .and_then(|value| value.as_array())
+            .expect("filtered group facets")
+            .iter()
+            .map(|value| {
+                (
+                    value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    value
+                        .get("count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(filtered_group_counts.get("team-a").copied(), Some(1));
+        assert_eq!(filtered_group_counts.get("team-b").copied(), Some(1));
+        assert_eq!(filtered_group_counts.len(), 2);
+
+        let filtered_status_counts = filtered_body
+            .get("facets")
+            .and_then(|value| value.get("statuses"))
+            .and_then(|value| value.as_array())
+            .expect("filtered status facets")
+            .iter()
+            .map(|value| {
+                (
+                    value
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    value
+                        .get("count")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(filtered_status_counts.get("active").copied(), Some(2));
+        assert_eq!(filtered_status_counts.get("disabled").copied(), Some(1));
+        assert_eq!(filtered_status_counts.get("quarantined").copied(), Some(1));
+        assert_eq!(filtered_status_counts.len(), 3);
+
+        let ungrouped_resp = client
+            .get(format!(
+                "http://{}/api/keys?page=1&per_page=10&group=&status=exhausted",
+                admin_addr
+            ))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .send()
+            .await
+            .expect("ungrouped request");
+        assert_eq!(ungrouped_resp.status(), reqwest::StatusCode::OK);
+        let ungrouped_body: serde_json::Value =
+            ungrouped_resp.json().await.expect("ungrouped json");
+        let ungrouped_items = ungrouped_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("ungrouped items");
+        assert_eq!(
+            ungrouped_body.get("total").and_then(|value| value.as_i64()),
+            Some(1)
+        );
+        assert_eq!(ungrouped_items.len(), 1);
+        assert_eq!(
+            ungrouped_items[0]
+                .get("id")
+                .and_then(|value| value.as_str()),
+            Some(ungrouped_exhausted_id.as_str())
+        );
+
+        let clamped_resp = client
+            .get(format!("http://{}/api/keys?page=99&per_page=2", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie)
+            .send()
+            .await
+            .expect("clamped request");
+        assert_eq!(clamped_resp.status(), reqwest::StatusCode::OK);
+        let clamped_body: serde_json::Value = clamped_resp.json().await.expect("clamped json");
+        assert_eq!(
+            clamped_body.get("page").and_then(|value| value.as_i64()),
+            Some(3)
+        );
+        let clamped_items = clamped_body
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("clamped items");
+        assert_eq!(clamped_items.len(), 1);
+        assert_eq!(
+            clamped_items[0].get("id").and_then(|value| value.as_str()),
+            Some(ungrouped_exhausted_id.as_str())
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn public_summary_hides_quarantined_key_count_without_admin_auth() {
         let db_path = temp_db_path("public-summary-quarantine");
         let db_str = db_path.to_string_lossy().to_string();
-        let proxy = TavilyProxy::with_endpoint(vec!["tvly-summary-public".to_string()], DEFAULT_UPSTREAM, &db_str)
-            .await
-            .expect("proxy created");
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-summary-public".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
         let key_id = proxy
             .list_api_key_metrics()
             .await
@@ -4892,7 +5295,10 @@ mod tests {
         let db_path = temp_db_path("summary-signatures-quarantine");
         let db_str = db_path.to_string_lossy().to_string();
         let proxy = TavilyProxy::with_endpoint(
-            vec!["tvly-signature-a".to_string(), "tvly-signature-b".to_string()],
+            vec![
+                "tvly-signature-a".to_string(),
+                "tvly-signature-b".to_string(),
+            ],
             DEFAULT_UPSTREAM,
             &db_str,
         )
@@ -4925,15 +5331,15 @@ mod tests {
                (key_id, source, reason_code, reason_summary, reason_detail, created_at, cleared_at)
                VALUES (?, ?, ?, ?, ?, ?, NULL)"#,
         )
-            .bind(&key_id)
-            .bind("/api/tavily/search")
-            .bind("account_deactivated")
-            .bind("Tavily account deactivated (HTTP 401)")
-            .bind("The account associated with this API key has been deactivated.")
-            .bind(Utc::now().timestamp())
-            .execute(&pool)
-            .await
-            .expect("quarantine key");
+        .bind(&key_id)
+        .bind("/api/tavily/search")
+        .bind("account_deactivated")
+        .bind("Tavily account deactivated (HTTP 401)")
+        .bind("The account associated with this API key has been deactivated.")
+        .bind(Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .expect("quarantine key");
 
         let state = Arc::new(AppState {
             proxy,
@@ -4946,7 +5352,9 @@ mod tests {
             usage_base: "http://127.0.0.1:58088".to_string(),
         });
 
-        let (sig, latest_id) = compute_signatures(&state).await.expect("compute signatures");
+        let (sig, latest_id) = compute_signatures(&state)
+            .await
+            .expect("compute signatures");
         let sig = sig.expect("summary signature");
         assert_eq!(sig.4, 1);
         assert_eq!(sig.5, 0);
@@ -5114,9 +5522,11 @@ mod tests {
             .get("tags")
             .and_then(|value| value.as_array())
             .expect("list tags array");
-        assert!(list_tags.iter().any(|value| {
-            value.get("displayName").and_then(|it| it.as_str()) == Some("VIP+")
-        }));
+        assert!(
+            list_tags.iter().any(|value| {
+                value.get("displayName").and_then(|it| it.as_str()) == Some("VIP+")
+            })
+        );
         assert!(list_tags.iter().any(|value| {
             value.get("systemKey").and_then(|it| it.as_str()) == Some("linuxdo_l2")
         }));
@@ -5385,10 +5795,8 @@ mod tests {
             .await
             .expect("list user tags request");
         assert_eq!(list_tags_resp.status(), reqwest::StatusCode::OK);
-        let list_tags_body: serde_json::Value = list_tags_resp
-            .json()
-            .await
-            .expect("list user tags json");
+        let list_tags_body: serde_json::Value =
+            list_tags_resp.json().await.expect("list user tags json");
         let items = list_tags_body
             .get("items")
             .and_then(|value| value.as_array())
@@ -5396,7 +5804,9 @@ mod tests {
         assert_eq!(items.len(), 5);
         let system_tag = items
             .iter()
-            .find(|item| item.get("systemKey").and_then(|value| value.as_str()) == Some("linuxdo_l4"))
+            .find(|item| {
+                item.get("systemKey").and_then(|value| value.as_str()) == Some("linuxdo_l4")
+            })
             .expect("linuxdo_l4 system tag present");
         assert!(
             system_tag
@@ -5460,7 +5870,10 @@ mod tests {
             .send()
             .await
             .expect("update system tag display name request");
-        assert_eq!(update_system_name_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            update_system_name_resp.status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
 
         let bind_system_resp = client
             .post(format!("http://{}/api/users/{}/tags", addr, user.user_id))
@@ -5486,10 +5899,8 @@ mod tests {
             .await
             .expect("create custom tag request");
         assert_eq!(create_custom_resp.status(), reqwest::StatusCode::OK);
-        let custom_tag: serde_json::Value = create_custom_resp
-            .json()
-            .await
-            .expect("custom tag json");
+        let custom_tag: serde_json::Value =
+            create_custom_resp.json().await.expect("custom tag json");
         let custom_tag_id = custom_tag
             .get("id")
             .and_then(|value| value.as_str())
@@ -5585,18 +5996,27 @@ mod tests {
         }));
 
         let unbind_system_resp = client
-            .delete(format!("http://{}/api/users/{}/tags/{}", addr, user.user_id, system_tag_id))
+            .delete(format!(
+                "http://{}/api/users/{}/tags/{}",
+                addr, user.user_id, system_tag_id
+            ))
             .send()
             .await
             .expect("unbind system tag request");
-        assert_eq!(unbind_system_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            unbind_system_resp.status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
 
         let delete_system_resp = client
             .delete(format!("http://{}/api/user-tags/{}", addr, system_tag_id))
             .send()
             .await
             .expect("delete system tag request");
-        assert_eq!(delete_system_resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            delete_system_resp.status(),
+            reqwest::StatusCode::BAD_REQUEST
+        );
 
         let delete_custom_resp = client
             .delete(format!("http://{}/api/user-tags/{}", addr, custom_tag_id))
@@ -5643,7 +6063,8 @@ mod tests {
                 .get("tags")
                 .and_then(|value| value.as_array())
                 .is_some_and(|tags| tags.iter().all(|tag| {
-                    tag.get("tagId").and_then(|value| value.as_str()) != Some(custom_tag_id.as_str())
+                    tag.get("tagId").and_then(|value| value.as_str())
+                        != Some(custom_tag_id.as_str())
                 }))
         );
         assert!(
@@ -5732,10 +6153,14 @@ mod tests {
 
         let unbound_item = items
             .iter()
-            .find(|item| item.get("id").and_then(|value| value.as_str()) == Some(unbound.id.as_str()))
+            .find(|item| {
+                item.get("id").and_then(|value| value.as_str()) == Some(unbound.id.as_str())
+            })
             .expect("unbound item exists");
         assert!(
-            unbound_item.get("owner").is_some_and(|value| value.is_null()),
+            unbound_item
+                .get("owner")
+                .is_some_and(|value| value.is_null()),
             "unbound token owner should be null"
         );
 
@@ -5765,7 +6190,9 @@ mod tests {
             .await
             .expect("unbound token detail json");
         assert!(
-            unbound_detail.get("owner").is_some_and(|value| value.is_null()),
+            unbound_detail
+                .get("owner")
+                .is_some_and(|value| value.is_null()),
             "unbound token detail owner should be null"
         );
 
@@ -5878,7 +6305,10 @@ mod tests {
         let client = Client::new();
 
         let logs_resp = client
-            .get(format!("http://{}/api/tokens/{}/logs?limit=20", addr, token.id))
+            .get(format!(
+                "http://{}/api/tokens/{}/logs?limit=20",
+                addr, token.id
+            ))
             .send()
             .await
             .expect("logs request");
@@ -6011,10 +6441,7 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             filtered_keys,
-            std::collections::BTreeSet::from([
-                "api:search".to_string(),
-                "mcp:search".to_string(),
-            ])
+            std::collections::BTreeSet::from(["api:search".to_string(), "mcp:search".to_string(),])
         );
 
         let filtered_legacy_resp = client
@@ -6049,9 +6476,11 @@ mod tests {
             .expect("events request");
         assert_eq!(events_resp.status(), reqwest::StatusCode::OK);
         let mut first_text = String::new();
-        while !first_text.contains("
+        while !first_text.contains(
+            "
 
-") {
+",
+        ) {
             let chunk = events_resp
                 .chunk()
                 .await
@@ -6060,9 +6489,11 @@ mod tests {
             first_text.push_str(std::str::from_utf8(&chunk).expect("snapshot chunk utf8"));
         }
         let snapshot_event = first_text
-            .split("
+            .split(
+                "
 
-")
+",
+            )
             .find(|chunk| chunk.contains("data: "))
             .expect("snapshot event");
         let snapshot_line = snapshot_event
@@ -6233,8 +6664,6 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
-
-
     #[tokio::test]
     async fn tavily_http_search_returns_401_for_invalid_token() {
         let db_path = temp_db_path("http-search-401-invalid");
@@ -6394,7 +6823,10 @@ mod tests {
             .await
             .expect("request 1");
         assert_eq!(resp1.status(), reqwest::StatusCode::OK);
-        let verdict1 = proxy.peek_token_quota(&token.id).await.expect("peek quota 1");
+        let verdict1 = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota 1");
         assert_eq!(verdict1.hourly_used, 1);
 
         let resp2 = client
@@ -6405,7 +6837,10 @@ mod tests {
             .await
             .expect("request 2");
         assert_eq!(resp2.status(), reqwest::StatusCode::OK);
-        let verdict2 = proxy.peek_token_quota(&token.id).await.expect("peek quota 2");
+        let verdict2 = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota 2");
         assert_eq!(verdict2.hourly_used, 2);
 
         // Third request should be blocked by predicted cost, without hitting upstream.
@@ -6418,7 +6853,10 @@ mod tests {
             .expect("request 3");
         assert_eq!(resp3.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        let verdict3 = proxy.peek_token_quota(&token.id).await.expect("peek quota 3");
+        let verdict3 = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota 3");
         assert_eq!(verdict3.hourly_used, 2);
 
         let _ = std::fs::remove_file(db_path);
@@ -6460,7 +6898,10 @@ mod tests {
             .await
             .expect("request 1");
         assert_eq!(resp1.status(), reqwest::StatusCode::OK);
-        let verdict1 = proxy.peek_token_quota(&token.id).await.expect("peek quota 1");
+        let verdict1 = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota 1");
         assert_eq!(verdict1.hourly_used, 2);
 
         // Second request should be blocked (2 + 2 > 2), without hitting upstream.
@@ -6514,7 +6955,10 @@ mod tests {
             .await
             .expect("basic request");
         assert_eq!(basic_resp.status(), reqwest::StatusCode::OK);
-        let verdict1 = proxy.peek_token_quota(&token.id).await.expect("peek quota 1");
+        let verdict1 = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota 1");
         assert_eq!(verdict1.hourly_used, 1);
 
         let advanced_resp = client
@@ -6527,7 +6971,10 @@ mod tests {
             .await
             .expect("advanced request");
         assert_eq!(advanced_resp.status(), reqwest::StatusCode::OK);
-        let verdict2 = proxy.peek_token_quota(&token.id).await.expect("peek quota 2");
+        let verdict2 = proxy
+            .peek_token_quota(&token.id)
+            .await
+            .expect("peek quota 2");
         assert_eq!(verdict2.hourly_used, 3);
 
         assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -6583,8 +7030,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tavily_http_search_returns_upstream_response_when_billing_write_fails_after_upstream_success(
-    ) {
+    async fn tavily_http_search_returns_upstream_response_when_billing_write_fails_after_upstream_success()
+     {
         let db_path = temp_db_path("http-search-billing-write-fails");
         let db_str = db_path.to_string_lossy().to_string();
 
@@ -6855,7 +7302,6 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
-
 
     #[tokio::test]
     async fn tavily_http_search_concurrent_requests_do_not_bypass_quota_due_to_billing_lock() {
@@ -7592,13 +8038,8 @@ mod tests {
             .expect("create token");
 
         // extract=0 (no charge), crawl=5, map=3
-        let (upstream_addr, hits) = spawn_http_json_endpoints_mock_with_usage(
-            expected_api_key.to_string(),
-            0,
-            5,
-            3,
-        )
-        .await;
+        let (upstream_addr, hits) =
+            spawn_http_json_endpoints_mock_with_usage(expected_api_key.to_string(), 0, 5, 3).await;
         let usage_base = format!("http://{}", upstream_addr);
         let proxy_addr = spawn_proxy_server(proxy.clone(), usage_base).await;
 
@@ -8131,10 +8572,12 @@ mod tests {
             .next()
             .expect("token log exists");
         assert_eq!(latest_log.result_status, "success");
-        assert!(latest_log
-            .error_message
-            .unwrap_or_default()
-            .contains("charging reserved minimum 4 credit(s)"));
+        assert!(
+            latest_log
+                .error_message
+                .unwrap_or_default()
+                .contains("charging reserved minimum 4 credit(s)")
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -8199,10 +8642,12 @@ mod tests {
             .next()
             .expect("token log exists");
         assert_eq!(latest_log.result_status, "success");
-        assert!(latest_log
-            .error_message
-            .unwrap_or_default()
-            .contains("charging reserved minimum 4 credit(s)"));
+        assert!(
+            latest_log
+                .error_message
+                .unwrap_or_default()
+                .contains("charging reserved minimum 4 credit(s)")
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -8400,7 +8845,10 @@ mod tests {
             .await
             .expect("request to proxy succeeds");
         assert!(create_resp.status().is_success());
-        let create_body: Value = create_resp.json().await.expect("parse research create response");
+        let create_body: Value = create_resp
+            .json()
+            .await
+            .expect("parse research create response");
         let request_id = create_body
             .get("request_id")
             .and_then(|v| v.as_str())
@@ -8420,7 +8868,10 @@ mod tests {
             StatusCode::OK,
             "result query should reuse the same upstream key selected by create step"
         );
-        let result_body: Value = result_resp.json().await.expect("parse research result response");
+        let result_body: Value = result_resp
+            .json()
+            .await
+            .expect("parse research result response");
         assert_eq!(
             result_body.get("request_id").and_then(|v| v.as_str()),
             Some(request_id)
@@ -8471,7 +8922,10 @@ mod tests {
             .await
             .expect("request to proxy succeeds");
         assert!(create_resp.status().is_success());
-        let create_body: Value = create_resp.json().await.expect("parse research create response");
+        let create_body: Value = create_resp
+            .json()
+            .await
+            .expect("parse research create response");
         let request_id = create_body
             .get("request_id")
             .and_then(|v| v.as_str())
@@ -8558,7 +9012,10 @@ mod tests {
             .await
             .expect("request to proxy succeeds");
         assert!(create_resp.status().is_success());
-        let create_body: Value = create_resp.json().await.expect("parse research create response");
+        let create_body: Value = create_resp
+            .json()
+            .await
+            .expect("parse research create response");
         let request_id = create_body
             .get("request_id")
             .and_then(|v| v.as_str())
@@ -8579,7 +9036,10 @@ mod tests {
             .await
             .expect("request to proxy succeeds");
         assert_eq!(result_resp.status(), StatusCode::NOT_FOUND);
-        let body: Value = result_resp.json().await.expect("parse research result response");
+        let body: Value = result_resp
+            .json()
+            .await
+            .expect("parse research result response");
         assert_eq!(
             body.get("error").and_then(|v| v.as_str()),
             Some("research_request_not_found")
@@ -8672,7 +9132,10 @@ mod tests {
         let counts_business_quota: i64 = row.try_get("counts_business_quota").unwrap();
         let result_status: String = row.try_get("result_status").unwrap();
 
-        assert_eq!(http_status, Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64));
+        assert_eq!(
+            http_status,
+            Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16() as i64)
+        );
         assert_eq!(counts_business_quota, 0);
         assert_eq!(result_status, "error");
 
@@ -8802,7 +9265,10 @@ mod tests {
             .await
             .expect("request to proxy succeeds");
         assert!(create_resp.status().is_success());
-        let create_body: Value = create_resp.json().await.expect("parse research create response");
+        let create_body: Value = create_resp
+            .json()
+            .await
+            .expect("parse research create response");
         let request_id = create_body
             .get("request_id")
             .and_then(|v| v.as_str())
@@ -8829,7 +9295,10 @@ mod tests {
             StatusCode::OK,
             "restarted proxy should load persisted research affinity"
         );
-        let result_body: Value = result_resp.json().await.expect("parse research result response");
+        let result_body: Value = result_resp
+            .json()
+            .await
+            .expect("parse research result response");
         assert_eq!(
             result_body.get("request_id").and_then(|v| v.as_str()),
             Some(request_id.as_str())
@@ -9180,7 +9649,8 @@ mod tests {
         let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1");
 
         let expected_api_key = "tvly-mcp-initialize-ping-key";
-        let (upstream_addr, hits) = spawn_mock_upstream_with_hits(expected_api_key.to_string()).await;
+        let (upstream_addr, hits) =
+            spawn_mock_upstream_with_hits(expected_api_key.to_string()).await;
         let upstream = format!("http://{}", upstream_addr);
 
         let proxy =
@@ -9271,7 +9741,8 @@ mod tests {
         let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1");
 
         let expected_api_key = "tvly-mcp-batch-body-key";
-        let (upstream_addr, hits) = spawn_mock_upstream_with_hits(expected_api_key.to_string()).await;
+        let (upstream_addr, hits) =
+            spawn_mock_upstream_with_hits(expected_api_key.to_string()).await;
         let upstream = format!("http://{}", upstream_addr);
 
         let proxy =
@@ -9319,7 +9790,11 @@ mod tests {
             .expect("request to proxy succeeds");
 
         assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "upstream must not be hit when blocked");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "upstream must not be hit when blocked"
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -9420,9 +9895,10 @@ mod tests {
         let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
 
         let expected_api_key = "tvly-mcp-batch-search-charges-with-error-key";
-        let (upstream_addr, hits) =
-            spawn_mock_mcp_upstream_for_tavily_search_batch_with_error(expected_api_key.to_string())
-                .await;
+        let (upstream_addr, hits) = spawn_mock_mcp_upstream_for_tavily_search_batch_with_error(
+            expected_api_key.to_string(),
+        )
+        .await;
         let upstream = format!("http://{}", upstream_addr);
 
         let proxy =
@@ -9472,8 +9948,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_batch_tools_call_tavily_search_charges_usage_credits_even_when_sibling_quota_exhausted(
-    ) {
+    async fn mcp_batch_tools_call_tavily_search_charges_usage_credits_even_when_sibling_quota_exhausted()
+     {
         let db_path = temp_db_path("mcp-batch-search-charges-with-quota-exhausted");
         let db_str = db_path.to_string_lossy().to_string();
 
@@ -9603,7 +10079,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_batch_tools_call_tavily_search_does_not_overcharge_when_error_is_in_detail_status() {
+    async fn mcp_batch_tools_call_tavily_search_does_not_overcharge_when_error_is_in_detail_status()
+    {
         let db_path = temp_db_path("mcp-batch-search-detail-status-no-overcharge");
         let db_str = db_path.to_string_lossy().to_string();
 
@@ -9664,17 +10141,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_batch_tools_call_tavily_search_charges_expected_total_when_usage_missing_for_some_items(
-    ) {
+    async fn mcp_batch_tools_call_tavily_search_charges_expected_total_when_usage_missing_for_some_items()
+     {
         let db_path = temp_db_path("mcp-batch-search-partial-usage");
         let db_str = db_path.to_string_lossy().to_string();
 
         let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
 
         let expected_api_key = "tvly-mcp-batch-search-partial-usage-key";
-        let (upstream_addr, hits) =
-            spawn_mock_mcp_upstream_for_tavily_search_batch_partial_usage(expected_api_key.to_string())
-                .await;
+        let (upstream_addr, hits) = spawn_mock_mcp_upstream_for_tavily_search_batch_partial_usage(
+            expected_api_key.to_string(),
+        )
+        .await;
         let upstream = format!("http://{}", upstream_addr);
 
         let proxy =
@@ -9731,9 +10209,10 @@ mod tests {
         let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
 
         let expected_api_key = "tvly-mcp-batch-mixed-tools-list-search-credits-key";
-        let (upstream_addr, hits) =
-            spawn_mock_mcp_upstream_for_mixed_tools_list_and_search_usage(expected_api_key.to_string())
-                .await;
+        let (upstream_addr, hits) = spawn_mock_mcp_upstream_for_mixed_tools_list_and_search_usage(
+            expected_api_key.to_string(),
+        )
+        .await;
         let upstream = format!("http://{}", upstream_addr);
 
         let proxy =
@@ -9934,7 +10413,8 @@ mod tests {
         let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1000");
 
         let expected_api_key = "tvly-mcp-batch-duplicate-ids-key";
-        let (upstream_addr, hits) = spawn_mock_upstream_with_hits(expected_api_key.to_string()).await;
+        let (upstream_addr, hits) =
+            spawn_mock_upstream_with_hits(expected_api_key.to_string()).await;
         let upstream = format!("http://{}", upstream_addr);
 
         let proxy =
@@ -10050,7 +10530,10 @@ mod tests {
             .expect("second request");
         assert_eq!(second.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
         let second_body: Value = second.json().await.expect("second response json");
-        assert_eq!(second_body.get("window").and_then(|v| v.as_str()), Some("hour"));
+        assert_eq!(
+            second_body.get("window").and_then(|v| v.as_str()),
+            Some("hour")
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
 
         let _ = std::fs::remove_file(db_path);
@@ -10324,8 +10807,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tools_call_tavily_search_returns_upstream_response_when_billing_write_fails_after_upstream_success(
-    ) {
+    async fn mcp_tools_call_tavily_search_returns_upstream_response_when_billing_write_fails_after_upstream_success()
+     {
         let db_path = temp_db_path("mcp-tools-call-search-billing-write-fails");
         let db_str = db_path.to_string_lossy().to_string();
 
@@ -10864,7 +11347,10 @@ mod tests {
             .peek_token_quota(&access_token.id)
             .await
             .expect("peek quota");
-        assert_eq!(verdict.hourly_used, 0, "JSON-RPC error must not charge credits");
+        assert_eq!(
+            verdict.hourly_used, 0,
+            "JSON-RPC error must not charge credits"
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -10998,7 +11484,10 @@ mod tests {
             .await
             .expect("request to proxy succeeds");
 
-        assert!(resp.status().is_success(), "expected successful MCP response");
+        assert!(
+            resp.status().is_success(),
+            "expected successful MCP response"
+        );
 
         let logs = proxy
             .token_recent_logs(&access_token.id, 5, None)

@@ -1930,6 +1930,19 @@ impl TavilyProxy {
         self.key_store.fetch_api_key_metrics(false).await
     }
 
+    /// Admin: list API key metrics with pagination and optional filters.
+    pub async fn list_api_key_metrics_paged(
+        &self,
+        page: i64,
+        per_page: i64,
+        groups: &[String],
+        statuses: &[String],
+    ) -> Result<PaginatedApiKeyMetrics, ProxyError> {
+        self.key_store
+            .fetch_api_key_metrics_page(page, per_page, groups, statuses)
+            .await
+    }
+
     /// 获取单个 API key 的完整统计信息，包含隔离详情。
     pub async fn get_api_key_metric(
         &self,
@@ -11166,16 +11179,34 @@ impl KeyStore {
         Ok(())
     }
 
-    async fn fetch_api_key_metrics(
-        &self,
-        include_quarantine_detail: bool,
-    ) -> Result<Vec<ApiKeyMetrics>, ProxyError> {
+    fn api_key_metrics_from_clause() -> &'static str {
+        r#"
+            FROM api_keys ak
+            LEFT JOIN (
+                SELECT
+                    api_key_id,
+                    COALESCE(SUM(total_requests), 0) AS total_requests,
+                    COALESCE(SUM(success_count), 0) AS success_count,
+                    COALESCE(SUM(error_count), 0) AS error_count,
+                    COALESCE(SUM(quota_exhausted_count), 0) AS quota_exhausted_count
+                FROM api_key_usage_buckets
+                WHERE bucket_secs = 86400
+                GROUP BY api_key_id
+            ) AS stats
+            ON stats.api_key_id = ak.id
+            LEFT JOIN api_key_quarantines aq
+            ON aq.key_id = ak.id AND aq.cleared_at IS NULL
+            WHERE ak.deleted_at IS NULL
+        "#
+    }
+
+    fn api_key_metrics_query(include_quarantine_detail: bool) -> String {
         let quarantine_detail_sql = if include_quarantine_detail {
             "aq.reason_detail AS quarantine_reason_detail,"
         } else {
             "NULL AS quarantine_reason_detail,"
         };
-        let query = format!(
+        format!(
             r#"
             SELECT
                 ak.id,
@@ -11196,85 +11227,252 @@ impl KeyStore {
                 COALESCE(stats.success_count, 0) AS success_count,
                 COALESCE(stats.error_count, 0) AS error_count,
                 COALESCE(stats.quota_exhausted_count, 0) AS quota_exhausted_count
-            FROM api_keys ak
-            LEFT JOIN (
-                SELECT
-                    api_key_id,
-                    COALESCE(SUM(total_requests), 0) AS total_requests,
-                    COALESCE(SUM(success_count), 0) AS success_count,
-                    COALESCE(SUM(error_count), 0) AS error_count,
-                    COALESCE(SUM(quota_exhausted_count), 0) AS quota_exhausted_count
-                FROM api_key_usage_buckets
-                WHERE bucket_secs = 86400
-                GROUP BY api_key_id
-            ) AS stats
-            ON stats.api_key_id = ak.id
-            LEFT JOIN api_key_quarantines aq
-            ON aq.key_id = ak.id AND aq.cleared_at IS NULL
-            WHERE ak.deleted_at IS NULL
-            ORDER BY ak.status ASC, ak.last_used_at ASC, ak.id ASC
+            {}
             "#,
+            Self::api_key_metrics_from_clause(),
+        )
+    }
+
+    fn map_api_key_metrics_row(row: sqlx::sqlite::SqliteRow) -> Result<ApiKeyMetrics, sqlx::Error> {
+        let id: String = row.try_get("id")?;
+        let status: String = row.try_get("status")?;
+        let group_name: Option<String> = row.try_get("group_name")?;
+        let status_changed_at: Option<i64> = row.try_get("status_changed_at")?;
+        let last_used_at: i64 = row.try_get("last_used_at")?;
+        let deleted_at: Option<i64> = row.try_get("deleted_at")?;
+        let quota_limit: Option<i64> = row.try_get("quota_limit")?;
+        let quota_remaining: Option<i64> = row.try_get("quota_remaining")?;
+        let quota_synced_at: Option<i64> = row.try_get("quota_synced_at")?;
+        let total_requests: i64 = row.try_get("total_requests")?;
+        let success_count: i64 = row.try_get("success_count")?;
+        let error_count: i64 = row.try_get("error_count")?;
+        let quota_exhausted_count: i64 = row.try_get("quota_exhausted_count")?;
+        let quarantine_source: Option<String> = row.try_get("quarantine_source")?;
+        let quarantine_reason_code: Option<String> = row.try_get("quarantine_reason_code")?;
+        let quarantine_reason_summary: Option<String> = row.try_get("quarantine_reason_summary")?;
+        let quarantine_reason_detail: Option<String> = row.try_get("quarantine_reason_detail")?;
+        let quarantine_created_at: Option<i64> = row.try_get("quarantine_created_at")?;
+
+        Ok(ApiKeyMetrics {
+            id,
+            status,
+            group_name: group_name.and_then(|name| {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            }),
+            status_changed_at: status_changed_at.and_then(normalize_timestamp),
+            last_used_at: normalize_timestamp(last_used_at),
+            deleted_at: deleted_at.and_then(normalize_timestamp),
+            quota_limit,
+            quota_remaining,
+            quota_synced_at: quota_synced_at.and_then(normalize_timestamp),
+            total_requests,
+            success_count,
+            error_count,
+            quota_exhausted_count,
+            quarantine: quarantine_source.map(|source| ApiKeyQuarantine {
+                source,
+                reason_code: quarantine_reason_code.unwrap_or_default(),
+                reason_summary: quarantine_reason_summary.unwrap_or_default(),
+                reason_detail: quarantine_reason_detail.unwrap_or_default(),
+                created_at: quarantine_created_at.unwrap_or_default(),
+            }),
+        })
+    }
+
+    fn normalize_api_key_groups(groups: &[String]) -> Vec<String> {
+        let mut normalized = Vec::new();
+        for group in groups {
+            let value = group.trim().to_string();
+            if !normalized.iter().any(|existing| existing == &value) {
+                normalized.push(value);
+            }
+        }
+        normalized
+    }
+
+    fn normalize_api_key_statuses(statuses: &[String]) -> Vec<String> {
+        let mut normalized = Vec::new();
+        for status in statuses {
+            let value = status.trim().to_ascii_lowercase();
+            if value.is_empty() {
+                continue;
+            }
+            if !normalized.iter().any(|existing| existing == &value) {
+                normalized.push(value);
+            }
+        }
+        normalized
+    }
+
+    fn push_api_key_group_filters<'a>(
+        builder: &mut QueryBuilder<'a, Sqlite>,
+        groups: &'a [String],
+    ) {
+        if groups.is_empty() {
+            return;
+        }
+
+        builder.push(" AND (");
+        for (index, group) in groups.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            if group.is_empty() {
+                builder.push("(TRIM(COALESCE(ak.group_name, '')) = '')");
+            } else {
+                builder
+                    .push("(TRIM(COALESCE(ak.group_name, '')) = ")
+                    .push_bind(group)
+                    .push(")");
+            }
+        }
+        builder.push(")");
+    }
+
+    fn push_api_key_status_filters<'a>(
+        builder: &mut QueryBuilder<'a, Sqlite>,
+        statuses: &'a [String],
+    ) {
+        if statuses.is_empty() {
+            return;
+        }
+
+        builder.push(" AND (");
+        for (index, status) in statuses.iter().enumerate() {
+            if index > 0 {
+                builder.push(" OR ");
+            }
+            if status == "quarantined" {
+                builder.push("(aq.key_id IS NOT NULL)");
+            } else {
+                builder
+                    .push("(aq.key_id IS NULL AND ak.status = ")
+                    .push_bind(status)
+                    .push(")");
+            }
+        }
+        builder.push(")");
+    }
+
+    async fn fetch_api_key_group_facets(
+        &self,
+        statuses: &[String],
+    ) -> Result<Vec<ApiKeyFacetCount>, ProxyError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT TRIM(COALESCE(ak.group_name, '')) AS value, COUNT(*) AS count",
         );
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        builder.push(Self::api_key_metrics_from_clause());
+        Self::push_api_key_status_filters(&mut builder, statuses);
+        builder.push(" GROUP BY value ORDER BY value ASC");
 
-        let metrics = rows
-            .into_iter()
-            .map(|row| -> Result<ApiKeyMetrics, sqlx::Error> {
-                let id: String = row.try_get("id")?;
-                let status: String = row.try_get("status")?;
-                let group_name: Option<String> = row.try_get("group_name")?;
-                let status_changed_at: Option<i64> = row.try_get("status_changed_at")?;
-                let last_used_at: i64 = row.try_get("last_used_at")?;
-                let deleted_at: Option<i64> = row.try_get("deleted_at")?;
-                let quota_limit: Option<i64> = row.try_get("quota_limit")?;
-                let quota_remaining: Option<i64> = row.try_get("quota_remaining")?;
-                let quota_synced_at: Option<i64> = row.try_get("quota_synced_at")?;
-                let total_requests: i64 = row.try_get("total_requests")?;
-                let success_count: i64 = row.try_get("success_count")?;
-                let error_count: i64 = row.try_get("error_count")?;
-                let quota_exhausted_count: i64 = row.try_get("quota_exhausted_count")?;
-                let quarantine_source: Option<String> = row.try_get("quarantine_source")?;
-                let quarantine_reason_code: Option<String> =
-                    row.try_get("quarantine_reason_code")?;
-                let quarantine_reason_summary: Option<String> =
-                    row.try_get("quarantine_reason_summary")?;
-                let quarantine_reason_detail: Option<String> =
-                    row.try_get("quarantine_reason_detail")?;
-                let quarantine_created_at: Option<i64> = row.try_get("quarantine_created_at")?;
-
-                Ok(ApiKeyMetrics {
-                    id,
-                    status,
-                    group_name: group_name.and_then(|name| {
-                        let trimmed = name.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.to_owned())
-                        }
-                    }),
-                    status_changed_at: status_changed_at.and_then(normalize_timestamp),
-                    last_used_at: normalize_timestamp(last_used_at),
-                    deleted_at: deleted_at.and_then(normalize_timestamp),
-                    quota_limit,
-                    quota_remaining,
-                    quota_synced_at: quota_synced_at.and_then(normalize_timestamp),
-                    total_requests,
-                    success_count,
-                    error_count,
-                    quota_exhausted_count,
-                    quarantine: quarantine_source.map(|source| ApiKeyQuarantine {
-                        source,
-                        reason_code: quarantine_reason_code.unwrap_or_default(),
-                        reason_summary: quarantine_reason_summary.unwrap_or_default(),
-                        reason_detail: quarantine_reason_detail.unwrap_or_default(),
-                        created_at: quarantine_created_at.unwrap_or_default(),
-                    }),
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ApiKeyFacetCount {
+                    value: row.try_get("value")?,
+                    count: row.try_get("count")?,
                 })
             })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::from)
+    }
+
+    async fn fetch_api_key_status_facets(
+        &self,
+        groups: &[String],
+    ) -> Result<Vec<ApiKeyFacetCount>, ProxyError> {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT CASE WHEN aq.key_id IS NOT NULL THEN 'quarantined' ELSE ak.status END AS value, COUNT(*) AS count",
+        );
+        builder.push(Self::api_key_metrics_from_clause());
+        Self::push_api_key_group_filters(&mut builder, groups);
+        builder.push(" GROUP BY value ORDER BY value ASC");
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ApiKeyFacetCount {
+                    value: row.try_get("value")?,
+                    count: row.try_get("count")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()
+            .map_err(ProxyError::from)
+    }
+
+    async fn fetch_api_key_metrics(
+        &self,
+        include_quarantine_detail: bool,
+    ) -> Result<Vec<ApiKeyMetrics>, ProxyError> {
+        let query = format!(
+            "{} ORDER BY CASE WHEN ak.status = 'active' THEN 0 ELSE 1 END ASC, COALESCE(ak.last_used_at, 0) DESC, ak.id ASC",
+            Self::api_key_metrics_query(include_quarantine_detail),
+        );
+        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(Self::map_api_key_metrics_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProxyError::from)
+    }
+
+    async fn fetch_api_key_metrics_page(
+        &self,
+        page: i64,
+        per_page: i64,
+        groups: &[String],
+        statuses: &[String],
+    ) -> Result<PaginatedApiKeyMetrics, ProxyError> {
+        let requested_page = page.max(1);
+        let per_page = per_page.clamp(1, 100);
+        let groups = Self::normalize_api_key_groups(groups);
+        let statuses = Self::normalize_api_key_statuses(statuses);
+
+        let mut count_builder = QueryBuilder::<Sqlite>::new("SELECT COUNT(*)");
+        count_builder.push(Self::api_key_metrics_from_clause());
+        Self::push_api_key_group_filters(&mut count_builder, &groups);
+        Self::push_api_key_status_filters(&mut count_builder, &statuses);
+        let total = count_builder
+            .build_query_scalar::<i64>()
+            .fetch_one(&self.pool)
+            .await?;
+        let total_pages = ((total + per_page - 1) / per_page).max(1);
+        let page = requested_page.min(total_pages);
+        let offset = (page - 1) * per_page;
+
+        let mut items_builder = QueryBuilder::<Sqlite>::new(Self::api_key_metrics_query(false));
+        Self::push_api_key_group_filters(&mut items_builder, &groups);
+        Self::push_api_key_status_filters(&mut items_builder, &statuses);
+        items_builder.push(
+            " ORDER BY CASE WHEN ak.status = 'active' THEN 0 ELSE 1 END ASC, COALESCE(ak.last_used_at, 0) DESC, ak.id ASC",
+        );
+        items_builder.push(" LIMIT ").push_bind(per_page);
+        items_builder.push(" OFFSET ").push_bind(offset);
+        let items = items_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(Self::map_api_key_metrics_row)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(metrics)
+        let group_counts = self.fetch_api_key_group_facets(&statuses).await?;
+        let status_counts = self.fetch_api_key_status_facets(&groups).await?;
+
+        Ok(PaginatedApiKeyMetrics {
+            items,
+            total,
+            page,
+            per_page,
+            facets: ApiKeyListFacets {
+                groups: group_counts,
+                statuses: status_counts,
+            },
+        })
     }
 
     async fn fetch_api_key_metric_by_id(
@@ -12157,6 +12355,27 @@ pub struct ApiKeyMetrics {
     pub error_count: i64,
     pub quota_exhausted_count: i64,
     pub quarantine: Option<ApiKeyQuarantine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyFacetCount {
+    pub value: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyListFacets {
+    pub groups: Vec<ApiKeyFacetCount>,
+    pub statuses: Vec<ApiKeyFacetCount>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaginatedApiKeyMetrics {
+    pub items: Vec<ApiKeyMetrics>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+    pub facets: ApiKeyListFacets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

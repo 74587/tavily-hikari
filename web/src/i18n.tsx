@@ -657,6 +657,10 @@ interface AdminTranslationsShape {
       clearStatuses: string
       selectedSuffix: string
     }
+    pagination: {
+      page: string
+      perPage: string
+    }
     table: {
       keyId: string
       status: string
@@ -1563,6 +1567,10 @@ export const translations: Record<Language, TranslationShape> = {
           clearStatuses: 'Show all statuses',
           selectedSuffix: 'selected',
         },
+        pagination: {
+          page: 'Page {page} of {total}',
+          perPage: 'Per page',
+        },
       table: {
         keyId: 'Key ID',
         status: 'Status',
@@ -2451,6 +2459,10 @@ export const translations: Record<Language, TranslationShape> = {
           clearGroups: '显示全部分组',
           clearStatuses: '显示全部状态',
           selectedSuffix: '项已选',
+        },
+        pagination: {
+          page: '第 {page}/{total} 页',
+          perPage: '每页',
         },
         table: {
           keyId: 'Key ID',

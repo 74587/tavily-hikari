@@ -117,6 +117,16 @@ export interface ApiKeySecret {
   api_key: string
 }
 
+export interface ApiKeyFacetOption {
+  value: string
+  count: number
+}
+
+export interface ApiKeyListFacets {
+  groups: ApiKeyFacetOption[]
+  statuses: ApiKeyFacetOption[]
+}
+
 // ---- Access Tokens (for /mcp auth) ----
 export interface TokenOwnerSummary {
   userId: string
@@ -233,8 +243,30 @@ export async function fetchPublicLogs(token: string, limit = 20, signal?: AbortS
   }))
 }
 
-export function fetchApiKeys(signal?: AbortSignal): Promise<ApiKeyStats[]> {
-  return requestJson('/api/keys', { signal })
+export interface PaginatedApiKeys extends Paginated<ApiKeyStats> {
+  facets: ApiKeyListFacets
+}
+
+export function fetchApiKeys(
+  page = 1,
+  perPage = 20,
+  options?: { groups?: string[]; statuses?: string[] },
+  signal?: AbortSignal,
+): Promise<PaginatedApiKeys> {
+  const params = new URLSearchParams({
+    page: String(page),
+    per_page: String(perPage),
+  })
+  for (const group of options?.groups ?? []) {
+    const normalized = group.trim()
+    params.append('group', normalized)
+  }
+  for (const status of options?.statuses ?? []) {
+    const normalized = status.trim().toLowerCase()
+    if (!normalized) continue
+    params.append('status', normalized)
+  }
+  return requestJson(`/api/keys?${params.toString()}`, { signal })
 }
 
 export function fetchApiKeyDetail(id: string, signal?: AbortSignal): Promise<ApiKeyStats> {
