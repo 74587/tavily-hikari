@@ -1623,6 +1623,21 @@ function KeysPageCanvas({
             <h2>{keyStrings.title}</h2>
             <p className="panel-description">{keyStrings.description}</p>
           </div>
+          <div style={{ ...keysQuickAddCardStyle, marginLeft: 'auto' }}>
+            <div style={keysQuickAddActionsStyle}>
+              <input
+                type="text"
+                className="input input-bordered"
+                readOnly
+                value="tvly-prod-******"
+                aria-label={keyStrings.placeholder}
+                style={{ flex: '1 1 260px', minWidth: 260, maxWidth: '100%' }}
+              />
+              <button type="button" className="btn btn-primary btn-sm" style={{ whiteSpace: 'nowrap' }}>
+                {keyStrings.addButton}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div style={keysUtilityRowStyle}>
@@ -1759,21 +1774,6 @@ function KeysPageCanvas({
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
-          </div>
-          <div style={keysQuickAddCardStyle}>
-            <div style={keysQuickAddActionsStyle}>
-              <input
-                type="text"
-                className="input input-bordered"
-                readOnly
-                value="tvly-prod-******"
-                aria-label={keyStrings.placeholder}
-                style={{ flex: '1 1 260px', minWidth: 260, maxWidth: '100%' }}
-              />
-              <button type="button" className="btn btn-primary btn-sm" style={{ whiteSpace: 'nowrap' }}>
-                {keyStrings.addButton}
-              </button>
-            </div>
           </div>
         </div>
 

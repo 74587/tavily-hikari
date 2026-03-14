@@ -6268,6 +6268,66 @@ function AdminDashboard(): JSX.Element {
 	            <h2>{keyStrings.title}</h2>
 	            <p className="panel-description">{keyStrings.description}</p>
 	          </div>
+            {isAdmin && (
+              <div
+                ref={keysBatchAnchorRef}
+                onMouseEnter={() => {
+                  clearKeysBatchAutoCollapseTimer()
+                  clearKeysBatchCloseTimer()
+                  setKeysBatchClosing(false)
+                  if (keysBatchSuppressNextHoverRef.current) {
+                    keysBatchSuppressNextHoverRef.current = false
+                    return
+                  }
+                  keysBatchOpenReasonRef.current = 'hover'
+                  setKeysBatchExpanded(true)
+                }}
+                onMouseLeave={() => {
+                  keysBatchSuppressNextHoverRef.current = false
+                  scheduleKeysBatchAutoCollapse('hover')
+                }}
+                onFocusCapture={() => {
+                  clearKeysBatchAutoCollapseTimer()
+                  clearKeysBatchCloseTimer()
+                  setKeysBatchClosing(false)
+                  keysBatchOpenReasonRef.current = 'focus'
+                  setKeysBatchExpanded(true)
+                }}
+                style={{ ...keysQuickAddCardStyle, position: 'relative', marginLeft: 'auto' }}
+              >
+                <div
+                  className={`keys-batch-collapsed${keysBatchVisible ? ' is-hidden' : ''}`}
+                  aria-hidden={keysBatchVisible}
+                  style={keysQuickAddActionsStyle}
+                >
+                  <Input
+                    ref={keysBatchCollapsedInputRef}
+                    type="text"
+                    name="collapsed-key-input"
+                    placeholder={keyStrings.placeholder}
+                    aria-label={keyStrings.placeholder}
+                    value={keysBatchFirstLine}
+                    onChange={(e) => setNewKeysText(e.target.value)}
+                    disabled={keysBatchVisible}
+                    style={{ flex: '1 1 260px', minWidth: 260, maxWidth: '100%' }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => void handleAddKey()}
+                    disabled={keysBatchVisible || submitting || keysBatchParsed.length === 0}
+                    style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                  >
+                    {submitting ? keyStrings.adding : keyStrings.addButton}
+                  </Button>
+                </div>
+                <datalist id="api-key-group-datalist">
+                  {namedKeyGroups.map((group) => (
+                    <option key={group.name} value={group.name} />
+                  ))}
+                </datalist>
+              </div>
+            )}
 	        </div>
           <div style={keysUtilityRowStyle}>
             <div style={keysFilterClusterStyle}>
@@ -6411,66 +6471,6 @@ function AdminDashboard(): JSX.Element {
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
-            {isAdmin && (
-              <div
-                ref={keysBatchAnchorRef}
-                onMouseEnter={() => {
-                  clearKeysBatchAutoCollapseTimer()
-                  clearKeysBatchCloseTimer()
-                  setKeysBatchClosing(false)
-                  if (keysBatchSuppressNextHoverRef.current) {
-                    keysBatchSuppressNextHoverRef.current = false
-                    return
-                  }
-                  keysBatchOpenReasonRef.current = 'hover'
-                  setKeysBatchExpanded(true)
-                }}
-                onMouseLeave={() => {
-                  keysBatchSuppressNextHoverRef.current = false
-                  scheduleKeysBatchAutoCollapse('hover')
-                }}
-                onFocusCapture={() => {
-                  clearKeysBatchAutoCollapseTimer()
-                  clearKeysBatchCloseTimer()
-                  setKeysBatchClosing(false)
-                  keysBatchOpenReasonRef.current = 'focus'
-                  setKeysBatchExpanded(true)
-                }}
-                style={{ ...keysQuickAddCardStyle, position: 'relative' }}
-              >
-                <div
-                  className={`keys-batch-collapsed${keysBatchVisible ? ' is-hidden' : ''}`}
-                  aria-hidden={keysBatchVisible}
-                  style={keysQuickAddActionsStyle}
-                >
-                  <Input
-                    ref={keysBatchCollapsedInputRef}
-                    type="text"
-                    name="collapsed-key-input"
-                    placeholder={keyStrings.placeholder}
-                    aria-label={keyStrings.placeholder}
-                    value={keysBatchFirstLine}
-                    onChange={(e) => setNewKeysText(e.target.value)}
-                    disabled={keysBatchVisible}
-                    style={{ flex: '1 1 260px', minWidth: 260, maxWidth: '100%' }}
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={() => void handleAddKey()}
-                    disabled={keysBatchVisible || submitting || keysBatchParsed.length === 0}
-                    style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
-                  >
-                    {submitting ? keyStrings.adding : keyStrings.addButton}
-                  </Button>
-                </div>
-                <datalist id="api-key-group-datalist">
-                  {namedKeyGroups.map((group) => (
-                    <option key={group.name} value={group.name} />
-                  ))}
-                </datalist>
-              </div>
-            )}
           </div>
         <AdminTableShell
           className="jobs-table-wrapper admin-responsive-up"
