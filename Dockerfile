@@ -1,5 +1,5 @@
 ########## Stage 1: compile the Rust binary ##########
-FROM rust:1.91 AS builder
+FROM rust:1.91-bookworm AS builder
 ARG APP_EFFECTIVE_VERSION
 WORKDIR /app
 
