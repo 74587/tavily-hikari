@@ -170,17 +170,17 @@ function filterKeyForStatus(status: KeyValidationStatus): ValidationFilterKey {
 
 function RegistrationIpIndicator(props: { label: string; tooltip: string }): JSX.Element {
   return (
-    <span className="group/registration-ip relative inline-flex align-middle">
-      <Badge
-        variant="success"
-        className="cursor-help gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]"
-        title={props.tooltip}
-        tabIndex={0}
-      >
-        <Icon icon="mdi:check-bold" width={12} height={12} aria-hidden="true" />
-        <span>{props.label}</span>
-      </Badge>
-      <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-max max-w-[16rem] -translate-x-1/2 rounded-lg border border-base-300 bg-base-100 px-2.5 py-1.5 text-[11px] font-medium text-base-content shadow-lg group-hover/registration-ip:block group-focus-within/registration-ip:block">
+    <span className="key-validation-detail">
+      <span className="key-validation-detail-trigger inline-flex" tabIndex={0} aria-label={props.tooltip}>
+        <Badge
+          variant="success"
+          className="gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em]"
+        >
+          <Icon icon="mdi:check-bold" width={12} height={12} aria-hidden="true" />
+          <span>{props.label}</span>
+        </Badge>
+      </span>
+      <span className="key-validation-bubble" role="tooltip">
         {props.tooltip}
       </span>
     </span>
