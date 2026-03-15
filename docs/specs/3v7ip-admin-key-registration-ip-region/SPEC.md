@@ -175,6 +175,19 @@
 
 ![导入校验弹窗](assets/api-keys-validation-dialog.png)
 
+## Visual Evidence (PR)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: Admin/Components/ApiKeysValidationDialog/Assigned Proxy Match Kinds
+  state: proxy-match-kinds
+  evidence_note: verifies the registration bubble renders success/info/warning text colors for registration IP, same-region, and other proxy matches during import validation.
+  image:
+  ![导入校验映射节点颜色分层](./assets/api-keys-validation-proxy-match-kinds.png)
+
 ## 质量门槛（Quality Gates）
 
 - `cargo fmt --all`

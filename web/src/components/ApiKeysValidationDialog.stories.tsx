@@ -227,18 +227,43 @@ export const PostImportWithRemainingRows: Story = {
   },
 };
 
+function openVisibleRegistrationBubbles(maxCount?: number): void {
+  const triggers = Array.from(
+    document.querySelectorAll<HTMLElement>("[data-registration-ip-trigger='true']"),
+  ).filter((candidate) => candidate.getClientRects().length > 0);
+
+  const visibleTriggers = triggers.slice(0, maxCount ?? triggers.length);
+  for (const trigger of visibleTriggers) {
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+  }
+
+  visibleTriggers[0]?.focus();
+}
+
+function staggerVisibleRegistrationBubbles(): void {
+  const offsets = [
+    { left: -56, top: 0 },
+    { left: 0, top: 44 },
+    { left: 64, top: 88 },
+  ];
+  const bubbles = Array.from(document.querySelectorAll<HTMLElement>(".key-validation-bubble")).filter(
+    (candidate) => candidate.getClientRects().length > 0,
+  );
+
+  bubbles.forEach((bubble, index) => {
+    const offset = offsets[index] ?? offsets[offsets.length - 1];
+    bubble.style.marginLeft = `${offset.left}px`;
+    bubble.style.marginTop = `${offset.top}px`;
+  });
+}
+
 function RegistrationIpPreviewCanvas(): JSX.Element {
   const timeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     timeoutRef.current = window.setTimeout(() => {
-      const trigger = Array.from(
-        document.querySelectorAll<HTMLElement>("[data-registration-ip-trigger='true']"),
-      ).find((candidate) => candidate.getClientRects().length > 0);
-      if (!trigger) return;
-      trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-      trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
-      trigger.focus();
+      openVisibleRegistrationBubbles(1);
     }, 180);
     return () => {
       if (timeoutRef.current != null) window.clearTimeout(timeoutRef.current);
@@ -328,10 +353,79 @@ export const RegistrationIpPreview: Story = {
 };
 
 export const AssignedProxyMatchKinds: Story = {
-  ...RegistrationIpPreview,
+  args: {
+    initial: {
+      group: "default",
+      input_lines: 3,
+      valid_lines: 3,
+      unique_in_input: 3,
+      duplicate_in_input: 0,
+      checking: false,
+      importing: false,
+      rows: [
+        {
+          api_key: "tvly-MATCH-IP",
+          status: "ok",
+          registration_ip: "8.8.8.8",
+          registration_region: "US",
+          assigned_proxy_key: "__direct__",
+          assigned_proxy_label: "Direct",
+          assigned_proxy_match_kind: "registration_ip",
+          quota_limit: 1000,
+          quota_remaining: 123,
+          attempts: 1,
+        },
+        {
+          api_key: "tvly-MATCH-REGION",
+          status: "ok",
+          registration_ip: "2606:4700:4700::1111",
+          registration_region: "US Westfield (MA)",
+          assigned_proxy_key: "http://1.1.1.1:8080",
+          assigned_proxy_label: "Westfield Relay",
+          assigned_proxy_match_kind: "same_region",
+          quota_limit: 1000,
+          quota_remaining: 456,
+          attempts: 1,
+        },
+        {
+          api_key: "tvly-MATCH-OTHER",
+          status: "ok",
+          registration_ip: "9.9.9.9",
+          registration_region: "ZZ",
+          assigned_proxy_key: "http://9.9.9.9:8080",
+          assigned_proxy_label: "Fallback Relay",
+          assigned_proxy_match_kind: "other",
+          quota_limit: 1000,
+          quota_remaining: 789,
+          attempts: 1,
+        },
+      ],
+    },
+  },
+  render: (args) => {
+    function AssignedProxyMatchKindsCanvas(): JSX.Element {
+      const timeoutRef = useRef<number | null>(null);
+
+      useEffect(() => {
+        timeoutRef.current = window.setTimeout(() => {
+          openVisibleRegistrationBubbles();
+          window.setTimeout(() => {
+            staggerVisibleRegistrationBubbles();
+          }, 40);
+        }, 180);
+        return () => {
+          if (timeoutRef.current != null) window.clearTimeout(timeoutRef.current);
+        };
+      }, []);
+
+      return <ModalHarness initial={args.initial} />;
+    }
+
+    return <AssignedProxyMatchKindsCanvas />;
+  },
   name: "Assigned Proxy Match Kinds",
   parameters: {
-    ...RegistrationIpPreview.parameters,
+    viewport: { defaultViewport: "1440-device-desktop" },
     docs: {
       description: {
         story:
