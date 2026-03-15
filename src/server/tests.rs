@@ -3520,7 +3520,7 @@ mod tests {
             None,
         );
 
-        let usage_addr = spawn_forward_proxy_probe_upstream().await;
+        let usage_addr = spawn_usage_mock_server().await;
         let usage_base = format!("http://{}", usage_addr);
         let addr =
             spawn_keys_admin_server_with_usage_base(proxy, forward_auth, false, usage_base).await;
