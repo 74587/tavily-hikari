@@ -1,6 +1,6 @@
 import React from "react";
-import { Icon } from "@iconify/react";
 import { createPortal } from "react-dom";
+import { Icon } from "../lib/icons";
 
 import { useTranslate } from "../i18n";
 import { useViewportMode } from "../lib/responsive";
