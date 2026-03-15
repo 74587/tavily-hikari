@@ -329,12 +329,16 @@ interface AdminTranslationsShape {
       add: string
       addedToList: string
       importAvailable: string
+      importInput: string
       cancel: string
       remove: string
       resultNode: string
+      resultNetwork: string
       resultStatus: string
       resultLatency: string
       resultAction: string
+      resultDetails: string
+      closeDetails: string
       saveFailed: string
     }
     validation: {
@@ -353,8 +357,40 @@ interface AdminTranslationsShape {
       timeout: string
       unreachable: string
       xrayMissing: string
+      subscriptionInvalid: string
       subscriptionUnreachable: string
+      subscriptionTimedOut: string
+      subscriptionNoNodes: string
+      subscriptionUnsupportedNodes: string
+      cancelled: string
       validationFailed: string
+    }
+    progress: {
+      titleValidate: string
+      titleSave: string
+      badgeValidate: string
+      badgeSave: string
+      buttonValidatingSubscription: string
+      buttonValidatingManual: string
+      buttonAddingSubscription: string
+      buttonAddingManual: string
+      running: string
+      waiting: string
+      done: string
+      failed: string
+      stepCounter: string
+      steps: Record<
+        | 'save_settings'
+        | 'refresh_subscription'
+        | 'bootstrap_probe'
+        | 'normalize_input'
+        | 'parse_input'
+        | 'fetch_subscription'
+        | 'probe_nodes'
+        | 'generate_result'
+        | 'refresh_ui',
+        string
+      >
     }
     nodes: {
       title: string
@@ -1384,22 +1420,26 @@ export const translations: Record<Language, TranslationShape> = {
           insertDirectLabel: 'Insert Direct fallback',
           insertDirectHint: 'Keep Direct as a secondary or last-resort route when proxy nodes become unavailable.',
           subscriptionDialogTitle: 'Add subscription URL',
-          subscriptionDialogDescription: 'Paste one subscription URL, validate it first, then add it to the saved list.',
+          subscriptionDialogDescription: 'Paste one subscription URL, validate it if you want a preview, or add it directly.',
           subscriptionDialogInputLabel: 'Subscription URL',
           manualDialogTitle: 'Import proxy nodes',
-          manualDialogDescription: 'Paste one or more manual nodes, validate them, then import only the usable ones.',
+          manualDialogDescription: 'Paste one or more manual nodes, optionally validate them first, or import the pasted entries directly.',
           manualDialogInputLabel: 'Proxy node lines',
           validate: 'Validate',
           validating: 'Validating candidates…',
           add: 'Add',
           addedToList: 'Added to the list.',
           importAvailable: 'Import {count} node(s)',
+          importInput: 'Import pasted nodes',
           cancel: 'Cancel',
           remove: 'Remove',
           resultNode: 'Node',
+          resultNetwork: 'IP / Location',
           resultStatus: 'Status',
           resultLatency: 'Latency',
           resultAction: 'Action',
+          resultDetails: 'View details',
+          closeDetails: 'Close details',
           saveFailed: 'Failed to save forward proxy settings.',
         },
         validation: {
@@ -1418,8 +1458,39 @@ export const translations: Record<Language, TranslationShape> = {
           timeout: 'Timed out',
           unreachable: 'Unreachable',
           xrayMissing: 'Xray unavailable',
+          subscriptionInvalid: 'Subscription format unsupported',
           subscriptionUnreachable: 'Subscription unavailable',
+          subscriptionTimedOut: 'Validation timed out and found no usable nodes',
+          subscriptionNoNodes: 'The subscription did not resolve to any nodes',
+          subscriptionUnsupportedNodes: 'The subscription did not contain supported nodes',
+          cancelled: 'Validation cancelled.',
           validationFailed: 'Validation failed',
+        },
+        progress: {
+          titleValidate: 'Validation progress',
+          titleSave: 'Add progress',
+          badgeValidate: 'Validate',
+          badgeSave: 'Add',
+          buttonValidatingSubscription: 'Validating subscription…',
+          buttonValidatingManual: 'Validating nodes…',
+          buttonAddingSubscription: 'Adding subscription…',
+          buttonAddingManual: 'Importing nodes…',
+          running: 'In progress…',
+          waiting: 'Waiting…',
+          done: 'Done',
+          failed: 'Failed',
+          stepCounter: '{current}/{total}',
+          steps: {
+            save_settings: 'Save settings',
+            refresh_subscription: 'Refresh subscription',
+            bootstrap_probe: 'Run bootstrap probes',
+            normalize_input: 'Normalize input',
+            parse_input: 'Parse input',
+            fetch_subscription: 'Fetch subscription',
+            probe_nodes: 'Probe nodes',
+            generate_result: 'Prepare result',
+            refresh_ui: 'Refresh settings and stats',
+          },
         },
         nodes: {
           title: 'Node pool & live stats',
@@ -2437,22 +2508,26 @@ export const translations: Record<Language, TranslationShape> = {
           insertDirectLabel: '插入 Direct 兜底节点',
           insertDirectHint: '当代理节点全部不可用时，保留 Direct 作为备用或最终回退路径。',
           subscriptionDialogTitle: '添加订阅链接',
-          subscriptionDialogDescription: '先粘贴一个订阅 URL，验证通过后再加入已保存列表。',
+          subscriptionDialogDescription: '先粘贴一个订阅 URL，可先验证预览，也可以直接加入已保存列表。',
           subscriptionDialogInputLabel: '订阅 URL',
           manualDialogTitle: '批量导入节点',
-          manualDialogDescription: '粘贴一个或多个手工节点，先验证可用性，再导入可用项。',
+          manualDialogDescription: '粘贴一个或多个手工节点，可先验证，也可以直接导入输入内容。',
           manualDialogInputLabel: '节点信息（每行一个）',
           validate: '验证可用性',
           validating: '正在验证候选项…',
           add: '添加',
           addedToList: '已加入列表。',
           importAvailable: '导入 {count} 个节点',
+          importInput: '导入输入内容',
           cancel: '取消',
           remove: '删除',
           resultNode: '节点',
+          resultNetwork: 'IP / 地理位置',
           resultStatus: '结果',
           resultLatency: '延迟',
           resultAction: '操作',
+          resultDetails: '查看详情',
+          closeDetails: '关闭详情',
           saveFailed: '保存正向代理设置失败。',
         },
         validation: {
@@ -2471,8 +2546,39 @@ export const translations: Record<Language, TranslationShape> = {
           timeout: '超时',
           unreachable: '不可达',
           xrayMissing: 'Xray 不可用',
+          subscriptionInvalid: '订阅无法解析',
           subscriptionUnreachable: '订阅不可达',
+          subscriptionTimedOut: '订阅验证超时，未发现可用节点',
+          subscriptionNoNodes: '订阅中没有解析出任何节点',
+          subscriptionUnsupportedNodes: '订阅中的节点格式暂不支持',
+          cancelled: '已取消验证。',
           validationFailed: '验证失败',
+        },
+        progress: {
+          titleValidate: '验证进度',
+          titleSave: '添加进度',
+          badgeValidate: '验证',
+          badgeSave: '添加',
+          buttonValidatingSubscription: '正在验证订阅…',
+          buttonValidatingManual: '正在验证节点…',
+          buttonAddingSubscription: '正在添加订阅…',
+          buttonAddingManual: '正在导入节点…',
+          running: '进行中…',
+          waiting: '等待中…',
+          done: '已完成',
+          failed: '失败',
+          stepCounter: '{current}/{total}',
+          steps: {
+            save_settings: '保存配置',
+            refresh_subscription: '刷新订阅',
+            bootstrap_probe: '引导探测节点',
+            normalize_input: '规范化输入',
+            parse_input: '解析输入',
+            fetch_subscription: '拉取订阅',
+            probe_nodes: '探测节点',
+            generate_result: '生成结果',
+            refresh_ui: '刷新列表与统计',
+          },
         },
         nodes: {
           title: '节点池与实时统计',

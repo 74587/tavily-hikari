@@ -277,6 +277,8 @@ struct ForwardProxySettingsUpdatePayload {
     subscription_update_interval_secs: u64,
     #[serde(default = "default_forward_proxy_insert_direct")]
     insert_direct: bool,
+    #[serde(default)]
+    skip_bootstrap_probe: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -302,6 +304,33 @@ struct ForwardProxyValidationView {
     discovered_nodes: Option<usize>,
     latency_ms: Option<f64>,
     error_code: Option<String>,
+    nodes: Vec<ForwardProxyValidationNodeView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForwardProxyValidationNodeView {
+    display_name: String,
+    ok: bool,
+    latency_ms: Option<f64>,
+    ip: Option<String>,
+    location: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Clone)]
+struct ForwardProxyStreamCancelGuard(tavily_hikari::ForwardProxyCancellation);
+
+impl ForwardProxyStreamCancelGuard {
+    fn new(cancellation: tavily_hikari::ForwardProxyCancellation) -> Self {
+        Self(cancellation)
+    }
+}
+
+impl Drop for ForwardProxyStreamCancelGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 fn default_forward_proxy_subscription_update_interval_secs() -> u64 {
@@ -310,6 +339,80 @@ fn default_forward_proxy_subscription_update_interval_secs() -> u64 {
 
 fn default_forward_proxy_insert_direct() -> bool {
     true
+}
+
+fn request_accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept
+                .split(',')
+                .map(str::trim)
+                .any(|item| item.eq_ignore_ascii_case("text/event-stream"))
+        })
+}
+
+fn build_forward_proxy_validation_view(
+    validation: tavily_hikari::ForwardProxyValidationResponse,
+) -> ForwardProxyValidationView {
+    let tavily_hikari::ForwardProxyValidationResponse {
+        ok,
+        normalized_values,
+        discovered_nodes,
+        latency_ms,
+        results,
+        first_error,
+    } = validation;
+    let result = results.into_iter().next();
+    if let Some(result) = result {
+        return ForwardProxyValidationView {
+            ok: result.ok,
+            message: result.message,
+            normalized_value: result.normalized_value,
+            discovered_nodes: result.discovered_nodes,
+            latency_ms: result.latency_ms,
+            error_code: result.error_code,
+            nodes: result
+                .nodes
+                .into_iter()
+                .map(|node| ForwardProxyValidationNodeView {
+                    display_name: node.display_name,
+                    ok: node.ok,
+                    latency_ms: node.latency_ms,
+                    ip: node.ip,
+                    location: node.location,
+                    message: node.message,
+                })
+                .collect(),
+        };
+    }
+
+    if let Some(error) = first_error {
+        return ForwardProxyValidationView {
+            ok: false,
+            message: error.message,
+            normalized_value: None,
+            discovered_nodes: Some(discovered_nodes),
+            latency_ms,
+            error_code: Some(error.code),
+            nodes: Vec::new(),
+        };
+    }
+
+    ForwardProxyValidationView {
+        ok,
+        message: if ok {
+            "validation succeeded".to_string()
+        } else {
+            "validation failed".to_string()
+        },
+        normalized_value: normalized_values.into_iter().next(),
+        discovered_nodes: Some(discovered_nodes),
+        latency_ms,
+        error_code: None,
+        nodes: Vec::new(),
+    }
 }
 
 async fn get_settings(
@@ -332,7 +435,7 @@ async fn put_forward_proxy_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ForwardProxySettingsUpdatePayload>,
-) -> Result<Json<tavily_hikari::ForwardProxySettingsResponse>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     if !is_admin_request(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
@@ -343,11 +446,94 @@ async fn put_forward_proxy_settings(
         insert_direct: payload.insert_direct,
     }
     .normalized();
+    let skip_bootstrap_probe = payload.skip_bootstrap_probe;
+    if request_accepts_event_stream(&headers) {
+        let state = state.clone();
+        let stream = stream! {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<tavily_hikari::ForwardProxyProgressEvent>();
+            tokio::spawn(async move {
+                let progress_tx = tx.clone();
+                let progress = move |event| {
+                    let _ = progress_tx.send(event);
+                };
+                match state
+                    .proxy
+                    .update_forward_proxy_settings_with_progress(
+                        settings,
+                        skip_bootstrap_probe,
+                        Some(&progress),
+                    )
+                    .await
+                {
+                    Ok(response) => {
+                        if let Ok(payload) = serde_json::to_value(&response) {
+                            let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::complete(
+                                "save",
+                                payload,
+                            ));
+                        } else {
+                            let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::error(
+                                "save",
+                                "failed to encode forward proxy settings response",
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("update forward proxy settings error: {err}");
+                        let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::error(
+                            "save",
+                            err.to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ));
+                    }
+                }
+            });
+
+            while let Some(event) = rx.recv().await {
+                match serde_json::to_string(&event) {
+                    Ok(json) => yield Ok::<Event, axum::http::Error>(Event::default().data(json)),
+                    Err(err) => {
+                        yield Ok::<Event, axum::http::Error>(Event::default().data(
+                            serde_json::json!({
+                                "type": "error",
+                                "operation": "save",
+                                "message": format!("failed to encode progress event: {err}"),
+                            })
+                            .to_string(),
+                        ));
+                        break;
+                    }
+                }
+                if matches!(
+                    event,
+                    tavily_hikari::ForwardProxyProgressEvent::Complete { .. }
+                        | tavily_hikari::ForwardProxyProgressEvent::Error { .. }
+                ) {
+                    break;
+                }
+            }
+        };
+
+        return Ok(
+            Sse::new(stream)
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(""))
+                .into_response(),
+        );
+    }
     state
         .proxy
-        .update_forward_proxy_settings(settings)
+        .update_forward_proxy_settings(settings, skip_bootstrap_probe)
         .await
-        .map(Json)
+        .map(|response| Json(response).into_response())
         .map_err(|err| {
             eprintln!("update forward proxy settings error: {err}");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
@@ -358,10 +544,114 @@ async fn post_forward_proxy_candidate_validation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ForwardProxyValidationPayload>,
-) -> Result<Json<ForwardProxyValidationView>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers) {
         return Err(StatusCode::FORBIDDEN);
     }
+    if request_accepts_event_stream(&headers) {
+        let state = state.clone();
+        let cancellation = tavily_hikari::ForwardProxyCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let stream = stream! {
+            let _cancel_guard = ForwardProxyStreamCancelGuard::new(cancellation.clone());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<tavily_hikari::ForwardProxyProgressEvent>();
+            tokio::spawn(async move {
+                let progress_tx = tx.clone();
+                let progress = move |event| {
+                    let _ = progress_tx.send(event);
+                };
+                let validation = match payload.kind {
+                    ForwardProxyValidationKindPayload::ProxyUrl => state
+                        .proxy
+                        .validate_forward_proxy_candidates_with_progress(
+                            vec![payload.value.clone()],
+                            Vec::new(),
+                            Some(&progress),
+                            Some(&worker_cancellation),
+                        )
+                        .await,
+                    ForwardProxyValidationKindPayload::SubscriptionUrl => state
+                        .proxy
+                        .validate_forward_proxy_candidates_with_progress(
+                            Vec::new(),
+                            vec![payload.value.clone()],
+                            Some(&progress),
+                            Some(&worker_cancellation),
+                        )
+                        .await,
+                };
+
+                match validation {
+                    Ok(response) => {
+                        let view = build_forward_proxy_validation_view(response);
+                        if let Ok(payload) = serde_json::to_value(&view) {
+                            let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::complete(
+                                "validate",
+                                payload,
+                            ));
+                        } else {
+                            let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::error(
+                                "validate",
+                                "failed to encode forward proxy validation response",
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        if worker_cancellation.is_cancelled() {
+                            return;
+                        }
+                        eprintln!("validate forward proxy candidate error: {err}");
+                        let _ = tx.send(tavily_hikari::ForwardProxyProgressEvent::error(
+                            "validate",
+                            err.to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ));
+                    }
+                }
+            });
+
+            while let Some(event) = rx.recv().await {
+                match serde_json::to_string(&event) {
+                    Ok(json) => yield Ok::<Event, axum::http::Error>(Event::default().data(json)),
+                    Err(err) => {
+                        yield Ok::<Event, axum::http::Error>(Event::default().data(
+                            serde_json::json!({
+                                "type": "error",
+                                "operation": "validate",
+                                "message": format!("failed to encode progress event: {err}"),
+                            })
+                            .to_string(),
+                        ));
+                        break;
+                    }
+                }
+                if matches!(
+                    event,
+                    tavily_hikari::ForwardProxyProgressEvent::Complete { .. }
+                        | tavily_hikari::ForwardProxyProgressEvent::Error { .. }
+                ) {
+                    break;
+                }
+            }
+            cancellation.cancel();
+        };
+
+        return Ok(
+            Sse::new(stream)
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(""))
+                .into_response(),
+        );
+    }
+
     let validation = match payload.kind {
         ForwardProxyValidationKindPayload::ProxyUrl => state
             .proxy
@@ -377,40 +667,7 @@ async fn post_forward_proxy_candidate_validation(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let result = validation.results.into_iter().next();
-    let response = if let Some(result) = result {
-        ForwardProxyValidationView {
-            ok: result.ok,
-            message: result.message,
-            normalized_value: result.normalized_value,
-            discovered_nodes: result.discovered_nodes,
-            latency_ms: result.latency_ms,
-            error_code: result.error_code,
-        }
-    } else if let Some(error) = validation.first_error {
-        ForwardProxyValidationView {
-            ok: false,
-            message: error.message,
-            normalized_value: None,
-            discovered_nodes: Some(validation.discovered_nodes),
-            latency_ms: validation.latency_ms,
-            error_code: Some(error.code),
-        }
-    } else {
-        ForwardProxyValidationView {
-            ok: validation.ok,
-            message: if validation.ok {
-                "validation succeeded".to_string()
-            } else {
-                "validation failed".to_string()
-            },
-            normalized_value: validation.normalized_values.into_iter().next(),
-            discovered_nodes: Some(validation.discovered_nodes),
-            latency_ms: validation.latency_ms,
-            error_code: None,
-        }
-    };
-    Ok(Json(response))
+    Ok(Json(build_forward_proxy_validation_view(validation)).into_response())
 }
 
 async fn get_forward_proxy_live_stats(
