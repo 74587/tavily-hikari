@@ -4,7 +4,7 @@
 
 - Status: 已完成（快车道）
 - Created: 2026-03-16
-- Last: 2026-03-16
+- Last: 2026-03-17
 
 ## 背景 / 问题陈述
 
@@ -185,6 +185,30 @@
 - sticky nodes 复用 forward proxy live stats 同款 activity / weight 图。
 - sticky users 7 日图使用 success/failure stacked bar，与节点 activity 图保持一致视觉语义。
 - 浏览器验收只连接本地或 mock upstream / proxy。
+
+## Visual Evidence (PR)
+
+- source_type: storybook_canvas
+  story_id_or_title: admin-fragments-keystickypanels--default
+  state: default
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  evidence_note: verifies the extracted sticky panels render the charged-credit windows as plain green/red values and reuse the forward-proxy activity and weight charts in one isolated review surface.
+  image:
+  ![Sticky key detail panels fragment](./assets/sticky-panels-fragment.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: admin-pages--keys-sticky-details
+  state: page-context
+  target_program: mock-only
+  capture_scope: browser-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  evidence_note: verifies the key detail page places the sticky users and sticky nodes panels under registration metadata without layout overflow in the admin page context.
+  image:
+  ![Sticky key detail page context](./assets/sticky-panels-page.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
