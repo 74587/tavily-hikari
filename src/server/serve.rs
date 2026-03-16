@@ -139,6 +139,8 @@ pub async fn serve(
         // Key details
         .route("/api/keys/:id/metrics", get(get_key_metrics))
         .route("/api/keys/:id/logs", get(get_key_logs))
+        .route("/api/keys/:id/sticky-users", get(get_key_sticky_users))
+        .route("/api/keys/:id/sticky-nodes", get(get_key_sticky_nodes))
         // Token details
         .route("/api/tokens/:id", get(get_token_detail))
         .route("/api/tokens/:id/metrics", get(get_token_metrics))

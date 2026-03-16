@@ -7335,6 +7335,7 @@ mod tests {
                 None,
                 4,
                 &mcp_search_kind,
+                None,
             )
             .await
             .expect("record pending billing log");

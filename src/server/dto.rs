@@ -35,6 +35,160 @@ struct ApiKeySecretView {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyUserIdentityView {
+    user_id: String,
+    display_name: Option<String>,
+    username: Option<String>,
+    active: bool,
+    last_login_at: Option<i64>,
+    token_count: i64,
+}
+
+impl From<&AdminUserIdentity> for StickyUserIdentityView {
+    fn from(value: &AdminUserIdentity) -> Self {
+        Self {
+            user_id: value.user_id.clone(),
+            display_name: value.display_name.clone(),
+            username: value.username.clone(),
+            active: value.active,
+            last_login_at: value.last_login_at,
+            token_count: value.token_count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyCreditsWindowView {
+    success_credits: i64,
+    failure_credits: i64,
+}
+
+impl From<&StickyCreditsWindow> for StickyCreditsWindowView {
+    fn from(value: &StickyCreditsWindow) -> Self {
+        Self {
+            success_credits: value.success_credits,
+            failure_credits: value.failure_credits,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyUsersWindowsView {
+    yesterday: StickyCreditsWindowView,
+    today: StickyCreditsWindowView,
+    month: StickyCreditsWindowView,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyUserDailyBucketView {
+    bucket_start: i64,
+    bucket_end: i64,
+    success_credits: i64,
+    failure_credits: i64,
+}
+
+impl From<ApiKeyUserUsageBucket> for StickyUserDailyBucketView {
+    fn from(value: ApiKeyUserUsageBucket) -> Self {
+        Self {
+            bucket_start: value.bucket_start,
+            bucket_end: value.bucket_end,
+            success_credits: value.success_credits,
+            failure_credits: value.failure_credits,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyUserView {
+    user: StickyUserIdentityView,
+    last_success_at: i64,
+    windows: StickyUsersWindowsView,
+    daily_buckets: Vec<StickyUserDailyBucketView>,
+}
+
+impl From<ApiKeyStickyUser> for StickyUserView {
+    fn from(value: ApiKeyStickyUser) -> Self {
+        Self {
+            user: StickyUserIdentityView::from(&value.user),
+            last_success_at: value.last_success_at,
+            windows: StickyUsersWindowsView {
+                yesterday: StickyCreditsWindowView::from(&value.yesterday),
+                today: StickyCreditsWindowView::from(&value.today),
+                month: StickyCreditsWindowView::from(&value.month),
+            },
+            daily_buckets: value
+                .daily_buckets
+                .into_iter()
+                .map(StickyUserDailyBucketView::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaginatedStickyUsersView {
+    items: Vec<StickyUserView>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyNodeView {
+    role: String,
+    key: String,
+    source: String,
+    display_name: String,
+    endpoint_url: Option<String>,
+    weight: f64,
+    available: bool,
+    last_error: Option<String>,
+    penalized: bool,
+    primary_assignment_count: i64,
+    secondary_assignment_count: i64,
+    stats: ForwardProxyStatsResponse,
+    last24h: Vec<ForwardProxyHourlyBucketResponse>,
+    weight24h: Vec<ForwardProxyWeightHourlyBucketResponse>,
+}
+
+impl From<ApiKeyStickyNode> for StickyNodeView {
+    fn from(value: ApiKeyStickyNode) -> Self {
+        Self {
+            role: value.role.to_string(),
+            key: value.node.key,
+            source: value.node.source,
+            display_name: value.node.display_name,
+            endpoint_url: value.node.endpoint_url,
+            weight: value.node.weight,
+            available: value.node.available,
+            last_error: value.node.last_error,
+            penalized: value.node.penalized,
+            primary_assignment_count: value.node.primary_assignment_count,
+            secondary_assignment_count: value.node.secondary_assignment_count,
+            stats: value.node.stats,
+            last24h: value.node.last24h,
+            weight24h: value.node.weight24h,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StickyNodesView {
+    range_start: String,
+    range_end: String,
+    bucket_seconds: i64,
+    nodes: Vec<StickyNodeView>,
+}
+
+#[derive(Debug, Serialize)]
 struct RequestLogView {
     id: i64,
     key_id: String,
@@ -356,6 +510,59 @@ async fn get_key_logs(
         .key_recent_logs(&id, limit, q.since)
         .await
         .map(|logs| Json(logs.into_iter().map(RequestLogView::from).collect()))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+struct StickyUsersQuery {
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
+async fn get_key_sticky_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<StickyUsersQuery>,
+) -> Result<Json<PaginatedStickyUsersView>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    state
+        .proxy
+        .key_sticky_users_paged(&id, q.page.unwrap_or(1), q.per_page.unwrap_or(20))
+        .await
+        .map(|result| {
+            Json(PaginatedStickyUsersView {
+                items: result.items.into_iter().map(StickyUserView::from).collect(),
+                total: result.total,
+                page: result.page,
+                per_page: result.per_page,
+            })
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn get_key_sticky_nodes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<StickyNodesView>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    state
+        .proxy
+        .key_sticky_nodes(&id)
+        .await
+        .map(|result| {
+            Json(StickyNodesView {
+                range_start: result.range_start,
+                range_end: result.range_end,
+                bucket_seconds: result.bucket_seconds,
+                nodes: result.nodes.into_iter().map(StickyNodeView::from).collect(),
+            })
+        })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 

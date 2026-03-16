@@ -30,9 +30,11 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use url::form_urlencoded;
 
 pub use forward_proxy::{
-    ForwardProxyLiveStatsResponse, ForwardProxySettings, ForwardProxySettingsResponse,
+    ForwardProxyHourlyBucketResponse, ForwardProxyLiveNodeResponse, ForwardProxyLiveStatsResponse,
+    ForwardProxySettings, ForwardProxySettingsResponse, ForwardProxyStatsResponse,
     ForwardProxyValidationError, ForwardProxyValidationNodeResult,
     ForwardProxyValidationProbeResult, ForwardProxyValidationResponse,
+    ForwardProxyWeightHourlyBucketResponse,
 };
 
 pub type ForwardProxyProgressCallback = dyn Fn(ForwardProxyProgressEvent) + Send + Sync;
@@ -334,6 +336,7 @@ const RESEARCH_REQUEST_AFFINITY_TTL_SECS: i64 = 24 * 60 * 60;
 // Hard cap on the number of token→key affinity entries kept in memory to prevent
 // unbounded growth under churny traffic (many distinct tokens).
 const TOKEN_AFFINITY_MAX_ENTRIES: usize = 10_000;
+const USER_API_KEY_BINDING_RECENT_LIMIT: i64 = 3;
 // Cache token -> user binding to avoid repeated DB lookups on hot request paths.
 const TOKEN_BINDING_CACHE_TTL_SECS: u64 = 30;
 const TOKEN_BINDING_CACHE_MAX_ENTRIES: usize = 10_000;
@@ -790,6 +793,20 @@ struct RegistrationAffinityContext<'a> {
 pub struct ForwardProxyAssignmentPreview {
     pub key: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyStickyNode {
+    pub role: &'static str,
+    pub node: forward_proxy::ForwardProxyLiveNodeResponse,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyStickyNodesResponse {
+    pub range_start: String,
+    pub range_end: String,
+    pub bucket_seconds: i64,
+    pub nodes: Vec<ApiKeyStickyNode>,
 }
 
 fn normalize_ip_string(raw: &str) -> Option<String> {
@@ -3452,6 +3469,20 @@ impl TavilyProxy {
             return self.key_store.acquire_key().await;
         };
 
+        if let Some(user_id) = self.key_store.find_user_id_by_token_fresh(token_id).await? {
+            let bound_key_ids = self
+                .key_store
+                .list_recent_api_key_bindings_for_user(&user_id)
+                .await?;
+            for key_id in bound_key_ids {
+                if let Some(lease) = self.key_store.try_acquire_specific_key(&key_id).await? {
+                    let mut state = self.affinity.lock().await;
+                    state.record_mapping(token_id, &lease.id, now);
+                    return Ok(lease);
+                }
+            }
+        }
+
         // Step 1: 尝试使用当前有效的亲和 key（仅在 TTL 窗口内且未过期）。
         let candidate_key_id = {
             let mut state = self.affinity.lock().await;
@@ -3842,7 +3873,8 @@ impl TavilyProxy {
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
 
-                let analysis = analyze_http_attempt(status, &body_bytes);
+                let mut analysis = analyze_http_attempt(status, &body_bytes);
+                analysis.api_key_id = Some(lease.id.clone());
                 let redacted_response_body = redact_api_key_bytes(&body_bytes);
                 if status.is_success()
                     && upstream_path == "/research"
@@ -4007,7 +4039,8 @@ impl TavilyProxy {
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
 
-                let analysis = analyze_http_attempt(status, &body_bytes);
+                let mut analysis = analyze_http_attempt(status, &body_bytes);
+                analysis.api_key_id = Some(lease.id.clone());
                 let redacted_response_body = redact_api_key_bytes(&body_bytes);
                 if status.is_success()
                     && let Some(request_id) = extract_research_request_id(&body_bytes)
@@ -4154,7 +4187,8 @@ impl TavilyProxy {
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
 
-                let analysis = analyze_http_attempt(status, &body_bytes);
+                let mut analysis = analyze_http_attempt(status, &body_bytes);
+                analysis.api_key_id = Some(lease.id.clone());
                 let redacted_response_body = redact_api_key_bytes(&body_bytes);
                 if status.is_success()
                     && let Some(request_id) = research_request_id.as_deref()
@@ -4308,6 +4342,49 @@ impl TavilyProxy {
         since: Option<i64>,
     ) -> Result<Vec<RequestLogRecord>, ProxyError> {
         self.key_store.fetch_key_logs(key_id, limit, since).await
+    }
+
+    pub async fn key_sticky_users_paged(
+        &self,
+        key_id: &str,
+        page: i64,
+        per_page: i64,
+    ) -> Result<PaginatedApiKeyStickyUsers, ProxyError> {
+        self.key_store
+            .fetch_key_sticky_users_page(key_id, page, per_page)
+            .await
+    }
+
+    pub async fn key_sticky_nodes(
+        &self,
+        key_id: &str,
+    ) -> Result<ApiKeyStickyNodesResponse, ProxyError> {
+        let record = self.reconcile_proxy_affinity_record(key_id).await?;
+        let manager = self.forward_proxy.lock().await.clone();
+        let live =
+            forward_proxy::build_forward_proxy_live_stats_response(&self.key_store.pool, &manager)
+                .await?;
+        let mut nodes = Vec::new();
+        for (role, proxy_key) in [
+            ("primary", record.primary_proxy_key.as_deref()),
+            ("secondary", record.secondary_proxy_key.as_deref()),
+        ] {
+            let Some(proxy_key) = proxy_key else {
+                continue;
+            };
+            if let Some(node) = live.nodes.iter().find(|node| node.key == proxy_key) {
+                nodes.push(ApiKeyStickyNode {
+                    role,
+                    node: node.clone(),
+                });
+            }
+        }
+        Ok(ApiKeyStickyNodesResponse {
+            range_start: live.range_start,
+            range_end: live.range_end,
+            bucket_seconds: live.bucket_seconds,
+            nodes,
+        })
     }
 
     // ----- Public auth token management API -----
@@ -4987,6 +5064,7 @@ impl TavilyProxy {
         result_status: &str,
         error_message: Option<&str>,
         business_credits: i64,
+        api_key_id: Option<&str>,
     ) -> Result<i64, ProxyError> {
         let request_kind = classify_token_request_kind(path, None);
         self.record_pending_billing_attempt_with_kind(
@@ -5001,6 +5079,7 @@ impl TavilyProxy {
             error_message,
             business_credits,
             &request_kind,
+            api_key_id,
         )
         .await
     }
@@ -5019,6 +5098,7 @@ impl TavilyProxy {
         error_message: Option<&str>,
         business_credits: i64,
         request_kind: &TokenRequestKind,
+        api_key_id: Option<&str>,
     ) -> Result<i64, ProxyError> {
         let billing_subject = self.billing_subject_for_token(token_id).await?;
         self.record_pending_billing_attempt_for_subject_with_kind(
@@ -5034,6 +5114,7 @@ impl TavilyProxy {
             business_credits,
             &billing_subject,
             request_kind,
+            api_key_id,
         )
         .await
     }
@@ -5052,6 +5133,7 @@ impl TavilyProxy {
         error_message: Option<&str>,
         business_credits: i64,
         billing_subject: &str,
+        api_key_id: Option<&str>,
     ) -> Result<i64, ProxyError> {
         let request_kind = classify_token_request_kind(path, None);
         self.record_pending_billing_attempt_for_subject_with_kind(
@@ -5067,6 +5149,7 @@ impl TavilyProxy {
             business_credits,
             billing_subject,
             &request_kind,
+            api_key_id,
         )
         .await
     }
@@ -5086,6 +5169,7 @@ impl TavilyProxy {
         business_credits: i64,
         billing_subject: &str,
         request_kind: &TokenRequestKind,
+        api_key_id: Option<&str>,
     ) -> Result<i64, ProxyError> {
         self.key_store
             .insert_token_log_pending_billing(
@@ -5101,6 +5185,7 @@ impl TavilyProxy {
                 business_credits,
                 billing_subject,
                 request_kind,
+                api_key_id,
             )
             .await
     }
@@ -6740,6 +6825,37 @@ impl KeyStore {
 
         sqlx::query(
             r#"
+            CREATE TABLE IF NOT EXISTS user_api_key_bindings (
+                user_id TEXT NOT NULL,
+                api_key_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_success_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, api_key_id),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (api_key_id) REFERENCES api_keys(id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_user_api_key_bindings_user_recent
+               ON user_api_key_bindings(user_id, last_success_at DESC, api_key_id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_user_api_key_bindings_key_recent
+               ON user_api_key_bindings(api_key_id, last_success_at DESC, user_id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS oauth_login_states (
                 state TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -6802,6 +6918,7 @@ impl KeyStore {
                 business_credits INTEGER,
                 billing_subject TEXT,
                 billing_state TEXT NOT NULL DEFAULT 'none',
+                api_key_id TEXT,
                 created_at INTEGER NOT NULL
             )
             "#,
@@ -6914,6 +7031,55 @@ impl KeyStore {
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_token_logs_billing_pending
                ON auth_token_logs(billing_state, billing_subject, id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        if !self
+            .table_column_exists("auth_token_logs", "api_key_id")
+            .await?
+        {
+            sqlx::query("ALTER TABLE auth_token_logs ADD COLUMN api_key_id TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_token_logs_api_key_time
+               ON auth_token_logs(api_key_id, created_at DESC, id DESC)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS api_key_user_usage_buckets (
+                api_key_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                bucket_start INTEGER NOT NULL,
+                bucket_secs INTEGER NOT NULL,
+                success_credits INTEGER NOT NULL,
+                failure_credits INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (api_key_id, user_id, bucket_start, bucket_secs),
+                FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_user_usage_buckets_key_bucket
+               ON api_key_user_usage_buckets(api_key_id, bucket_secs, bucket_start DESC)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_user_usage_buckets_user_bucket
+               ON api_key_user_usage_buckets(user_id, bucket_secs, bucket_start DESC)"#,
         )
         .execute(&self.pool)
         .await?;
@@ -7742,6 +7908,108 @@ impl KeyStore {
     ) -> Result<(), ProxyError> {
         self.increment_account_usage_bucket_by(user_id, bucket_start, granularity, 1)
             .await
+    }
+
+    async fn increment_api_key_user_usage_bucket(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        api_key_id: &str,
+        user_id: &str,
+        bucket_start: i64,
+        credits: i64,
+        result_status: &str,
+    ) -> Result<(), ProxyError> {
+        if credits <= 0 {
+            return Ok(());
+        }
+        let (success_credits, failure_credits) = if result_status == OUTCOME_SUCCESS {
+            (credits, 0_i64)
+        } else {
+            (0_i64, credits)
+        };
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            r#"
+            INSERT INTO api_key_user_usage_buckets (
+                api_key_id,
+                user_id,
+                bucket_start,
+                bucket_secs,
+                success_credits,
+                failure_credits,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(api_key_id, user_id, bucket_start, bucket_secs)
+            DO UPDATE SET
+                success_credits = api_key_user_usage_buckets.success_credits + excluded.success_credits,
+                failure_credits = api_key_user_usage_buckets.failure_credits + excluded.failure_credits,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(api_key_id)
+        .bind(user_id)
+        .bind(bucket_start)
+        .bind(SECS_PER_DAY)
+        .bind(success_credits)
+        .bind(failure_credits)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn refresh_user_api_key_binding(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        user_id: &str,
+        api_key_id: &str,
+        success_at: i64,
+    ) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_api_key_bindings (
+                user_id,
+                api_key_id,
+                created_at,
+                updated_at,
+                last_success_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, api_key_id)
+            DO UPDATE SET
+                updated_at = excluded.updated_at,
+                last_success_at = excluded.last_success_at
+            "#,
+        )
+        .bind(user_id)
+        .bind(api_key_id)
+        .bind(success_at)
+        .bind(success_at)
+        .bind(success_at)
+        .execute(&mut **tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            DELETE FROM user_api_key_bindings
+            WHERE user_id = ?
+              AND api_key_id IN (
+                  SELECT api_key_id
+                  FROM user_api_key_bindings
+                  WHERE user_id = ?
+                  ORDER BY last_success_at DESC, updated_at DESC, api_key_id DESC
+                  LIMIT -1 OFFSET ?
+              )
+            "#,
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .bind(USER_API_KEY_BINDING_RECENT_LIMIT)
+        .execute(&mut **tx)
+        .await?;
+
+        Ok(())
     }
 
     async fn sum_usage_buckets(
@@ -10378,6 +10646,211 @@ impl KeyStore {
         Ok(items)
     }
 
+    async fn list_recent_api_key_bindings_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<String>, ProxyError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT api_key_id
+            FROM user_api_key_bindings
+            WHERE user_id = ?
+            ORDER BY last_success_at DESC, updated_at DESC, api_key_id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(user_id)
+        .bind(USER_API_KEY_BINDING_RECENT_LIMIT)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(ProxyError::from)
+    }
+
+    async fn fetch_key_sticky_users_page(
+        &self,
+        key_id: &str,
+        page: i64,
+        per_page: i64,
+    ) -> Result<PaginatedApiKeyStickyUsers, ProxyError> {
+        let page = page.max(1);
+        let per_page = per_page.clamp(1, 100);
+        let offset = (page - 1) * per_page;
+        let now = Local::now();
+        let today_start = start_of_local_day_utc_ts(now);
+        let yesterday_start = previous_local_day_start_utc_ts(now);
+        let month_start = start_of_local_month_utc_ts(now);
+        let oldest_daily_date = now
+            .date_naive()
+            .checked_sub_days(chrono::Days::new(6))
+            .unwrap_or_else(|| now.date_naive());
+        let oldest_daily_start = local_date_start_utc_ts(oldest_daily_date, now);
+        let usage_since = month_start.min(oldest_daily_start);
+
+        let total = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_api_key_bindings WHERE api_key_id = ?",
+        )
+        .bind(key_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+            ),
+        >(
+            r#"
+            SELECT
+                b.user_id,
+                b.last_success_at,
+                COALESCE(SUM(CASE WHEN u.bucket_start = ? THEN u.success_credits ELSE 0 END), 0) AS yesterday_success_credits,
+                COALESCE(SUM(CASE WHEN u.bucket_start = ? THEN u.failure_credits ELSE 0 END), 0) AS yesterday_failure_credits,
+                COALESCE(SUM(CASE WHEN u.bucket_start = ? THEN u.success_credits ELSE 0 END), 0) AS today_success_credits,
+                COALESCE(SUM(CASE WHEN u.bucket_start = ? THEN u.failure_credits ELSE 0 END), 0) AS today_failure_credits,
+                COALESCE(SUM(CASE WHEN u.bucket_start >= ? THEN u.success_credits ELSE 0 END), 0) AS month_success_credits,
+                COALESCE(SUM(CASE WHEN u.bucket_start >= ? THEN u.failure_credits ELSE 0 END), 0) AS month_failure_credits
+            FROM user_api_key_bindings b
+            LEFT JOIN api_key_user_usage_buckets u
+              ON u.api_key_id = b.api_key_id
+             AND u.user_id = b.user_id
+             AND u.bucket_secs = ?
+             AND u.bucket_start >= ?
+            WHERE b.api_key_id = ?
+            GROUP BY b.user_id, b.last_success_at
+            ORDER BY
+                (COALESCE(SUM(CASE WHEN u.bucket_start = ? THEN u.success_credits ELSE 0 END), 0)
+                + COALESCE(SUM(CASE WHEN u.bucket_start = ? THEN u.failure_credits ELSE 0 END), 0)) DESC,
+                b.last_success_at DESC,
+                b.user_id ASC
+            LIMIT ? OFFSET ?
+            "#,
+        )
+        .bind(yesterday_start)
+        .bind(yesterday_start)
+        .bind(today_start)
+        .bind(today_start)
+        .bind(month_start)
+        .bind(month_start)
+        .bind(SECS_PER_DAY)
+        .bind(usage_since)
+        .bind(key_id)
+        .bind(today_start)
+        .bind(today_start)
+        .bind(per_page)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let user_ids = rows.iter().map(|row| row.0.clone()).collect::<Vec<_>>();
+        let identities = self.get_admin_user_identities(&user_ids).await?;
+
+        let bucket_starts = (0..7_i64)
+            .map(|index| oldest_daily_start + index * SECS_PER_DAY)
+            .collect::<Vec<_>>();
+        let daily_rows = if user_ids.is_empty() {
+            Vec::new()
+        } else {
+            let mut builder = QueryBuilder::new(
+                "SELECT user_id, bucket_start, success_credits, failure_credits \
+                 FROM api_key_user_usage_buckets \
+                 WHERE api_key_id = ",
+            );
+            builder.push_bind(key_id);
+            builder.push(" AND bucket_secs = ");
+            builder.push_bind(SECS_PER_DAY);
+            builder.push(" AND bucket_start >= ");
+            builder.push_bind(oldest_daily_start);
+            builder.push(" AND user_id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for user_id in &user_ids {
+                    separated.push_bind(user_id);
+                }
+            }
+            builder.push(") ORDER BY user_id ASC, bucket_start ASC");
+            builder
+                .build_query_as::<(String, i64, i64, i64)>()
+                .fetch_all(&self.pool)
+                .await?
+        };
+
+        let mut daily_map = HashMap::<String, HashMap<i64, StickyCreditsWindow>>::new();
+        for (user_id, bucket_start, success_credits, failure_credits) in daily_rows {
+            daily_map.entry(user_id).or_default().insert(
+                bucket_start,
+                StickyCreditsWindow {
+                    success_credits,
+                    failure_credits,
+                },
+            );
+        }
+
+        let mut items = Vec::with_capacity(rows.len());
+        for (
+            user_id,
+            last_success_at,
+            yesterday_success_credits,
+            yesterday_failure_credits,
+            today_success_credits,
+            today_failure_credits,
+            month_success_credits,
+            month_failure_credits,
+        ) in rows
+        {
+            let Some(user) = identities.get(&user_id).cloned() else {
+                continue;
+            };
+            let user_daily = daily_map.get(&user_id);
+            let daily_buckets = bucket_starts
+                .iter()
+                .map(|bucket_start| {
+                    let bucket = user_daily
+                        .and_then(|items| items.get(bucket_start))
+                        .cloned()
+                        .unwrap_or_default();
+                    ApiKeyUserUsageBucket {
+                        bucket_start: *bucket_start,
+                        bucket_end: bucket_start.saturating_add(SECS_PER_DAY),
+                        success_credits: bucket.success_credits,
+                        failure_credits: bucket.failure_credits,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            items.push(ApiKeyStickyUser {
+                user,
+                last_success_at,
+                yesterday: StickyCreditsWindow {
+                    success_credits: yesterday_success_credits,
+                    failure_credits: yesterday_failure_credits,
+                },
+                today: StickyCreditsWindow {
+                    success_credits: today_success_credits,
+                    failure_credits: today_failure_credits,
+                },
+                month: StickyCreditsWindow {
+                    success_credits: month_success_credits,
+                    failure_credits: month_failure_credits,
+                },
+                daily_buckets,
+            });
+        }
+
+        Ok(PaginatedApiKeyStickyUsers {
+            items,
+            total,
+            page,
+            per_page,
+        })
+    }
+
     async fn update_account_quota_limits(
         &self,
         user_id: &str,
@@ -12413,6 +12886,7 @@ impl KeyStore {
         business_credits: i64,
         billing_subject: &str,
         request_kind: &TokenRequestKind,
+        api_key_id: Option<&str>,
     ) -> Result<i64, ProxyError> {
         let created_at = Utc::now().timestamp();
         let counts_business_quota = if counts_business_quota { 1i64 } else { 0i64 };
@@ -12434,8 +12908,9 @@ impl KeyStore {
                 business_credits,
                 billing_subject,
                 billing_state,
+                api_key_id,
                 created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -12454,6 +12929,7 @@ impl KeyStore {
         .bind(business_credits)
         .bind(billing_subject)
         .bind(BILLING_STATE_PENDING)
+        .bind(api_key_id)
         .bind(created_at)
         .fetch_one(&self.pool)
         .await?;
@@ -12526,12 +13002,12 @@ impl KeyStore {
         let claimed = if force_claim_miss {
             None
         } else {
-            sqlx::query_as::<_, (i64, Option<String>, i64)>(
+            sqlx::query_as::<_, (i64, Option<String>, i64, Option<String>, String)>(
                 r#"
                 UPDATE auth_token_logs
                 SET billing_state = ?
                 WHERE id = ? AND billing_state = ?
-                RETURNING COALESCE(business_credits, 0), billing_subject, created_at
+                RETURNING COALESCE(business_credits, 0), billing_subject, created_at, api_key_id, result_status
                 "#,
             )
             .bind(BILLING_STATE_CHARGED)
@@ -12541,7 +13017,8 @@ impl KeyStore {
             .await?
         };
 
-        let Some((credits, billing_subject, created_at)) = claimed else {
+        let Some((credits, billing_subject, created_at, api_key_id, result_status)) = claimed
+        else {
             let billing_state = sqlx::query_scalar::<_, String>(
                 "SELECT billing_state FROM auth_token_logs WHERE id = ? LIMIT 1",
             )
@@ -12648,6 +13125,23 @@ impl KeyStore {
             .bind(credits)
             .fetch_one(&mut *tx)
             .await?;
+
+            if let Some(api_key_id) = api_key_id.as_deref() {
+                self.increment_api_key_user_usage_bucket(
+                    &mut tx,
+                    api_key_id,
+                    user_id,
+                    local_day_bucket_start_utc_ts(charge_ts),
+                    credits,
+                    result_status.as_str(),
+                )
+                .await?;
+
+                if result_status == OUTCOME_SUCCESS {
+                    self.refresh_user_api_key_binding(&mut tx, user_id, api_key_id, created_at)
+                        .await?;
+                }
+            }
         } else if let Some(token_id) = billing_subject.strip_prefix("token:") {
             sqlx::query(
                 r#"
@@ -15571,6 +16065,38 @@ pub struct AdminUserIdentity {
     pub token_count: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StickyCreditsWindow {
+    pub success_credits: i64,
+    pub failure_credits: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyUserUsageBucket {
+    pub bucket_start: i64,
+    pub bucket_end: i64,
+    pub success_credits: i64,
+    pub failure_credits: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyStickyUser {
+    pub user: AdminUserIdentity,
+    pub last_success_at: i64,
+    pub yesterday: StickyCreditsWindow,
+    pub today: StickyCreditsWindow,
+    pub month: StickyCreditsWindow,
+    pub daily_buckets: Vec<ApiKeyUserUsageBucket>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaginatedApiKeyStickyUsers {
+    pub items: Vec<ApiKeyStickyUser>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct UserTokenSummary {
     pub token_id: String,
@@ -15957,6 +16483,7 @@ pub struct AttemptAnalysis {
     pub status: &'static str,
     pub tavily_status_code: Option<i64>,
     pub key_health_action: KeyHealthAction,
+    pub api_key_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15974,6 +16501,7 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
             key_health_action: classify_quarantine_reason(Some(status.as_u16() as i64), body)
                 .map(KeyHealthAction::Quarantine)
                 .unwrap_or(KeyHealthAction::None),
+            api_key_id: None,
         };
     }
 
@@ -15984,6 +16512,7 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
                 status: OUTCOME_UNKNOWN,
                 tavily_status_code: None,
                 key_health_action: KeyHealthAction::None,
+                api_key_id: None,
             };
         }
     };
@@ -16014,6 +16543,7 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
                         status: OUTCOME_QUOTA_EXHAUSTED,
                         tavily_status_code: code.or(detected_code),
                         key_health_action: KeyHealthAction::MarkExhausted,
+                        api_key_id: None,
                     };
                 }
                 MessageOutcome::Error => {
@@ -16031,6 +16561,7 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
             key_health_action: classify_quarantine_reason(detected_code, body)
                 .map(KeyHealthAction::Quarantine)
                 .unwrap_or(KeyHealthAction::None),
+            api_key_id: None,
         };
     }
 
@@ -16039,6 +16570,7 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
             status: OUTCOME_SUCCESS,
             tavily_status_code: detected_code,
             key_health_action: KeyHealthAction::None,
+            api_key_id: None,
         };
     }
 
@@ -16046,6 +16578,7 @@ fn analyze_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis {
         status: OUTCOME_UNKNOWN,
         tavily_status_code: detected_code,
         key_health_action: KeyHealthAction::None,
+        api_key_id: None,
     }
 }
 
@@ -16097,6 +16630,7 @@ pub fn analyze_http_attempt(status: StatusCode, body: &[u8]) -> AttemptAnalysis 
         status: status_str,
         tavily_status_code: Some(effective),
         key_health_action,
+        api_key_id: None,
     }
 }
 
@@ -20992,6 +21526,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 OUTCOME_SUCCESS,
                 Some("simulated pending charge"),
                 3,
+                None,
             )
             .await
             .expect("record pending billing attempt");
@@ -21083,6 +21618,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 OUTCOME_SUCCESS,
                 Some("simulated pending charge"),
                 4,
+                None,
             )
             .await
             .expect("record pending billing attempt");
@@ -21233,6 +21769,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 Some("subject pinned to original token"),
                 2,
                 guard.billing_subject(),
+                None,
             )
             .await
             .expect("record pending billing attempt with pinned subject");
@@ -21366,6 +21903,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 OUTCOME_SUCCESS,
                 Some("previous month token charge"),
                 3,
+                None,
             )
             .await
             .expect("record pending token billing");
@@ -21447,6 +21985,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 OUTCOME_SUCCESS,
                 Some("previous month account charge"),
                 4,
+                None,
             )
             .await
             .expect("record pending account billing");
@@ -21502,6 +22041,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 OUTCOME_SUCCESS,
                 Some("concurrent settle"),
                 5,
+                None,
             )
             .await
             .expect("record pending billing attempt");
@@ -21568,6 +22108,7 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                 OUTCOME_SUCCESS,
                 Some("forced claim miss"),
                 3,
+                None,
             )
             .await
             .expect("record pending billing attempt");

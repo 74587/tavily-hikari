@@ -36,10 +36,12 @@ use url::form_urlencoded;
 type SummarySig = (i64, i64, i64, i64, i64, i64, i64, Option<i64>);
 use std::time::{Duration, Instant};
 use tavily_hikari::{
-    ApiKeyMetrics, AuthToken, OAuthAccountProfile, PendingBillingSettleOutcome, ProxyError,
-    ProxyRequest, ProxyResponse, ProxySummary, RequestLogRecord, TavilyProxy, TokenHourlyBucket,
-    TokenHourlyRequestVerdict, TokenLogRecord, TokenQuotaVerdict, TokenRequestKindOption,
-    TokenSummary, TokenUsageBucket, UserTokenLookup, analyze_mcp_attempt,
+    AdminUserIdentity, ApiKeyMetrics, ApiKeyStickyNode, ApiKeyStickyUser, ApiKeyUserUsageBucket,
+    AuthToken, ForwardProxyHourlyBucketResponse, ForwardProxyStatsResponse,
+    ForwardProxyWeightHourlyBucketResponse, OAuthAccountProfile, PendingBillingSettleOutcome,
+    ProxyError, ProxyRequest, ProxyResponse, ProxySummary, RequestLogRecord, StickyCreditsWindow,
+    TavilyProxy, TokenHourlyBucket, TokenHourlyRequestVerdict, TokenLogRecord, TokenQuotaVerdict,
+    TokenRequestKindOption, TokenSummary, TokenUsageBucket, UserTokenLookup, analyze_mcp_attempt,
     classify_token_request_kind, effective_request_logs_gc_at,
     effective_request_logs_retention_days, effective_token_daily_limit,
     effective_token_hourly_limit, effective_token_hourly_request_limit,

@@ -836,6 +836,7 @@ async fn proxy_tavily_http_endpoint(
                                     None,
                                     credits,
                                     subject,
+                                    analysis.api_key_id.as_deref(),
                                 )
                                 .await
                         } else {
@@ -852,6 +853,7 @@ async fn proxy_tavily_http_endpoint(
                                     analysis.status,
                                     None,
                                     credits,
+                                    analysis.api_key_id.as_deref(),
                                 )
                                 .await
                         }
@@ -1053,6 +1055,7 @@ async fn proxy_tavily_http_endpoint(
                                 None,
                                 credits,
                                 subject,
+                                analysis.api_key_id.as_deref(),
                             )
                             .await
                     } else {
@@ -1069,6 +1072,7 @@ async fn proxy_tavily_http_endpoint(
                                 analysis.status,
                                 None,
                                 credits,
+                                analysis.api_key_id.as_deref(),
                             )
                             .await
                     }

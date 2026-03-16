@@ -769,6 +769,7 @@ async fn proxy_handler(
                                     credits,
                                     subject,
                                     &request_kind,
+                                    analysis.api_key_id.as_deref(),
                                 )
                                 .await
                         } else {
@@ -786,6 +787,7 @@ async fn proxy_handler(
                                     None,
                                     credits,
                                     &request_kind,
+                                    analysis.api_key_id.as_deref(),
                                 )
                                 .await
                         }

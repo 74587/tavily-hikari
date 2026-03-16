@@ -940,6 +940,51 @@ export interface KeySummary {
   last_activity: number | null
 }
 
+export interface StickyUserIdentity {
+  userId: string
+  displayName: string | null
+  username: string | null
+  active: boolean
+  lastLoginAt: number | null
+  tokenCount: number
+}
+
+export interface StickyCreditsWindow {
+  successCredits: number
+  failureCredits: number
+}
+
+export interface StickyUserDailyBucket {
+  bucketStart: number
+  bucketEnd: number
+  successCredits: number
+  failureCredits: number
+}
+
+export interface StickyUserRow {
+  user: StickyUserIdentity
+  lastSuccessAt: number
+  windows: {
+    yesterday: StickyCreditsWindow
+    today: StickyCreditsWindow
+    month: StickyCreditsWindow
+  }
+  dailyBuckets: StickyUserDailyBucket[]
+}
+
+export interface StickyUsersResponse extends Paginated<StickyUserRow> {}
+
+export interface StickyNode extends ForwardProxyStatsNode {
+  role: 'primary' | 'secondary'
+}
+
+export interface StickyNodesResponse {
+  rangeStart: string
+  rangeEnd: string
+  bucketSeconds: number
+  nodes: StickyNode[]
+}
+
 export function fetchKeyMetrics(id: string, period?: 'day' | 'week' | 'month', since?: number, signal?: AbortSignal): Promise<KeySummary> {
   const params = new URLSearchParams()
   if (period) params.set('period', period)
@@ -996,6 +1041,25 @@ export function fetchKeyLogs(id: string, limit = 50, since?: number, signal?: Ab
   if (since != null) params.set('since', String(since))
   const encoded = encodeURIComponent(id)
   return requestJson(`/api/keys/${encoded}/logs?${params.toString()}`, { signal })
+}
+
+export function fetchKeyStickyUsers(
+  id: string,
+  page = 1,
+  perPage = 20,
+  signal?: AbortSignal,
+): Promise<StickyUsersResponse> {
+  const params = new URLSearchParams({
+    page: String(page),
+    per_page: String(perPage),
+  })
+  const encoded = encodeURIComponent(id)
+  return requestJson(`/api/keys/${encoded}/sticky-users?${params.toString()}`, { signal })
+}
+
+export function fetchKeyStickyNodes(id: string, signal?: AbortSignal): Promise<StickyNodesResponse> {
+  const encoded = encodeURIComponent(id)
+  return requestJson(`/api/keys/${encoded}/sticky-nodes`, { signal })
 }
 
 // Tokens API

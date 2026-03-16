@@ -1035,6 +1035,32 @@ interface AdminTranslationsShape {
       registrationIp: string
       registrationRegion: string
     }
+    stickyUsers: {
+      title: string
+      description: string
+      empty: string
+      user: string
+      yesterday: string
+      today: string
+      month: string
+      trend: string
+      lastSuccess: string
+      success: string
+      failure: string
+      inactive: string
+    }
+    stickyNodes: {
+      title: string
+      description: string
+      empty: string
+      role: string
+      node: string
+      activity: string
+      weight: string
+      primary: string
+      secondary: string
+      window: string
+    }
     logsTitle: string
     logsDescription: string
     logsEmpty: string
@@ -2183,6 +2209,32 @@ export const translations: Record<Language, TranslationShape> = {
           registrationIp: 'Registration IP',
           registrationRegion: 'Region',
         },
+        stickyUsers: {
+          title: 'Sticky Users',
+          description: 'Current user bindings on this key, charged credits only.',
+          empty: 'No users are currently sticky to this key.',
+          user: 'User',
+          yesterday: 'Yesterday',
+          today: 'Today',
+          month: 'Month',
+          trend: '7d trend',
+          lastSuccess: 'Last success',
+          success: 'Success',
+          failure: 'Failure',
+          inactive: 'Inactive',
+        },
+        stickyNodes: {
+          title: 'Sticky Nodes',
+          description: 'Current primary and secondary proxy nodes for this key.',
+          empty: 'No sticky nodes are currently assigned.',
+          role: 'Role',
+          node: 'Node',
+          activity: '24h activity',
+          weight: '24h weight',
+          primary: 'Primary',
+          secondary: 'Secondary',
+          window: 'Window',
+        },
         logsTitle: 'Recent Requests',
         logsDescription: 'Up to the latest 200 for this key.',
         logsEmpty: 'No request logs for this period.',
@@ -3288,6 +3340,32 @@ export const translations: Record<Language, TranslationShape> = {
           group: '分组',
           registrationIp: '注册 IP',
           registrationRegion: '地区',
+        },
+        stickyUsers: {
+          title: 'Sticky 用户',
+          description: '当前仍绑定到这把密钥的用户，以及已记账 credits 视图。',
+          empty: '当前没有用户 sticky 到这把密钥。',
+          user: '用户',
+          yesterday: '昨日',
+          today: '今日',
+          month: '本月',
+          trend: '近 7 日',
+          lastSuccess: '最近成功',
+          success: '成功',
+          failure: '失败',
+          inactive: '停用',
+        },
+        stickyNodes: {
+          title: 'Sticky 节点',
+          description: '这把密钥当前的主备代理节点，与实时统计保持同款图表。',
+          empty: '当前没有 sticky 节点。',
+          role: '角色',
+          node: '节点',
+          activity: '24h 活动',
+          weight: '24h 权重',
+          primary: '主节点',
+          secondary: '备节点',
+          window: '窗口',
         },
         logsTitle: '近期请求',
         logsDescription: '最多展示该密钥的 200 条请求。',

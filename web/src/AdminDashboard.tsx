@@ -128,6 +128,8 @@ import {
   type Paginated,
   fetchKeyMetrics,
   fetchKeyLogs,
+  fetchKeyStickyNodes,
+  fetchKeyStickyUsers,
   type KeySummary,
   type JobLogView,
   fetchApiKeyDetail,
@@ -151,8 +153,14 @@ import {
   type AdminUserTag,
   type AdminUserTagBinding,
   type ForwardProxySettings,
+  type ForwardProxyActivityBucket,
+  type ForwardProxyStatsNode,
   type ForwardProxyStatsResponse,
+  type ForwardProxyWeightBucket,
   type ForwardProxyValidationKind,
+  type StickyNode,
+  type StickyUserDailyBucket,
+  type StickyUserRow,
   type ForwardProxyProgressEvent,
   fetchForwardProxySettings,
   fetchForwardProxyStats,
@@ -704,6 +712,192 @@ function TokenOwnerValue({
       </button>
     </div>
   )
+}
+
+type StickyUserIdentityLike = StickyUserRow['user']
+
+function stickyUserPrimary(user: StickyUserIdentityLike): string {
+  return user.displayName || user.userId
+}
+
+function stickyUserSecondary(user: StickyUserIdentityLike): string | null {
+  return user.username ? `@${user.username}` : null
+}
+
+function buildVisibleBarHeights(successCount: number, failureCount: number, scaleMax: number, totalHeightPx: number) {
+  if (scaleMax <= 0 || totalHeightPx <= 0) {
+    return { empty: totalHeightPx, failure: 0, success: 0 }
+  }
+
+  let success = successCount > 0 ? Math.max((successCount / scaleMax) * totalHeightPx, 1) : 0
+  let failure = failureCount > 0 ? Math.max((failureCount / scaleMax) * totalHeightPx, 1) : 0
+  const maxVisible = Math.max(totalHeightPx, 0)
+  let overflow = success + failure - maxVisible
+
+  const shrink = (value: number, minVisible: number, amount: number) => {
+    if (amount <= 0 || value <= minVisible) return { nextValue: value, remaining: amount }
+    const delta = Math.min(value - minVisible, amount)
+    return { nextValue: value - delta, remaining: amount - delta }
+  }
+
+  if (overflow > 0) {
+    const first = success >= failure ? 'success' : 'failure'
+    const second = first === 'success' ? 'failure' : 'success'
+    for (const key of [first, second] as const) {
+      const minVisible = key === 'success' ? (successCount > 0 ? 1 : 0) : failureCount > 0 ? 1 : 0
+      const current = key === 'success' ? success : failure
+      const result = shrink(current, minVisible, overflow)
+      if (key === 'success') {
+        success = result.nextValue
+      } else {
+        failure = result.nextValue
+      }
+      overflow = result.remaining
+    }
+  }
+
+  const used = Math.min(success + failure, maxVisible)
+  return {
+    empty: Math.max(maxVisible - used, 0),
+    failure,
+    success,
+  }
+}
+
+function formatTrendTimeRange(startIso: string, endIso: string): string {
+  return `${formatTimestampNoYear(Math.floor(new Date(startIso).getTime() / 1000))} - ${formatTimestampNoYear(Math.floor(new Date(endIso).getTime() / 1000))}`
+}
+
+function ProxyActivityTrendCell({
+  buckets,
+  scaleMax,
+}: {
+  buckets: ForwardProxyActivityBucket[]
+  scaleMax: number
+}): JSX.Element {
+  if (buckets.length === 0) return <span className="token-owner-empty">—</span>
+
+  return (
+    <div className="flex h-10 items-end gap-px">
+      {buckets.map((bucket) => {
+        const total = bucket.successCount + bucket.failureCount
+        const heights = buildVisibleBarHeights(bucket.successCount, bucket.failureCount, scaleMax, 40)
+        return (
+          <div
+            key={bucket.bucketStart}
+            className="relative flex h-10 min-w-0 flex-1 flex-col overflow-hidden rounded-[3px] border border-border/40 bg-muted/35"
+            title={`${formatTrendTimeRange(bucket.bucketStart, bucket.bucketEnd)} · ${bucket.successCount}/${bucket.failureCount}`}
+          >
+            <div style={{ height: `${heights.empty}px` }} />
+            <div className={total > 0 ? 'bg-destructive/80' : 'bg-transparent'} style={{ height: `${heights.failure}px` }} />
+            <div className={total > 0 ? 'bg-success/85' : 'bg-transparent'} style={{ height: `${heights.success}px` }} />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function StickyCreditsTrendCell({
+  buckets,
+  scaleMax,
+}: {
+  buckets: StickyUserDailyBucket[]
+  scaleMax: number
+}): JSX.Element {
+  if (buckets.length === 0) return <span className="token-owner-empty">—</span>
+
+  return (
+    <div className="flex h-10 items-end gap-px">
+      {buckets.map((bucket) => {
+        const total = bucket.successCredits + bucket.failureCredits
+        const heights = buildVisibleBarHeights(bucket.successCredits, bucket.failureCredits, scaleMax, 40)
+        return (
+          <div
+            key={bucket.bucketStart}
+            className="relative flex h-10 min-w-0 flex-1 flex-col overflow-hidden rounded-[3px] border border-border/40 bg-muted/35"
+            title={`${formatDateOnly(bucket.bucketStart)} · ${bucket.successCredits}/${bucket.failureCredits}`}
+          >
+            <div style={{ height: `${heights.empty}px` }} />
+            <div className={total > 0 ? 'bg-destructive/80' : 'bg-transparent'} style={{ height: `${heights.failure}px` }} />
+            <div className={total > 0 ? 'bg-success/85' : 'bg-transparent'} style={{ height: `${heights.success}px` }} />
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+type WeightTrendScale = {
+  minValue: number
+  maxValue: number
+}
+
+function buildWeightTrendGeometry(buckets: ForwardProxyWeightBucket[], scale: WeightTrendScale) {
+  if (buckets.length === 0) return null
+
+  const chartWidth = 216
+  const chartHeight = 40
+  const span = Math.max(scale.maxValue - scale.minValue, Number.EPSILON)
+  const bucketWidth = chartWidth / buckets.length
+  const points = buckets.map((bucket, index) => {
+    const ratio = Math.max(0, Math.min(1, (bucket.lastWeight - scale.minValue) / span))
+    const x = bucketWidth * index + bucketWidth / 2
+    const y = chartHeight - ratio * chartHeight
+    return { x, y }
+  })
+  const firstPoint = points[0]
+  const lastPoint = points[points.length - 1]
+  if (!firstPoint || !lastPoint) return null
+
+  const zeroRatio = (0 - scale.minValue) / span
+  const zeroY = chartHeight - Math.max(0, Math.min(1, zeroRatio)) * chartHeight
+  const linePath = points
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(' ')
+  const areaPath = `${linePath} L ${lastPoint.x.toFixed(2)} ${zeroY.toFixed(2)} L ${firstPoint.x.toFixed(2)} ${zeroY.toFixed(2)} Z`
+
+  return { chartWidth, chartHeight, linePath, areaPath, zeroY }
+}
+
+function ProxyWeightTrendCell({ buckets, scale }: { buckets: ForwardProxyWeightBucket[]; scale: WeightTrendScale }): JSX.Element {
+  const geometry = buildWeightTrendGeometry(buckets, scale)
+  if (!geometry) return <span className="token-owner-empty">—</span>
+
+  return (
+    <svg
+      viewBox={`0 0 ${geometry.chartWidth} ${geometry.chartHeight}`}
+      className="block h-10 w-full rounded-md border border-border/55 bg-background/45"
+      aria-hidden="true"
+    >
+      <line x1={0} y1={geometry.zeroY} x2={geometry.chartWidth} y2={geometry.zeroY} stroke="hsl(var(--foreground) / 0.14)" strokeWidth="1" />
+      <path d={geometry.areaPath} fill="hsl(var(--success) / 0.18)" />
+      <path d={geometry.linePath} fill="none" stroke="hsl(var(--success))" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function resolveStickyNodeWeightBuckets(node: ForwardProxyStatsNode): ForwardProxyWeightBucket[] {
+  if (node.weight24h.length > 0) return node.weight24h
+  if (node.last24h.length === 0) return []
+  return node.last24h.map((bucket) => ({
+    bucketStart: bucket.bucketStart,
+    bucketEnd: bucket.bucketEnd,
+    sampleCount: 0,
+    minWeight: node.weight,
+    maxWeight: node.weight,
+    avgWeight: node.weight,
+    lastWeight: node.weight,
+  }))
+}
+
+function stickyNodeWindowSummary(node: StickyNode): string {
+  const attempts = node.stats.oneDay.attempts
+  const successRate = node.stats.oneDay.successRate
+  const latency = node.stats.oneDay.avgLatencyMs
+  const rateLabel = successRate == null ? '—' : percentageFormatter.format(successRate)
+  const latencyLabel = latency == null ? '—' : `${Math.round(latency)} ms`
+  return `${formatNumber(attempts)} · ${rateLabel} · ${latencyLabel}`
 }
 
 function statusTone(status: string): StatusTone {
@@ -5113,6 +5307,7 @@ function AdminDashboard(): JSX.Element {
         <KeyDetails
           key={route.id}
           id={route.id}
+          onOpenUser={(userId) => navigateUser(userId, { preserveUsersContext: true })}
           onBack={() =>
             navigateToPath(
               buildAdminKeysPath({
@@ -8403,7 +8598,7 @@ function LogDetails({ log, strings }: { log: RequestLog; strings: AdminTranslati
   )
 }
 
-function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Element {
+function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void; onOpenUser: (userId: string) => void }): JSX.Element {
   const translations = useTranslate()
   const adminStrings = translations.admin
   const keyStrings = adminStrings.keys
@@ -8415,6 +8610,8 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
   const [startDate, setStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
   const [summary, setSummary] = useState<KeySummary | null>(null)
   const [logs, setLogs] = useState<RequestLog[]>([])
+  const [stickyUsers, setStickyUsers] = useState<StickyUserRow[]>([])
+  const [stickyNodes, setStickyNodes] = useState<StickyNode[]>([])
   const [detailLoadState, setDetailLoadState] = useState<QueryLoadState>('initial_loading')
   const [error, setError] = useState<string | null>(null)
   const [syncState, setSyncState] = useState<'idle' | 'syncing' | 'success'>('idle')
@@ -8458,17 +8655,23 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
         setDetail(null)
         setSummary(null)
         setLogs([])
+        setStickyUsers([])
+        setStickyNodes([])
       }
       const since = computeSince()
-      const [s, ls, d] = await Promise.all([
+      const [s, ls, d, stickyUsersResponse, stickyNodesResponse] = await Promise.all([
         fetchKeyMetrics(id, period, since, controller.signal),
         fetchKeyLogs(id, 50, since, controller.signal),
         fetchApiKeyDetail(id, controller.signal).catch(() => null),
+        fetchKeyStickyUsers(id, 1, 20, controller.signal),
+        fetchKeyStickyNodes(id, controller.signal),
       ])
       if (controller.signal.aborted) return
       setSummary(s)
       setLogs(ls)
       setDetail(d)
+      setStickyUsers(stickyUsersResponse.items)
+      setStickyNodes(stickyNodesResponse.nodes)
       setDetailLoadState('ready')
       queryKeyRef.current = queryKey
     } catch (err) {
@@ -8550,6 +8753,26 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
       { id: 'quota', label: keyDetailsStrings.metrics.quota, value: formatNumber(summary.quota_exhausted_count), subtitle: formatPercent(summary.quota_exhausted_count, total) },
     ]
   }, [summary, keyDetailsStrings])
+  const stickyUserScaleMax = useMemo(
+    () => Math.max(...stickyUsers.flatMap((item) => item.dailyBuckets.map((bucket) => bucket.successCredits + bucket.failureCredits)), 0),
+    [stickyUsers],
+  )
+  const stickyNodeScaleMax = useMemo(
+    () => Math.max(...stickyNodes.flatMap((node) => node.last24h.map((bucket) => bucket.successCount + bucket.failureCount)), 0),
+    [stickyNodes],
+  )
+  const stickyNodeWeightScale = useMemo(() => {
+    const weightValues = stickyNodes.flatMap((node) =>
+      resolveStickyNodeWeightBuckets(node).flatMap((bucket) => [bucket.minWeight, bucket.maxWeight, bucket.lastWeight]),
+    )
+    const minWeightValue = Math.min(...weightValues, 0)
+    const maxWeightValue = Math.max(...weightValues, 0)
+    const weightPadding = Math.max((maxWeightValue - minWeightValue) * 0.08, 0.2)
+    return {
+      minValue: minWeightValue - weightPadding,
+      maxValue: maxWeightValue + weightPadding,
+    }
+  }, [stickyNodes])
   const detailBlocking = isBlockingLoadState(detailLoadState)
   const detailRefreshing = isRefreshingLoadState(detailLoadState)
   const detailLoadingLabel = detailRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
@@ -8786,6 +9009,184 @@ function KeyDetails({ id, onBack }: { id: string; onBack: () => void }): JSX.Ele
               ))
             )}
           </section>
+        </AdminLoadingRegion>
+      </section>
+
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>{keyDetailsStrings.stickyUsers.title}</h2>
+            <p className="panel-description">{keyDetailsStrings.stickyUsers.description}</p>
+          </div>
+        </div>
+        <AdminLoadingRegion className="table-wrapper admin-responsive-up" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+          {stickyUsers.length === 0 ? (
+            <div className="empty-state alert">{keyDetailsStrings.stickyUsers.empty}</div>
+          ) : (
+            <Table>
+              <thead>
+                <tr>
+                  <th>{keyDetailsStrings.stickyUsers.user}</th>
+                  <th>{keyDetailsStrings.stickyUsers.yesterday}</th>
+                  <th>{keyDetailsStrings.stickyUsers.today}</th>
+                  <th>{keyDetailsStrings.stickyUsers.month}</th>
+                  <th>{keyDetailsStrings.stickyUsers.lastSuccess}</th>
+                  <th>{keyDetailsStrings.stickyUsers.trend}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stickyUsers.map((item) => {
+                  const secondary = stickyUserSecondary(item.user)
+                  return (
+                    <tr key={item.user.userId}>
+                      <td>
+                        <div className="token-owner-block">
+                          <button type="button" className="link-button token-owner-trigger" onClick={() => onOpenUser(item.user.userId)}>
+                            <span className="token-owner-link">{stickyUserPrimary(item.user)}</span>
+                            {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
+                          </button>
+                          {!item.user.active ? <span className="token-owner-empty">{keyDetailsStrings.stickyUsers.inactive}</span> : null}
+                        </div>
+                      </td>
+                      <td>{formatNumber(item.windows.yesterday.successCredits)} / {formatNumber(item.windows.yesterday.failureCredits)}</td>
+                      <td>{formatNumber(item.windows.today.successCredits)} / {formatNumber(item.windows.today.failureCredits)}</td>
+                      <td>{formatNumber(item.windows.month.successCredits)} / {formatNumber(item.windows.month.failureCredits)}</td>
+                      <td>{formatTimestamp(item.lastSuccessAt)}</td>
+                      <td style={{ minWidth: 180 }}>
+                        <StickyCreditsTrendCell buckets={item.dailyBuckets} scaleMax={stickyUserScaleMax} />
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </Table>
+          )}
+        </AdminLoadingRegion>
+        <AdminLoadingRegion className="admin-mobile-list admin-responsive-down" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+          {stickyUsers.length === 0 ? (
+            <div className="empty-state alert">{keyDetailsStrings.stickyUsers.empty}</div>
+          ) : (
+            stickyUsers.map((item) => {
+              const secondary = stickyUserSecondary(item.user)
+              return (
+                <article key={item.user.userId} className="admin-mobile-card">
+                  <div className="admin-mobile-kv">
+                    <span>{keyDetailsStrings.stickyUsers.user}</span>
+                    <strong>
+                      <button type="button" className="link-button token-owner-trigger" onClick={() => onOpenUser(item.user.userId)}>
+                        <span className="token-owner-link">{stickyUserPrimary(item.user)}</span>
+                        {secondary ? <span className="token-owner-secondary">{secondary}</span> : null}
+                      </button>
+                    </strong>
+                  </div>
+                  <div className="admin-mobile-kv">
+                    <span>{keyDetailsStrings.stickyUsers.yesterday}</span>
+                    <strong>{formatNumber(item.windows.yesterday.successCredits)} / {formatNumber(item.windows.yesterday.failureCredits)}</strong>
+                  </div>
+                  <div className="admin-mobile-kv">
+                    <span>{keyDetailsStrings.stickyUsers.today}</span>
+                    <strong>{formatNumber(item.windows.today.successCredits)} / {formatNumber(item.windows.today.failureCredits)}</strong>
+                  </div>
+                  <div className="admin-mobile-kv">
+                    <span>{keyDetailsStrings.stickyUsers.month}</span>
+                    <strong>{formatNumber(item.windows.month.successCredits)} / {formatNumber(item.windows.month.failureCredits)}</strong>
+                  </div>
+                  <div className="admin-mobile-kv">
+                    <span>{keyDetailsStrings.stickyUsers.lastSuccess}</span>
+                    <strong>{formatTimestamp(item.lastSuccessAt)}</strong>
+                  </div>
+                  <div className="admin-mobile-kv">
+                    <span>{keyDetailsStrings.stickyUsers.trend}</span>
+                    <div style={{ width: '100%' }}>
+                      <StickyCreditsTrendCell buckets={item.dailyBuckets} scaleMax={stickyUserScaleMax} />
+                    </div>
+                  </div>
+                </article>
+              )
+            })
+          )}
+        </AdminLoadingRegion>
+      </section>
+
+      <section className="surface panel">
+        <div className="panel-header">
+          <div>
+            <h2>{keyDetailsStrings.stickyNodes.title}</h2>
+            <p className="panel-description">{keyDetailsStrings.stickyNodes.description}</p>
+          </div>
+        </div>
+        <AdminLoadingRegion className="table-wrapper admin-responsive-up" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+          {stickyNodes.length === 0 ? (
+            <div className="empty-state alert">{keyDetailsStrings.stickyNodes.empty}</div>
+          ) : (
+            <Table>
+              <thead>
+                <tr>
+                  <th>{keyDetailsStrings.stickyNodes.role}</th>
+                  <th>{keyDetailsStrings.stickyNodes.node}</th>
+                  <th>{keyDetailsStrings.stickyNodes.window}</th>
+                  <th>{keyDetailsStrings.stickyNodes.activity}</th>
+                  <th>{keyDetailsStrings.stickyNodes.weight}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stickyNodes.map((node) => (
+                  <tr key={`${node.role}:${node.key}`}>
+                    <td>
+                      <StatusBadge tone={node.role === 'primary' ? 'success' : 'info'}>
+                        {node.role === 'primary' ? keyDetailsStrings.stickyNodes.primary : keyDetailsStrings.stickyNodes.secondary}
+                      </StatusBadge>
+                    </td>
+                    <td>
+                      <div style={{ display: 'grid', gap: 4 }}>
+                        <strong>{node.displayName}</strong>
+                        <span className="token-owner-empty">{node.key}</span>
+                      </div>
+                    </td>
+                    <td>{stickyNodeWindowSummary(node)}</td>
+                    <td style={{ minWidth: 180 }}>
+                      <ProxyActivityTrendCell buckets={node.last24h} scaleMax={stickyNodeScaleMax} />
+                    </td>
+                    <td style={{ minWidth: 180 }}>
+                      <ProxyWeightTrendCell buckets={resolveStickyNodeWeightBuckets(node)} scale={stickyNodeWeightScale} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          )}
+        </AdminLoadingRegion>
+        <AdminLoadingRegion className="admin-mobile-list admin-responsive-down" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+          {stickyNodes.length === 0 ? (
+            <div className="empty-state alert">{keyDetailsStrings.stickyNodes.empty}</div>
+          ) : (
+            stickyNodes.map((node) => (
+              <article key={`${node.role}:${node.key}`} className="admin-mobile-card">
+                <div className="admin-mobile-kv">
+                  <span>{keyDetailsStrings.stickyNodes.role}</span>
+                  <StatusBadge tone={node.role === 'primary' ? 'success' : 'info'}>
+                    {node.role === 'primary' ? keyDetailsStrings.stickyNodes.primary : keyDetailsStrings.stickyNodes.secondary}
+                  </StatusBadge>
+                </div>
+                <div className="admin-mobile-kv">
+                  <span>{keyDetailsStrings.stickyNodes.node}</span>
+                  <strong>{node.displayName}</strong>
+                </div>
+                <div className="admin-mobile-kv">
+                  <span>{keyDetailsStrings.stickyNodes.activity}</span>
+                  <div style={{ width: '100%' }}>
+                    <ProxyActivityTrendCell buckets={node.last24h} scaleMax={stickyNodeScaleMax} />
+                  </div>
+                </div>
+                <div className="admin-mobile-kv">
+                  <span>{keyDetailsStrings.stickyNodes.weight}</span>
+                  <div style={{ width: '100%' }}>
+                    <ProxyWeightTrendCell buckets={resolveStickyNodeWeightBuckets(node)} scale={stickyNodeWeightScale} />
+                  </div>
+                </div>
+              </article>
+            ))
+          )}
         </AdminLoadingRegion>
       </section>
 
