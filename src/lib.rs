@@ -2703,9 +2703,10 @@ impl TavilyProxy {
         ordered
     }
 
-    async fn reconcile_proxy_affinity_record(
+    async fn resolve_proxy_affinity_record(
         &self,
         api_key_id: &str,
+        persist: bool,
     ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
         let mut record = self.load_proxy_affinity_record(api_key_id).await?;
         let (registration_ip, registration_region) =
@@ -2795,9 +2796,18 @@ impl TavilyProxy {
             record.primary_proxy_key = record.secondary_proxy_key.take();
         }
         record.updated_at = now;
-        self.store_proxy_affinity_record(api_key_id, record.clone())
-            .await?;
+        if persist {
+            self.store_proxy_affinity_record(api_key_id, record.clone())
+                .await?;
+        }
         Ok(record)
+    }
+
+    async fn reconcile_proxy_affinity_record(
+        &self,
+        api_key_id: &str,
+    ) -> Result<forward_proxy::ForwardProxyAffinityRecord, ProxyError> {
+        self.resolve_proxy_affinity_record(api_key_id, true).await
     }
 
     async fn promote_proxy_affinity_secondary(
@@ -3469,7 +3479,7 @@ impl TavilyProxy {
             return self.key_store.acquire_key().await;
         };
 
-        if let Some(user_id) = self.key_store.find_user_id_by_token_fresh(token_id).await? {
+        if let Some(user_id) = self.key_store.find_user_id_by_token(token_id).await? {
             let bound_key_ids = self
                 .key_store
                 .list_recent_api_key_bindings_for_user(&user_id)
@@ -4363,7 +4373,7 @@ impl TavilyProxy {
         &self,
         key_id: &str,
     ) -> Result<ApiKeyStickyNodesResponse, ProxyError> {
-        let record = self.reconcile_proxy_affinity_record(key_id).await?;
+        let record = self.resolve_proxy_affinity_record(key_id, false).await?;
         let manager = self.forward_proxy.lock().await.clone();
         let live =
             forward_proxy::build_forward_proxy_live_stats_response(&self.key_store.pool, &manager)
@@ -18601,6 +18611,68 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             created_affinity.0.as_deref(),
             Some("http://1.1.1.1:8080"),
             "fallback imports should preserve the proxy chosen during validation"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn key_sticky_nodes_preview_is_read_only_but_uses_effective_assignment() {
+        let db_path = temp_db_path("sticky-nodes-preview-read-only");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let geo_origin = format!("http://{geo_addr}/geo");
+
+        let mut proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy.api_key_geo_origin = geo_origin.clone();
+        {
+            let mut manager = proxy.forward_proxy.lock().await;
+            manager.apply_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![
+                        "http://18.183.246.69:8080".to_string(),
+                        "http://1.1.1.1:8080".to_string(),
+                    ],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                }
+                .normalized(),
+            );
+        }
+
+        let (key_id, _) = proxy
+            .add_or_undelete_key_with_status_in_group_and_registration(
+                "tvly-sticky-preview",
+                None,
+                Some("18.183.246.69"),
+                Some("JP Tokyo (13)"),
+            )
+            .await
+            .expect("key created without persisted proxy affinity");
+
+        let sticky_nodes = proxy
+            .key_sticky_nodes(&key_id)
+            .await
+            .expect("load sticky node preview");
+        assert_eq!(sticky_nodes.nodes.len(), 2);
+        assert_eq!(sticky_nodes.nodes[0].role, "primary");
+        assert_eq!(
+            sticky_nodes.nodes[0].node.key, "http://18.183.246.69:8080",
+            "preview should reflect the same effective primary node the request path would pick"
+        );
+
+        let persisted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM forward_proxy_key_affinity WHERE key_id = ?")
+                .bind(&key_id)
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("count affinity rows");
+        assert_eq!(
+            persisted_count, 0,
+            "admin sticky-node preview must not persist or mutate forward proxy affinity"
         );
 
         let _ = std::fs::remove_file(db_path);

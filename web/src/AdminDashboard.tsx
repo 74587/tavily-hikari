@@ -8605,12 +8605,15 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
   const keyDetailsStrings = adminStrings.keyDetails
   const logsTableStrings = adminStrings.logs.table
   const loadingStateStrings = adminStrings.loadingStates
+  const tokenStrings = adminStrings.tokens
   const [detail, setDetail] = useState<ApiKeyStats | null>(null)
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('month')
   const [startDate, setStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
   const [summary, setSummary] = useState<KeySummary | null>(null)
   const [logs, setLogs] = useState<RequestLog[]>([])
   const [stickyUsers, setStickyUsers] = useState<StickyUserRow[]>([])
+  const [stickyUsersPage, setStickyUsersPage] = useState(1)
+  const [stickyUsersTotal, setStickyUsersTotal] = useState(0)
   const [stickyNodes, setStickyNodes] = useState<StickyNode[]>([])
   const [detailLoadState, setDetailLoadState] = useState<QueryLoadState>('initial_loading')
   const [stickyUsersLoadState, setStickyUsersLoadState] = useState<QueryLoadState>('initial_loading')
@@ -8625,7 +8628,13 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
   const syncFeedbackTimerRef = useRef<number | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
   const queryKeyRef = useRef<string | null>(null)
+  const stickyUsersAbortRef = useRef<AbortController | null>(null)
+  const stickyUsersQueryKeyRef = useRef<string | null>(null)
+  const stickyNodesAbortRef = useRef<AbortController | null>(null)
+  const stickyNodesQueryKeyRef = useRef<string | null>(null)
   const queryKey = `${id}:${period}:${startDate}`
+  const stickyUsersQueryKey = `${id}:${stickyUsersPage}`
+  const stickyUsersPerPage = 20
   const quarantineDetailId = `key-quarantine-detail-${id}`
 
   const computeSince = useCallback((): number => {
@@ -8653,20 +8662,12 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
         reason === 'refresh'
           ? getRefreshingLoadState(queryKeyRef.current != null)
           : getBlockingLoadState(queryKeyRef.current != null)
-      setDetailLoadState(
-        panelLoadState,
-      )
-      setStickyUsersLoadState(panelLoadState)
-      setStickyNodesLoadState(panelLoadState)
+      setDetailLoadState(panelLoadState)
       setError(null)
-      setStickyUsersError(null)
-      setStickyNodesError(null)
       if (reason !== 'refresh') {
         setDetail(null)
         setSummary(null)
         setLogs([])
-        setStickyUsers([])
-        setStickyNodes([])
       }
       const since = computeSince()
       const [s, ls, d] = await Promise.all([
@@ -8679,27 +8680,6 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
       setLogs(ls)
       setDetail(d)
       setDetailLoadState('ready')
-      const [stickyUsersResult, stickyNodesResult] = await Promise.allSettled([
-        fetchKeyStickyUsers(id, 1, 20, controller.signal),
-        fetchKeyStickyNodes(id, controller.signal),
-      ])
-      if (controller.signal.aborted) return
-      if (stickyUsersResult.status === 'fulfilled') {
-        setStickyUsers(stickyUsersResult.value.items)
-        setStickyUsersLoadState('ready')
-      } else {
-        console.error(stickyUsersResult.reason)
-        setStickyUsersError(stickyUsersResult.reason instanceof Error ? stickyUsersResult.reason.message : adminStrings.errors.loadKeyDetails)
-        setStickyUsersLoadState('error')
-      }
-      if (stickyNodesResult.status === 'fulfilled') {
-        setStickyNodes(stickyNodesResult.value.nodes)
-        setStickyNodesLoadState('ready')
-      } else {
-        console.error(stickyNodesResult.reason)
-        setStickyNodesError(stickyNodesResult.reason instanceof Error ? stickyNodesResult.reason.message : adminStrings.errors.loadKeyDetails)
-        setStickyNodesLoadState('error')
-      }
       queryKeyRef.current = queryKey
     } catch (err) {
       if ((err as Error).name === 'AbortError') return
@@ -8709,6 +8689,62 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
     }
   }, [adminStrings.errors.loadKeyDetails, computeSince, id, period, queryKey])
 
+  const loadStickyUsers = useCallback(async (reason: 'initial' | 'switch' | 'refresh' = 'refresh') => {
+    stickyUsersAbortRef.current?.abort()
+    const controller = new AbortController()
+    stickyUsersAbortRef.current = controller
+    try {
+      const panelLoadState =
+        reason === 'refresh'
+          ? getRefreshingLoadState(stickyUsersQueryKeyRef.current != null)
+          : getBlockingLoadState(stickyUsersQueryKeyRef.current != null)
+      setStickyUsersLoadState(panelLoadState)
+      setStickyUsersError(null)
+      if (reason !== 'refresh') {
+        setStickyUsers([])
+        setStickyUsersTotal(0)
+      }
+      const result = await fetchKeyStickyUsers(id, stickyUsersPage, stickyUsersPerPage, controller.signal)
+      if (controller.signal.aborted) return
+      setStickyUsers(result.items)
+      setStickyUsersTotal(result.total)
+      setStickyUsersLoadState('ready')
+      stickyUsersQueryKeyRef.current = stickyUsersQueryKey
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      console.error(err)
+      setStickyUsersError(err instanceof Error ? err.message : adminStrings.errors.loadKeyDetails)
+      setStickyUsersLoadState('error')
+    }
+  }, [adminStrings.errors.loadKeyDetails, id, stickyUsersPage, stickyUsersPerPage, stickyUsersQueryKey])
+
+  const loadStickyNodes = useCallback(async (reason: 'initial' | 'switch' | 'refresh' = 'refresh') => {
+    stickyNodesAbortRef.current?.abort()
+    const controller = new AbortController()
+    stickyNodesAbortRef.current = controller
+    try {
+      const panelLoadState =
+        reason === 'refresh'
+          ? getRefreshingLoadState(stickyNodesQueryKeyRef.current != null)
+          : getBlockingLoadState(stickyNodesQueryKeyRef.current != null)
+      setStickyNodesLoadState(panelLoadState)
+      setStickyNodesError(null)
+      if (reason !== 'refresh') {
+        setStickyNodes([])
+      }
+      const result = await fetchKeyStickyNodes(id, controller.signal)
+      if (controller.signal.aborted) return
+      setStickyNodes(result.nodes)
+      setStickyNodesLoadState('ready')
+      stickyNodesQueryKeyRef.current = id
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      console.error(err)
+      setStickyNodesError(err instanceof Error ? err.message : adminStrings.errors.loadKeyDetails)
+      setStickyNodesLoadState('error')
+    }
+  }, [adminStrings.errors.loadKeyDetails, id])
+
   useEffect(() => {
     const reason = queryKeyRef.current == null ? 'initial' : queryKeyRef.current === queryKey ? 'refresh' : 'switch'
     void load(reason)
@@ -8716,6 +8752,32 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
       loadAbortRef.current?.abort()
     }
   }, [load, queryKey])
+
+  useEffect(() => {
+    const reason =
+      stickyUsersQueryKeyRef.current == null
+        ? 'initial'
+        : stickyUsersQueryKeyRef.current === stickyUsersQueryKey
+          ? 'refresh'
+          : 'switch'
+    void loadStickyUsers(reason)
+    return () => {
+      stickyUsersAbortRef.current?.abort()
+    }
+  }, [loadStickyUsers, stickyUsersQueryKey])
+
+  useEffect(() => {
+    const reason =
+      stickyNodesQueryKeyRef.current == null
+        ? 'initial'
+        : stickyNodesQueryKeyRef.current === id
+          ? 'refresh'
+          : 'switch'
+    void loadStickyNodes(reason)
+    return () => {
+      stickyNodesAbortRef.current?.abort()
+    }
+  }, [id, loadStickyNodes])
 
   useEffect(() => () => {
     if (syncFeedbackTimerRef.current != null) {
@@ -8725,6 +8787,7 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
 
   useEffect(() => {
     setQuarantineDetailExpanded(false)
+    setStickyUsersPage(1)
   }, [id])
 
   const syncUsage = useCallback(async () => {
@@ -8734,7 +8797,7 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
       setSyncState('syncing')
       setError(null)
       await syncApiKeyUsage(id)
-      await load('refresh')
+      await Promise.all([load('refresh'), loadStickyUsers('refresh'), loadStickyNodes('refresh')])
       setSyncState('success')
       if (syncFeedbackTimerRef.current != null) {
         window.clearTimeout(syncFeedbackTimerRef.current)
@@ -8750,7 +8813,7 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
     } finally {
       syncInFlightRef.current = false
     }
-  }, [adminStrings.errors.syncUsage, id, load])
+  }, [adminStrings.errors.syncUsage, id, load, loadStickyNodes, loadStickyUsers])
 
   const clearQuarantine = useCallback(async () => {
     if (quarantineState === 'clearing') return
@@ -8758,14 +8821,14 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
       setQuarantineState('clearing')
       setError(null)
       await clearApiKeyQuarantine(id)
-      await load('refresh')
+      await Promise.all([load('refresh'), loadStickyUsers('refresh'), loadStickyNodes('refresh')])
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : adminStrings.errors.clearQuarantine)
     } finally {
       setQuarantineState('idle')
     }
-  }, [adminStrings.errors.clearQuarantine, id, load, quarantineState])
+  }, [adminStrings.errors.clearQuarantine, id, load, loadStickyNodes, loadStickyUsers, quarantineState])
 
   const metricCards = useMemo(() => {
     if (!summary) return []
@@ -8803,6 +8866,12 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
   const detailBlocking = isBlockingLoadState(detailLoadState)
   const detailRefreshing = isRefreshingLoadState(detailLoadState)
   const detailLoadingLabel = detailRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
+  const stickyUsersBlocking = isBlockingLoadState(stickyUsersLoadState)
+  const stickyUsersRefreshing = isRefreshingLoadState(stickyUsersLoadState)
+  const stickyUsersLoadingLabel = stickyUsersRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
+  const stickyUsersTotalPages = Math.max(1, Math.ceil(stickyUsersTotal / stickyUsersPerPage))
+  const stickyNodesRefreshing = isRefreshingLoadState(stickyNodesLoadState)
+  const stickyNodesLoadingLabel = stickyNodesRefreshing ? loadingStateStrings.refreshing : loadingStateStrings.switching
   const quarantineRawDetail = detail?.quarantine?.reasonDetail?.trim() ?? ''
   const hasQuarantineRawDetail = quarantineRawDetail.length > 0
 
@@ -9046,7 +9115,13 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
             <p className="panel-description">{keyDetailsStrings.stickyUsers.description}</p>
           </div>
         </div>
-        <AdminLoadingRegion className="table-wrapper admin-responsive-up" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+        <AdminLoadingRegion
+          className="table-wrapper admin-responsive-up"
+          loadState={stickyUsersLoadState}
+          loadingLabel={stickyUsersLoadingLabel}
+          errorLabel={stickyUsersError ?? adminStrings.errors.loadKeyDetails}
+          minHeight={220}
+        >
           {stickyUsers.length === 0 ? (
             <div className="empty-state alert">{keyDetailsStrings.stickyUsers.empty}</div>
           ) : (
@@ -9089,7 +9164,13 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
             </Table>
           )}
         </AdminLoadingRegion>
-        <AdminLoadingRegion className="admin-mobile-list admin-responsive-down" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+        <AdminLoadingRegion
+          className="admin-mobile-list admin-responsive-down"
+          loadState={stickyUsersLoadState}
+          loadingLabel={stickyUsersLoadingLabel}
+          errorLabel={stickyUsersError ?? adminStrings.errors.loadKeyDetails}
+          minHeight={220}
+        >
           {stickyUsers.length === 0 ? (
             <div className="empty-state alert">{keyDetailsStrings.stickyUsers.empty}</div>
           ) : (
@@ -9133,6 +9214,26 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
             })
           )}
         </AdminLoadingRegion>
+        {stickyUsersTotal > stickyUsersPerPage && (
+          <AdminTablePagination
+            page={stickyUsersPage}
+            totalPages={stickyUsersTotalPages}
+            pageSummary={
+              <span className="panel-description">
+                {keyStrings.pagination.page
+                  .replace('{page}', String(stickyUsersPage))
+                  .replace('{total}', String(stickyUsersTotalPages))}
+              </span>
+            }
+            previousLabel={tokenStrings.pagination.prev}
+            nextLabel={tokenStrings.pagination.next}
+            previousDisabled={stickyUsersPage <= 1}
+            nextDisabled={stickyUsersPage >= stickyUsersTotalPages}
+            disabled={stickyUsersBlocking}
+            onPrevious={() => setStickyUsersPage((current) => Math.max(1, current - 1))}
+            onNext={() => setStickyUsersPage((current) => Math.min(stickyUsersTotalPages, current + 1))}
+          />
+        )}
       </section>
 
       <section className="surface panel">
@@ -9142,7 +9243,13 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
             <p className="panel-description">{keyDetailsStrings.stickyNodes.description}</p>
           </div>
         </div>
-        <AdminLoadingRegion className="table-wrapper admin-responsive-up" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+        <AdminLoadingRegion
+          className="table-wrapper admin-responsive-up"
+          loadState={stickyNodesLoadState}
+          loadingLabel={stickyNodesLoadingLabel}
+          errorLabel={stickyNodesError ?? adminStrings.errors.loadKeyDetails}
+          minHeight={220}
+        >
           {stickyNodes.length === 0 ? (
             <div className="empty-state alert">{keyDetailsStrings.stickyNodes.empty}</div>
           ) : (
@@ -9183,7 +9290,13 @@ function KeyDetails({ id, onBack, onOpenUser }: { id: string; onBack: () => void
             </Table>
           )}
         </AdminLoadingRegion>
-        <AdminLoadingRegion className="admin-mobile-list admin-responsive-down" loadState={detailLoadState} loadingLabel={detailLoadingLabel} minHeight={220}>
+        <AdminLoadingRegion
+          className="admin-mobile-list admin-responsive-down"
+          loadState={stickyNodesLoadState}
+          loadingLabel={stickyNodesLoadingLabel}
+          errorLabel={stickyNodesError ?? adminStrings.errors.loadKeyDetails}
+          minHeight={220}
+        >
           {stickyNodes.length === 0 ? (
             <div className="empty-state alert">{keyDetailsStrings.stickyNodes.empty}</div>
           ) : (
