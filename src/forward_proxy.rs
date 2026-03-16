@@ -359,6 +359,7 @@ pub struct ForwardProxyRuntimeState {
     pub source: String,
     pub kind: String,
     pub endpoint_url: Option<String>,
+    pub resolved_ip_source: String,
     pub resolved_ips: Vec<String>,
     pub resolved_regions: Vec<String>,
     pub available: bool,
@@ -381,6 +382,7 @@ impl ForwardProxyRuntimeState {
                 .as_ref()
                 .map(Url::to_string)
                 .or_else(|| endpoint.raw_url.clone()),
+            resolved_ip_source: String::new(),
             resolved_ips: Vec::new(),
             resolved_regions: Vec::new(),
             available: endpoint.is_selectable(),
@@ -441,6 +443,7 @@ struct ForwardProxyRuntimeRow {
     display_name: String,
     source: String,
     endpoint_url: Option<String>,
+    resolved_ip_source: Option<String>,
     resolved_ips_json: Option<String>,
     resolved_regions_json: Option<String>,
     weight: f64,
@@ -457,6 +460,11 @@ impl From<ForwardProxyRuntimeRow> for ForwardProxyRuntimeState {
             source: value.source,
             kind: "unknown".to_string(),
             endpoint_url: value.endpoint_url,
+            resolved_ip_source: value
+                .resolved_ip_source
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             resolved_ips: decode_string_vec_json(value.resolved_ips_json.as_deref()),
             resolved_regions: decode_string_vec_json(value.resolved_regions_json.as_deref()),
             available: true,
@@ -1252,6 +1260,7 @@ pub async fn ensure_forward_proxy_schema(pool: &SqlitePool) -> Result<(), ProxyE
             display_name TEXT NOT NULL,
             source TEXT NOT NULL,
             endpoint_url TEXT,
+            resolved_ip_source TEXT NOT NULL DEFAULT '',
             resolved_ips_json TEXT NOT NULL DEFAULT '[]',
             resolved_regions_json TEXT NOT NULL DEFAULT '[]',
             weight REAL NOT NULL,
@@ -1274,6 +1283,8 @@ pub async fn ensure_forward_proxy_schema(pool: &SqlitePool) -> Result<(), ProxyE
         "TEXT NOT NULL DEFAULT '[]'",
     )
     .await?;
+    ensure_forward_proxy_runtime_column(pool, "resolved_ip_source", "TEXT NOT NULL DEFAULT ''")
+        .await?;
 
     sqlx::query(
         r#"
@@ -1427,6 +1438,7 @@ pub async fn load_forward_proxy_runtime_states(
             display_name,
             source,
             endpoint_url,
+            resolved_ip_source,
             resolved_ips_json,
             resolved_regions_json,
             weight,
@@ -1473,6 +1485,7 @@ pub async fn persist_forward_proxy_runtime_state(
             display_name,
             source,
             endpoint_url,
+            resolved_ip_source,
             resolved_ips_json,
             resolved_regions_json,
             weight,
@@ -1481,11 +1494,12 @@ pub async fn persist_forward_proxy_runtime_state(
             consecutive_failures,
             is_penalized,
             updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, strftime('%s', 'now'))
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s', 'now'))
         ON CONFLICT(proxy_key) DO UPDATE SET
             display_name = excluded.display_name,
             source = excluded.source,
             endpoint_url = excluded.endpoint_url,
+            resolved_ip_source = excluded.resolved_ip_source,
             resolved_ips_json = excluded.resolved_ips_json,
             resolved_regions_json = excluded.resolved_regions_json,
             weight = excluded.weight,
@@ -1500,6 +1514,7 @@ pub async fn persist_forward_proxy_runtime_state(
     .bind(&state.display_name)
     .bind(&state.source)
     .bind(&state.endpoint_url)
+    .bind(&state.resolved_ip_source)
     .bind(resolved_ips_json)
     .bind(resolved_regions_json)
     .bind(state.weight)

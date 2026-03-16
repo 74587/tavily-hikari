@@ -22,6 +22,7 @@
 - 代理节点自身的已解析 IP / 地区也要持久化，并在导入绑定时优先复用这些节点元数据，而不是每次都临时 lookup。
 - 代理节点的出口 IP 必须通过第三方 trace 接口实测获得，不得使用 endpoint host、share-link host 或 DNS 推断来替代真实出口 IP。
 - 节点地区可以在拿到第三方 trace 的真实出口 IP 后，再通过 `country.is` 兼容接口解析并持久化。
+- 升级前遗留的 host/DNS 推断缓存即使看起来“完整”，也必须视为 stale metadata 并在后续导入/校验时刷新成 trace 来源。
 - 对升级前遗留的 Xray 节点 `resolved_ips=["127.0.0.1"]` / 空地区缓存，导入与校验选点时必须识别为 stale metadata 并自动刷新，不得把 loopback cache 视为“已完成解析”。
 - 列表支持 `registration_ip` 精确筛选与 `registration_region` 多选 facets 筛选，且保持 URL / 分页上下文。
 - 地区解析遵循 `xp` 的 `country.is` 思路：批量解析、短暂失败回退、不阻断导入。
