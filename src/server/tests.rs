@@ -3750,6 +3750,9 @@ mod tests {
                 subscription_urls: Vec::new(),
                 subscription_update_interval_secs: 3600,
                 insert_direct: false,
+            
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
             }, false)
             .await
             .expect("proxy settings updated");
@@ -4281,6 +4284,9 @@ mod tests {
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
@@ -4370,6 +4376,9 @@ mod tests {
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
@@ -14616,6 +14625,9 @@ mod tests {
                 subscription_urls: Vec::new(),
                 subscription_update_interval_secs: 3600,
                 insert_direct: false,
+            
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
             }, false)
             .await
             .expect("disable direct fallback");

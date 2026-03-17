@@ -14,6 +14,7 @@ import {
 } from '../components/ui/dialog'
 import { Input } from '../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { Switch } from '../components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
 import { Textarea } from '../components/ui/textarea'
 import AdminLoadingRegion from '../components/AdminLoadingRegion'
@@ -70,6 +71,8 @@ export interface ForwardProxyDraft {
   subscriptionUrlsText: string
   subscriptionUpdateIntervalSecs: string
   insertDirect: boolean
+  egressSocks5Enabled: boolean
+  egressSocks5Url: string
 }
 
 export interface ForwardProxyValidationEntry {
@@ -106,6 +109,7 @@ interface ForwardProxySettingsModuleProps {
   revalidating: boolean
   savedAt: number | null
   revalidateProgress: ForwardProxyDialogProgressState | null
+  egressPreviewProgress?: ForwardProxyDialogProgressState | null
   onPersistDraft: (
     draft: ForwardProxyDraft,
     onProgress?: (event: ForwardProxyProgressEvent) => void,
@@ -383,6 +387,8 @@ function buildDraftFromSettings(settings: ForwardProxySettings | null): ForwardP
     subscriptionUrlsText: settings?.subscriptionUrls.join('\n') ?? '',
     subscriptionUpdateIntervalSecs: String(settings?.subscriptionUpdateIntervalSecs ?? 3600),
     insertDirect: settings?.insertDirect ?? true,
+    egressSocks5Enabled: settings?.egressSocks5Enabled ?? false,
+    egressSocks5Url: settings?.egressSocks5Url ?? '',
   }
 }
 
@@ -1497,6 +1503,7 @@ export default function ForwardProxySettingsModule({
   revalidating,
   savedAt,
   revalidateProgress,
+  egressPreviewProgress = null,
   onPersistDraft,
   onValidateCandidates,
   onRefresh,
@@ -1532,6 +1539,9 @@ export default function ForwardProxySettingsModule({
   const manualUrls = settings?.proxyUrls ?? []
   const subscriptionUrls = settings?.subscriptionUrls ?? []
   const draft = buildDraftFromSettings(settings)
+  const [egressSocks5UrlDraft, setEgressSocks5UrlDraft] = useState(draft.egressSocks5Url)
+  const [egressSocks5EnabledDraft, setEgressSocks5EnabledDraft] = useState(draft.egressSocks5Enabled)
+  const [egressProgress, setEgressProgress] = useState<ForwardProxyDialogProgressState | null>(null)
   const [dialogKind, setDialogKind] = useState<ForwardProxyDialogKind>(null)
   const [dialogInput, setDialogInput] = useState('')
   const [dialogError, setDialogError] = useState<string | null>(null)
@@ -1573,6 +1583,12 @@ export default function ForwardProxySettingsModule({
       ])
     : normalizeEntries([...manualUrls, ...dialogInputValues])
   const controlsDisabled = saving || revalidating
+  const activeEgressProgress = egressPreviewProgress ?? egressProgress
+  const egressInputLocked = settings?.egressSocks5Enabled ?? false
+  const egressDraftDirty =
+    egressSocks5UrlDraft.trim() !== draft.egressSocks5Url.trim()
+    || egressSocks5EnabledDraft !== draft.egressSocks5Enabled
+  const egressApplyBusy = controlsDisabled && activeEgressProgress?.action === 'save'
   const canAddSubscription = dialogSubscriptionCandidate != null
     && (!activeDialogValidating || dialogHasLiveImportableSubscription)
   const canAddManualBatch = dialogManualBatchValues.length > manualUrls.length
@@ -1586,6 +1602,11 @@ export default function ForwardProxySettingsModule({
     FORWARD_PROXY_INTERVAL_OPTIONS.find(
       (option) => option.value === String(settings?.subscriptionUpdateIntervalSecs ?? 3600),
     )?.value ?? '3600'
+
+  useEffect(() => {
+    setEgressSocks5UrlDraft(draft.egressSocks5Url)
+    setEgressSocks5EnabledDraft(draft.egressSocks5Enabled)
+  }, [draft.egressSocks5Enabled, draft.egressSocks5Url])
 
   const summaryCards = [
     {
@@ -1723,6 +1744,35 @@ export default function ForwardProxySettingsModule({
         ...draft,
         insertDirect: checked,
       })
+    } catch {
+      // Parent state already exposes the error banner.
+    }
+  }
+
+  const handleApplyEgress = async () => {
+    try {
+      setEgressProgress(
+        createDialogProgressState(strings.progress, 'egress', 'save', {
+          includeEgressValidation: egressSocks5EnabledDraft,
+        }),
+      )
+      await persistDraft(
+        {
+          ...draft,
+          egressSocks5Enabled: egressSocks5EnabledDraft,
+          egressSocks5Url: egressSocks5UrlDraft.trim(),
+        },
+        (event) => {
+          setEgressProgress((current) => {
+            const base =
+              current
+              ?? createDialogProgressState(strings.progress, 'egress', 'save', {
+                includeEgressValidation: egressSocks5EnabledDraft,
+              })
+            return updateDialogProgressState(base, strings.progress, event)
+          })
+        },
+      )
     } catch {
       // Parent state already exposes the error banner.
     }
@@ -2128,6 +2178,66 @@ export default function ForwardProxySettingsModule({
             minHeight={220}
           >
             <div className="space-y-3">
+              <Card className="forward-proxy-field-card">
+                <CardHeader className="forward-proxy-editor-head">
+                  <div>
+                    <CardTitle className="text-base">{strings.config.egressTitle}</CardTitle>
+                    <CardDescription className="panel-description">
+                      {strings.config.egressDescription}
+                    </CardDescription>
+                  </div>
+                  <Badge variant={settings?.egressSocks5Enabled ? 'info' : 'outline'}>
+                    {settings?.egressSocks5Enabled
+                      ? strings.config.egressEnabled
+                      : strings.config.egressDisabled}
+                  </Badge>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {activeEgressProgress && (
+                    <ForwardProxyProgressBubble strings={strings} progress={activeEgressProgress} />
+                  )}
+                  <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+                    <label className="forward-proxy-field">
+                      <span className="forward-proxy-field-label">{strings.config.egressUrlLabel}</span>
+                      <Input
+                        value={egressSocks5UrlDraft}
+                        onChange={(event) => setEgressSocks5UrlDraft(event.target.value)}
+                        placeholder={strings.config.egressUrlPlaceholder}
+                        disabled={controlsDisabled || egressInputLocked}
+                        readOnly={egressInputLocked}
+                      />
+                      <span className="panel-description">
+                        {egressInputLocked
+                          ? strings.config.egressLockedHint
+                          : strings.config.egressUrlHint}
+                      </span>
+                    </label>
+
+                    <div className="space-y-3 rounded-xl border border-border/70 bg-card/45 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <strong className="text-sm">{strings.config.egressSwitchLabel}</strong>
+                          <p className="panel-description">{strings.config.egressSwitchHint}</p>
+                        </div>
+                        <Switch
+                          checked={egressSocks5EnabledDraft}
+                          onCheckedChange={setEgressSocks5EnabledDraft}
+                          disabled={controlsDisabled}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        className="w-full"
+                        onClick={() => void handleApplyEgress()}
+                        disabled={controlsDisabled || !egressDraftDirty}
+                      >
+                        {egressApplyBusy ? strings.config.egressApplying : strings.config.egressApply}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
               <div className="rounded-xl border border-border/70 bg-card/45 px-3.5 py-3">
                 <div className="flex flex-wrap items-center gap-3">
                   <Button type="button" variant="secondary" size="sm" onClick={() => openDialog('manual')} disabled={controlsDisabled}>

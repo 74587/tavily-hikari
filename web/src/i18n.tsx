@@ -314,6 +314,18 @@ interface AdminTranslationsShape {
       manualPlaceholder: string
       manualListEmpty: string
       manualItemFallback: string
+      egressTitle: string
+      egressDescription: string
+      egressEnabled: string
+      egressDisabled: string
+      egressUrlLabel: string
+      egressUrlPlaceholder: string
+      egressUrlHint: string
+      egressLockedHint: string
+      egressSwitchLabel: string
+      egressSwitchHint: string
+      egressApply: string
+      egressApplying: string
       subscriptionIntervalLabel: string
       subscriptionIntervalHint: string
       invalidInterval: string
@@ -384,6 +396,8 @@ interface AdminTranslationsShape {
       stepCounter: string
       steps: Record<
         | 'save_settings'
+        | 'validate_egress_socks5'
+        | 'apply_egress_socks5'
         | 'refresh_subscription'
         | 'bootstrap_probe'
         | 'normalize_input'
@@ -1466,6 +1480,18 @@ export const translations: Record<Language, TranslationShape> = {
           manualPlaceholder: 'http://127.0.0.1:8080\nsocks5h://127.0.0.1:1080\nvmess://…',
           manualListEmpty: 'No manual proxy URLs yet.',
           manualItemFallback: 'Manual node {index}',
+          egressTitle: 'Global SOCKS5 relay',
+          egressDescription: 'Route every non-direct forward-proxy request through one managed SOCKS5 relay so the egress path stays centralized.',
+          egressEnabled: 'Enabled',
+          egressDisabled: 'Disabled',
+          egressUrlLabel: 'SOCKS5 relay URL',
+          egressUrlPlaceholder: 'socks5h://user:pass@127.0.0.1:1080',
+          egressUrlHint: 'Accepts socks5:// or socks5h://. The URL stays editable while the relay is disabled.',
+          egressLockedHint: 'Disable the relay first if you need to edit the URL.',
+          egressSwitchLabel: 'Use global relay',
+          egressSwitchHint: 'New non-direct requests switch over only after the apply flow finishes.',
+          egressApply: 'Apply relay settings',
+          egressApplying: 'Applying relay…',
           subscriptionIntervalLabel: 'Subscription refresh interval (seconds)',
           subscriptionIntervalHint: 'Used by the backend refresh scheduler. Keep it high enough to avoid noisy churn.',
           invalidInterval: 'Subscription refresh interval must be a positive integer.',
@@ -1536,6 +1562,8 @@ export const translations: Record<Language, TranslationShape> = {
           stepCounter: '{current}/{total}',
           steps: {
             save_settings: 'Save settings',
+            validate_egress_socks5: 'Validate global SOCKS5 relay',
+            apply_egress_socks5: 'Apply global SOCKS5 relay',
             refresh_subscription: 'Refresh subscription',
             bootstrap_probe: 'Run bootstrap probes',
             normalize_input: 'Normalize input',
@@ -2605,6 +2633,18 @@ export const translations: Record<Language, TranslationShape> = {
           manualPlaceholder: 'http://127.0.0.1:8080\nsocks5h://127.0.0.1:1080\nvmess://…',
           manualListEmpty: '还没有手工节点。',
           manualItemFallback: '手工节点 {index}',
+          egressTitle: '全局 SOCKS5 收敛',
+          egressDescription: '把所有非直连 forward proxy 请求统一收敛到同一个 SOCKS5 relay，方便集中管理出口网络。',
+          egressEnabled: '已开启',
+          egressDisabled: '已关闭',
+          egressUrlLabel: 'SOCKS5 relay 地址',
+          egressUrlPlaceholder: 'socks5h://user:pass@127.0.0.1:1080',
+          egressUrlHint: '支持 socks5:// 与 socks5h://。关闭时可以编辑，开启后会自动锁定。',
+          egressLockedHint: '请先关闭全局 relay，关闭成功后才能再次编辑地址。',
+          egressSwitchLabel: '启用全局 relay',
+          egressSwitchHint: '只有在应用流程完成后，新请求才会切换到新的出口路径。',
+          egressApply: '应用 relay 配置',
+          egressApplying: '正在应用 relay…',
           subscriptionIntervalLabel: '订阅刷新周期（秒）',
           subscriptionIntervalHint: '由后端定时任务使用。周期过短会让节点列表更容易抖动。',
           invalidInterval: '订阅刷新周期必须是大于 0 的整数。',
@@ -2675,6 +2715,8 @@ export const translations: Record<Language, TranslationShape> = {
           stepCounter: '{current}/{total}',
           steps: {
             save_settings: '保存配置',
+            validate_egress_socks5: '校验全局 SOCKS5 relay',
+            apply_egress_socks5: '应用全局 SOCKS5 relay',
             refresh_subscription: '刷新订阅',
             bootstrap_probe: '引导探测节点',
             normalize_input: '规范化输入',

@@ -1542,6 +1542,8 @@ const FORWARD_PROXY_PROGRESS_OPERATION_VALIDATE: &str = "validate";
 const FORWARD_PROXY_PROGRESS_OPERATION_REVALIDATE: &str = "revalidate";
 
 const FORWARD_PROXY_PHASE_SAVE_SETTINGS: &str = "save_settings";
+const FORWARD_PROXY_PHASE_VALIDATE_EGRESS_SOCKS5: &str = "validate_egress_socks5";
+const FORWARD_PROXY_PHASE_APPLY_EGRESS_SOCKS5: &str = "apply_egress_socks5";
 const FORWARD_PROXY_PHASE_REFRESH_SUBSCRIPTION: &str = "refresh_subscription";
 const FORWARD_PROXY_PHASE_BOOTSTRAP_PROBE: &str = "bootstrap_probe";
 const FORWARD_PROXY_PHASE_NORMALIZE_INPUT: &str = "normalize_input";
@@ -1551,6 +1553,8 @@ const FORWARD_PROXY_PHASE_PROBE_NODES: &str = "probe_nodes";
 const FORWARD_PROXY_PHASE_GENERATE_RESULT: &str = "generate_result";
 
 const FORWARD_PROXY_LABEL_SAVE_SETTINGS: &str = "Saving forward proxy settings";
+const FORWARD_PROXY_LABEL_VALIDATE_EGRESS_SOCKS5: &str = "Validating global SOCKS5 relay";
+const FORWARD_PROXY_LABEL_APPLY_EGRESS_SOCKS5: &str = "Applying global SOCKS5 relay";
 const FORWARD_PROXY_LABEL_REFRESH_SUBSCRIPTION: &str = "Refreshing subscription nodes";
 const FORWARD_PROXY_LABEL_BOOTSTRAP_PROBE: &str = "Running bootstrap probes";
 const FORWARD_PROXY_LABEL_NORMALIZE_INPUT: &str = "Normalizing input";
@@ -1712,6 +1716,40 @@ impl TavilyProxy {
         })
     }
 
+    async fn validate_forward_proxy_egress_socks5(
+        &self,
+        egress_socks5_url: &Url,
+    ) -> Result<(), ProxyError> {
+        let probe_url = forward_proxy::derive_probe_url(&self.upstream);
+        let client = self
+            .forward_proxy_clients
+            .direct_client_via_egress(Some(egress_socks5_url))
+            .await?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(forward_proxy::FORWARD_PROXY_VALIDATION_TIMEOUT_SECS),
+            client.get(probe_url).send(),
+        )
+        .await
+        .map_err(|_| ProxyError::Other("global SOCKS5 validation timed out".to_string()))?
+        .map_err(ProxyError::Http)?;
+        if !response.status().is_success()
+            && response.status() != StatusCode::UNAUTHORIZED
+            && response.status() != StatusCode::FORBIDDEN
+            && response.status() != StatusCode::NOT_FOUND
+        {
+            return Err(ProxyError::Other(format!(
+                "global SOCKS5 validation returned status {}",
+                response.status()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn current_forward_proxy_egress_socks5_url(&self) -> Option<Url> {
+        let manager = self.forward_proxy.lock().await;
+        manager.settings.effective_egress_socks5_url()
+    }
+
     pub async fn update_forward_proxy_settings(
         &self,
         settings: ForwardProxySettings,
@@ -1728,6 +1766,24 @@ impl TavilyProxy {
         progress: Option<&ForwardProxyProgressCallback>,
     ) -> Result<ForwardProxySettingsResponse, ProxyError> {
         let normalized = settings.normalized();
+        let next_egress_socks5_url = normalized.effective_egress_socks5_url();
+        if normalized.egress_socks5_enabled {
+            let egress_socks5_url = next_egress_socks5_url.as_ref().ok_or_else(|| {
+                ProxyError::Other(
+                    "global SOCKS5 relay must be a valid socks5:// or socks5h:// URL".to_string(),
+                )
+            })?;
+            emit_forward_proxy_progress(
+                progress,
+                ForwardProxyProgressEvent::phase(
+                    FORWARD_PROXY_PROGRESS_OPERATION_SAVE,
+                    FORWARD_PROXY_PHASE_VALIDATE_EGRESS_SOCKS5,
+                    FORWARD_PROXY_LABEL_VALIDATE_EGRESS_SOCKS5,
+                ),
+            );
+            self.validate_forward_proxy_egress_socks5(egress_socks5_url)
+                .await?;
+        }
         let previous_manager = {
             let manager = self.forward_proxy.lock().await;
             manager.clone()
@@ -1754,9 +1810,28 @@ impl TavilyProxy {
         );
         forward_proxy::save_forward_proxy_settings(&self.key_store.pool, normalized.clone())
             .await?;
+        emit_forward_proxy_progress(
+            progress,
+            ForwardProxyProgressEvent::phase(
+                FORWARD_PROXY_PROGRESS_OPERATION_SAVE,
+                FORWARD_PROXY_PHASE_APPLY_EGRESS_SOCKS5,
+                FORWARD_PROXY_LABEL_APPLY_EGRESS_SOCKS5,
+            ),
+        );
+        {
+            let mut manager = self.forward_proxy.lock().await;
+            manager.update_settings_only(normalized.clone());
+            {
+                let mut xray = self.xray_supervisor.lock().await;
+                xray.sync_endpoints(&mut manager.endpoints, next_egress_socks5_url.as_ref())
+                    .await?;
+            }
+            self.sync_forward_proxy_runtime_state(&mut manager).await?;
+        }
         let fetched_subscriptions = self
             .fetch_forward_proxy_subscription_map_with_progress(
                 &added_subscription_urls,
+                next_egress_socks5_url.clone(),
                 FORWARD_PROXY_PROGRESS_OPERATION_SAVE,
                 progress,
                 false,
@@ -1768,7 +1843,8 @@ impl TavilyProxy {
                 manager.apply_incremental_settings(normalized.clone(), &fetched_subscriptions);
             {
                 let mut xray = self.xray_supervisor.lock().await;
-                xray.sync_endpoints(&mut manager.endpoints).await?;
+                xray.sync_endpoints(&mut manager.endpoints, next_egress_socks5_url.as_ref())
+                    .await?;
             }
             self.sync_forward_proxy_runtime_state(&mut manager).await?;
             bootstrap_targets
@@ -2140,10 +2216,15 @@ impl TavilyProxy {
                 FORWARD_PROXY_LABEL_FETCH_SUBSCRIPTION,
             ),
         );
+        let egress_socks5_url = self.current_forward_proxy_egress_socks5_url().await;
+        let subscription_client = self
+            .forward_proxy_clients
+            .direct_client_via_egress(egress_socks5_url.as_ref())
+            .await?;
         let urls = run_forward_proxy_future_with_cancel(
             cancellation,
             forward_proxy::fetch_subscription_proxy_urls_with_validation_budget(
-                &self.forward_proxy_clients.direct_client(),
+                &subscription_client,
                 &normalized_subscription,
                 validation_timeout,
                 validation_started,
@@ -2440,9 +2521,11 @@ impl TavilyProxy {
             let manager = self.forward_proxy.lock().await;
             manager.settings.clone()
         };
+        let egress_socks5_url = settings.effective_egress_socks5_url();
         let subscription_urls = self
             .fetch_forward_proxy_subscription_map_with_progress(
                 &settings.subscription_urls,
+                egress_socks5_url.clone(),
                 operation,
                 progress,
                 true,
@@ -2453,7 +2536,8 @@ impl TavilyProxy {
         manager.apply_subscription_refresh(&subscription_urls);
         {
             let mut xray = self.xray_supervisor.lock().await;
-            xray.sync_endpoints(&mut manager.endpoints).await?;
+            xray.sync_endpoints(&mut manager.endpoints, egress_socks5_url.as_ref())
+                .await?;
         }
         self.sync_forward_proxy_runtime_state(&mut manager).await?;
         Ok(())
@@ -2462,12 +2546,17 @@ impl TavilyProxy {
     async fn fetch_forward_proxy_subscription_map_with_progress(
         &self,
         subscription_urls: &[String],
+        egress_socks5_url: Option<Url>,
         operation: &'static str,
         progress: Option<&ForwardProxyProgressCallback>,
         fail_when_all_fail: bool,
     ) -> Result<HashMap<String, Vec<String>>, ProxyError> {
         let mut fetched = HashMap::new();
         let mut fetched_any_subscription = false;
+        let subscription_client = self
+            .forward_proxy_clients
+            .direct_client_via_egress(egress_socks5_url.as_ref())
+            .await?;
         let total = subscription_urls.len();
         for (index, subscription_url) in subscription_urls.iter().enumerate() {
             emit_forward_proxy_progress(
@@ -2482,7 +2571,7 @@ impl TavilyProxy {
                 ),
             );
             match forward_proxy::fetch_subscription_proxy_urls(
-                &self.forward_proxy_clients.direct_client(),
+                &subscription_client,
                 subscription_url,
                 Duration::from_secs(
                     forward_proxy::FORWARD_PROXY_SUBSCRIPTION_VALIDATION_TIMEOUT_SECS,
@@ -2595,20 +2684,35 @@ impl TavilyProxy {
         &self,
         endpoint: &forward_proxy::ForwardProxyEndpoint,
     ) -> Result<(forward_proxy::ForwardProxyEndpoint, Option<String>), ProxyError> {
+        if endpoint.uses_local_relay {
+            return Ok((endpoint.clone(), None));
+        }
+        let egress_socks5_url = self.current_forward_proxy_egress_socks5_url().await;
         let mut temporary_xray_key = None;
-        let resolved = if endpoint.requires_xray() && endpoint.endpoint_url.is_none() {
-            let raw_url = endpoint.raw_url.as_deref().ok_or_else(|| {
-                ProxyError::Other("xray proxy validation requires raw proxy url".to_string())
-            })?;
+        let resolved = if endpoint.needs_local_relay(egress_socks5_url.as_ref()) {
+            let raw_url = endpoint
+                .raw_url
+                .as_deref()
+                .or_else(|| endpoint.endpoint_url.as_ref().map(Url::as_str))
+                .ok_or_else(|| {
+                    ProxyError::Other("xray proxy validation requires raw proxy url".to_string())
+                })?;
             let validate_key = format!(
                 "__validate_xray__{:016x}",
-                forward_proxy::stable_hash_u64(raw_url)
+                forward_proxy::stable_hash_u64(&format!(
+                    "{}|{}",
+                    raw_url,
+                    egress_socks5_url
+                        .as_ref()
+                        .map(Url::as_str)
+                        .unwrap_or_default()
+                ))
             );
             let mut validate_endpoint = forward_proxy::ForwardProxyEndpoint::new_manual(
                 validate_key.clone(),
                 endpoint.display_name.clone(),
                 endpoint.protocol,
-                None,
+                endpoint.endpoint_url.clone(),
                 Some(raw_url.to_string()),
             );
             validate_endpoint.source = endpoint.source.clone();
@@ -2618,11 +2722,12 @@ impl TavilyProxy {
                 .xray_supervisor
                 .lock()
                 .await
-                .ensure_instance(&validate_endpoint)
+                .ensure_instance(&validate_endpoint, egress_socks5_url.as_ref())
                 .await?;
             temporary_xray_key = Some(validate_key);
             let mut resolved = endpoint.clone();
             resolved.endpoint_url = Some(route_url);
+            resolved.uses_local_relay = true;
             resolved
         } else {
             endpoint.clone()
@@ -19134,6 +19239,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19225,6 +19333,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19284,6 +19395,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19345,6 +19459,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19417,6 +19534,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             subscription_urls: Vec::new(),
             subscription_update_interval_secs: 3600,
             insert_direct: false,
+
+            egress_socks5_enabled: false,
+            egress_socks5_url: String::new(),
         }
         .normalized();
         {
@@ -19484,6 +19604,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             subscription_urls: Vec::new(),
             subscription_update_interval_secs: 3600,
             insert_direct: false,
+
+            egress_socks5_enabled: false,
+            egress_socks5_url: String::new(),
         }
         .normalized();
         {
@@ -19562,6 +19685,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             subscription_urls: Vec::new(),
             subscription_update_interval_secs: 3600,
             insert_direct: false,
+
+            egress_socks5_enabled: false,
+            egress_socks5_url: String::new(),
         }
         .normalized();
         {
@@ -19656,6 +19782,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
             subscription_urls: Vec::new(),
             subscription_update_interval_secs: 3600,
             insert_direct: false,
+
+            egress_socks5_enabled: false,
+            egress_socks5_url: String::new(),
         }
         .normalized();
         let endpoint_key = {
@@ -19756,6 +19885,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19816,6 +19948,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19889,6 +20024,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -19976,6 +20114,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20092,6 +20233,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20209,6 +20353,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20285,6 +20432,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20362,6 +20512,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20429,6 +20582,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20455,6 +20611,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20494,6 +20653,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20568,6 +20730,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20681,6 +20846,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: true,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20732,6 +20900,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20819,6 +20990,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20887,6 +21061,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -20955,6 +21132,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
@@ -21028,6 +21208,9 @@ data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"oop
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: true,
+
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 }
                 .normalized(),
             );
