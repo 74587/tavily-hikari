@@ -1,6 +1,13 @@
-import React, { ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon, getGuideClientIconName } from './lib/icons'
 import CherryStudioMock from './components/CherryStudioMock'
+import ConnectivityChecksPanel, {
+  type ProbeBubbleItem,
+  type ProbeBubbleModel,
+  type ProbeButtonModel,
+  type ProbeButtonState,
+  type ProbeStepStatus,
+} from './components/ConnectivityChecksPanel'
 import TokenSecretField, { type TokenSecretCopyState } from './components/TokenSecretField'
 import ManualCopyBubble from './components/ManualCopyBubble'
 
@@ -94,29 +101,6 @@ const GUIDE_KEY_ORDER: GuideKey[] = [
   'cherryStudio',
   'other',
 ]
-
-type ProbeButtonState = 'idle' | 'running' | 'success' | 'partial' | 'failed'
-type ProbeStepStatus = 'running' | 'success' | 'failed' | 'blocked'
-type ProbeBubbleAnchor = 'mcp' | 'api'
-
-interface ProbeButtonModel {
-  state: ProbeButtonState
-  completed: number
-  total: number
-}
-
-interface ProbeBubbleItem {
-  id: string
-  label: string
-  status: ProbeStepStatus
-  detail?: string | null
-}
-
-interface ProbeBubbleModel {
-  visible: boolean
-  anchor: ProbeBubbleAnchor
-  items: ProbeBubbleItem[]
-}
 
 interface McpProbeStepDefinition {
   id: string
@@ -1219,81 +1203,6 @@ export default function UserConsole(): JSX.Element {
     setProbeBubble({ visible: true, anchor: 'api', items: [...completedItems] })
   }, [anyProbeRunning, route, text.detail.probe])
 
-  const buttonMeta = useMemo(() => {
-    const tone = (state: ProbeButtonState): string => {
-      if (state === 'success') return 'user-console-probe-btn-success'
-      if (state === 'partial') return 'user-console-probe-btn-partial'
-      if (state === 'failed') return 'user-console-probe-btn-failed'
-      if (state === 'running') return 'user-console-probe-btn-running'
-      return 'user-console-probe-btn-idle'
-    }
-    const icon = (state: ProbeButtonState): string => {
-      if (state === 'success') return 'mdi:check-circle-outline'
-      if (state === 'partial') return 'mdi:alert-circle-outline'
-      if (state === 'failed') return 'mdi:close-circle-outline'
-      if (state === 'running') return 'mdi:loading'
-      return 'mdi:play-circle-outline'
-    }
-    return {
-      tone,
-      icon,
-    }
-  }, [])
-
-  const probeItemMeta = useMemo(() => {
-    const icon = (status: ProbeStepStatus): string => {
-      if (status === 'success') return 'mdi:check-circle-outline'
-      if (status === 'failed') return 'mdi:close-circle-outline'
-      if (status === 'blocked') return 'mdi:alert-circle-outline'
-      return 'mdi:loading'
-    }
-    const textFor = (status: ProbeStepStatus): string => text.detail.probe.stepStatus[status]
-    return {
-      icon,
-      textFor,
-    }
-  }, [text.detail.probe.stepStatus])
-
-  const renderProbeBubble = (): JSX.Element | null => {
-    if (!probeBubble?.visible || probeBubble.items.length === 0) return null
-    const bubbleStyle = {
-      '--probe-bubble-shift': `${probeBubbleShift}px`,
-    } as React.CSSProperties
-    return (
-      <div
-        ref={probeBubbleRef}
-        className={`user-console-probe-bubble user-console-probe-bubble-anchor-${probeBubble.anchor}`}
-        style={bubbleStyle}
-        role="status"
-        aria-live="polite"
-      >
-        <ul className="user-console-probe-bubble-list">
-          {probeBubble.items.map((item) => (
-            <li
-              key={item.id}
-              className="user-console-probe-bubble-item"
-              aria-label={`${probeItemMeta.textFor(item.status)} · ${item.label}${item.detail ? ` · ${item.detail}` : ''}`}
-            >
-              <Icon
-                icon={probeItemMeta.icon(item.status)}
-                className={
-                  `user-console-probe-bubble-item-icon user-console-probe-bubble-item-icon-status-${item.status} `
-                  + `${item.status === 'running' ? 'is-spinning' : ''}`
-                }
-              />
-              <div className="user-console-probe-bubble-item-copy">
-                <strong className="user-console-probe-bubble-item-label">{item.label}</strong>
-                {item.detail ? (
-                  <span className="user-console-probe-bubble-item-detail">{item.detail}</span>
-                ) : null}
-              </div>
-            </li>
-          ))}
-        </ul>
-      </div>
-    )
-  }
-
   const goHome = () => {
     window.location.href = '/'
   }
@@ -1770,57 +1679,22 @@ export default function UserConsole(): JSX.Element {
               <p className="user-console-token-error" role="status" aria-live="polite">{detailTokenError}</p>
             ) : null}
 
-            <div className="user-console-probe-box">
-              <div className="user-console-probe-label-row">
-                <label className="token-label">{text.detail.probe.title}</label>
-                <span className="user-console-probe-hint">
-                  <button
-                    type="button"
-                    className="user-console-probe-hint-trigger"
-                    aria-label={text.detail.probe.costHintAria}
-                  >
-                    <Icon icon="mdi:help-circle-outline" />
-                  </button>
-                  <span className="user-console-probe-hint-bubble" role="tooltip">
-                    {text.detail.probe.costHint}
-                  </span>
-                </span>
-              </div>
-              <div className="user-console-probe-actions">
-                <div className="user-console-probe-action">
-                  {probeBubble?.anchor === 'mcp' && renderProbeBubble()}
-                  <button
-                    type="button"
-                    data-probe-kind="mcp"
-                    className={`btn btn-sm user-console-probe-btn ${buttonMeta.tone(mcpProbe.state)}`}
-                    onClick={() => void runMcpProbe()}
-                    disabled={anyProbeRunning}
-                  >
-                    <Icon
-                      icon={buttonMeta.icon(mcpProbe.state)}
-                      className={`user-console-probe-btn-icon ${mcpProbe.state === 'running' ? 'is-spinning' : ''}`}
-                    />
-                    <span>{probeButtonLabel('mcp', mcpProbe)}</span>
-                  </button>
-                </div>
-                <div className="user-console-probe-action">
-                  {probeBubble?.anchor === 'api' && renderProbeBubble()}
-                  <button
-                    type="button"
-                    data-probe-kind="api"
-                    className={`btn btn-sm user-console-probe-btn ${buttonMeta.tone(apiProbe.state)}`}
-                    onClick={() => void runApiProbe()}
-                    disabled={anyProbeRunning}
-                  >
-                    <Icon
-                      icon={buttonMeta.icon(apiProbe.state)}
-                      className={`user-console-probe-btn-icon ${apiProbe.state === 'running' ? 'is-spinning' : ''}`}
-                    />
-                    <span>{probeButtonLabel('api', apiProbe)}</span>
-                  </button>
-                </div>
-              </div>
-            </div>
+            <ConnectivityChecksPanel
+              title={text.detail.probe.title}
+              costHint={text.detail.probe.costHint}
+              costHintAria={text.detail.probe.costHintAria}
+              stepStatusText={text.detail.probe.stepStatus}
+              mcpButtonLabel={probeButtonLabel('mcp', mcpProbe)}
+              apiButtonLabel={probeButtonLabel('api', apiProbe)}
+              mcpProbe={mcpProbe}
+              apiProbe={apiProbe}
+              probeBubble={probeBubble}
+              probeBubbleShift={probeBubbleShift}
+              probeBubbleRef={probeBubbleRef}
+              anyProbeRunning={anyProbeRunning}
+              onMcpClick={() => void runMcpProbe()}
+              onApiClick={() => void runApiProbe()}
+            />
           </section>
 
           <section className="surface panel user-console-detail-panel">
