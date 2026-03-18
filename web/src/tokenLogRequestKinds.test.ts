@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'bun:test'
 
 import {
+  buildRequestKindQuickFilterSelection,
   buildVisibleRequestKindOptions,
   buildTokenLogsPagePath,
-  mergeRequestKindLabels,
+  defaultTokenLogRequestKindQuickFilters,
+  deriveRequestKindQuickFilters,
+  mergeRequestKindOptionsByKey,
+  requestKindSelectionsMatch,
+  resolveEffectiveRequestKindSelection,
+  resolveRequestKindOptionsRefresh,
+  resolveManualRequestKindQuickFilters,
+  summarizeRequestKindQuickFilters,
   summarizeSelectedRequestKinds,
+  tokenLogRequestKindEmptySelectionKey,
   toggleRequestKindSelection,
   uniqueSelectedRequestKinds,
 } from './tokenLogRequestKinds'
@@ -42,11 +51,27 @@ describe('token log request kind helpers', () => {
     )
   })
 
+  it('preserves an active zero-match quick filter as an explicit empty query', () => {
+    expect(
+      buildTokenLogsPagePath({
+        tokenId: 'ZjvC',
+        page: 1,
+        perPage: 20,
+        sinceIso: '2026-03-01T00:00:00+08:00',
+        untilIso: '2026-04-01T00:00:00+08:00',
+        forceEmptyMatch: true,
+        requestKinds: [],
+      }),
+    ).toBe(
+      `/api/tokens/ZjvC/logs/page?page=1&per_page=20&since=2026-03-01T00%3A00%3A00%2B08%3A00&until=2026-04-01T00%3A00%3A00%2B08%3A00&request_kind=${encodeURIComponent(tokenLogRequestKindEmptySelectionKey)}`,
+    )
+  })
+
   it('summarizes filter state with labels and selected counts', () => {
     const options = [
-      { key: 'api:search', label: 'API | search' },
-      { key: 'mcp:search', label: 'MCP | search' },
-      { key: 'mcp:batch', label: 'MCP | batch' },
+      { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+      { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
+      { key: 'mcp:batch', label: 'MCP | batch', protocol_group: 'mcp', billing_group: 'billable' },
     ]
 
     expect(summarizeSelectedRequestKinds([], options)).toBe('All request types')
@@ -59,17 +84,32 @@ describe('token log request kind helpers', () => {
     ).toBe('3 selected')
   })
 
-  it('remembers request kind labels from options and rendered logs', () => {
+  it('remembers request kind metadata from current and previous options', () => {
     expect(
-      mergeRequestKindLabels(
-        { 'mcp:raw:/mcp/sse': 'MCP | /mcp/sse' },
-        [{ key: 'api:search', label: 'API | search' }],
-        [{ request_kind_key: 'mcp:search', request_kind_label: 'MCP | search' }],
+      mergeRequestKindOptionsByKey(
+        {
+          'mcp:raw:/mcp/sse': {
+            key: 'mcp:raw:/mcp/sse',
+            label: 'MCP | /mcp/sse',
+            protocol_group: 'mcp',
+            billing_group: 'billable',
+          },
+        },
+        [{ key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' }],
       ),
     ).toEqual({
-      'api:search': 'API | search',
-      'mcp:raw:/mcp/sse': 'MCP | /mcp/sse',
-      'mcp:search': 'MCP | search',
+      'api:search': {
+        key: 'api:search',
+        label: 'API | search',
+        protocol_group: 'api',
+        billing_group: 'billable',
+      },
+      'mcp:raw:/mcp/sse': {
+        key: 'mcp:raw:/mcp/sse',
+        label: 'MCP | /mcp/sse',
+        protocol_group: 'mcp',
+        billing_group: 'billable',
+      },
     })
   })
 
@@ -77,12 +117,154 @@ describe('token log request kind helpers', () => {
     expect(
       buildVisibleRequestKindOptions(
         ['mcp:raw:/mcp/sse', 'api:search'],
-        [{ key: 'api:search', label: 'API | search' }],
-        { 'mcp:raw:/mcp/sse': 'MCP | /mcp/sse' },
+        [{ key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' }],
+        {
+          'mcp:raw:/mcp/sse': {
+            key: 'mcp:raw:/mcp/sse',
+            label: 'MCP | /mcp/sse',
+            protocol_group: 'mcp',
+            billing_group: 'billable',
+          },
+        },
       ),
     ).toEqual([
-      { key: 'api:search', label: 'API | search' },
-      { key: 'mcp:raw:/mcp/sse', label: 'MCP | /mcp/sse' },
+      { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+      { key: 'mcp:raw:/mcp/sse', label: 'MCP | /mcp/sse', protocol_group: 'mcp', billing_group: 'billable' },
     ])
+  })
+
+  it('builds tri-state quick-filter selections from canonical option groups', () => {
+    const options = [
+      { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+      { key: 'api:research-result', label: 'API | research result', protocol_group: 'api', billing_group: 'non_billable' },
+      { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
+      { key: 'mcp:tools/list', label: 'MCP | tools/list', protocol_group: 'mcp', billing_group: 'non_billable' },
+    ]
+
+    expect(
+      buildRequestKindQuickFilterSelection(options, { billing: 'billable', protocol: 'mcp' }),
+    ).toEqual(['mcp:search'])
+    expect(
+      buildRequestKindQuickFilterSelection(options, { billing: 'non_billable', protocol: 'all' }),
+    ).toEqual(['api:research-result', 'mcp:tools/list'])
+    expect(
+      buildRequestKindQuickFilterSelection(options, defaultTokenLogRequestKindQuickFilters),
+    ).toEqual([])
+  })
+
+  it('derives quick-filter state only when a selection matches one unique preset', () => {
+    const options = [
+      { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+      { key: 'api:research-result', label: 'API | research result', protocol_group: 'api', billing_group: 'non_billable' },
+      { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
+      { key: 'mcp:tools/list', label: 'MCP | tools/list', protocol_group: 'mcp', billing_group: 'non_billable' },
+    ]
+
+    expect(deriveRequestKindQuickFilters(['mcp:search'], options)).toEqual({
+      billing: 'billable',
+      protocol: 'mcp',
+    })
+    expect(deriveRequestKindQuickFilters(['api:search', 'mcp:search'], options)).toEqual({
+      billing: 'billable',
+      protocol: 'all',
+    })
+    expect(deriveRequestKindQuickFilters(['api:search', 'mcp:tools/list'], options)).toEqual(
+      defaultTokenLogRequestKindQuickFilters,
+    )
+  })
+
+  it('compares selections by exact key set and summarizes quick-filter presets', () => {
+    expect(requestKindSelectionsMatch(['mcp:search', 'api:search'], ['api:search', 'mcp:search'])).toBe(true)
+    expect(requestKindSelectionsMatch(['mcp:search'], ['api:search'])).toBe(false)
+    expect(summarizeRequestKindQuickFilters({ billing: 'billable', protocol: 'mcp' })).toBe('Paid + MCP')
+    expect(summarizeRequestKindQuickFilters({ billing: 'all', protocol: 'api' })).toBe('API request types')
+    expect(summarizeRequestKindQuickFilters(defaultTokenLogRequestKindQuickFilters)).toBe('All request types')
+  })
+
+  it('preserves or re-derives quick presets after manual checkbox edits', () => {
+    const options = [
+      { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+      { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
+      { key: 'mcp:tools/list', label: 'MCP | tools/list', protocol_group: 'mcp', billing_group: 'non_billable' },
+    ]
+
+    expect(
+      resolveManualRequestKindQuickFilters(
+        ['mcp:search'],
+        { billing: 'billable', protocol: 'mcp' },
+        ['mcp:search'],
+        options,
+      ),
+    ).toEqual({ billing: 'billable', protocol: 'mcp' })
+    expect(
+      resolveManualRequestKindQuickFilters(
+        ['mcp:search', 'api:search'],
+        { billing: 'billable', protocol: 'mcp' },
+        ['mcp:search'],
+        options,
+      ),
+    ).toEqual({ billing: 'billable', protocol: 'all' })
+  })
+
+  it('uses the derived quick selection as the effective request kind set while a preset is active', () => {
+    expect(
+      resolveEffectiveRequestKindSelection(
+        ['mcp:search'],
+        { billing: 'billable', protocol: 'mcp' },
+        ['mcp:search', 'mcp:batch'],
+      ),
+    ).toEqual(['mcp:search', 'mcp:batch'])
+    expect(
+      resolveEffectiveRequestKindSelection(
+        ['mcp:search'],
+        defaultTokenLogRequestKindQuickFilters,
+        ['mcp:search', 'mcp:batch'],
+      ),
+    ).toEqual(['mcp:search'])
+    expect(
+      resolveManualRequestKindQuickFilters(
+        ['mcp:search'],
+        defaultTokenLogRequestKindQuickFilters,
+        ['api:search'],
+        [
+          { key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' },
+          { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
+          { key: 'mcp:tools/list', label: 'MCP | tools/list', protocol_group: 'mcp', billing_group: 'non_billable' },
+        ],
+      ),
+    ).toEqual({ billing: 'billable', protocol: 'mcp' })
+  })
+
+  it('detects when refreshed options expand an active quick preset selection', () => {
+    const refreshed = resolveRequestKindOptionsRefresh(
+      [
+        { key: 'mcp:search', label: 'MCP | search', protocol_group: 'mcp', billing_group: 'billable' },
+        { key: 'mcp:extract', label: 'MCP | extract', protocol_group: 'mcp', billing_group: 'billable' },
+      ],
+      ['mcp:search'],
+      { billing: 'billable', protocol: 'mcp' },
+      ['mcp:search'],
+      false,
+    )
+
+    expect(refreshed.quickSelection).toEqual(['mcp:search', 'mcp:extract'])
+    expect(refreshed.effectiveSelection).toEqual(['mcp:search', 'mcp:extract'])
+    expect(refreshed.hasEmptyMatch).toBe(false)
+    expect(refreshed.selectionChanged).toBe(true)
+  })
+
+  it('preserves a zero-match quick preset when refreshed options still have no matches', () => {
+    const refreshed = resolveRequestKindOptionsRefresh(
+      [{ key: 'api:search', label: 'API | search', protocol_group: 'api', billing_group: 'billable' }],
+      [],
+      { billing: 'non_billable', protocol: 'mcp' },
+      [],
+      true,
+    )
+
+    expect(refreshed.quickSelection).toEqual([])
+    expect(refreshed.effectiveSelection).toEqual([])
+    expect(refreshed.hasEmptyMatch).toBe(true)
+    expect(refreshed.selectionChanged).toBe(false)
   })
 })

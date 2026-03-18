@@ -3000,8 +3000,41 @@ button:disabled {
   line-height: 1.7;
 }
 
+.token-request-quick-filters {
+  display: grid;
+  gap: 12px;
+  padding: 8px 8px 6px;
+}
+
+.token-request-quick-filter-row {
+  display: grid;
+  gap: 6px;
+}
+
+.token-request-quick-filter-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+
+.token-request-quick-segmented.segmented-tabs {
+  display: flex;
+  width: 100%;
+}
+
+.token-request-quick-segmented.segmented-tabs .segmented-tab {
+  flex: 1 1 0;
+  justify-content: center;
+  padding-inline: 12px;
+}
+
 .token-request-kind-menu {
-  max-height: min(24rem, 70vh);
+  max-height: min(
+    var(--radix-dropdown-menu-content-available-height, calc(100dvh - 1rem)),
+    calc(100dvh - 1rem)
+  );
   overflow-y: auto;
 }
 
@@ -3011,6 +3044,7 @@ button:disabled {
   --request-kind-bg-start: hsl(210 33% 97%);
   --request-kind-bg-end: hsl(214 28% 92%);
   --request-kind-chip: hsl(0 0% 100% / 0.72);
+  --request-kind-chip-border: hsl(0 0% 100% / 0.16);
   display: inline-flex;
   align-items: center;
   gap: 0.42rem;
@@ -3043,6 +3077,8 @@ button:disabled {
   padding: 0.16rem 0.42rem;
   border-radius: 999px;
   background: var(--request-kind-chip);
+  border: 1px solid var(--request-kind-chip-border);
+  box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.08);
   font-size: 0.68em;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -3068,6 +3104,8 @@ button:disabled {
   --request-kind-border: hsl(218 24% 78% / 0.88);
   --request-kind-bg-start: hsl(210 33% 97%);
   --request-kind-bg-end: hsl(214 28% 92%);
+  --request-kind-chip: hsl(217 28% 84% / 0.48);
+  --request-kind-chip-border: hsl(217 24% 54% / 0.2);
 }
 
 .request-kind-badge--api {
@@ -3075,6 +3113,8 @@ button:disabled {
   --request-kind-border: hsl(214 88% 56% / 0.28);
   --request-kind-bg-start: hsl(212 100% 97%);
   --request-kind-bg-end: hsl(210 100% 92%);
+  --request-kind-chip: hsl(213 88% 74% / 0.28);
+  --request-kind-chip-border: hsl(214 78% 52% / 0.22);
 }
 
 .request-kind-badge--api-search {
@@ -3082,6 +3122,8 @@ button:disabled {
   --request-kind-border: hsl(214 88% 56% / 0.34);
   --request-kind-bg-start: hsl(212 100% 97%);
   --request-kind-bg-end: hsl(208 100% 91%);
+  --request-kind-chip: hsl(213 92% 69% / 0.32);
+  --request-kind-chip-border: hsl(214 82% 50% / 0.24);
 }
 
 .request-kind-badge--api-extract {
@@ -3089,6 +3131,8 @@ button:disabled {
   --request-kind-border: hsl(184 86% 45% / 0.34);
   --request-kind-bg-start: hsl(180 100% 96%);
   --request-kind-bg-end: hsl(185 90% 90%);
+  --request-kind-chip: hsl(184 78% 62% / 0.3);
+  --request-kind-chip-border: hsl(184 70% 42% / 0.22);
 }
 
 .request-kind-badge--api-crawl {
@@ -3096,6 +3140,8 @@ button:disabled {
   --request-kind-border: hsl(34 96% 54% / 0.34);
   --request-kind-bg-start: hsl(44 100% 96%);
   --request-kind-bg-end: hsl(38 100% 90%);
+  --request-kind-chip: hsl(36 96% 62% / 0.32);
+  --request-kind-chip-border: hsl(34 84% 48% / 0.24);
 }
 
 .request-kind-badge--api-map {
@@ -3103,6 +3149,8 @@ button:disabled {
   --request-kind-border: hsl(152 66% 44% / 0.32);
   --request-kind-bg-start: hsl(148 70% 95%);
   --request-kind-bg-end: hsl(152 72% 89%);
+  --request-kind-chip: hsl(150 62% 58% / 0.32);
+  --request-kind-chip-border: hsl(150 58% 38% / 0.22);
 }
 
 .request-kind-badge--api-research {
@@ -3110,6 +3158,8 @@ button:disabled {
   --request-kind-border: hsl(334 84% 56% / 0.3);
   --request-kind-bg-start: hsl(332 100% 97%);
   --request-kind-bg-end: hsl(338 100% 93%);
+  --request-kind-chip: hsl(334 84% 70% / 0.3);
+  --request-kind-chip-border: hsl(334 68% 48% / 0.22);
 }
 
 .request-kind-badge--api-research-result {
@@ -3117,6 +3167,8 @@ button:disabled {
   --request-kind-border: hsl(350 84% 58% / 0.32);
   --request-kind-bg-start: hsl(350 100% 97%);
   --request-kind-bg-end: hsl(352 100% 93%);
+  --request-kind-chip: hsl(351 86% 72% / 0.32);
+  --request-kind-chip-border: hsl(351 74% 52% / 0.24);
 }
 
 .request-kind-badge--api-usage {
@@ -3124,6 +3176,8 @@ button:disabled {
   --request-kind-border: hsl(223 24% 56% / 0.3);
   --request-kind-bg-start: hsl(220 24% 96%);
   --request-kind-bg-end: hsl(220 24% 91%);
+  --request-kind-chip: hsl(223 30% 68% / 0.28);
+  --request-kind-chip-border: hsl(223 22% 46% / 0.2);
 }
 
 .request-kind-badge--api-raw {
@@ -3131,6 +3185,8 @@ button:disabled {
   --request-kind-border: hsl(236 64% 60% / 0.28);
   --request-kind-bg-start: hsl(238 100% 97%);
   --request-kind-bg-end: hsl(236 100% 93%);
+  --request-kind-chip: hsl(238 76% 72% / 0.3);
+  --request-kind-chip-border: hsl(238 60% 50% / 0.22);
 }
 
 .request-kind-badge--mcp {
@@ -3138,6 +3194,17 @@ button:disabled {
   --request-kind-border: hsl(195 90% 49% / 0.28);
   --request-kind-bg-start: hsl(191 100% 96%);
   --request-kind-bg-end: hsl(191 94% 91%);
+  --request-kind-chip: hsl(197 88% 68% / 0.28);
+  --request-kind-chip-border: hsl(196 74% 48% / 0.22);
+}
+
+.request-kind-badge--mcp-extract {
+  --request-kind-ink: hsl(221 78% 34%);
+  --request-kind-border: hsl(221 84% 58% / 0.34);
+  --request-kind-bg-start: hsl(220 100% 97%);
+  --request-kind-bg-end: hsl(223 96% 92%);
+  --request-kind-chip: hsl(220 86% 70% / 0.3);
+  --request-kind-chip-border: hsl(221 72% 50% / 0.24);
 }
 
 .request-kind-badge--mcp-search {
@@ -3145,6 +3212,8 @@ button:disabled {
   --request-kind-border: hsl(195 94% 49% / 0.34);
   --request-kind-bg-start: hsl(191 100% 96%);
   --request-kind-bg-end: hsl(190 100% 90%);
+  --request-kind-chip: hsl(192 88% 64% / 0.3);
+  --request-kind-chip-border: hsl(192 78% 46% / 0.22);
 }
 
 .request-kind-badge--mcp-batch {
@@ -3152,6 +3221,8 @@ button:disabled {
   --request-kind-border: hsl(22 92% 58% / 0.34);
   --request-kind-bg-start: hsl(20 100% 96%);
   --request-kind-bg-end: hsl(28 100% 91%);
+  --request-kind-chip: hsl(24 96% 66% / 0.3);
+  --request-kind-chip-border: hsl(24 80% 46% / 0.22);
 }
 
 .request-kind-badge--mcp-tool {
@@ -3159,6 +3230,62 @@ button:disabled {
   --request-kind-border: hsl(92 60% 44% / 0.34);
   --request-kind-bg-start: hsl(88 100% 96%);
   --request-kind-bg-end: hsl(94 82% 90%);
+  --request-kind-chip: hsl(96 72% 62% / 0.3);
+  --request-kind-chip-border: hsl(95 58% 40% / 0.22);
+}
+
+.request-kind-badge--mcp-initialize {
+  --request-kind-ink: hsl(35 84% 31%);
+  --request-kind-border: hsl(35 90% 54% / 0.34);
+  --request-kind-bg-start: hsl(42 100% 97%);
+  --request-kind-bg-end: hsl(40 96% 91%);
+  --request-kind-chip: hsl(40 92% 68% / 0.3);
+  --request-kind-chip-border: hsl(38 76% 48% / 0.22);
+}
+
+.request-kind-badge--mcp-notification {
+  --request-kind-ink: hsl(320 72% 34%);
+  --request-kind-border: hsl(320 76% 56% / 0.34);
+  --request-kind-bg-start: hsl(320 100% 97%);
+  --request-kind-bg-end: hsl(320 92% 92%);
+  --request-kind-chip: hsl(320 86% 70% / 0.3);
+  --request-kind-chip-border: hsl(320 72% 50% / 0.22);
+}
+
+.request-kind-badge--mcp-ping {
+  --request-kind-ink: hsl(163 66% 28%);
+  --request-kind-border: hsl(164 62% 46% / 0.34);
+  --request-kind-bg-start: hsl(156 86% 96%);
+  --request-kind-bg-end: hsl(162 72% 90%);
+  --request-kind-chip: hsl(163 72% 62% / 0.3);
+  --request-kind-chip-border: hsl(163 58% 42% / 0.22);
+}
+
+.request-kind-badge--mcp-resource {
+  --request-kind-ink: hsl(279 60% 34%);
+  --request-kind-border: hsl(277 68% 58% / 0.34);
+  --request-kind-bg-start: hsl(276 100% 97%);
+  --request-kind-bg-end: hsl(280 88% 93%);
+  --request-kind-chip: hsl(278 78% 72% / 0.3);
+  --request-kind-chip-border: hsl(277 62% 52% / 0.22);
+}
+
+.request-kind-badge--mcp-resource-template {
+  --request-kind-ink: hsl(258 64% 34%);
+  --request-kind-border: hsl(257 72% 58% / 0.34);
+  --request-kind-bg-start: hsl(256 100% 97%);
+  --request-kind-bg-end: hsl(260 90% 93%);
+  --request-kind-chip: hsl(258 84% 74% / 0.3);
+  --request-kind-chip-border: hsl(257 66% 54% / 0.22);
+}
+
+.request-kind-badge--mcp-tools-list {
+  --request-kind-ink: hsl(233 62% 36%);
+  --request-kind-border: hsl(232 72% 60% / 0.34);
+  --request-kind-bg-start: hsl(230 100% 97%);
+  --request-kind-bg-end: hsl(234 86% 93%);
+  --request-kind-chip: hsl(232 84% 72% / 0.3);
+  --request-kind-chip-border: hsl(232 66% 52% / 0.22);
 }
 
 .request-kind-badge--mcp-system {
@@ -3166,6 +3293,8 @@ button:disabled {
   --request-kind-border: hsl(254 70% 62% / 0.32);
   --request-kind-bg-start: hsl(252 100% 97%);
   --request-kind-bg-end: hsl(255 100% 94%);
+  --request-kind-chip: hsl(254 74% 72% / 0.28);
+  --request-kind-chip-border: hsl(254 60% 54% / 0.2);
 }
 
 .request-kind-badge--mcp-raw {
@@ -3173,6 +3302,8 @@ button:disabled {
   --request-kind-border: hsl(214 18% 63% / 0.32);
   --request-kind-bg-start: hsl(210 20% 96%);
   --request-kind-bg-end: hsl(214 18% 91%);
+  --request-kind-chip: hsl(214 18% 68% / 0.28);
+  --request-kind-chip-border: hsl(214 16% 48% / 0.2);
 }
 
 .dark .request-kind-badge {
@@ -3181,6 +3312,7 @@ button:disabled {
   --request-kind-bg-start: hsl(219 24% 24% / 0.96);
   --request-kind-bg-end: hsl(219 22% 18% / 0.98);
   --request-kind-chip: hsl(0 0% 100% / 0.12);
+  --request-kind-chip-border: hsl(0 0% 100% / 0.08);
   box-shadow:
     inset 0 1px 0 hsl(0 0% 100% / 0.08),
     0 18px 34px -28px hsl(0 0% 0% / 0.7);
@@ -3243,12 +3375,25 @@ button:disabled {
   --request-kind-bg-end: hsl(239 48% 17% / 0.98);
 }
 
-.dark .request-kind-badge--mcp,
+.dark .request-kind-badge--mcp {
+  --request-kind-ink: hsl(204 100% 85%);
+  --request-kind-border: hsl(204 86% 68% / 0.42);
+  --request-kind-bg-start: hsl(208 52% 22% / 0.96);
+  --request-kind-bg-end: hsl(212 44% 18% / 0.98);
+}
+
 .dark .request-kind-badge--mcp-search {
   --request-kind-ink: hsl(191 100% 82%);
   --request-kind-border: hsl(191 88% 62% / 0.44);
   --request-kind-bg-start: hsl(192 74% 19% / 0.96);
   --request-kind-bg-end: hsl(194 66% 15% / 0.98);
+}
+
+.dark .request-kind-badge--mcp-extract {
+  --request-kind-ink: hsl(219 100% 86%);
+  --request-kind-border: hsl(220 84% 68% / 0.44);
+  --request-kind-bg-start: hsl(222 62% 21% / 0.96);
+  --request-kind-bg-end: hsl(226 54% 17% / 0.98);
 }
 
 .dark .request-kind-badge--mcp-batch {
@@ -3263,6 +3408,41 @@ button:disabled {
   --request-kind-border: hsl(94 64% 58% / 0.42);
   --request-kind-bg-start: hsl(96 62% 18% / 0.96);
   --request-kind-bg-end: hsl(100 56% 14% / 0.98);
+}
+
+.dark .request-kind-badge--mcp-initialize {
+  --request-kind-ink: hsl(42 100% 82%);
+  --request-kind-border: hsl(40 92% 66% / 0.44);
+  --request-kind-bg-start: hsl(36 68% 20% / 0.96);
+  --request-kind-bg-end: hsl(32 62% 16% / 0.98);
+}
+
+.dark .request-kind-badge--mcp-notification {
+  --request-kind-ink: hsl(320 96% 86%);
+  --request-kind-border: hsl(320 84% 68% / 0.44);
+  --request-kind-bg-start: hsl(318 58% 21% / 0.96);
+  --request-kind-bg-end: hsl(322 50% 17% / 0.98);
+}
+
+.dark .request-kind-badge--mcp-ping {
+  --request-kind-ink: hsl(162 82% 82%);
+  --request-kind-border: hsl(162 68% 60% / 0.44);
+  --request-kind-bg-start: hsl(162 58% 18% / 0.96);
+  --request-kind-bg-end: hsl(166 50% 14% / 0.98);
+}
+
+.dark .request-kind-badge--mcp-resource {
+  --request-kind-ink: hsl(278 100% 86%);
+  --request-kind-border: hsl(278 82% 70% / 0.44);
+  --request-kind-bg-start: hsl(276 52% 21% / 0.96);
+  --request-kind-bg-end: hsl(280 46% 17% / 0.98);
+}
+
+.dark .request-kind-badge--mcp-tools-list {
+  --request-kind-ink: hsl(245 100% 87%);
+  --request-kind-border: hsl(244 82% 70% / 0.44);
+  --request-kind-bg-start: hsl(242 50% 21% / 0.96);
+  --request-kind-bg-end: hsl(246 44% 17% / 0.98);
 }
 
 .dark .request-kind-badge--mcp-system {
@@ -7798,6 +7978,42 @@ tbody .log-details-row:hover {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
+}
+
+.forward-proxy-progress-bubble-shell {
+  position: fixed;
+  z-index: 1300;
+  width: min(22rem, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+}
+
+.forward-proxy-progress-bubble-shell::before {
+  content: '';
+  position: absolute;
+  left: var(--forward-proxy-progress-bubble-arrow-left, 50%);
+  width: 14px;
+  height: 14px;
+  border-left: 1px solid hsl(var(--border) / 0.9);
+  border-top: 1px solid hsl(var(--border) / 0.9);
+  background: hsl(var(--popover) / 0.98);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.forward-proxy-progress-bubble-shell[data-placement='bottom']::before {
+  top: -8px;
+}
+
+.forward-proxy-progress-bubble-shell[data-placement='top']::before {
+  bottom: -8px;
+  transform: translateX(-50%) rotate(225deg);
+}
+
+.forward-proxy-progress-bubble-surface {
+  width: 100%;
+  border-color: hsl(var(--border) / 0.9);
+  background: hsl(var(--popover) / 0.98);
+  box-shadow: 0 24px 60px hsl(222 47% 11% / 0.22);
+  backdrop-filter: blur(16px);
 }
 
 .forward-proxy-field-label {

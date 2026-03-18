@@ -247,6 +247,8 @@ async function requestJsonWithToken<T>(
 export type ForwardProxyProgressOperation = 'save' | 'validate' | 'revalidate'
 export type ForwardProxyProgressPhaseKey =
   | 'save_settings'
+  | 'validate_egress_socks5'
+  | 'apply_egress_socks5'
   | 'refresh_subscription'
   | 'bootstrap_probe'
   | 'normalize_input'
@@ -1421,6 +1423,8 @@ export interface ForwardProxySettings {
   subscriptionUrls: string[]
   subscriptionUpdateIntervalSecs: number
   insertDirect: boolean
+  egressSocks5Enabled: boolean
+  egressSocks5Url: string
   nodes: ForwardProxyNode[]
 }
 
@@ -1433,6 +1437,8 @@ export interface UpdateForwardProxySettingsPayload {
   subscriptionUrls: string[]
   subscriptionUpdateIntervalSecs: number
   insertDirect: boolean
+  egressSocks5Enabled?: boolean
+  egressSocks5Url?: string
   skipBootstrapProbe?: boolean
 }
 
@@ -1498,6 +1504,8 @@ function createEmptyForwardProxySettings(): ForwardProxySettings {
     subscriptionUrls: [],
     subscriptionUpdateIntervalSecs: 3600,
     insertDirect: true,
+    egressSocks5Enabled: false,
+    egressSocks5Url: '',
     nodes: [],
   }
 }
