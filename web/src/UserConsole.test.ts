@@ -88,10 +88,14 @@ describe('UserConsole probe step definitions', () => {
           { name: ' Acme_Lookup ' },
         ],
       },
-    })).toEqual(['tavily_search', 'tavily_map', 'Acme_Lookup'])
+    })).toEqual([
+      { requestName: 'tavily_search', displayName: 'tavily-search', inputSchema: null },
+      { requestName: 'tavily_map', displayName: 'tavily-map', inputSchema: null },
+      { requestName: 'Acme_Lookup', displayName: 'Acme_Lookup', inputSchema: null },
+    ])
   })
 
-  it('calls unsupported advertised tools with the discovered name and empty arguments', async () => {
+  it('calls schema-backed advertised tools with synthesized probe arguments', async () => {
     const calls: Array<{ url: string, init?: RequestInit }> = []
     globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: requestUrl(input), init })
@@ -103,7 +107,19 @@ describe('UserConsole probe step definitions', () => {
 
     const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, [
       ' tavily_search ',
-      ' Acme_Lookup ',
+      {
+        requestName: 'Acme_Lookup',
+        displayName: 'Acme_Lookup',
+        inputSchema: {
+          type: 'object',
+          required: ['query', 'target_url', 'include_images'],
+          properties: {
+            query: { type: 'string' },
+            target_url: { type: 'string', format: 'uri' },
+            include_images: { type: 'boolean' },
+          },
+        },
+      },
     ])
 
     expect(steps.map((step) => ({ id: step.id, billable: step.billable }))).toEqual([
@@ -124,7 +140,11 @@ describe('UserConsole probe step definitions', () => {
       },
       {
         name: 'Acme_Lookup',
-        arguments: {},
+        arguments: {
+          query: 'health check',
+          target_url: 'https://example.com',
+          include_images: false,
+        },
       },
     ])
   })
@@ -150,7 +170,23 @@ describe('UserConsole probe step definitions', () => {
     const steps = __testables.buildMcpProbeStepDefinitions(mcpProbeText)
 
     await expect(steps[1]?.run('th-zjvc-secret')).resolves.toEqual({
-      discoveredTools: ['tavily-search', 'Acme_Lookup'],
+      discoveredTools: [
+        { requestName: 'tavily-search', displayName: 'tavily-search', inputSchema: null },
+        { requestName: 'Acme_Lookup', displayName: 'Acme_Lookup', inputSchema: null },
+      ],
+    })
+  })
+
+  it('skips advertised tools only when discovery provides no fixture and no input schema', async () => {
+    const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, [{
+      requestName: 'Acme_Lookup',
+      displayName: 'Acme_Lookup',
+      inputSchema: null,
+    }])
+
+    await expect(steps[0]?.run('th-zjvc-secret')).resolves.toEqual({
+      detail: '当前本地没有 Acme_Lookup 的检测夹具，已跳过。',
+      stepState: 'skipped',
     })
   })
 
@@ -303,7 +339,7 @@ describe('UserConsole probe step definitions', () => {
     ])
   })
 
-  it('does not silently skip newly advertised Tavily tools without a fixture', async () => {
+  it('does not silently skip newly advertised Tavily tools when discovery exposes an input schema', async () => {
     const calls: Array<{ url: string, init?: RequestInit }> = []
     globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: requestUrl(input), init })
@@ -313,7 +349,17 @@ describe('UserConsole probe step definitions', () => {
       })
     }) as typeof fetch
 
-    const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, ['tavily_agents'])
+    const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, [{
+      requestName: 'tavily_agents',
+      displayName: 'tavily-agents',
+      inputSchema: {
+        type: 'object',
+        required: ['query'],
+        properties: {
+          query: { type: 'string' },
+        },
+      },
+    }])
 
     expect(steps).toHaveLength(1)
     expect(steps[0]?.billable).toBe(true)
@@ -325,7 +371,9 @@ describe('UserConsole probe step definitions', () => {
       method: 'tools/call',
       params: {
         name: 'tavily_agents',
-        arguments: {},
+        arguments: {
+          query: 'health check',
+        },
       },
     })
   })

@@ -111,9 +111,15 @@ interface McpProbeStepDefinition {
   run: (token: string) => Promise<McpProbeStepResult | null>
 }
 
+interface AdvertisedMcpTool {
+  requestName: string
+  displayName: string
+  inputSchema: Record<string, unknown> | null
+}
+
 interface McpProbeStepResult {
   detail?: string | null
-  discoveredTools?: string[]
+  discoveredTools?: AdvertisedMcpTool[]
   stepState?: Extract<McpProbeStepState, 'success' | 'skipped'>
 }
 
@@ -245,6 +251,24 @@ function isBillableMcpProbeTool(toolName: string): boolean {
   return canonicalMcpProbeToolName(toolName).startsWith('tavily-')
 }
 
+function firstSchemaRecord(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const record = asRecord(item)
+      if (record) return record
+    }
+    return null
+  }
+  return asRecord(value)
+}
+
+function extractAdvertisedMcpToolSchema(tool: Record<string, unknown>): Record<string, unknown> | null {
+  return firstSchemaRecord(tool.inputSchema)
+    ?? firstSchemaRecord(tool.input_schema)
+    ?? firstSchemaRecord(tool.parameters)
+    ?? firstSchemaRecord(tool.schema)
+}
+
 function mcpToolProbeArguments(toolName: string): Record<string, unknown> | null {
   switch (canonicalMcpProbeToolName(toolName)) {
     case 'tavily-search':
@@ -272,19 +296,126 @@ function mcpToolProbeArguments(toolName: string): Record<string, unknown> | null
   }
 }
 
-function extractAdvertisedMcpTools(payload: unknown): string[] {
+function schemaType(schema: Record<string, unknown>): string | null {
+  const directType = schema.type
+  if (typeof directType === 'string' && directType.length > 0) return directType
+  if (Array.isArray(directType)) {
+    for (const item of directType) {
+      if (typeof item === 'string' && item !== 'null' && item.length > 0) return item
+    }
+  }
+  if (schema.properties || schema.required) return 'object'
+  if (schema.items) return 'array'
+  return null
+}
+
+function schemaExampleValue(
+  schema: Record<string, unknown>,
+  propertyName: string,
+  depth = 0,
+): unknown | undefined {
+  if (depth > 4) return undefined
+  if ('const' in schema) return schema.const
+  if ('default' in schema) return schema.default
+
+  const examples = Array.isArray(schema.examples) ? schema.examples : []
+  for (const example of examples) {
+    if (example !== undefined) return example
+  }
+
+  const enumValues = Array.isArray(schema.enum) ? schema.enum : []
+  for (const value of enumValues) {
+    if (value !== undefined) return value
+  }
+
+  for (const key of ['oneOf', 'anyOf', 'allOf'] as const) {
+    const variants = Array.isArray(schema[key]) ? schema[key] : []
+    for (const variant of variants) {
+      const variantSchema = asRecord(variant)
+      if (!variantSchema) continue
+      const synthesized = schemaExampleValue(variantSchema, propertyName, depth + 1)
+      if (synthesized !== undefined) return synthesized
+    }
+  }
+
+  const lowerName = propertyName.toLowerCase()
+  switch (schemaType(schema)) {
+    case 'boolean':
+      return false
+    case 'integer':
+    case 'number':
+      if (
+        lowerName.includes('limit')
+        || lowerName.includes('depth')
+        || lowerName.includes('breadth')
+        || lowerName.includes('count')
+        || lowerName.includes('page')
+        || lowerName.includes('max')
+      ) {
+        return 1
+      }
+      return typeof schema.minimum === 'number' ? schema.minimum : 0
+    case 'string':
+      if (
+        schema.format === 'uri'
+        || schema.format === 'url'
+        || lowerName.includes('url')
+        || lowerName.includes('uri')
+      ) {
+        return 'https://example.com'
+      }
+      if (lowerName.includes('country')) return 'United States'
+      if (lowerName.includes('id')) return 'probe-id'
+      return 'health check'
+    case 'array': {
+      const itemSchema = asRecord(schema.items)
+      const itemValue = itemSchema ? schemaExampleValue(itemSchema, propertyName, depth + 1) : undefined
+      return itemValue === undefined ? [] : [itemValue]
+    }
+    case 'object': {
+      const properties = asRecord(schema.properties)
+      const required = Array.isArray(schema.required)
+        ? schema.required.filter((value): value is string => typeof value === 'string' && value.length > 0)
+        : []
+      const value: Record<string, unknown> = {}
+      for (const key of required) {
+        const childSchema = properties ? asRecord(properties[key]) : null
+        if (!childSchema) continue
+        const childValue = schemaExampleValue(childSchema, key, depth + 1)
+        if (childValue !== undefined) {
+          value[key] = childValue
+        }
+      }
+      return value
+    }
+    default:
+      return undefined
+  }
+}
+
+function synthesizeMcpToolProbeArguments(inputSchema: Record<string, unknown> | null): unknown | null {
+  if (!inputSchema) return null
+  const synthesized = schemaExampleValue(inputSchema, 'arguments')
+  return synthesized === undefined ? null : synthesized
+}
+
+function extractAdvertisedMcpTools(payload: unknown): AdvertisedMcpTool[] {
   const result = asRecord(asRecord(payload)?.result)
   const tools = Array.isArray(result?.tools) ? result.tools : []
-  const uniqueByCanonical = new Map<string, string>()
+  const uniqueByCanonical = new Map<string, AdvertisedMcpTool>()
 
-  for (const rawName of tools
-    .map((tool) => asRecord(tool)?.name)
-    .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
-  ) {
+  for (const tool of tools) {
+    const toolRecord = asRecord(tool)
+    const rawName = typeof toolRecord?.name === 'string' ? toolRecord.name : null
+    if (!rawName || rawName.trim().length === 0) continue
     const trimmedName = rawName.trim()
     const canonicalName = canonicalMcpProbeToolName(trimmedName)
     if (canonicalName.length === 0 || uniqueByCanonical.has(canonicalName)) continue
-    uniqueByCanonical.set(canonicalName, trimmedName)
+    uniqueByCanonical.set(canonicalName, {
+      requestName: trimmedName,
+      displayName: canonicalName,
+      inputSchema: toolRecord ? extractAdvertisedMcpToolSchema(toolRecord) : null,
+    })
   }
 
   return Array.from(uniqueByCanonical.values())
@@ -324,21 +455,38 @@ function buildMcpProbeStepDefinitions(
 
 function buildMcpToolCallProbeStepDefinitions(
   probeText: McpProbeText,
-  toolNames: string[],
+  tools: Array<string | AdvertisedMcpTool>,
 ): McpProbeStepDefinition[] {
-  const toolEntries: Array<{ requestName: string, displayName: string }> = []
+  const toolEntries: AdvertisedMcpTool[] = []
   const seenCanonicalNames = new Set<string>()
 
-  for (const toolName of toolNames) {
-    const requestName = toolName.trim()
-    const displayName = canonicalMcpProbeToolName(requestName)
+  for (const tool of tools) {
+    const requestName = typeof tool === 'string' ? tool.trim() : tool.requestName.trim()
+    const displayName = typeof tool === 'string'
+      ? canonicalMcpProbeToolName(requestName)
+      : canonicalMcpProbeToolName(tool.displayName)
     if (displayName.length === 0 || seenCanonicalNames.has(displayName)) continue
     seenCanonicalNames.add(displayName)
-    toolEntries.push({ requestName, displayName })
+    toolEntries.push({
+      requestName,
+      displayName,
+      inputSchema: typeof tool === 'string' ? null : tool.inputSchema,
+    })
   }
 
-  return toolEntries.flatMap(({ requestName, displayName }) => {
-    const probeArguments = mcpToolProbeArguments(displayName) ?? {}
+  return toolEntries.flatMap(({ requestName, displayName, inputSchema }) => {
+    const probeArguments = mcpToolProbeArguments(displayName) ?? synthesizeMcpToolProbeArguments(inputSchema)
+    if (probeArguments == null) {
+      return [{
+        id: `mcp-tool-call:${displayName}`,
+        label: formatTemplate(probeText.steps.mcpToolCall, { tool: displayName }),
+        billable: isBillableMcpProbeTool(displayName),
+        run: async (): Promise<McpProbeStepResult | null> => ({
+          detail: formatTemplate(probeText.skippedProbeFixture, { tool: displayName }),
+          stepState: 'skipped',
+        }),
+      }]
+    }
 
     return [{
       id: `mcp-tool-call:${displayName}`,

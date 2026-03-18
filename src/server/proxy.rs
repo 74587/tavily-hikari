@@ -275,13 +275,21 @@ async fn proxy_handler(
                             .to_string();
 
                         let normalized_tool = tool.to_ascii_lowercase().replace('_', "-");
-                        let supported_billable_tool = matches!(
+                        let usage_metered_tool = matches!(
                             normalized_tool.as_str(),
                             "tavily-search" | "tavily-extract" | "tavily-crawl" | "tavily-map"
                         );
+                        let reserved_billable_tool = matches!(
+                            normalized_tool.as_str(),
+                            "tavily-search"
+                                | "tavily-extract"
+                                | "tavily-crawl"
+                                | "tavily-map"
+                                | "tavily-research"
+                        );
                         let is_tavily_tool = normalized_tool.starts_with("tavily-");
 
-                        if supported_billable_tool || is_tavily_tool {
+                        if reserved_billable_tool || is_tavily_tool {
                             *any_billable = true;
                             *all_non_billable = false;
 
@@ -297,7 +305,7 @@ async fn proxy_handler(
                                 }
                             }
 
-                            if supported_billable_tool {
+                            if usage_metered_tool {
                                 let mut injected_include_usage = false;
                                 if !params.contains_key("arguments") {
                                     params.insert(
@@ -344,6 +352,12 @@ async fn proxy_handler(
                                                 .saturating_add(expected);
                                     }
                                 }
+                            } else if reserved_billable_tool {
+                                let args_entry = params.get("arguments").unwrap_or(&Value::Null);
+                                let reserved =
+                                    tavily_mcp_reserved_credits(normalized_tool.as_str(), args_entry);
+                                *reserved_billable_total =
+                                    (*reserved_billable_total).saturating_add(reserved);
                             } else {
                                 // Unknown `tavily-*` tool: keep the original arguments/body shape,
                                 // but still treat it as billable so new upstream tools cannot bypass quota.
