@@ -127,7 +127,7 @@ const scenarios: ConnectivityScenario[] = [
       visible: true,
       anchor: 'mcp',
       items: [
-        { id: 'mcp-ping', label: 'MCP service connectivity', status: 'blocked', detail: 'Daily quota exhausted for this token' },
+        { id: 'mcp-ping', label: 'MCP service connectivity', status: 'success' },
         { id: 'mcp-tools-list', label: 'MCP tool discovery', status: 'success' },
         { id: 'mcp-tool-call:tavily-search', label: 'MCP tool call · tavily-search', status: 'blocked', detail: 'Skipped after quota precheck' },
         { id: 'mcp-tool-call:tavily-extract', label: 'MCP tool call · tavily-extract', status: 'blocked', detail: 'Skipped after quota precheck' },
@@ -278,4 +278,8 @@ type Story = StoryObj<typeof meta>
 export const StateGallery: Story = {
   name: 'State Gallery',
   render: () => <ConnectivityChecksGallery />,
+}
+
+export const __testables = {
+  scenarios,
 }

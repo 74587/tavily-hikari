@@ -77,6 +77,18 @@ describe('UserConsole probe step definitions', () => {
     expect(steps[1]?.billable).toBeUndefined()
   })
 
+  it('canonicalizes advertised MCP tool names before scheduling the sweep', () => {
+    expect(__testables.extractAdvertisedMcpTools({
+      result: {
+        tools: [
+          { name: ' tavily_search ' },
+          { name: 'tavily-search' },
+          { name: 'tavily_map' },
+        ],
+      },
+    })).toEqual(['tavily-search', 'tavily-map'])
+  })
+
   it('executes live MCP probe calls with the expected JSON-RPC payloads', async () => {
     const calls: Array<{ url: string, init?: RequestInit }> = []
     globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -89,11 +101,11 @@ describe('UserConsole probe step definitions', () => {
           result: body.method === 'tools/list'
             ? {
                 tools: [
-                  { name: 'tavily-search' },
-                  { name: 'tavily-extract' },
+                  { name: 'tavily_search' },
+                  { name: 'tavily_extract' },
                   { name: 'tavily-crawl' },
-                  { name: 'tavily-map' },
-                  { name: 'tavily-research' },
+                  { name: 'tavily_map' },
+                  { name: 'tavily_research' },
                 ],
               }
             : { ok: true },

@@ -264,7 +264,8 @@ function extractAdvertisedMcpTools(payload: unknown): string[] {
   const names = tools
     .map((tool) => asRecord(tool)?.name)
     .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
-    .map((name) => name.trim())
+    .map((name) => normalizeMcpToolName(name))
+    .filter((name) => name.length > 0)
 
   return Array.from(new Set(names))
 }
@@ -305,7 +306,13 @@ function buildMcpToolCallProbeStepDefinitions(
   probeText: McpProbeText,
   toolNames: string[],
 ): McpProbeStepDefinition[] {
-  return toolNames.map((toolName) => ({
+  const canonicalToolNames = Array.from(new Set(
+    toolNames
+      .map((toolName) => normalizeMcpToolName(toolName))
+      .filter((toolName) => toolName.length > 0),
+  ))
+
+  return canonicalToolNames.map((toolName) => ({
     id: `mcp-tool-call:${toolName}`,
     label: formatTemplate(probeText.steps.mcpToolCall, { tool: toolName }),
     billable: true,
