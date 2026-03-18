@@ -84,9 +84,39 @@ describe('UserConsole probe step definitions', () => {
           { name: ' tavily_search ' },
           { name: 'tavily-search' },
           { name: 'tavily_map' },
+          { name: ' Acme_Lookup ' },
         ],
       },
-    })).toEqual(['tavily-search', 'tavily-map'])
+    })).toEqual(['tavily-search', 'tavily-map', 'Acme_Lookup'])
+  })
+
+  it('keeps non-Tavily tool calls unmodified and non-billable', async () => {
+    const calls: Array<{ url: string, init?: RequestInit }> = []
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: requestUrl(input), init })
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 'ok', result: { ok: true } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    const steps = __testables.buildMcpToolCallProbeStepDefinitions(mcpProbeText, [
+      ' tavily_search ',
+      ' Acme_Lookup ',
+    ])
+
+    expect(steps.map((step) => ({ id: step.id, billable: step.billable }))).toEqual([
+      { id: 'mcp-tool-call:tavily-search', billable: true },
+      { id: 'mcp-tool-call:Acme_Lookup', billable: false },
+    ])
+
+    await steps[0]?.run('th-zjvc-secret')
+    await steps[1]?.run('th-zjvc-secret')
+
+    expect(calls.map((call) => JSON.parse(String(call.init?.body ?? 'null')).params.name)).toEqual([
+      'tavily-search',
+      'Acme_Lookup',
+    ])
   })
 
   it('executes live MCP probe calls with the expected JSON-RPC payloads', async () => {

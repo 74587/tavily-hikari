@@ -227,12 +227,23 @@ function envelopeError(payload: unknown): string | null {
   return getProbeEnvelopeError(payload)
 }
 
-function normalizeMcpToolName(toolName: string): string {
-  return toolName.trim().toLowerCase().replaceAll('_', '-')
+function canonicalMcpProbeToolName(toolName: string): string {
+  const trimmed = toolName.trim()
+  const normalized = trimmed.toLowerCase().replaceAll('_', '-')
+
+  if (normalized.startsWith('tavily-')) {
+    return normalized
+  }
+
+  return trimmed
+}
+
+function isBillableMcpProbeTool(toolName: string): boolean {
+  return canonicalMcpProbeToolName(toolName).startsWith('tavily-')
 }
 
 function mcpToolProbeArguments(toolName: string): Record<string, unknown> {
-  switch (normalizeMcpToolName(toolName)) {
+  switch (canonicalMcpProbeToolName(toolName)) {
     case 'tavily-search':
       return {
         query: 'health check',
@@ -264,7 +275,7 @@ function extractAdvertisedMcpTools(payload: unknown): string[] {
   const names = tools
     .map((tool) => asRecord(tool)?.name)
     .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
-    .map((name) => normalizeMcpToolName(name))
+    .map((name) => canonicalMcpProbeToolName(name))
     .filter((name) => name.length > 0)
 
   return Array.from(new Set(names))
@@ -308,14 +319,14 @@ function buildMcpToolCallProbeStepDefinitions(
 ): McpProbeStepDefinition[] {
   const canonicalToolNames = Array.from(new Set(
     toolNames
-      .map((toolName) => normalizeMcpToolName(toolName))
+      .map((toolName) => canonicalMcpProbeToolName(toolName))
       .filter((toolName) => toolName.length > 0),
   ))
 
   return canonicalToolNames.map((toolName) => ({
     id: `mcp-tool-call:${toolName}`,
     label: formatTemplate(probeText.steps.mcpToolCall, { tool: toolName }),
-    billable: true,
+    billable: isBillableMcpProbeTool(toolName),
     run: async (token: string): Promise<McpProbeStepResult | null> => {
       const payload = await probeMcpToolsCall(token, toolName, mcpToolProbeArguments(toolName))
       const error = envelopeError(payload)
@@ -1908,7 +1919,9 @@ export const __testables = {
   buildApiProbeStepDefinitions,
   buildMcpProbeStepDefinitions,
   buildMcpToolCallProbeStepDefinitions,
+  canonicalMcpProbeToolName,
   extractAdvertisedMcpTools,
+  isBillableMcpProbeTool,
   nextRunningMcpProbeModel,
   resolveGuideToken,
   shouldRenderLandingGuide,
