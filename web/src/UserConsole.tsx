@@ -274,13 +274,19 @@ function mcpToolProbeArguments(toolName: string): Record<string, unknown> | null
 function extractAdvertisedMcpTools(payload: unknown): string[] {
   const result = asRecord(asRecord(payload)?.result)
   const tools = Array.isArray(result?.tools) ? result.tools : []
-  const names = tools
+  const uniqueByCanonical = new Map<string, string>()
+
+  for (const rawName of tools
     .map((tool) => asRecord(tool)?.name)
     .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
-    .map((name) => canonicalMcpProbeToolName(name))
-    .filter((name) => name.length > 0)
+  ) {
+    const trimmedName = rawName.trim()
+    const canonicalName = canonicalMcpProbeToolName(trimmedName)
+    if (canonicalName.length === 0 || uniqueByCanonical.has(canonicalName)) continue
+    uniqueByCanonical.set(canonicalName, trimmedName)
+  }
 
-  return Array.from(new Set(names))
+  return Array.from(uniqueByCanonical.values())
 }
 
 function buildMcpProbeStepDefinitions(
@@ -319,33 +325,38 @@ function buildMcpToolCallProbeStepDefinitions(
   probeText: McpProbeText,
   toolNames: string[],
 ): McpProbeStepDefinition[] {
-  const canonicalToolNames = Array.from(new Set(
-    toolNames
-      .map((toolName) => canonicalMcpProbeToolName(toolName))
-      .filter((toolName) => toolName.length > 0),
-  ))
+  const toolEntries: Array<{ requestName: string, displayName: string }> = []
+  const seenCanonicalNames = new Set<string>()
 
-  return canonicalToolNames.flatMap((toolName) => {
-    const probeArguments = mcpToolProbeArguments(toolName)
+  for (const toolName of toolNames) {
+    const requestName = toolName.trim()
+    const displayName = canonicalMcpProbeToolName(requestName)
+    if (displayName.length === 0 || seenCanonicalNames.has(displayName)) continue
+    seenCanonicalNames.add(displayName)
+    toolEntries.push({ requestName, displayName })
+  }
+
+  return toolEntries.flatMap(({ requestName, displayName }) => {
+    const probeArguments = mcpToolProbeArguments(displayName)
     if (!probeArguments) {
       return [{
-        id: `mcp-tool-call:${toolName}`,
-        label: formatTemplate(probeText.steps.mcpToolCall, { tool: toolName }),
-        billable: isBillableMcpProbeTool(toolName),
+        id: `mcp-tool-call:${displayName}`,
+        label: formatTemplate(probeText.steps.mcpToolCall, { tool: displayName }),
+        billable: isBillableMcpProbeTool(displayName),
         run: async (): Promise<McpProbeStepResult | null> => {
           throw new Error(formatTemplate(probeText.errors.missingProbeFixture, {
-            tools: toolName,
+            tools: displayName,
           }))
         },
       }]
     }
 
     return [{
-      id: `mcp-tool-call:${toolName}`,
-      label: formatTemplate(probeText.steps.mcpToolCall, { tool: toolName }),
-      billable: isBillableMcpProbeTool(toolName),
+      id: `mcp-tool-call:${displayName}`,
+      label: formatTemplate(probeText.steps.mcpToolCall, { tool: displayName }),
+      billable: isBillableMcpProbeTool(displayName),
       run: async (token: string): Promise<McpProbeStepResult | null> => {
-        const payload = await probeMcpToolsCall(token, toolName, probeArguments)
+        const payload = await probeMcpToolsCall(token, requestName, probeArguments)
         const error = envelopeError(payload) ?? getMcpProbeResultError(payload)
         if (error) throw new Error(error)
         return null

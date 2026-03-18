@@ -78,7 +78,7 @@ describe('UserConsole probe step definitions', () => {
     expect(steps[1]?.billable).toBeUndefined()
   })
 
-  it('canonicalizes advertised MCP tool names before scheduling the sweep', () => {
+  it('preserves the first advertised MCP tool name while deduplicating aliases for the sweep', () => {
     expect(__testables.extractAdvertisedMcpTools({
       result: {
         tools: [
@@ -88,7 +88,7 @@ describe('UserConsole probe step definitions', () => {
           { name: ' Acme_Lookup ' },
         ],
       },
-    })).toEqual(['tavily-search', 'tavily-map', 'Acme_Lookup'])
+    })).toEqual(['tavily_search', 'tavily_map', 'Acme_Lookup'])
   })
 
   it('keeps unsupported advertised tools in the MCP call sweep and fails them per tool', async () => {
@@ -117,7 +117,7 @@ describe('UserConsole probe step definitions', () => {
     )
 
     expect(calls.map((call) => JSON.parse(String(call.init?.body ?? 'null')).params.name)).toEqual([
-      'tavily-search',
+      'tavily_search',
     ])
   })
 
@@ -234,10 +234,10 @@ describe('UserConsole probe step definitions', () => {
     expect(calls.slice(2).map((call) => JSON.parse(String(call.init?.body ?? 'null')))).toEqual([
       {
         jsonrpc: '2.0',
-        id: 'probe-tool-call:tavily-search',
+        id: 'probe-tool-call:tavily_search',
         method: 'tools/call',
         params: {
-          name: 'tavily-search',
+          name: 'tavily_search',
           arguments: {
             query: 'health check',
             search_depth: 'basic',
@@ -246,10 +246,10 @@ describe('UserConsole probe step definitions', () => {
       },
       {
         jsonrpc: '2.0',
-        id: 'probe-tool-call:tavily-extract',
+        id: 'probe-tool-call:tavily_extract',
         method: 'tools/call',
         params: {
-          name: 'tavily-extract',
+          name: 'tavily_extract',
           arguments: {
             urls: ['https://example.com'],
           },
@@ -270,10 +270,10 @@ describe('UserConsole probe step definitions', () => {
       },
       {
         jsonrpc: '2.0',
-        id: 'probe-tool-call:tavily-map',
+        id: 'probe-tool-call:tavily_map',
         method: 'tools/call',
         params: {
-          name: 'tavily-map',
+          name: 'tavily_map',
           arguments: {
             url: 'https://example.com',
             max_depth: 1,
@@ -283,10 +283,10 @@ describe('UserConsole probe step definitions', () => {
       },
       {
         jsonrpc: '2.0',
-        id: 'probe-tool-call:tavily-research',
+        id: 'probe-tool-call:tavily_research',
         method: 'tools/call',
         params: {
-          name: 'tavily-research',
+          name: 'tavily_research',
           arguments: {
             query: 'health check',
           },
