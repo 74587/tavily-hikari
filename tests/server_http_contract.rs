@@ -391,7 +391,7 @@ async fn spawn_mock_mcp_tools_contract_upstream(
                                 .and_then(|value| value.as_str())
                                 .unwrap_or_default();
                             assert!(
-                                advertised_tools.iter().any(|name| *name == tool_name),
+                                advertised_tools.contains(&tool_name),
                                 "unexpected advertised tool call: {tool_name}"
                             );
 
