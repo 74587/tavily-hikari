@@ -4383,6 +4383,8 @@ mod tests {
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
@@ -4473,6 +4475,8 @@ colo=LAX
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: true,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
@@ -4571,6 +4575,8 @@ colo=LAX
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
@@ -4643,6 +4649,8 @@ colo=LAX
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
@@ -4742,6 +4750,8 @@ colo=LAX
                     subscription_urls: Vec::new(),
                     subscription_update_interval_secs: 3600,
                     insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
                 },
                 false,
             )
