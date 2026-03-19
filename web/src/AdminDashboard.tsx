@@ -927,7 +927,7 @@ function AdminDashboard(): JSX.Element {
   const [requestsError, setRequestsError] = useState<string | null>(null)
   const [jobs, setJobs] = useState<JobLogView[]>([])
   const [dashboardJobs, setDashboardJobs] = useState<JobLogView[]>([])
-  const [jobFilter, setJobFilter] = useState<'all' | 'quota' | 'usage' | 'logs'>('all')
+  const [jobFilter, setJobFilter] = useState<'all' | 'quota' | 'usage' | 'logs' | 'geo'>('all')
   const [jobsPage, setJobsPage] = useState(1)
   const jobsPerPage = 10
   const [jobsTotal, setJobsTotal] = useState(0)
@@ -7487,7 +7487,7 @@ function AdminDashboard(): JSX.Element {
             <p className="panel-description">{jobsStrings.description}</p>
           </div>
           <div className="panel-actions">
-            <SegmentedTabs<'all' | 'quota' | 'usage' | 'logs'>
+            <SegmentedTabs<'all' | 'quota' | 'usage' | 'logs' | 'geo'>
               value={jobFilter}
               onChange={setJobFilter}
               options={[
@@ -7495,6 +7495,7 @@ function AdminDashboard(): JSX.Element {
                 { value: 'quota', label: jobsStrings.filters.quota },
                 { value: 'usage', label: jobsStrings.filters.usage },
                 { value: 'logs', label: jobsStrings.filters.logs },
+                { value: 'geo', label: jobsStrings.filters.geo },
               ]}
               ariaLabel={jobsStrings.title}
               disabled={jobsBlocking}

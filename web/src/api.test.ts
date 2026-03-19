@@ -388,4 +388,26 @@ describe('admin user tag api helpers', () => {
       finished_at: 1_773_344_470,
     })
   })
+
+  it('passes the geo job filter through to the jobs API', async () => {
+    const fetchMock = mock(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            items: [],
+            total: 0,
+            page: 1,
+            perPage: 10,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+    globalThis.fetch = fetchMock as typeof fetch
+
+    await fetchJobs(1, 10, 'geo')
+
+    const [input] = fetchMock.mock.calls[0] as [string]
+    expect(input).toBe('/api/jobs?page=1&per_page=10&group=geo')
+  })
 })

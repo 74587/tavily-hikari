@@ -549,7 +549,7 @@ interface ServerJobLogView {
   finishedAt: number | null
 }
 
-export type JobGroup = 'all' | 'quota' | 'usage' | 'logs'
+export type JobGroup = 'all' | 'quota' | 'usage' | 'logs' | 'geo'
 
 export interface Profile {
   displayName: string | null

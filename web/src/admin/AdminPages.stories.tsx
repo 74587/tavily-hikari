@@ -473,6 +473,17 @@ const MOCK_REQUESTS: RequestLog[] = [
 
 const MOCK_JOBS: JobLogView[] = [
   {
+    id: 611,
+    job_type: 'forward_proxy_geo_refresh',
+    key_id: null,
+    key_group: null,
+    status: 'success',
+    attempt: 1,
+    message: 'refreshed_candidates=11',
+    started_at: now - 120,
+    finished_at: now - 90,
+  },
+  {
     id: 610,
     job_type: 'quota_sync',
     key_id: 'MZli',
@@ -2216,7 +2227,7 @@ function JobsPageCanvas(): JSX.Element {
             <p className="panel-description">{jobsStrings.description}</p>
           </div>
           <div className="panel-actions">
-            <SegmentedTabs<'all' | 'quota' | 'usage' | 'logs'>
+            <SegmentedTabs<'all' | 'quota' | 'usage' | 'logs' | 'geo'>
               value="all"
               onChange={() => {}}
               options={[
@@ -2224,6 +2235,7 @@ function JobsPageCanvas(): JSX.Element {
                 { value: 'quota', label: jobsStrings.filters.quota },
                 { value: 'usage', label: jobsStrings.filters.usage },
                 { value: 'logs', label: jobsStrings.filters.logs },
+                { value: 'geo', label: jobsStrings.filters.geo },
               ]}
               ariaLabel={jobsStrings.title}
             />
