@@ -186,6 +186,14 @@ jobs:
         with:
           ref: ${{ env.RELEASE_HEAD_SHA }}
 
+      - name: Install Rust native dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libsqlite3-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -210,10 +218,161 @@ jobs:
           set -euo pipefail
           lower="${GITHUB_REPOSITORY,,}"
           echo "IMAGE_NAME_LOWER=${lower}" >> "$GITHUB_ENV"
+          echo "LOCAL_SMOKE_IMAGE=tavily-hikari-release-smoke:${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
           echo "image_name_lower=${lower}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build local Docker image for MCP billing smoke
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: ${{ env.LOCAL_SMOKE_IMAGE }}
+          build-args: |
+            APP_EFFECTIVE_VERSION=${{ env.APP_EFFECTIVE_VERSION }}
+
+      - name: Build smoke helpers
+        run: cargo build --locked --bin mock_tavily
+
+      - name: MCP billing smoke gate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MOCK_PORT=58088
+          PROXY_PORT=58087
+          DATA_DIR="${RUNNER_TEMP}/tavily-hikari-release-smoke-data"
+          DB_PATH="${DATA_DIR}/tavily_proxy.db"
+          MOCK_LOG="${RUNNER_TEMP}/mock-tavily.log"
+          CONTAINER_NAME="tavily-hikari-release-smoke"
+
+          cleanup() {
+            docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+            if [[ -n "${MOCK_PID:-}" ]]; then
+              kill "${MOCK_PID}" >/dev/null 2>&1 || true
+              wait "${MOCK_PID}" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+
+          mkdir -p "${DATA_DIR}"
+
+          ./target/debug/mock_tavily --bind "127.0.0.1:${MOCK_PORT}" >"${MOCK_LOG}" 2>&1 &
+          MOCK_PID=$!
+
+          for _ in {1..50}; do
+            if curl -fsS "http://127.0.0.1:${MOCK_PORT}/admin/state" >/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+          curl -fsS "http://127.0.0.1:${MOCK_PORT}/admin/state" >/dev/null
+
+          curl -fsS \
+            -X POST \
+            "http://127.0.0.1:${MOCK_PORT}/admin/keys" \
+            -H 'content-type: application/json' \
+            -d '{"secret":"tvly-test-key","limit":1000,"remaining":1000}' \
+            >/dev/null
+
+          docker run -d --rm \
+            --name "${CONTAINER_NAME}" \
+            --add-host host.docker.internal:host-gateway \
+            -p "127.0.0.1:${PROXY_PORT}:8787" \
+            -v "${DATA_DIR}:/srv/app/data" \
+            -e TAVILY_API_KEYS=tvly-test-key \
+            -e TAVILY_UPSTREAM="http://host.docker.internal:${MOCK_PORT}/mcp" \
+            -e TAVILY_USAGE_BASE="http://host.docker.internal:${MOCK_PORT}" \
+            -e DEV_OPEN_ADMIN=true \
+            -e PROXY_DB_PATH=/srv/app/data/tavily_proxy.db \
+            "${LOCAL_SMOKE_IMAGE}" \
+            >/dev/null
+
+          for _ in {1..60}; do
+            if curl -fsS "http://127.0.0.1:${PROXY_PORT}/health" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:${PROXY_PORT}/health" >/dev/null
+
+          TOKEN_PAYLOAD="$(
+            curl -fsS \
+              -X POST \
+              "http://127.0.0.1:${PROXY_PORT}/api/tokens" \
+              -H 'content-type: application/json' \
+              -d '{}'
+          )"
+          export TOKEN_PAYLOAD
+          TOKEN="$(python3 - <<'PY'
+          import json, os
+          payload = json.loads(os.environ["TOKEN_PAYLOAD"])
+          print(payload["token"])
+          PY
+          )"
+          TOKEN_ID="$(python3 - <<'PY'
+          import os
+          token = os.environ["TOKEN_PAYLOAD"]
+          payload = __import__("json").loads(token)
+          full_token = payload["token"]
+          token_id = full_token.removeprefix("th-").split("-", 1)[0]
+          print(token_id)
+          PY
+          )"
+
+          SEARCH_RESPONSE="$(
+            curl -fsS \
+              -X POST \
+              "http://127.0.0.1:${PROXY_PORT}/mcp" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H 'content-type: application/json' \
+              -d '{"jsonrpc":"2.0","id":"release-smoke-search","method":"tools/call","params":{"name":"tavily_search","arguments":{"query":"release smoke gate","search_depth":"advanced"}}}'
+          )"
+          export SEARCH_RESPONSE
+          python3 - <<'PY'
+          import json, os
+          payload = json.loads(os.environ["SEARCH_RESPONSE"])
+          assert payload.get("result"), payload
+          PY
+
+          python3 - "${DB_PATH}" "${TOKEN_ID}" <<'PY'
+          import json
+          import pathlib
+          import sqlite3
+          import sys
+
+          db_path = pathlib.Path(sys.argv[1])
+          token_id = sys.argv[2]
+          conn = sqlite3.connect(db_path)
+          request_row = conn.execute(
+              "SELECT request_body FROM request_logs WHERE auth_token_id = ? ORDER BY id DESC LIMIT 1",
+              (token_id,),
+          ).fetchone()
+          if request_row is None:
+              raise SystemExit("missing request_logs row for smoke token")
+          request_body = json.loads(request_row[0].decode())
+          if request_body["params"]["arguments"].get("include_usage") is not True:
+              raise SystemExit(f"include_usage missing from forwarded request: {request_body}")
+
+          token_log_row = conn.execute(
+              "SELECT business_credits FROM auth_token_logs WHERE token_id = ? ORDER BY id DESC LIMIT 1",
+              (token_id,),
+          ).fetchone()
+          if token_log_row is None or token_log_row[0] is None or token_log_row[0] <= 0:
+              raise SystemExit(f"missing charged credits for smoke token: {token_log_row}")
+
+          month_row = conn.execute(
+              "SELECT COALESCE(month_count, 0) FROM auth_token_quota WHERE token_id = ? LIMIT 1",
+              (token_id,),
+          ).fetchone()
+          if month_row is None or month_row[0] < token_log_row[0]:
+              raise SystemExit(
+                  f"token monthly quota did not increase with billed credits: month_row={month_row} charged={token_log_row}"
+              )
+          PY
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
