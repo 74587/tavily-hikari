@@ -2547,13 +2547,7 @@ impl KeyStore {
         match (rebuild_result, reenable_result) {
             (Err(err), _) => Err(err),
             (Ok(_), Err(err)) => Err(err.into()),
-            (Ok(_), Ok(_)) => {
-                self.ensure_no_foreign_key_violations(
-                    &mut conn,
-                    "request_logs schema migration produced invalid foreign keys",
-                )
-                .await
-            }
+            (Ok(_), Ok(_)) => Ok(()),
         }
     }
 
@@ -2696,6 +2690,13 @@ impl KeyStore {
         sqlx::query("ALTER TABLE request_logs_new RENAME TO request_logs")
             .execute(&mut **conn)
             .await?;
+
+        self.ensure_no_foreign_key_violations(
+            conn,
+            "request_logs schema migration produced invalid foreign keys",
+        )
+        .await?;
+
         sqlx::query("COMMIT").execute(&mut **conn).await?;
 
         Ok(())

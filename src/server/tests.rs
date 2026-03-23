@@ -8399,6 +8399,171 @@ colo=LAX
     }
 
     #[tokio::test]
+    async fn request_logs_legacy_api_key_migration_rolls_back_when_fk_check_fails() {
+        let db_path = temp_db_path("request-logs-legacy-fk-safe-migration-rollback");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open rollback db pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE api_keys (
+                id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'active',
+                status_changed_at INTEGER,
+                last_used_at INTEGER NOT NULL DEFAULT 0,
+                quota_limit INTEGER,
+                quota_remaining INTEGER,
+                quota_synced_at INTEGER,
+                deleted_at INTEGER
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create rollback api_keys");
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (
+                id, api_key, status, status_changed_at, last_used_at, quota_limit, quota_remaining, quota_synced_at, deleted_at
+            ) VALUES (?, ?, 'active', NULL, ?, NULL, NULL, NULL, NULL)
+            "#,
+        )
+        .bind("k-rollback")
+        .bind("tvly-rollback-ref")
+        .bind(512_i64)
+        .execute(&pool)
+        .await
+        .expect("insert rollback api key");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key TEXT NOT NULL,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                query TEXT,
+                status_code INTEGER,
+                error_message TEXT,
+                request_body BLOB,
+                response_body BLOB,
+                created_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create rollback request_logs");
+
+        let request_log_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO request_logs (
+                api_key, method, path, query, status_code, error_message, request_body, response_body, created_at
+            ) VALUES (?, 'POST', '/search', NULL, 200, NULL, NULL, NULL, ?)
+            RETURNING id
+            "#,
+        )
+        .bind("tvly-rollback-ref")
+        .bind(220_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("insert rollback request log");
+
+        create_request_log_reference_tables(&pool).await;
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("disable foreign keys for corruption fixture");
+        sqlx::query(
+            r#"
+            INSERT INTO auth_token_logs (
+                token_id,
+                method,
+                path,
+                result_status,
+                request_log_id,
+                created_at
+            ) VALUES ('tok-ref', 'POST', '/mcp', 'error', ?, ?)
+            "#,
+        )
+        .bind(request_log_id + 999)
+        .bind(221_i64)
+        .execute(&pool)
+        .await
+        .expect("insert invalid auth_token_logs reference");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("reenable foreign keys after corruption fixture");
+        drop(pool);
+
+        let err = TavilyProxy::with_endpoint(
+            vec!["tvly-rollback-ref-upgrade".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect_err("startup migration should fail on invalid preserved foreign keys");
+        assert!(
+            err.to_string()
+                .contains("request_logs schema migration produced invalid foreign keys"),
+            "unexpected migration error: {err}"
+        );
+
+        let upgraded_pool = connect_sqlite_test_pool(&db_str).await;
+
+        let api_key_column_still_exists = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT 1 FROM pragma_table_info('request_logs') WHERE name = 'api_key' LIMIT 1",
+        )
+        .fetch_optional(&upgraded_pool)
+        .await
+        .expect("probe rollback api_key column")
+        .is_some();
+        assert!(
+            api_key_column_still_exists,
+            "failed migration should leave the legacy request_logs schema intact"
+        );
+
+        let rebuilt_table_exists = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'request_logs_new' LIMIT 1",
+        )
+        .fetch_optional(&upgraded_pool)
+        .await
+        .expect("probe request_logs_new after rollback")
+        .is_some();
+        assert!(
+            !rebuilt_table_exists,
+            "failed migration should not leave request_logs_new behind"
+        );
+
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT request_log_id FROM auth_token_logs ORDER BY id DESC LIMIT 1",
+            )
+            .fetch_one(&upgraded_pool)
+            .await
+            .expect("read invalid preserved auth_token_logs reference"),
+            Some(request_log_id + 999)
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn request_logs_not_null_api_key_migration_preserves_references_and_accepts_null_keys() {
         let db_path = temp_db_path("request-logs-nullable-fk-safe-migration");
         let db_str = db_path.to_string_lossy().to_string();
