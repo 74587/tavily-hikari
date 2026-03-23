@@ -2691,9 +2691,9 @@ impl KeyStore {
             .execute(&mut **conn)
             .await?;
 
-        self.ensure_no_foreign_key_violations(
+        self.ensure_request_logs_rebuild_references_valid(
             conn,
-            "request_logs schema migration produced invalid foreign keys",
+            "request_logs schema migration produced invalid preserved references",
         )
         .await?;
 
@@ -2702,31 +2702,88 @@ impl KeyStore {
         Ok(())
     }
 
-    async fn ensure_no_foreign_key_violations(
+    async fn ensure_request_logs_rebuild_references_valid(
         &self,
         conn: &mut sqlx::pool::PoolConnection<Sqlite>,
         context: &str,
     ) -> Result<(), ProxyError> {
-        let rows = sqlx::query("PRAGMA foreign_key_check")
+        let rows = sqlx::query("PRAGMA foreign_key_check('request_logs')")
             .fetch_all(&mut **conn)
             .await?;
+        if !rows.is_empty() {
+            let details = rows
+                .into_iter()
+                .take(5)
+                .map(|row| {
+                    let table = row
+                        .try_get::<String, _>(0)
+                        .unwrap_or_else(|_| "<unknown-table>".to_string());
+                    let rowid = row.try_get::<i64, _>(1).unwrap_or_default();
+                    let parent = row
+                        .try_get::<String, _>(2)
+                        .unwrap_or_else(|_| "<unknown-parent>".to_string());
+                    let fk_index = row.try_get::<i64, _>(3).unwrap_or_default();
+                    format!("{table}[rowid={rowid}] -> {parent} (fk#{fk_index})")
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            return Err(ProxyError::Other(format!("{context}: {details}")));
+        }
+
+        self.ensure_request_logs_child_reference_integrity(conn, "auth_token_logs", context)
+            .await?;
+        self.ensure_request_logs_child_reference_integrity(
+            conn,
+            "api_key_maintenance_records",
+            context,
+        )
+        .await
+    }
+
+    async fn ensure_request_logs_child_reference_integrity(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        table: &str,
+        context: &str,
+    ) -> Result<(), ProxyError> {
+        let table_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        )
+        .bind(table)
+        .fetch_optional(&mut **conn)
+        .await?;
+        if table_exists.is_none() {
+            return Ok(());
+        }
+
+        let has_request_log_id = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = 'request_log_id' LIMIT 1",
+        )
+        .bind(table)
+        .fetch_optional(&mut **conn)
+        .await?;
+        if has_request_log_id.is_none() {
+            return Ok(());
+        }
+
+        let query = format!(
+            "SELECT rowid, request_log_id FROM {table} \
+             WHERE request_log_id IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM request_logs WHERE request_logs.id = {table}.request_log_id) \
+             ORDER BY rowid ASC LIMIT 5"
+        );
+        let rows = sqlx::query(&query).fetch_all(&mut **conn).await?;
         if rows.is_empty() {
             return Ok(());
         }
 
         let details = rows
             .into_iter()
-            .take(5)
             .map(|row| {
-                let table = row
-                    .try_get::<String, _>(0)
-                    .unwrap_or_else(|_| "<unknown-table>".to_string());
-                let rowid = row.try_get::<i64, _>(1).unwrap_or_default();
-                let parent = row
-                    .try_get::<String, _>(2)
-                    .unwrap_or_else(|_| "<unknown-parent>".to_string());
-                let fk_index = row.try_get::<i64, _>(3).unwrap_or_default();
-                format!("{table}[rowid={rowid}] -> {parent} (fk#{fk_index})")
+                let rowid = row.try_get::<i64, _>("rowid").unwrap_or_default();
+                let request_log_id = row.try_get::<i64, _>("request_log_id").unwrap_or_default();
+                format!("{table}[rowid={rowid}] -> request_logs[id={request_log_id}]")
             })
             .collect::<Vec<_>>()
             .join("; ");

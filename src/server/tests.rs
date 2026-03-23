@@ -8520,7 +8520,7 @@ colo=LAX
         .expect_err("startup migration should fail on invalid preserved foreign keys");
         assert!(
             err.to_string()
-                .contains("request_logs schema migration produced invalid foreign keys"),
+                .contains("request_logs schema migration produced invalid preserved references"),
             "unexpected migration error: {err}"
         );
 
@@ -8558,6 +8558,151 @@ colo=LAX
             .await
             .expect("read invalid preserved auth_token_logs reference"),
             Some(request_log_id + 999)
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn request_logs_migration_ignores_unrelated_auth_token_log_orphans() {
+        let db_path = temp_db_path("request-logs-ignore-unrelated-auth-token-log-orphans");
+        let db_str = db_path.to_string_lossy().to_string();
+
+        let options = SqliteConnectOptions::new()
+            .filename(&db_str)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open unrelated orphan db pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE api_keys (
+                id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'active',
+                status_changed_at INTEGER,
+                last_used_at INTEGER NOT NULL DEFAULT 0,
+                quota_limit INTEGER,
+                quota_remaining INTEGER,
+                quota_synced_at INTEGER,
+                deleted_at INTEGER
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create unrelated orphan api_keys");
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (
+                id, api_key, status, status_changed_at, last_used_at, quota_limit, quota_remaining, quota_synced_at, deleted_at
+            ) VALUES (?, ?, 'active', NULL, ?, NULL, NULL, NULL, NULL)
+            "#,
+        )
+        .bind("k-unrelated")
+        .bind("tvly-unrelated-ref")
+        .bind(640_i64)
+        .execute(&pool)
+        .await
+        .expect("insert unrelated orphan api key");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key TEXT NOT NULL,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                query TEXT,
+                status_code INTEGER,
+                error_message TEXT,
+                request_body BLOB,
+                response_body BLOB,
+                created_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create unrelated orphan request_logs");
+
+        let request_log_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO request_logs (
+                api_key, method, path, query, status_code, error_message, request_body, response_body, created_at
+            ) VALUES (?, 'POST', '/search', NULL, 200, NULL, NULL, NULL, ?)
+            RETURNING id
+            "#,
+        )
+        .bind("tvly-unrelated-ref")
+        .bind(240_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("insert unrelated orphan request log");
+
+        create_request_log_reference_tables(&pool).await;
+        insert_request_log_reference_rows(&pool, "k-unrelated", request_log_id).await;
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("disable foreign keys for unrelated orphan fixture");
+        sqlx::query(
+            "UPDATE api_key_maintenance_records SET auth_token_log_id = ? WHERE id = 'maint-ref'",
+        )
+        .bind(999_999_i64)
+        .execute(&pool)
+        .await
+        .expect("corrupt unrelated auth_token_log_id reference");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("reenable foreign keys after unrelated orphan fixture");
+        drop(pool);
+
+        let _proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-unrelated-ref-upgrade".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("request_logs migration should ignore unrelated auth_token_log orphans");
+
+        let upgraded_pool = connect_sqlite_test_pool(&db_str).await;
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT api_key_id FROM request_logs WHERE id = ?",
+            )
+            .bind(request_log_id)
+            .fetch_one(&upgraded_pool)
+            .await
+            .expect("read migrated unrelated orphan request log"),
+            Some("k-unrelated".to_string())
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT request_log_id FROM api_key_maintenance_records WHERE id = 'maint-ref'",
+            )
+            .fetch_one(&upgraded_pool)
+            .await
+            .expect("read preserved maintenance request_log_id"),
+            Some(request_log_id)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT auth_token_log_id FROM api_key_maintenance_records WHERE id = 'maint-ref'",
+            )
+            .fetch_one(&upgraded_pool)
+            .await
+            .expect("read preserved unrelated orphan auth_token_log_id"),
+            Some(999_999_i64)
         );
 
         let _ = std::fs::remove_file(db_path);
