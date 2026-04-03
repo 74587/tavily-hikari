@@ -1522,6 +1522,8 @@ impl RequestLogView {
             &record.result_status,
             record.failure_kind.as_deref(),
         );
+        let result_status =
+            display_result_status_for_request_kind(&record.request_kind_key, &record.result_status);
         let request_kind_billing_group = token_request_kind_billing_group_for_request_log(
             &record.request_kind_key,
             Some(&record.request_body),
@@ -1539,7 +1541,7 @@ impl RequestLogView {
             request_kind_key: record.request_kind_key,
             request_kind_label: record.request_kind_label,
             request_kind_detail: record.request_kind_detail,
-            result_status: record.result_status,
+            result_status,
             created_at: record.created_at,
             error_message: record.error_message,
             failure_kind: record.failure_kind,
@@ -1575,6 +1577,8 @@ impl RequestLogView {
             record.counts_business_quota,
         )
         .to_string();
+        let result_status =
+            display_result_status_for_request_kind(&request_kind_key, &record.result_status);
         Self {
             id: record.id,
             key_id: record.key_id,
@@ -1588,7 +1592,7 @@ impl RequestLogView {
             request_kind_key: record.request_kind_key,
             request_kind_label: record.request_kind_label,
             request_kind_detail: record.request_kind_detail,
-            result_status: record.result_status,
+            result_status,
             created_at: record.created_at,
             error_message: record.error_message,
             failure_kind: record.failure_kind,

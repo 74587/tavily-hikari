@@ -336,6 +336,8 @@ impl From<TokenLogRecord> for PublicTokenLogView {
 
 impl PublicTokenLogView {
     fn from_record(r: TokenLogRecord, language: UiLanguage) -> Self {
+        let result_status =
+            display_result_status_for_request_kind(&r.request_kind_key, &r.result_status);
         Self {
             id: r.id,
             method: r.method,
@@ -343,7 +345,7 @@ impl PublicTokenLogView {
             query: r.query,
             http_status: r.http_status,
             mcp_status: r.mcp_status,
-            result_status: r.result_status,
+            result_status,
             error_message: append_solution_guidance_to_error(
                 r.error_message,
                 r.failure_kind.as_deref(),

@@ -7077,6 +7077,66 @@ colo=LAX
     }
 
     #[test]
+    fn session_delete_unsupported_views_render_neutral_result_status() {
+        let token_record = TokenLogRecord {
+            id: 3,
+            key_id: Some("MZlj".to_string()),
+            method: "DELETE".to_string(),
+            path: "/mcp".to_string(),
+            query: None,
+            http_status: Some(405),
+            mcp_status: Some(405),
+            business_credits: None,
+            request_kind_key: "mcp:session-delete-unsupported".to_string(),
+            request_kind_label: "MCP | session delete unsupported".to_string(),
+            request_kind_detail: None,
+            counts_business_quota: false,
+            result_status: "error".to_string(),
+            error_message: Some("Session termination not supported".to_string()),
+            failure_kind: Some("mcp_method_405".to_string()),
+            key_effect_code: "none".to_string(),
+            key_effect_summary: Some("No automatic status change".to_string()),
+            created_at: 1_700_000_002,
+        };
+        let public_view = PublicTokenLogView::from_record(token_record.clone(), UiLanguage::Zh);
+        assert_eq!(public_view.result_status, "neutral");
+
+        let admin_token_view = TokenLogView::from(token_record.clone());
+        assert_eq!(admin_token_view.result_status, "neutral");
+        assert_eq!(admin_token_view.operational_class, "neutral");
+
+        let request_view = RequestLogView::from_request_record(
+            RequestLogRecord {
+                id: 4,
+                key_id: Some("MZlj".to_string()),
+                auth_token_id: Some("token-session-delete".to_string()),
+                method: "DELETE".to_string(),
+                path: "/mcp".to_string(),
+                query: None,
+                status_code: Some(405),
+                tavily_status_code: Some(405),
+                error_message: Some("Session termination not supported".to_string()),
+                business_credits: None,
+                request_kind_key: "mcp:session-delete-unsupported".to_string(),
+                request_kind_label: "MCP | session delete unsupported".to_string(),
+                request_kind_detail: None,
+                result_status: "error".to_string(),
+                failure_kind: Some("mcp_method_405".to_string()),
+                key_effect_code: "none".to_string(),
+                key_effect_summary: Some("No automatic status change".to_string()),
+                request_body: Vec::new(),
+                response_body: br#"{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Method Not Allowed: Session termination not supported"}}"#.to_vec(),
+                created_at: 1_700_000_003,
+                forwarded_headers: Vec::new(),
+                dropped_headers: Vec::new(),
+            },
+            false,
+        );
+        assert_eq!(request_view.result_status, "neutral");
+        assert_eq!(request_view.operational_class, "neutral");
+    }
+
+    #[test]
     fn admin_token_log_view_exposes_failure_kind_and_key_effect_fields() {
         let view = TokenLogView::from(TokenLogRecord {
             id: 2,
@@ -8395,6 +8455,12 @@ colo=LAX
                 .and_then(|value| value.as_str()),
             Some("non_billable")
         );
+        assert_eq!(
+            unfiltered_body
+                .pointer("/items/0/result_status")
+                .and_then(|value| value.as_str()),
+            Some("neutral")
+        );
 
         let success_resp = client
             .get(format!(
@@ -8470,6 +8536,12 @@ colo=LAX
                 .and_then(|value| value.as_str()),
             Some("mcp:session-delete-unsupported")
         );
+        assert_eq!(
+            neutral_body
+                .pointer("/items/0/result_status")
+                .and_then(|value| value.as_str()),
+            Some("neutral")
+        );
         assert!(
             neutral_body
                 .get("items")
@@ -8521,6 +8593,20 @@ colo=LAX
                     .and_then(|value| value.as_str())
                     == Some("mcp:session-delete-unsupported")
             })));
+        assert!(
+            neutral_result_body
+                .get("items")
+                .and_then(|value| value.as_array())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("request_kind_key")
+                            .and_then(|value| value.as_str())
+                            == Some("mcp:session-delete-unsupported")
+                    })
+                })
+                .and_then(|item| item.get("result_status").and_then(|value| value.as_str()))
+                == Some("neutral")
+        );
 
         let error_result_resp = client
             .get(format!(
@@ -8544,6 +8630,35 @@ colo=LAX
                     .and_then(|value| value.as_str())
                     != Some("mcp:session-delete-unsupported")
             })));
+
+        let key_neutral_logs_resp = client
+            .get(format!(
+                "http://{}/api/keys/{}/logs/page?page=1&per_page=20&result=neutral",
+                admin_addr, key_id
+            ))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .send()
+            .await
+            .expect("key neutral logs request");
+        assert_eq!(key_neutral_logs_resp.status(), reqwest::StatusCode::OK);
+        let key_neutral_logs_body: serde_json::Value = key_neutral_logs_resp
+            .json()
+            .await
+            .expect("key neutral logs json");
+        assert!(
+            key_neutral_logs_body
+                .get("items")
+                .and_then(|value| value.as_array())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("request_kind_key")
+                            .and_then(|value| value.as_str())
+                            == Some("mcp:session-delete-unsupported")
+                    })
+                })
+                .and_then(|item| item.get("result_status").and_then(|value| value.as_str()))
+                == Some("neutral")
+        );
 
         let upstream_resp = client
             .get(format!(
@@ -11779,6 +11894,21 @@ colo=LAX
                 .and_then(|value| value.as_str()),
             Some("non_billable")
         );
+        let session_delete_log = logs
+            .iter()
+            .find(|value| {
+                value
+                    .get("request_kind_key")
+                    .and_then(|kind| kind.as_str())
+                    .is_some_and(|kind| kind == "mcp:session-delete-unsupported")
+            })
+            .expect("session delete token log");
+        assert_eq!(
+            session_delete_log
+                .get("result_status")
+                .and_then(|value| value.as_str()),
+            Some("neutral")
+        );
 
         let page_resp = client
             .get(format!(
@@ -11927,6 +12057,21 @@ colo=LAX
             paged_legacy_log.get("legacyRequestKindKey").is_none(),
             "paged token log payload should not expose legacy request-kind snapshots"
         );
+        let paged_session_delete_log = items
+            .iter()
+            .find(|value| {
+                value
+                    .get("request_kind_key")
+                    .and_then(|kind| kind.as_str())
+                    .is_some_and(|kind| kind == "mcp:session-delete-unsupported")
+            })
+            .expect("paged session delete log");
+        assert_eq!(
+            paged_session_delete_log
+                .get("result_status")
+                .and_then(|value| value.as_str()),
+            Some("neutral")
+        );
 
         let neutral_page_resp = client
             .get(format!(
@@ -11976,6 +12121,18 @@ colo=LAX
                 .and_then(|kind| kind.as_str())
                 == Some("mcp:session-delete-unsupported")
         }));
+        assert!(
+            neutral_result_items
+                .iter()
+                .find(|value| {
+                    value
+                        .get("request_kind_key")
+                        .and_then(|kind| kind.as_str())
+                        == Some("mcp:session-delete-unsupported")
+                })
+                .and_then(|value| value.get("result_status").and_then(|status| status.as_str()))
+                == Some("neutral")
+        );
 
         let error_result_page_resp = client
             .get(format!(
@@ -12144,6 +12301,12 @@ colo=LAX
         assert_eq!(
             snapshot_session_delete_log
                 .get("operationalClass")
+                .and_then(|value| value.as_str()),
+            Some("neutral")
+        );
+        assert_eq!(
+            snapshot_session_delete_log
+                .get("result_status")
                 .and_then(|value| value.as_str()),
             Some("neutral")
         );

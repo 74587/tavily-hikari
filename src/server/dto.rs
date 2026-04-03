@@ -442,6 +442,8 @@ impl From<TokenLogRecord> for TokenLogView {
             r.failure_kind.as_deref(),
             r.counts_business_quota,
         );
+        let result_status =
+            display_result_status_for_request_kind(&r.request_kind_key, &r.result_status);
         Self {
             id: r.id,
             key_id: r.key_id,
@@ -454,7 +456,7 @@ impl From<TokenLogRecord> for TokenLogView {
             request_kind_key: r.request_kind_key,
             request_kind_label: r.request_kind_label,
             request_kind_detail: r.request_kind_detail,
-            result_status: r.result_status,
+            result_status,
             error_message: r.error_message,
             failure_kind: r.failure_kind,
             key_effect_code: r.key_effect_code,

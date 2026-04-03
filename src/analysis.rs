@@ -1595,6 +1595,21 @@ pub fn normalize_operational_class_filter(value: Option<&str>) -> Option<&'stati
     }
 }
 
+fn normalized_result_status(result_status: &str) -> String {
+    result_status.trim().to_ascii_lowercase()
+}
+
+pub fn display_result_status_for_request_kind(
+    request_kind_key: &str,
+    result_status: &str,
+) -> String {
+    if request_kind_key.trim() == "mcp:session-delete-unsupported" {
+        OPERATIONAL_CLASS_NEUTRAL.to_string()
+    } else {
+        normalized_result_status(result_status)
+    }
+}
+
 fn is_client_error_failure_kind(kind: &str) -> bool {
     matches!(
         kind.trim(),
@@ -1633,16 +1648,16 @@ pub fn operational_class_for_token_log(
     failure_kind: Option<&str>,
     counts_business_quota: bool,
 ) -> &'static str {
-    let normalized_result = result_status.trim().to_ascii_lowercase();
-    if normalized_result == OUTCOME_QUOTA_EXHAUSTED {
+    let display_result = display_result_status_for_request_kind(request_kind_key, result_status);
+    if display_result == OUTCOME_QUOTA_EXHAUSTED {
         return OPERATIONAL_CLASS_QUOTA_EXHAUSTED;
     }
 
-    if request_kind_key.trim() == "mcp:session-delete-unsupported" {
+    if display_result == OPERATIONAL_CLASS_NEUTRAL {
         return OPERATIONAL_CLASS_NEUTRAL;
     }
 
-    if normalized_result == OUTCOME_ERROR {
+    if display_result == OUTCOME_ERROR {
         if let Some(kind) = failure_kind {
             if is_client_error_failure_kind(kind) {
                 return OPERATIONAL_CLASS_CLIENT_ERROR;
@@ -1661,7 +1676,7 @@ pub fn operational_class_for_token_log(
         return OPERATIONAL_CLASS_NEUTRAL;
     }
 
-    if normalized_result == OUTCOME_SUCCESS {
+    if display_result == OUTCOME_SUCCESS {
         OPERATIONAL_CLASS_SUCCESS
     } else {
         OPERATIONAL_CLASS_SYSTEM_ERROR

@@ -624,6 +624,14 @@ fn operational_class_maps_control_plane_and_failure_kinds() {
         operational_class_for_request_kind("api:search", OUTCOME_QUOTA_EXHAUSTED, None),
         OPERATIONAL_CLASS_QUOTA_EXHAUSTED
     );
+    assert_eq!(
+        display_result_status_for_request_kind("mcp:session-delete-unsupported", OUTCOME_ERROR),
+        OPERATIONAL_CLASS_NEUTRAL
+    );
+    assert_eq!(
+        display_result_status_for_request_kind("mcp:unknown-payload", OUTCOME_ERROR),
+        OUTCOME_ERROR
+    );
 }
 
 #[test]
