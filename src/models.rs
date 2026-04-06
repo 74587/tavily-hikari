@@ -479,6 +479,45 @@ pub struct RequestLogsPage {
     pub facets: RequestLogPageFacets,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestLogsCursorDirection {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestLogsCursor {
+    pub created_at: i64,
+    pub id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestLogsCursorPage {
+    pub items: Vec<RequestLogRecord>,
+    pub page_size: i64,
+    pub next_cursor: Option<RequestLogsCursor>,
+    pub prev_cursor: Option<RequestLogsCursor>,
+    pub has_older: bool,
+    pub has_newer: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenLogsCursorPage {
+    pub items: Vec<TokenLogRecord>,
+    pub page_size: i64,
+    pub next_cursor: Option<RequestLogsCursor>,
+    pub prev_cursor: Option<RequestLogsCursor>,
+    pub has_older: bool,
+    pub has_newer: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestLogsCatalog {
+    pub retention_days: i64,
+    pub request_kind_options: Vec<TokenRequestKindOption>,
+    pub facets: RequestLogPageFacets,
+}
+
 /// 汇总统计信息，用于展示整体代理运行状况。
 #[derive(Debug, Clone)]
 pub struct ProxySummary {

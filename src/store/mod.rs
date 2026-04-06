@@ -1055,12 +1055,19 @@ pub(crate) async fn run_request_kind_canonical_backfill_with_pool(
     })
 }
 
+#[derive(Debug, Clone)]
+struct RequestLogsCatalogCacheEntry {
+    value: RequestLogsCatalog,
+    expires_at: Instant,
+}
+
 #[derive(Debug)]
 pub(crate) struct KeyStore {
     pub(crate) pool: SqlitePool,
     pub(crate) token_binding_cache: RwLock<HashMap<String, TokenBindingCacheEntry>>,
     pub(crate) account_quota_resolution_cache:
         RwLock<HashMap<String, AccountQuotaResolutionCacheEntry>>,
+    pub(crate) request_logs_catalog_cache: RwLock<HashMap<String, RequestLogsCatalogCacheEntry>>,
     #[cfg(test)]
     pub(crate) forced_pending_claim_miss_log_ids: Mutex<HashSet<i64>>,
     // Lightweight failpoint registry used by integration tests to simulate a lost quota
@@ -1074,6 +1081,7 @@ impl KeyStore {
             pool: open_sqlite_pool(database_path, true, false).await?,
             token_binding_cache: RwLock::new(HashMap::new()),
             account_quota_resolution_cache: RwLock::new(HashMap::new()),
+            request_logs_catalog_cache: RwLock::new(HashMap::new()),
             #[cfg(test)]
             forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
@@ -3900,6 +3908,7 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
 
+        self.invalidate_request_logs_catalog_cache().await;
         Ok(result.rows_affected() as i64)
     }
 
@@ -3930,6 +3939,7 @@ impl KeyStore {
                 break;
             }
         }
+        self.invalidate_request_logs_catalog_cache().await;
         Ok(total_deleted)
     }
 
@@ -6938,6 +6948,36 @@ impl KeyStore {
 
     pub(crate) async fn invalidate_all_account_quota_resolutions(&self) {
         self.account_quota_resolution_cache.write().await.clear();
+    }
+
+    async fn cached_request_logs_catalog(&self, cache_key: &str) -> Option<RequestLogsCatalog> {
+        let now = Instant::now();
+        if let Some(cached) = {
+            let cache = self.request_logs_catalog_cache.read().await;
+            cache.get(cache_key).cloned()
+        } && cached.expires_at > now
+        {
+            return Some(cached.value);
+        }
+        None
+    }
+
+    async fn cache_request_logs_catalog(&self, cache_key: String, value: &RequestLogsCatalog) {
+        let mut cache = self.request_logs_catalog_cache.write().await;
+        cache.insert(
+            cache_key,
+            RequestLogsCatalogCacheEntry {
+                value: value.clone(),
+                expires_at: Instant::now()
+                    + Duration::from_secs(ADMIN_REQUEST_LOGS_CATALOG_CACHE_TTL_SECS as u64),
+            },
+        );
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.expires_at > now);
+    }
+
+    pub(crate) async fn invalidate_request_logs_catalog_cache(&self) {
+        self.request_logs_catalog_cache.write().await.clear();
     }
 
     pub(crate) async fn list_user_ids_for_tag(
@@ -11213,6 +11253,7 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
 
+        self.invalidate_request_logs_catalog_cache().await;
         Ok(())
     }
 
@@ -11322,6 +11363,7 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
 
+        self.invalidate_request_logs_catalog_cache().await;
         Ok(log_id)
     }
 
@@ -13208,7 +13250,7 @@ impl KeyStore {
         }
 
         tx.commit().await?;
-
+        self.invalidate_request_logs_catalog_cache().await;
         Ok(request_log_id)
     }
 
@@ -13984,6 +14026,74 @@ impl KeyStore {
         .map_err(ProxyError::from)
     }
 
+    fn request_logs_cursor(created_at: i64, id: i64) -> RequestLogsCursor {
+        RequestLogsCursor { created_at, id }
+    }
+
+    fn request_logs_cursor_for_record(record: &RequestLogRecord) -> RequestLogsCursor {
+        Self::request_logs_cursor(record.created_at, record.id)
+    }
+
+    fn request_logs_cursor_for_token_record(record: &TokenLogRecord) -> RequestLogsCursor {
+        Self::request_logs_cursor(record.created_at, record.id)
+    }
+
+    fn push_desc_cursor_clause<'a>(
+        builder: &mut QueryBuilder<'a, Sqlite>,
+        created_at_column: &str,
+        id_column: &str,
+        cursor: Option<&RequestLogsCursor>,
+        direction: RequestLogsCursorDirection,
+        has_where: bool,
+    ) -> bool {
+        let Some(cursor) = cursor else {
+            return has_where;
+        };
+
+        builder.push(if has_where { " AND (" } else { " WHERE (" });
+        builder.push(created_at_column);
+        builder.push(match direction {
+            RequestLogsCursorDirection::Older => " < ",
+            RequestLogsCursorDirection::Newer => " > ",
+        });
+        builder.push_bind(cursor.created_at);
+        builder.push(" OR (");
+        builder.push(created_at_column);
+        builder.push(" = ");
+        builder.push_bind(cursor.created_at);
+        builder.push(" AND ");
+        builder.push(id_column);
+        builder.push(match direction {
+            RequestLogsCursorDirection::Older => " < ",
+            RequestLogsCursorDirection::Newer => " > ",
+        });
+        builder.push_bind(cursor.id);
+        builder.push("))");
+        true
+    }
+
+    fn request_logs_catalog_cache_key(
+        scoped_key_id: Option<&str>,
+        since: Option<i64>,
+        include_token_facets: bool,
+        include_key_facets: bool,
+    ) -> String {
+        let scope = scoped_key_id
+            .map(|key_id| format!("key:{key_id}"))
+            .unwrap_or_else(|| "global".to_string());
+        format!(
+            "request_logs:{scope}:since={}:tokens={include_token_facets}:keys={include_key_facets}",
+            since.unwrap_or_default()
+        )
+    }
+
+    fn token_logs_catalog_cache_key(token_id: &str, since: i64, until: Option<i64>) -> String {
+        format!(
+            "token_logs:{token_id}:since={since}:until={}",
+            until.unwrap_or_default()
+        )
+    }
+
     fn push_request_logs_scope<'a>(
         builder: &mut QueryBuilder<'a, Sqlite>,
         scoped_key_id: Option<&'a str>,
@@ -14227,6 +14337,225 @@ impl KeyStore {
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProxyError::from)
+    }
+
+    pub(crate) async fn fetch_request_logs_catalog(
+        &self,
+        scoped_key_id: Option<&str>,
+        since: Option<i64>,
+        include_token_facets: bool,
+        include_key_facets: bool,
+    ) -> Result<RequestLogsCatalog, ProxyError> {
+        let cache_key = Self::request_logs_catalog_cache_key(
+            scoped_key_id,
+            since,
+            include_token_facets,
+            include_key_facets,
+        );
+        if let Some(cached) = self.cached_request_logs_catalog(&cache_key).await {
+            return Ok(cached);
+        }
+
+        let request_kind_options = self
+            .fetch_request_log_request_kind_options(scoped_key_id, since)
+            .await?;
+        let results = self
+            .fetch_request_log_result_facet_options(scoped_key_id, since)
+            .await?;
+        let key_effects = self
+            .fetch_request_log_facet_options("key_effect_code", scoped_key_id, since, false)
+            .await?;
+        let tokens = if include_token_facets {
+            self.fetch_request_log_facet_options("auth_token_id", scoped_key_id, since, true)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let keys = if include_key_facets {
+            self.fetch_request_log_facet_options("api_key_id", scoped_key_id, since, true)
+                .await?
+        } else {
+            Vec::new()
+        };
+
+        let catalog = RequestLogsCatalog {
+            retention_days: effective_request_logs_retention_days(),
+            request_kind_options,
+            facets: RequestLogPageFacets {
+                results,
+                key_effects,
+                tokens,
+                keys,
+            },
+        };
+        self.cache_request_logs_catalog(cache_key, &catalog).await;
+        Ok(catalog)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fetch_request_logs_cursor_page(
+        &self,
+        scoped_key_id: Option<&str>,
+        since: Option<i64>,
+        request_kinds: &[String],
+        result_status: Option<&str>,
+        key_effect_code: Option<&str>,
+        auth_token_id: Option<&str>,
+        key_id: Option<&str>,
+        operational_class: Option<&str>,
+        cursor: Option<&RequestLogsCursor>,
+        direction: RequestLogsCursorDirection,
+        page_size: i64,
+    ) -> Result<RequestLogsCursorPage, ProxyError> {
+        let page_size = page_size.clamp(1, 200);
+        let query_limit = page_size + 1;
+        let normalized_request_kinds = Self::normalize_request_kind_filters(request_kinds);
+        let filtered_request_kinds: Vec<&str> = normalized_request_kinds
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let stored_request_kind_sql = "request_kind_key";
+        let legacy_request_kind_predicate_sql =
+            legacy_request_kind_stored_predicate_sql(stored_request_kind_sql);
+        let legacy_request_kind_sql =
+            request_log_request_kind_key_sql("path", "request_body", "request_kind_key");
+        let stored_counts_business_quota_sql =
+            request_log_counts_business_quota_sql(stored_request_kind_sql, "request_body");
+        let stored_operational_class_case_sql = request_log_operational_class_case_sql(
+            stored_request_kind_sql,
+            &stored_counts_business_quota_sql,
+            "result_status",
+            "COALESCE(failure_kind, '')",
+        );
+        let legacy_counts_business_quota_sql =
+            request_log_counts_business_quota_sql(&legacy_request_kind_sql, "request_body");
+        let legacy_operational_class_case_sql = request_log_operational_class_case_sql(
+            &legacy_request_kind_sql,
+            &legacy_counts_business_quota_sql,
+            "result_status",
+            "COALESCE(failure_kind, '')",
+        );
+        let stored_result_bucket_sql =
+            result_bucket_case_sql(&stored_operational_class_case_sql, "result_status");
+        let legacy_result_bucket_sql =
+            result_bucket_case_sql(&legacy_operational_class_case_sql, "result_status");
+
+        let mut items_query = QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT
+                id,
+                api_key_id,
+                auth_token_id,
+                method,
+                path,
+                query,
+                status_code,
+                tavily_status_code,
+                error_message,
+                result_status,
+                request_kind_key,
+                request_kind_label,
+                request_kind_detail,
+                business_credits,
+                failure_kind,
+                key_effect_code,
+                key_effect_summary,
+                request_body,
+                NULL AS response_body,
+                forwarded_headers,
+                dropped_headers,
+                created_at
+            FROM request_logs
+            "#
+            .to_string(),
+        );
+        let has_where = Self::push_request_logs_scope(&mut items_query, scoped_key_id, since);
+        Self::push_request_logs_filters(
+            &mut items_query,
+            RequestLogFilterParams {
+                request_kinds: &filtered_request_kinds,
+                result_status: None,
+                key_effect_code,
+                auth_token_id,
+                key_id,
+                stored_request_kind_sql,
+                legacy_request_kind_predicate_sql: &legacy_request_kind_predicate_sql,
+                legacy_request_kind_sql: &legacy_request_kind_sql,
+                has_where,
+            },
+        );
+        if let Some(result_status) = result_status {
+            items_query.push(" AND ");
+            Self::push_result_bucket_filter_clause(
+                &mut items_query,
+                result_status,
+                &legacy_request_kind_predicate_sql,
+                &stored_result_bucket_sql,
+                &legacy_result_bucket_sql,
+            );
+        }
+        if let Some(operational_class) = operational_class {
+            items_query.push(" AND ");
+            Self::push_operational_class_filter_clause(
+                &mut items_query,
+                operational_class,
+                &legacy_request_kind_predicate_sql,
+                &stored_operational_class_case_sql,
+                &legacy_operational_class_case_sql,
+            );
+        }
+        Self::push_desc_cursor_clause(
+            &mut items_query,
+            "created_at",
+            "id",
+            cursor,
+            direction,
+            true,
+        );
+        match direction {
+            RequestLogsCursorDirection::Older => {
+                items_query.push(" ORDER BY created_at DESC, id DESC LIMIT ");
+            }
+            RequestLogsCursorDirection::Newer => {
+                items_query.push(" ORDER BY created_at ASC, id ASC LIMIT ");
+            }
+        }
+        items_query.push_bind(query_limit);
+
+        let mut rows = items_query.build().fetch_all(&self.pool).await?;
+        let has_more = rows.len() as i64 > page_size;
+        if has_more {
+            rows.truncate(page_size as usize);
+        }
+        if matches!(direction, RequestLogsCursorDirection::Newer) {
+            rows.reverse();
+        }
+        let items = rows
+            .into_iter()
+            .map(Self::map_request_log_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let has_older = match direction {
+            RequestLogsCursorDirection::Older => has_more,
+            RequestLogsCursorDirection::Newer => cursor.is_some() && !items.is_empty(),
+        };
+        let has_newer = match direction {
+            RequestLogsCursorDirection::Older => cursor.is_some() && !items.is_empty(),
+            RequestLogsCursorDirection::Newer => has_more,
+        };
+
+        Ok(RequestLogsCursorPage {
+            next_cursor: has_older
+                .then(|| items.last().map(Self::request_logs_cursor_for_record))
+                .flatten(),
+            prev_cursor: has_newer
+                .then(|| items.first().map(Self::request_logs_cursor_for_record))
+                .flatten(),
+            items,
+            page_size,
+            has_older,
+            has_newer,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

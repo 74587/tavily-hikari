@@ -467,6 +467,7 @@ const TOKEN_BINDING_CACHE_TTL_SECS: u64 = 30;
 const TOKEN_BINDING_CACHE_MAX_ENTRIES: usize = 10_000;
 const ACCOUNT_QUOTA_RESOLUTION_CACHE_TTL_SECS: u64 = 5;
 const ACCOUNT_QUOTA_RESOLUTION_CACHE_MAX_ENTRIES: usize = 10_000;
+const ADMIN_REQUEST_LOGS_CATALOG_CACHE_TTL_SECS: i64 = 30;
 // Keep the lease TTL below the acquisition wait so a crashed holder can be recovered
 // by the next in-flight request instead of blocking the subject for minutes.
 const QUOTA_SUBJECT_LOCK_TTL_SECS: u64 = 20;
@@ -603,6 +604,10 @@ pub fn effective_request_logs_retention_days() -> i64 {
         REQUEST_LOGS_MIN_RETENTION_DAYS,
     );
     days.max(REQUEST_LOGS_MIN_RETENTION_DAYS)
+}
+
+pub fn effective_auth_token_log_retention_days() -> i64 {
+    AUTH_TOKEN_LOG_RETENTION_SECS / SECS_PER_DAY
 }
 
 /// Effective hourly quota limit per access token, including environment overrides.
