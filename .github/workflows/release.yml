@@ -195,6 +195,22 @@ jobs:
         with:
           ref: ${{ env.RELEASE_HEAD_SHA }}
 
+      - name: Restore release smoke helper for backfill
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          helper_path=".github/scripts/release-mcp-billing-smoke.sh"
+          if [[ -x "${helper_path}" ]]; then
+            exit 0
+          fi
+
+          echo "restoring ${helper_path} from origin/main for backfill ${RELEASE_HEAD_SHA}"
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "$(dirname "${helper_path}")"
+          git show FETCH_HEAD:"${helper_path}" > "${helper_path}"
+          chmod +x "${helper_path}"
+
       - name: Install Rust native dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libsqlite3-dev
 

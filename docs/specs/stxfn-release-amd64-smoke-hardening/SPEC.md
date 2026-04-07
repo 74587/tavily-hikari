@@ -11,6 +11,7 @@
 - `Release` workflow 的 `Build and smoke image (amd64)` 在 `MCP billing smoke gate` 失败，`v0.36.7` tag 已创建但 GitHub Release 尚未生成。
 - 当前 smoke gate 直接内联在 `.github/workflows/release.yml`，固定占用 `58088/58087`，失败时没有输出 `mock_tavily` / Docker / 端口诊断，复盘成本高。
 - 现有 PR checks 不包含这条 release-only smoke，所以问题只会在合入 `main` 后暴露；本次目标是修复 release harness，而不是把 release 门禁前移到 PR。
+- 回填 `workflow_dispatch(head_sha=旧提交)` 时，release job 会 checkout 到旧代码树；若 workflow 新增了旧提交不存在的 helper 文件，必须显式恢复这些 helper，避免回填路径因 `No such file or directory` 再次失败。
 
 ## 目标 / 非目标
 
@@ -51,6 +52,7 @@
 - mock 或 proxy 启动失败时，脚本必须输出足够诊断信息（至少含 mock log、Docker 容器状态/日志、端口监听信息、数据目录状态）。
 - 成功路径必须保持现有 smoke 断言：mock readiness、proxy `/health`、token 创建、MCP search、406/429、SQLite 账单与请求日志断言。
 - 修复合入后，必须通过 `workflow_dispatch(head_sha=a37b6be54db2f114a0987293c9eca9e1281f21f1)` 成功回填 `v0.36.7` release。
+- 当 release workflow 回填到不包含新 helper 的旧提交时，job 必须先恢复缺失 helper，再执行 smoke gate。
 
 ### SHOULD
 
@@ -167,6 +169,7 @@ None
 
 - 2026-04-07: 创建 spec，冻结“只修 release harness、不改 PR 门禁、回填 `v0.36.7`”的执行合同。
 - 2026-04-07: 完成脚本抽离、动态端口与失败诊断加固；本地占口失败演练与 shared testbox 完整 smoke rehearsal 已通过，等待 PR/merge/backfill。
+- 2026-04-07: 回填 run 暴露旧提交缺失新 smoke helper 的兼容性问题；补充 workflow 在 backfill checkout 后自动恢复 helper 的约束与验证。
 
 ## 参考（References）
 
