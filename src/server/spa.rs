@@ -150,6 +150,7 @@ const BASE_404_STYLES: &str = r#"
     min-height: 100%;
   }
 
+  body.not-found-page-body,
   .not-found-page-body {
     margin: 0;
     min-height: 100vh;
@@ -384,6 +385,7 @@ mod spa_404_tests {
         assert!(html.contains("@media (prefers-color-scheme: dark)"));
         assert!(html.contains("html.not-found-page:not([data-theme-mode='light']):not(.dark)"));
         assert!(html.contains("media.addEventListener('change',onChange)"));
+        assert!(html.contains("body.not-found-page-body,"));
         assert!(html.contains("<html lang=\"en\" class=\"not-found-page\">"));
         assert!(html.contains("<body class=\"not-found-page-body\">"));
         assert!(html.contains("history.replaceState(null,'', p)"));
