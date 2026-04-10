@@ -10,6 +10,7 @@ import ConnectivityChecksPanel, {
 } from './components/ConnectivityChecksPanel'
 import TokenSecretField, { type TokenSecretCopyState } from './components/TokenSecretField'
 import ManualCopyBubble from './components/ManualCopyBubble'
+import UserConsoleHeader from './components/UserConsoleHeader'
 
 import {
   createBrowserTodayWindow,
@@ -33,6 +34,7 @@ import {
   fetchUserTokenLogs,
   fetchUserTokenSecret,
   fetchUserTokens,
+  postUserLogout,
   parseUserTokenEventSnapshot,
   type Profile,
   type PublicTokenLog,
@@ -41,10 +43,8 @@ import {
   type UserTokenSummary,
   type VersionInfo,
 } from './api'
-import LanguageSwitcher from './components/LanguageSwitcher'
 import RollingNumber from './components/RollingNumber'
 import { StatusBadge, type StatusTone } from './components/StatusBadge'
-import ThemeToggle from './components/ThemeToggle'
 import UserConsoleFooter from './components/UserConsoleFooter'
 import { Button } from './components/ui/button'
 import {
@@ -87,6 +87,7 @@ const NOCODB_DOC_URL = 'https://nocodb.com/docs/product-docs/mcp'
 const USER_CONSOLE_SECRET_CACHE_TTL_MS = 2_000
 const USER_CONSOLE_SECRET_PREWARM_DELAY_MS = 120
 const BASE_MCP_PROBE_STEP_COUNT = 4
+const BASE_API_PROBE_STEP_COUNT = 6
 
 type GuideLanguage = 'toml' | 'json' | 'bash'
 type GuideKey = 'codex' | 'claude' | 'vscode' | 'claudeDesktop' | 'cursor' | 'windsurf' | 'cherryStudio' | 'other'
@@ -175,6 +176,7 @@ interface McpProbeRunContext {
   sessionId: string | null
   clientVersion: string
   identity: McpProbeIdentityGenerator
+  signal?: AbortSignal
 }
 
 interface McpProbeIdentityGenerator {
@@ -193,7 +195,7 @@ interface ApiProbeStepDefinition {
   label: string
   run: (
     token: string,
-    context: { requestId: string | null },
+    context: { requestId: string | null, signal?: AbortSignal },
   ) => Promise<string | null>
 }
 
@@ -252,6 +254,170 @@ function statusTone(status: string): StatusTone {
   if (status === 'error') return 'error'
   if (status === 'quota_exhausted') return 'warning'
   return 'neutral'
+}
+
+type UserConsoleViewKey = 'dashboard' | 'tokens' | 'tokenDetail'
+
+function resolveUserConsoleView(route: ConsoleRoute): UserConsoleViewKey {
+  if (route.name === 'token') return 'tokenDetail'
+  if (route.section === 'tokens') return 'tokens'
+  return 'dashboard'
+}
+
+function resolveUserConsoleIdentityName(profile: Profile | null): string | null {
+  const primary = profile?.userDisplayName?.trim()
+  if (primary) return primary
+  const fallback = profile?.displayName?.trim()
+  if (fallback) return fallback
+  return null
+}
+
+function resolveUserConsoleProviderLabel(
+  provider: Profile['userProvider'] | undefined,
+  providers: { linuxdo: string },
+): string | null {
+  if (provider === 'linuxdo') return providers.linuxdo
+  return null
+}
+
+function resolveFallbackLogoutTarget(
+  locationLike: Pick<Location, 'pathname' | 'search'>,
+): string {
+  const pathname = locationLike.pathname?.trim() || '/'
+  const normalizedPath = pathname.startsWith('/') ? pathname : `/${pathname}`
+  return `${normalizedPath}${locationLike.search || ''}`
+}
+
+type LogoutTargetProbe = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Pick<Response, 'ok' | 'status' | 'redirected' | 'url'>>
+
+function isConsoleEntryPath(pathname: string): boolean {
+  return pathname === '/console' || pathname === '/console/' || pathname === '/console.html'
+}
+
+function isPublicHomePath(pathname: string): boolean {
+  return pathname === '/' || pathname === '/index.html'
+}
+
+function resolveLogoutTargetFromProbeResponse(
+  response: Pick<Response, 'ok' | 'status' | 'redirected' | 'url'>,
+  fallbackTarget: string,
+): string | null {
+  if (response.redirected && typeof response.url === 'string' && response.url.length > 0) {
+    const redirectedPath = new URL(response.url, 'https://codex.invalid').pathname
+    return isPublicHomePath(redirectedPath) ? '/' : fallbackTarget
+  }
+
+  if (response.ok || (response.status >= 300 && response.status < 400)) {
+    return '/'
+  }
+
+  return null
+}
+
+async function resolvePostLogoutTarget(
+  locationLike: Pick<Location, 'pathname' | 'search'>,
+  probeHome: LogoutTargetProbe = fetch,
+): Promise<string> {
+  const fallbackTarget = resolveFallbackLogoutTarget(locationLike)
+
+  try {
+    const response = await probeHome('/', {
+      method: 'HEAD',
+      credentials: 'same-origin',
+    })
+    const headTarget = resolveLogoutTargetFromProbeResponse(response, fallbackTarget)
+    if (headTarget != null) {
+      return headTarget
+    }
+
+    if (!response.ok) {
+      const getResponse = await probeHome('/', {
+        method: 'GET',
+        credentials: 'same-origin',
+      })
+      const getTarget = resolveLogoutTargetFromProbeResponse(getResponse, fallbackTarget)
+      if (getTarget != null) {
+        return getTarget
+      }
+    }
+  } catch {
+    // Fall back to the current console entry when the public home is unavailable.
+  }
+
+  return fallbackTarget
+}
+
+function shouldRedirectToLogoutTarget(
+  locationLike: Pick<Location, 'pathname' | 'search'>,
+  logoutTarget: string,
+): boolean {
+  return resolveFallbackLogoutTarget(locationLike) !== logoutTarget
+}
+
+async function performUserLogoutFlow({
+  logoutRequest,
+  abortActiveConsoleLoads,
+  redirectAfterLogout,
+}: {
+  logoutRequest: () => Promise<void>
+  abortActiveConsoleLoads: () => void
+  redirectAfterLogout: () => Promise<boolean> | Promise<void> | boolean | void
+}): Promise<void> {
+  await logoutRequest()
+  abortActiveConsoleLoads()
+  await redirectAfterLogout()
+}
+
+function applyLoggedOutConsoleReset({
+  clearSensitiveConsoleState,
+  setShowLoggedOutState,
+}: {
+  clearSensitiveConsoleState: () => void
+  setShowLoggedOutState: (value: boolean) => void
+}): void {
+  setShowLoggedOutState(false)
+  clearSensitiveConsoleState()
+}
+
+function resetActiveProbeUiState(
+  currentRunId: number,
+  abortActiveProbeRun: () => void,
+): {
+  nextRunId: number
+  mcpProbe: ProbeButtonModel
+  apiProbe: ProbeButtonModel
+} {
+  abortActiveProbeRun()
+  return createClearedProbeUiState(currentRunId)
+}
+
+function createClearedProbeUiState(currentRunId: number): {
+  nextRunId: number
+  mcpProbe: ProbeButtonModel
+  apiProbe: ProbeButtonModel
+} {
+  return {
+    nextRunId: currentRunId + 1,
+    mcpProbe: createProbeButtonModel(BASE_MCP_PROBE_STEP_COUNT),
+    apiProbe: createProbeButtonModel(BASE_API_PROBE_STEP_COUNT),
+  }
+}
+
+function toLoggedOutConsoleProfile(profile: Profile | null | undefined): Profile {
+  return {
+    displayName: profile?.isAdmin === true ? profile.displayName ?? null : null,
+    isAdmin: profile?.isAdmin === true,
+    forwardAuthEnabled: profile?.forwardAuthEnabled ?? false,
+    builtinAuthEnabled: profile?.builtinAuthEnabled ?? false,
+    allowRegistration: profile?.allowRegistration ?? false,
+    userLoggedIn: false,
+    userProvider: null,
+    userDisplayName: null,
+    userAvatarUrl: null,
+  }
 }
 
 function formatTimestamp(ts: number): string {
@@ -646,6 +812,7 @@ function buildMcpProbeStepDefinitions(
           requestId: context.identity.nextRequestId('initialize'),
           protocolVersion: context.protocolVersion,
           clientVersion: context.clientVersion,
+          signal: context.signal,
         })
         const error = envelopeError(response.payload)
         if (error) throw new Error(error)
@@ -662,6 +829,7 @@ function buildMcpProbeStepDefinitions(
         const response = await probeMcpInitialized(token, {
           protocolVersion: context.protocolVersion,
           sessionId: context.sessionId,
+          signal: context.signal,
         })
         context.sessionId = response.sessionId ?? context.sessionId
         return null
@@ -676,6 +844,7 @@ function buildMcpProbeStepDefinitions(
           requestId: context.identity.nextRequestId('ping'),
           protocolVersion: context.protocolVersion,
           sessionId: context.sessionId,
+          signal: context.signal,
         })
         const error = envelopeError(response.payload)
         if (error) throw new Error(error)
@@ -692,6 +861,7 @@ function buildMcpProbeStepDefinitions(
           requestId: context.identity.nextRequestId('tools-list'),
           protocolVersion: context.protocolVersion,
           sessionId: context.sessionId,
+          signal: context.signal,
         })
         const error = envelopeError(response.payload)
         if (error) throw new Error(error)
@@ -749,6 +919,7 @@ function buildMcpToolCallProbeStepDefinitions(
           requestId: context.identity.nextRequestId('tools-call', requestName),
           protocolVersion: context.protocolVersion,
           sessionId: context.sessionId,
+          signal: context.signal,
         })
         const error = envelopeError(response.payload) ?? getMcpProbeResultError(response.payload)
         if (error) throw new Error(error)
@@ -767,7 +938,7 @@ function buildApiProbeStepDefinitions(
     {
       id: 'api-search',
       label: probeText.steps.apiSearch,
-      run: async (token: string): Promise<string | null> => {
+      run: async (token: string, context: { requestId: string | null, signal?: AbortSignal }): Promise<string | null> => {
         const payload = await probeApiTavilySearch(token, {
           query: 'health check',
           max_results: 1,
@@ -775,7 +946,7 @@ function buildApiProbeStepDefinitions(
           include_answer: false,
           include_raw_content: false,
           include_images: false,
-        })
+        }, context.signal)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
         return null
@@ -784,11 +955,11 @@ function buildApiProbeStepDefinitions(
     {
       id: 'api-extract',
       label: probeText.steps.apiExtract,
-      run: async (token: string): Promise<string | null> => {
+      run: async (token: string, context: { requestId: string | null, signal?: AbortSignal }): Promise<string | null> => {
         const payload = await probeApiTavilyExtract(token, {
           urls: ['https://example.com'],
           include_images: false,
-        })
+        }, context.signal)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
         return null
@@ -797,12 +968,12 @@ function buildApiProbeStepDefinitions(
     {
       id: 'api-crawl',
       label: probeText.steps.apiCrawl,
-      run: async (token: string): Promise<string | null> => {
+      run: async (token: string, context: { requestId: string | null, signal?: AbortSignal }): Promise<string | null> => {
         const payload = await probeApiTavilyCrawl(token, {
           url: 'https://example.com',
           max_depth: 1,
           limit: 1,
-        })
+        }, context.signal)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
         return null
@@ -811,12 +982,12 @@ function buildApiProbeStepDefinitions(
     {
       id: 'api-map',
       label: probeText.steps.apiMap,
-      run: async (token: string): Promise<string | null> => {
+      run: async (token: string, context: { requestId: string | null, signal?: AbortSignal }): Promise<string | null> => {
         const payload = await probeApiTavilyMap(token, {
           url: 'https://example.com',
           max_depth: 1,
           limit: 1,
-        })
+        }, context.signal)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
         return null
@@ -825,12 +996,12 @@ function buildApiProbeStepDefinitions(
     {
       id: 'api-research',
       label: probeText.steps.apiResearch,
-      run: async (token: string): Promise<string | null> => {
+      run: async (token: string, context: { requestId: string | null, signal?: AbortSignal }): Promise<string | null> => {
         const payload = await probeApiTavilyResearch(token, {
           input: 'health check',
           model: 'mini',
           citation_format: 'numbered',
-        })
+        }, context.signal)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
         const requestId = getResearchRequestId(payload)
@@ -843,11 +1014,11 @@ function buildApiProbeStepDefinitions(
     {
       id: 'api-research-result',
       label: probeText.steps.apiResearchResult,
-      run: async (token: string, context: { requestId: string | null }): Promise<string | null> => {
+      run: async (token: string, context: { requestId: string | null, signal?: AbortSignal }): Promise<string | null> => {
         if (!context.requestId) {
           throw new Error(probeText.errors.missingRequestId)
         }
-        const payload = await probeApiTavilyResearchResult(token, context.requestId)
+        const payload = await probeApiTavilyResearchResult(token, context.requestId, context.signal)
         const error = envelopeError(payload)
         if (error) throw new Error(error)
         const status = payload.status
@@ -967,6 +1138,7 @@ export default function UserConsole(): JSX.Element {
     return () => window.clearTimeout(timer)
   }, [todayWindow.todayEnd])
   const [error, setError] = useState<string | null>(null)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [copyState, setCopyState] = useState<Record<string, TokenSecretCopyState>>({})
   const [tokenSecretTokenId, setTokenSecretTokenId] = useState<string | null>(null)
   const [tokenSecretVisible, setTokenSecretVisible] = useState(false)
@@ -976,9 +1148,10 @@ export default function UserConsole(): JSX.Element {
   const [activeGuide, setActiveGuide] = useState<GuideKey>('codex')
   const [isMobileGuide, setIsMobileGuide] = useState(false)
   const [mcpProbe, setMcpProbe] = useState<ProbeButtonModel>(() => createProbeButtonModel(BASE_MCP_PROBE_STEP_COUNT))
-  const [apiProbe, setApiProbe] = useState<ProbeButtonModel>(() => createProbeButtonModel(6))
+  const [apiProbe, setApiProbe] = useState<ProbeButtonModel>(() => createProbeButtonModel(BASE_API_PROBE_STEP_COUNT))
   const [probeBubble, setProbeBubble] = useState<ProbeBubbleModel | null>(null)
   const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
+  const [showLoggedOutState, setShowLoggedOutState] = useState(false)
   const [revealedGuideContextKey, setRevealedGuideContextKey] = useState<string | null>(null)
   const [guideTokenValue, setGuideTokenValue] = useState<string | null>(null)
   const [guideTokenLoading, setGuideTokenLoading] = useState(false)
@@ -992,6 +1165,11 @@ export default function UserConsole(): JSX.Element {
   const probeRunIdRef = useRef(0)
   const tokenSecretRunIdRef = useRef(0)
   const guideTokenRunIdRef = useRef(0)
+  const baseLoadRunIdRef = useRef(0)
+  const detailLoadRunIdRef = useRef(0)
+  const baseLoadAbortRef = useRef<AbortController | null>(null)
+  const detailLoadAbortRef = useRef<AbortController | null>(null)
+  const probeAbortRef = useRef<AbortController | null>(null)
   const detailEventsRef = useRef<EventSource | null>(null)
   const pageRef = useRef<HTMLElement>(null)
   const dashboardSectionRef = useRef<HTMLElement | null>(null)
@@ -1002,6 +1180,112 @@ export default function UserConsole(): JSX.Element {
   const landingScrollBehaviorRef = useRef<ScrollBehavior>('auto')
   const shouldScrollLandingSectionRef = useRef(route.name === 'landing' && route.section !== null)
   const { viewportMode, contentMode, isCompactLayout } = useResponsiveModes(pageRef)
+
+  const clearConsoleData = useCallback(() => {
+    setDashboard(null)
+    setTokens([])
+    setDetail(null)
+    setDetailLogs([])
+    setDetailLogsPushIssue(null)
+    setError(null)
+  }, [])
+
+  const clearProbeUi = useCallback(() => {
+    const clearedProbeState = createClearedProbeUiState(probeRunIdRef.current)
+    probeRunIdRef.current = clearedProbeState.nextRunId
+    setMcpProbe(clearedProbeState.mcpProbe)
+    setApiProbe(clearedProbeState.apiProbe)
+    setProbeBubble(null)
+    setManualCopyBubble(null)
+  }, [])
+
+  const abortActiveConsoleLoads = useCallback(() => {
+    baseLoadRunIdRef.current += 1
+    detailLoadRunIdRef.current += 1
+    baseLoadAbortRef.current?.abort()
+    detailLoadAbortRef.current?.abort()
+    baseLoadAbortRef.current = null
+    detailLoadAbortRef.current = null
+    detailEventsRef.current?.close()
+    detailEventsRef.current = null
+    setDetailLogsPushIssue(null)
+  }, [])
+
+  const abortActiveProbeRun = useCallback(() => {
+    probeAbortRef.current?.abort()
+    probeAbortRef.current = null
+  }, [])
+
+  const abortAllPendingTokenSecretRequests = useCallback(() => {
+    for (const controller of tokenSecretRequestAbortRef.current.values()) {
+      controller.abort()
+    }
+    tokenSecretRequestAbortRef.current.clear()
+    tokenSecretRequestRef.current.clear()
+  }, [])
+
+  const clearTokenSecretState = useCallback(() => {
+    tokenSecretRunIdRef.current += 1
+    setTokenSecretTokenId(null)
+    setTokenSecretVisible(false)
+    setTokenSecretValue(null)
+    setTokenSecretLoading(false)
+    setTokenSecretError(null)
+    for (const timer of tokenSecretWarmTimerRef.current.values()) {
+      window.clearTimeout(timer)
+    }
+    for (const timer of tokenSecretCacheTimerRef.current.values()) {
+      window.clearTimeout(timer)
+    }
+    for (const controller of tokenSecretWarmAbortRef.current.values()) {
+      controller.abort()
+    }
+    abortAllPendingTokenSecretRequests()
+    tokenSecretWarmTimerRef.current.clear()
+    tokenSecretCacheTimerRef.current.clear()
+    tokenSecretWarmAbortRef.current.clear()
+    tokenSecretCacheRef.current.clear()
+  }, [abortAllPendingTokenSecretRequests])
+
+  const clearGuideTokenState = useCallback(() => {
+    guideTokenRunIdRef.current += 1
+    setGuideTokenValue(null)
+    setGuideTokenLoading(false)
+    setGuideTokenError(null)
+    setRevealedGuideContextKey(null)
+  }, [])
+
+  const clearSensitiveConsoleState = useCallback(() => {
+    detailLoadRunIdRef.current += 1
+    detailLoadAbortRef.current?.abort()
+    detailLoadAbortRef.current = null
+    detailEventsRef.current?.close()
+    detailEventsRef.current = null
+    setDetailLogsPushIssue(null)
+    clearConsoleData()
+    abortActiveProbeRun()
+    clearProbeUi()
+    clearTokenSecretState()
+    clearGuideTokenState()
+    setCopyState({})
+  }, [abortActiveProbeRun, clearConsoleData, clearGuideTokenState, clearProbeUi, clearTokenSecretState])
+
+  const redirectAfterLogoutIfNeeded = useCallback(async (
+    locationLike: Pick<Location, 'pathname' | 'search'>,
+    options: { showLoggedOutState?: boolean } = {},
+  ) => {
+    const { showLoggedOutState: nextShowLoggedOutState = true } = options
+    setProfile((prev) => toLoggedOutConsoleProfile(prev))
+    setShowLoggedOutState(nextShowLoggedOutState)
+    clearSensitiveConsoleState()
+
+    const logoutTarget = await resolvePostLogoutTarget(locationLike)
+    if (shouldRedirectToLogoutTarget(locationLike, logoutTarget)) {
+      window.location.href = logoutTarget
+      return true
+    }
+    return false
+  }, [clearSensitiveConsoleState])
 
   useEffect(() => {
     const handlePopState = () => {
@@ -1023,22 +1307,23 @@ export default function UserConsole(): JSX.Element {
     }
   }, [])
 
-  const reloadBase = useCallback(async (signal: AbortSignal) => {
+  const reloadBase = useCallback(async (signal: AbortSignal, runId: number) => {
     try {
       const nextProfile = await fetchProfile(signal)
+      if (signal.aborted || baseLoadRunIdRef.current !== runId) return
       setProfile(nextProfile)
 
       const availability = resolveUserConsoleAvailability(nextProfile)
       if (availability === 'logged_out') {
-        window.location.href = '/'
+        applyLoggedOutConsoleReset({
+          clearSensitiveConsoleState,
+          setShowLoggedOutState,
+        })
         return
       }
+      setShowLoggedOutState(false)
       if (availability === 'disabled') {
-        setDashboard(null)
-        setTokens([])
-        setDetail(null)
-        setDetailLogs([])
-        setError(null)
+        clearConsoleData()
         return
       }
 
@@ -1046,24 +1331,38 @@ export default function UserConsole(): JSX.Element {
         fetchUserDashboard(todayWindow, signal),
         fetchUserTokens(todayWindow, signal),
       ])
+      if (signal.aborted || baseLoadRunIdRef.current !== runId) return
       setDashboard(nextDashboard)
       setTokens(nextTokens)
       setError(null)
     } catch (err) {
+      if (signal.aborted || baseLoadRunIdRef.current !== runId) return
       const message = err instanceof Error ? err.message : text.errors.load
       setError(message)
       if (errorStatus(err) === 401) {
-        window.location.href = '/'
+        abortActiveConsoleLoads()
+        await redirectAfterLogoutIfNeeded(window.location)
       }
     } finally {
-      setLoading(false)
+      if (!signal.aborted && baseLoadRunIdRef.current === runId) {
+        setLoading(false)
+      }
     }
-  }, [text.errors.load, todayWindow])
+  }, [abortActiveConsoleLoads, clearConsoleData, clearSensitiveConsoleState, redirectAfterLogoutIfNeeded, text.errors.load, todayWindow])
 
   useEffect(() => {
     const controller = new AbortController()
-    void reloadBase(controller.signal)
-    return () => controller.abort()
+    const runId = baseLoadRunIdRef.current + 1
+    baseLoadRunIdRef.current = runId
+    baseLoadAbortRef.current?.abort()
+    baseLoadAbortRef.current = controller
+    void reloadBase(controller.signal, runId)
+    return () => {
+      controller.abort()
+      if (baseLoadAbortRef.current === controller) {
+        baseLoadAbortRef.current = null
+      }
+    }
   }, [reloadBase])
 
   useEffect(() => {
@@ -1082,6 +1381,9 @@ export default function UserConsole(): JSX.Element {
 
   useEffect(() => {
     if (consoleAvailability !== 'enabled' || route.name !== 'token') {
+      detailLoadRunIdRef.current += 1
+      detailLoadAbortRef.current?.abort()
+      detailLoadAbortRef.current = null
       setDetail(null)
       setDetailLogs([])
       setDetailLoading(false)
@@ -1091,26 +1393,42 @@ export default function UserConsole(): JSX.Element {
     setDetailLogs([])
     setDetailLoading(true)
     const controller = new AbortController()
+    const runId = detailLoadRunIdRef.current + 1
+    detailLoadRunIdRef.current = runId
+    detailLoadAbortRef.current?.abort()
+    detailLoadAbortRef.current = controller
     Promise.all([
       fetchUserTokenDetail(route.id, todayWindow, controller.signal),
       fetchUserTokenLogs(route.id, 20, controller.signal),
     ])
       .then(([nextDetail, nextLogs]) => {
+        if (controller.signal.aborted || detailLoadRunIdRef.current !== runId) return
         setDetail(nextDetail)
         setDetailLogs(nextLogs)
         setError(null)
       })
       .catch((err) => {
+        if (controller.signal.aborted || detailLoadRunIdRef.current !== runId) return
         setDetail(null)
         setDetailLogs([])
         setError(err instanceof Error ? err.message : text.errors.detail)
         if (errorStatus(err) === 401) {
-          window.location.href = '/'
+          abortActiveConsoleLoads()
+          void redirectAfterLogoutIfNeeded(window.location)
         }
       })
-      .finally(() => setDetailLoading(false))
-    return () => controller.abort()
-  }, [consoleAvailability, route, text.errors.detail, todayWindow])
+      .finally(() => {
+        if (!controller.signal.aborted && detailLoadRunIdRef.current === runId) {
+          setDetailLoading(false)
+        }
+      })
+    return () => {
+      controller.abort()
+      if (detailLoadAbortRef.current === controller) {
+        detailLoadAbortRef.current = null
+      }
+    }
+  }, [abortActiveConsoleLoads, consoleAvailability, redirectAfterLogoutIfNeeded, route, text.errors.detail, todayWindow])
 
   useEffect(() => {
     detailEventsRef.current?.close()
@@ -1171,12 +1489,13 @@ export default function UserConsole(): JSX.Element {
   }, [consoleAvailability, route, todayWindow])
 
   useEffect(() => {
-    probeRunIdRef.current += 1
-    setMcpProbe(createProbeButtonModel(BASE_MCP_PROBE_STEP_COUNT))
-    setApiProbe(createProbeButtonModel(6))
+    const clearedProbeState = resetActiveProbeUiState(probeRunIdRef.current, abortActiveProbeRun)
+    probeRunIdRef.current = clearedProbeState.nextRunId
+    setMcpProbe(clearedProbeState.mcpProbe)
+    setApiProbe(clearedProbeState.apiProbe)
     setProbeBubble(null)
     setManualCopyBubble(null)
-  }, [route.name === 'token' ? route.id : route.section ?? 'landing'])
+  }, [abortActiveProbeRun, route.name === 'token' ? route.id : route.section ?? 'landing'])
 
   const abortPendingTokenSecretRequest = useCallback((tokenId: string) => {
     const controller = tokenSecretRequestAbortRef.current.get(tokenId)
@@ -1187,36 +1506,36 @@ export default function UserConsole(): JSX.Element {
     tokenSecretRequestRef.current.delete(tokenId)
   }, [])
 
-  const abortAllPendingTokenSecretRequests = useCallback(() => {
-    for (const controller of tokenSecretRequestAbortRef.current.values()) {
-      controller.abort()
+  const handleLogout = useCallback(async () => {
+    if (isLoggingOut || profile?.userLoggedIn !== true) return
+    setIsLoggingOut(true)
+    setError(null)
+
+    try {
+      await performUserLogoutFlow({
+        logoutRequest: postUserLogout,
+        abortActiveConsoleLoads,
+        redirectAfterLogout: () => redirectAfterLogoutIfNeeded(window.location),
+      })
+      return
+    } catch (err) {
+      setError(formatTemplate(text.header.logoutFailed, {
+        message: getProbeErrorMessage(err),
+      }))
+    } finally {
+      setIsLoggingOut(false)
     }
-    tokenSecretRequestAbortRef.current.clear()
-    tokenSecretRequestRef.current.clear()
-  }, [])
+  }, [
+    abortActiveConsoleLoads,
+    isLoggingOut,
+    profile?.userLoggedIn,
+    redirectAfterLogoutIfNeeded,
+    text.header.logoutFailed,
+  ])
 
   useEffect(() => {
-    tokenSecretRunIdRef.current += 1
-    setTokenSecretTokenId(null)
-    setTokenSecretVisible(false)
-    setTokenSecretValue(null)
-    setTokenSecretLoading(false)
-    setTokenSecretError(null)
-    for (const timer of tokenSecretWarmTimerRef.current.values()) {
-      window.clearTimeout(timer)
-    }
-    for (const timer of tokenSecretCacheTimerRef.current.values()) {
-      window.clearTimeout(timer)
-    }
-    for (const controller of tokenSecretWarmAbortRef.current.values()) {
-      controller.abort()
-    }
-    abortAllPendingTokenSecretRequests()
-    tokenSecretWarmTimerRef.current.clear()
-    tokenSecretCacheTimerRef.current.clear()
-    tokenSecretWarmAbortRef.current.clear()
-    tokenSecretCacheRef.current.clear()
-  }, [abortAllPendingTokenSecretRequests, consoleAvailability, route.name === 'token' ? route.id : route.name])
+    clearTokenSecretState()
+  }, [clearTokenSecretState, consoleAvailability, route.name === 'token' ? route.id : route.name])
 
   useEffect(() => {
     return () => {
@@ -1511,13 +1830,25 @@ export default function UserConsole(): JSX.Element {
     text.detail.guideToken.revealFailed,
   ])
 
-  const subtitle = useMemo(() => {
-    const user = profile?.userDisplayName?.trim()
-    if (user && user.length > 0) {
-      return `${text.subtitle} · ${user}`
-    }
-    return text.subtitle
-  }, [profile?.userDisplayName, text.subtitle])
+  const subtitle = text.subtitle
+  const currentView = useMemo(() => resolveUserConsoleView(route), [route])
+  const currentViewTitle = text.header.views[currentView]
+  const currentViewDescription = currentView === 'dashboard'
+    ? text.dashboard.description
+    : currentView === 'tokens'
+      ? text.tokens.description
+      : text.detail.subtitle
+  const sessionDisplayName = useMemo(() => {
+    const name = resolveUserConsoleIdentityName(profile)
+    if (name) return name
+    if (profile?.userLoggedIn === true) return text.header.unknownUser
+    if (profile?.isAdmin) return text.header.adminLabel
+    return null
+  }, [profile, text.header.adminLabel, text.header.unknownUser])
+  const sessionProviderLabel = useMemo(
+    () => resolveUserConsoleProviderLabel(profile?.userProvider, text.header.providers),
+    [profile?.userProvider, text.header.providers],
+  )
 
   const guideToken = guideTokenVisible ? guideTokenValue ?? maskedGuideToken : maskedGuideToken
 
@@ -1542,6 +1873,10 @@ export default function UserConsole(): JSX.Element {
   const anyProbeRunning = mcpProbe.state === 'running' || apiProbe.state === 'running'
   const adminHref = getUserConsoleAdminHref(profile)
   const consoleUnavailable = consoleAvailability === 'disabled'
+  const consoleLoggedOut = consoleAvailability === 'logged_out' && showLoggedOutState
+  const consoleNeedsLogin = consoleAvailability === 'logged_out' && !showLoggedOutState
+  const consoleEmptyState = consoleUnavailable || consoleLoggedOut || consoleNeedsLogin
+  const logoutVisible = profile?.userLoggedIn === true
   const showTokenListLoading = loading && tokens.length === 0
   const showEmptyTokens = !loading && tokens.length === 0
   const showLandingGuide = shouldRenderLandingGuide(route, tokens.length)
@@ -1556,7 +1891,7 @@ export default function UserConsole(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (consoleUnavailable || route.name !== 'landing' || !route.section) return
+    if (consoleEmptyState || route.name !== 'landing' || !route.section) return
     if (!shouldScrollLandingSectionRef.current) {
       landingScrollBehaviorRef.current = 'auto'
       return
@@ -1569,16 +1904,16 @@ export default function UserConsole(): JSX.Element {
       landingScrollBehaviorRef.current = 'auto'
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [consoleUnavailable, route, scrollToLandingSection])
+  }, [consoleEmptyState, route, scrollToLandingSection])
 
   useEffect(() => {
-    if (consoleUnavailable || route.name !== 'token') return
+    if (consoleEmptyState || route.name !== 'token') return
     const frame = window.requestAnimationFrame(() => {
       window.scrollTo({ top: 0, behavior: 'auto' })
       detailHeadingRef.current?.focus({ preventScroll: true })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [consoleUnavailable, route])
+  }, [consoleEmptyState, route])
 
   const navigateToRoute = useCallback((nextRoute: ConsoleRoute) => {
     const nextHash = userConsoleRouteToHash(nextRoute)
@@ -1596,13 +1931,17 @@ export default function UserConsole(): JSX.Element {
     if (route.name !== 'token' || anyProbeRunning) return
     const runId = probeRunIdRef.current + 1
     probeRunIdRef.current = runId
-    const isActiveRun = () => probeRunIdRef.current === runId
+    probeAbortRef.current?.abort()
+    const controller = new AbortController()
+    probeAbortRef.current = controller
+    const isActiveRun = () => probeRunIdRef.current === runId && !controller.signal.aborted
     const probeText = text.detail.probe
     const probeContext: McpProbeRunContext = {
       protocolVersion: MCP_PROBE_PROTOCOL_VERSION,
       sessionId: null,
       clientVersion: versionState.status === 'ready' ? versionState.value?.frontend ?? 'dev' : 'dev',
       identity: createMcpProbeIdentityGenerator(),
+      signal: controller.signal,
     }
 
     const stepDefinitions = [...buildMcpProbeStepDefinitions(probeText)]
@@ -1616,7 +1955,7 @@ export default function UserConsole(): JSX.Element {
 
     let token = ''
     try {
-      const secret = await fetchUserTokenSecret(route.id)
+      const secret = await fetchUserTokenSecret(route.id, controller.signal)
       if (!isActiveRun()) return
       token = secret.token
     } catch (err) {
@@ -1643,7 +1982,7 @@ export default function UserConsole(): JSX.Element {
     if (quotaBlockedWindow) {
       try {
         const revalidatedQuota = await revalidateBlockedQuotaWindow(detail, async () => {
-          return await fetchUserTokenDetail(route.id, todayWindow)
+          return await fetchUserTokenDetail(route.id, todayWindow, controller.signal)
         })
         if (!isActiveRun()) return
         quotaBlockedWindow = revalidatedQuota.window
@@ -1701,7 +2040,7 @@ export default function UserConsole(): JSX.Element {
           if (quotaWindow) {
             quotaBlockedWindow = quotaWindow
             try {
-              const refreshedDetail = await fetchUserTokenDetail(route.id, todayWindow)
+              const refreshedDetail = await fetchUserTokenDetail(route.id, todayWindow, controller.signal)
               if (!isActiveRun()) return
               setDetail(refreshedDetail)
             } catch {
@@ -1741,13 +2080,19 @@ export default function UserConsole(): JSX.Element {
       total: stepDefinitions.length,
     })
     setProbeBubble({ visible: true, anchor: 'mcp', items: [...completedItems] })
-  }, [anyProbeRunning, detail, route, text.detail.probe, versionState])
+    if (probeAbortRef.current === controller) {
+      probeAbortRef.current = null
+    }
+  }, [anyProbeRunning, detail, route, text.detail.probe, todayWindow, versionState])
 
   const runApiProbe = useCallback(async () => {
     if (route.name !== 'token' || anyProbeRunning) return
     const runId = probeRunIdRef.current + 1
     probeRunIdRef.current = runId
-    const isActiveRun = () => probeRunIdRef.current === runId
+    probeAbortRef.current?.abort()
+    const controller = new AbortController()
+    probeAbortRef.current = controller
+    const isActiveRun = () => probeRunIdRef.current === runId && !controller.signal.aborted
 
     const stepDefinitions = buildApiProbeStepDefinitions(text.detail.probe)
 
@@ -1760,7 +2105,7 @@ export default function UserConsole(): JSX.Element {
 
     let token = ''
     try {
-      const secret = await fetchUserTokenSecret(route.id)
+      const secret = await fetchUserTokenSecret(route.id, controller.signal)
       if (!isActiveRun()) return
       token = secret.token
     } catch (err) {
@@ -1800,7 +2145,7 @@ export default function UserConsole(): JSX.Element {
       })
 
       try {
-        const detail = await current.run(token, { requestId: researchRequestId })
+        const detail = await current.run(token, { requestId: researchRequestId, signal: controller.signal })
         if (!isActiveRun()) return
         if (current.id === 'api-research' && detail) {
           researchRequestId = detail
@@ -1842,6 +2187,9 @@ export default function UserConsole(): JSX.Element {
       total: stepDefinitions.length,
     })
     setProbeBubble({ visible: true, anchor: 'api', items: [...completedItems] })
+    if (probeAbortRef.current === controller) {
+      probeAbortRef.current = null
+    }
   }, [anyProbeRunning, route, text.detail.probe])
 
   const goHome = () => {
@@ -1996,30 +2344,28 @@ export default function UserConsole(): JSX.Element {
         isCompactLayout ? ' is-compact-layout' : ''
       }`}
     >
-      <section className="surface app-header admin-panel-header">
-        <div className="admin-panel-header-main">
-          <h1>{text.title}</h1>
-          <p className="admin-panel-header-subtitle">{subtitle}</p>
-        </div>
-        <div className="admin-panel-header-side">
-          <div className="admin-panel-header-tools">
-            <div className="admin-language-switcher">
-              <ThemeToggle />
-              <LanguageSwitcher />
-            </div>
-          </div>
-          {adminHref && (
-            <div className="admin-panel-header-actions">
-              <Button asChild variant="outline" size="sm" className="user-console-admin-entry">
-                <a href={adminHref}>
-                  <Icon icon="mdi:crown-outline" width={16} height={16} aria-hidden="true" />
-                  <span>{publicStrings.adminButton}</span>
-                </a>
-              </Button>
-            </div>
-          )}
-        </div>
-      </section>
+      <UserConsoleHeader
+        title={text.title}
+        subtitle={subtitle}
+        eyebrow={text.header.eyebrow}
+        currentViewLabel={text.header.currentView}
+        currentViewTitle={currentViewTitle}
+        currentViewDescription={currentViewDescription}
+        sessionLabel={text.header.session}
+        sessionDisplayName={sessionDisplayName}
+        sessionProviderLabel={sessionProviderLabel}
+        sessionAvatarUrl={profile?.userAvatarUrl}
+        adminLabel={text.header.adminLabel}
+        isAdmin={profile?.isAdmin === true}
+        adminHref={adminHref}
+        adminActionLabel={publicStrings.adminButton}
+        adminMenuLabel={text.header.adminMenuAction}
+        logoutVisible={logoutVisible}
+        isLoggingOut={isLoggingOut}
+        logoutLabel={text.header.logout}
+        loggingOutLabel={text.header.loggingOut}
+        onLogout={handleLogout}
+      />
 
       {consoleUnavailable && (
         <section className="surface panel access-panel">
@@ -2040,9 +2386,47 @@ export default function UserConsole(): JSX.Element {
         </section>
       )}
 
-      {!consoleUnavailable && error && <section className="surface error-banner">{error}</section>}
+      {consoleLoggedOut && (
+        <section className="surface panel access-panel">
+          <div className="console-unavailable-state">
+            <div className="console-unavailable-icon" aria-hidden="true">
+              <Icon icon="mdi:logout-variant" width={22} height={22} />
+            </div>
+            <div className="console-unavailable-copy">
+              <h2>{text.loggedOut.title}</h2>
+              <p>{text.loggedOut.description}</p>
+            </div>
+            <div className="table-actions console-unavailable-actions">
+              <button type="button" className="btn btn-primary" onClick={() => { window.location.href = '/auth/linuxdo' }}>
+                {text.loggedOut.action}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
-      {!consoleUnavailable && route.name === 'landing' && (
+      {consoleNeedsLogin && (
+        <section className="surface panel access-panel">
+          <div className="console-unavailable-state">
+            <div className="console-unavailable-icon" aria-hidden="true">
+              <Icon icon="mdi:account-arrow-right-outline" width={22} height={22} />
+            </div>
+            <div className="console-unavailable-copy">
+              <h2>{text.loginRequired.title}</h2>
+              <p>{text.loginRequired.description}</p>
+            </div>
+            <div className="table-actions console-unavailable-actions">
+              <button type="button" className="btn btn-primary" onClick={() => { window.location.href = '/auth/linuxdo' }}>
+                {text.loginRequired.action}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {!consoleEmptyState && error && <section className="surface error-banner">{error}</section>}
+
+      {!consoleEmptyState && route.name === 'landing' && (
         <div className="user-console-landing-stack">
           <section
             ref={dashboardSectionRef}
@@ -2277,7 +2661,7 @@ export default function UserConsole(): JSX.Element {
         </div>
       )}
 
-      {!consoleUnavailable && route.name === 'token' && (
+      {!consoleEmptyState && route.name === 'token' && (
         <>
           <section className="surface panel access-panel">
             <header className="panel-header" style={{ marginBottom: 8 }}>
@@ -2514,21 +2898,32 @@ export default function UserConsole(): JSX.Element {
 }
 
 export const __testables = {
+  applyLoggedOutConsoleReset,
   buildApiProbeStepDefinitions,
   buildMcpProbeStepDefinitions,
   buildMcpToolCallProbeStepDefinitions,
   canonicalMcpProbeToolName,
+  createClearedProbeUiState,
   createMcpProbeIdentityGenerator,
   extractAdvertisedMcpTools,
   isActiveGuideRevealContext,
   isBillableMcpProbeTool,
   isIdentifierLikePropertyName,
   nextRunningMcpProbeModel,
+  performUserLogoutFlow,
+  resetActiveProbeUiState,
   resolveDetailLogsPushIssueMessage,
   resolveGuideSamples,
   resolveGuideRevealContextKey,
   resolveGuideToken,
   resolveGuideTokenId,
+  resolveFallbackLogoutTarget,
+  resolvePostLogoutTarget,
+  shouldRedirectToLogoutTarget,
+  toLoggedOutConsoleProfile,
+  resolveUserConsoleIdentityName,
+  resolveUserConsoleProviderLabel,
+  resolveUserConsoleView,
   shouldRenderLandingGuide,
 }
 
@@ -2874,6 +3269,25 @@ function resolveGuideSamples(content: GuideContent): GuideSample[] {
 const EN = {
   title: 'User Console',
   subtitle: 'Your account dashboard and token management',
+  header: {
+    eyebrow: 'User Workspace',
+    currentView: 'Current View',
+    session: 'Signed in as',
+    adminLabel: 'Admin',
+    adminMenuAction: 'Admin dashboard',
+    logout: 'Sign out',
+    loggingOut: 'Signing out…',
+    logoutFailed: 'Failed to sign out: {message}',
+    unknownUser: 'Connected user',
+    views: {
+      dashboard: 'Account Overview',
+      tokens: 'Token List',
+      tokenDetail: 'Token Detail',
+    },
+    providers: {
+      linuxdo: 'LinuxDo',
+    },
+  },
   dashboard: {
     usage: 'Account Usage Overview',
     description: 'Track account-level throughput, failures, and quota windows without switching pages.',
@@ -2918,6 +3332,16 @@ const EN = {
     title: 'User console unavailable',
     description: 'This server has not enabled user OAuth login, so `/console` cannot load dashboard or token data right now.',
     home: 'Back to Home',
+  },
+  loggedOut: {
+    title: 'You have signed out',
+    description: 'This deployment keeps `/console` available, but dashboard and token data require signing in again.',
+    action: 'Sign in with LinuxDo',
+  },
+  loginRequired: {
+    title: 'Sign in to open your console',
+    description: 'Dashboard and token data appear here after you sign in with LinuxDo.',
+    action: 'Sign in with LinuxDo',
   },
   detail: {
     title: 'Token Detail',
@@ -3045,6 +3469,25 @@ const EN = {
 const ZH = {
   title: '用户控制台',
   subtitle: '账户仪表盘与 Token 管理',
+  header: {
+    eyebrow: '用户工作区',
+    currentView: '当前视图',
+    session: '当前身份',
+    adminLabel: '管理员',
+    adminMenuAction: '管理员面板',
+    logout: '退出登录',
+    loggingOut: '退出中…',
+    logoutFailed: '退出登录失败：{message}',
+    unknownUser: '已连接用户',
+    views: {
+      dashboard: '账户概览',
+      tokens: 'Token 列表',
+      tokenDetail: 'Token 详情',
+    },
+    providers: {
+      linuxdo: 'LinuxDo',
+    },
+  },
   dashboard: {
     usage: '账户用量概览',
     description: '在同一页集中查看账户级成功率、失败量与各配额窗口。',
@@ -3089,6 +3532,16 @@ const ZH = {
     title: '用户控制台暂不可用',
     description: '当前服务未启用用户 OAuth 登录，因此 `/console` 暂时无法加载账户仪表盘与 Token 数据。',
     home: '返回首页',
+  },
+  loggedOut: {
+    title: '你已退出登录',
+    description: '当前部署会保留 `/console` 入口，但账户仪表盘与 Token 数据需要重新登录后才能访问。',
+    action: '使用 LinuxDo 登录',
+  },
+  loginRequired: {
+    title: '登录后即可打开控制台',
+    description: '使用 LinuxDo 登录后，这里就会显示你的仪表盘与 Token 数据。',
+    action: '使用 LinuxDo 登录',
   },
   detail: {
     title: 'Token 详情',

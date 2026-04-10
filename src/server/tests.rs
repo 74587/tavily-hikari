@@ -8171,7 +8171,9 @@ colo=LAX
                 provider_user_id: "linuxdo-user-1".to_string(),
                 username: Some("linuxdo_alice".to_string()),
                 name: Some("LinuxDO Alice".to_string()),
-                avatar_template: None,
+                avatar_template: Some(
+                    "/user_avatar/connect.linux.do/linuxdo_alice/{size}/1_2.png".to_string(),
+                ),
                 active: true,
                 trust_level: Some(2),
                 raw_payload_json: None,
@@ -8187,7 +8189,11 @@ colo=LAX
             .await
             .expect("create user session");
 
-        let addr = spawn_user_oauth_server(proxy).await;
+        let mut oauth_options = linuxdo_oauth_options_for_test();
+        oauth_options.authorize_url = "http://oauth.internal:3000/oauth2/authorize".to_string();
+        oauth_options.userinfo_url = "http://discourse.internal:3000/api/user".to_string();
+
+        let addr = spawn_user_oauth_server_with_options(proxy, oauth_options).await;
         let client = Client::new();
 
         let profile_url = format!("http://{}/api/profile", addr);
@@ -8229,6 +8235,12 @@ colo=LAX
         assert_eq!(
             logged_in_profile.get("userDisplayName"),
             Some(&serde_json::Value::String("LinuxDO Alice".to_string()))
+        );
+        assert_eq!(
+            logged_in_profile.get("userAvatarUrl"),
+            Some(&serde_json::Value::String(
+                "https://connect.linux.do/user_avatar/connect.linux.do/linuxdo_alice/96/1_2.png".to_string(),
+            ))
         );
 
         let token_url = format!("http://{}/api/user/token", addr);

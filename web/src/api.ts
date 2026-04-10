@@ -1106,6 +1106,7 @@ export interface Profile {
   userLoggedIn?: boolean
   userProvider?: 'linuxdo' | null
   userDisplayName?: string | null
+  userAvatarUrl?: string | null
 }
 
 export function fetchProfile(signal?: AbortSignal): Promise<Profile> {
@@ -1327,6 +1328,24 @@ export function fetchUserToken(signal?: AbortSignal): Promise<UserTokenResponse>
   return requestJson('/api/user/token', { signal })
 }
 
+export async function postUserLogout(signal?: AbortSignal): Promise<void> {
+  const response = await fetch('/api/user/logout', {
+    method: 'POST',
+    signal,
+  })
+  if (response.status === 204 || response.status === 401) {
+    return
+  }
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText)
+    const err = new Error(message || `Request failed with status ${response.status}`) as Error & {
+      status?: number
+    }
+    err.status = response.status
+    throw err
+  }
+}
+
 export interface UserDashboard {
   hourlyAnyUsed: number
   hourlyAnyLimit: number
@@ -1445,6 +1464,7 @@ export interface ProbeMcpRequestContext {
   protocolVersion?: string | null
   sessionId?: string | null
   requestId?: string
+  signal?: AbortSignal
 }
 
 export interface ProbeMcpInitializeContext extends ProbeMcpRequestContext {
@@ -1507,6 +1527,7 @@ export async function probeMcpInitialize(
 ): Promise<ProbeMcpEnvelopeResult> {
   const response = await requestMcpProbeEnvelopeWithToken<ProbeMcpResponse>('/mcp', token, {
     method: 'POST',
+    signal: context.signal,
     headers: buildMcpProbeHeaders(context),
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -1537,6 +1558,7 @@ export async function probeMcpInitialized(
 ): Promise<ProbeMcpNotificationResult> {
   const response = await requestMcpProbeNotificationWithToken<ProbeMcpResponse>('/mcp', token, {
     method: 'POST',
+    signal: context.signal,
     headers: buildMcpProbeHeaders(context),
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -1561,6 +1583,7 @@ export async function probeMcpPing(
 ): Promise<ProbeMcpEnvelopeResult> {
   const response = await requestMcpProbeEnvelopeWithToken<ProbeMcpResponse>('/mcp', token, {
     method: 'POST',
+    signal: context.signal,
     headers: buildMcpProbeHeaders(context),
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -1583,6 +1606,7 @@ export async function probeMcpToolsList(
 ): Promise<ProbeMcpEnvelopeResult> {
   const response = await requestMcpProbeEnvelopeWithToken<ProbeMcpResponse>('/mcp', token, {
     method: 'POST',
+    signal: context.signal,
     headers: buildMcpProbeHeaders(context),
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -1607,6 +1631,7 @@ export async function probeMcpToolsCall(
 ): Promise<ProbeMcpEnvelopeResult> {
   const response = await requestMcpProbeEnvelopeWithToken<ProbeMcpResponse>('/mcp', token, {
     method: 'POST',
+    signal: context.signal,
     headers: buildMcpProbeHeaders(context),
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -1641,30 +1666,50 @@ export interface TavilyResearchResultResponse {
   [key: string]: unknown
 }
 
-export function probeApiTavilySearch(token: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+export function probeApiTavilySearch(
+  token: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   return requestJsonWithToken('/api/tavily/search', token, {
     method: 'POST',
+    signal,
     body: JSON.stringify(payload),
   })
 }
 
-export function probeApiTavilyExtract(token: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+export function probeApiTavilyExtract(
+  token: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   return requestJsonWithToken('/api/tavily/extract', token, {
     method: 'POST',
+    signal,
     body: JSON.stringify(payload),
   })
 }
 
-export function probeApiTavilyCrawl(token: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+export function probeApiTavilyCrawl(
+  token: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   return requestJsonWithToken('/api/tavily/crawl', token, {
     method: 'POST',
+    signal,
     body: JSON.stringify(payload),
   })
 }
 
-export function probeApiTavilyMap(token: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+export function probeApiTavilyMap(
+  token: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   return requestJsonWithToken('/api/tavily/map', token, {
     method: 'POST',
+    signal,
     body: JSON.stringify(payload),
   })
 }
@@ -1672,9 +1717,11 @@ export function probeApiTavilyMap(token: string, payload: Record<string, unknown
 export function probeApiTavilyResearch(
   token: string,
   payload: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<TavilyResearchCreateResponse> {
   return requestJsonWithToken('/api/tavily/research', token, {
     method: 'POST',
+    signal,
     body: JSON.stringify(payload),
   })
 }
@@ -1682,9 +1729,11 @@ export function probeApiTavilyResearch(
 export function probeApiTavilyResearchResult(
   token: string,
   requestId: string,
+  signal?: AbortSignal,
 ): Promise<TavilyResearchResultResponse> {
   return requestJsonWithToken(`/api/tavily/research/${encodeURIComponent(requestId)}`, token, {
     method: 'GET',
+    signal,
   })
 }
 
