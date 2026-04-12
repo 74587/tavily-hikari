@@ -1838,66 +1838,23 @@ impl TavilyProxy {
         &self,
         endpoint: &forward_proxy::ForwardProxyEndpoint,
     ) -> Result<(forward_proxy::ForwardProxyEndpoint, Option<String>), ProxyError> {
-        if endpoint.uses_local_relay {
-            return Ok((endpoint.clone(), None));
-        }
         let egress_socks5_url = self.current_forward_proxy_egress_socks5_url().await;
-        let mut temporary_xray_key = None;
-        let resolved = if endpoint.needs_local_relay(egress_socks5_url.as_ref()) {
-            let raw_url = endpoint
-                .raw_url
-                .as_deref()
-                .or_else(|| endpoint.endpoint_url.as_ref().map(Url::as_str))
-                .ok_or_else(|| {
-                    ProxyError::Other("xray proxy validation requires raw proxy url".to_string())
-                })?;
-            let validate_key = format!(
-                "__validate_xray__{:016x}",
-                forward_proxy::stable_hash_u64(&format!(
-                    "{}|{}",
-                    raw_url,
-                    egress_socks5_url
-                        .as_ref()
-                        .map(Url::as_str)
-                        .unwrap_or_default()
-                ))
-            );
-            let mut validate_endpoint = forward_proxy::ForwardProxyEndpoint::new_manual(
-                validate_key.clone(),
-                endpoint.display_name.clone(),
-                endpoint.protocol,
-                endpoint.endpoint_url.clone(),
-                Some(raw_url.to_string()),
-            );
-            validate_endpoint.source = endpoint.source.clone();
-            validate_endpoint.manual_present = endpoint.manual_present;
-            validate_endpoint.subscription_sources = endpoint.subscription_sources.clone();
-            let route_url = self
-                .xray_supervisor
-                .lock()
-                .await
-                .ensure_instance(&validate_endpoint, egress_socks5_url.as_ref())
-                .await?;
-            temporary_xray_key = Some(validate_key);
-            let mut resolved = endpoint.clone();
-            resolved.endpoint_url = Some(route_url);
-            resolved.uses_local_relay = true;
-            resolved
-        } else {
-            endpoint.clone()
-        };
-        Ok((resolved, temporary_xray_key))
+        self.xray_supervisor
+            .lock()
+            .await
+            .resolve_validation_endpoint(endpoint, egress_socks5_url.as_ref())
+            .await
     }
 
     pub(crate) async fn cleanup_forward_proxy_validation_endpoint(
         &self,
-        temporary_xray_key: Option<String>,
+        relay_lease_id: Option<String>,
     ) {
-        if let Some(temp_key) = temporary_xray_key {
+        if let Some(relay_id) = relay_lease_id {
             self.xray_supervisor
                 .lock()
                 .await
-                .remove_instance(&temp_key)
+                .release_relay_lease(&relay_id)
                 .await;
         }
     }
@@ -3202,7 +3159,7 @@ impl TavilyProxy {
         request_kind: &str,
         plan: Vec<forward_proxy::SelectedForwardProxy>,
         mut build: F,
-    ) -> Result<(reqwest::Response, forward_proxy::SelectedForwardProxy), ProxyError>
+    ) -> Result<(reqwest::Response, forward_proxy::ForwardProxyRelayLease), ProxyError>
     where
         F: FnMut(Client) -> reqwest::RequestBuilder,
     {
@@ -3237,6 +3194,17 @@ impl TavilyProxy {
                     continue;
                 }
             };
+            let relay_lease = {
+                let relay_id = self
+                    .xray_supervisor
+                    .lock()
+                    .await
+                    .acquire_relay_lease_by_url(candidate.endpoint_url.as_ref());
+                forward_proxy::ForwardProxyRelayLease::new(
+                    Arc::clone(&self.xray_supervisor),
+                    relay_id,
+                )
+            };
             let started = Instant::now();
             match build(client).send().await {
                 Ok(response) => {
@@ -3256,9 +3224,10 @@ impl TavilyProxy {
                             .promote_proxy_affinity_secondary(api_key_id, &candidate.key)
                             .await;
                     }
-                    return Ok((response, candidate));
+                    return Ok((response, relay_lease));
                 }
                 Err(err) => {
+                    drop(relay_lease);
                     let failure_kind = forward_proxy::failure_kind_from_http_error(&err);
                     let _ = self
                         .record_forward_proxy_attempt(
@@ -3301,7 +3270,13 @@ impl TavilyProxy {
                         None,
                     )
                     .await;
-                Ok((response, direct))
+                Ok((
+                    response,
+                    forward_proxy::ForwardProxyRelayLease::new(
+                        Arc::clone(&self.xray_supervisor),
+                        None,
+                    ),
+                ))
             }
             Err(err) => {
                 let _ = self
@@ -3324,7 +3299,7 @@ impl TavilyProxy {
         api_key_id: &str,
         request_kind: &str,
         build: F,
-    ) -> Result<(reqwest::Response, forward_proxy::SelectedForwardProxy), ProxyError>
+    ) -> Result<(reqwest::Response, forward_proxy::ForwardProxyRelayLease), ProxyError>
     where
         F: FnMut(Client) -> reqwest::RequestBuilder,
     {
@@ -3342,7 +3317,7 @@ impl TavilyProxy {
         request_kind: &str,
         affinity: &forward_proxy::ForwardProxyAffinityRecord,
         build: F,
-    ) -> Result<(reqwest::Response, forward_proxy::SelectedForwardProxy), ProxyError>
+    ) -> Result<(reqwest::Response, forward_proxy::ForwardProxyRelayLease), ProxyError>
     where
         F: FnMut(Client) -> reqwest::RequestBuilder,
     {
@@ -4445,7 +4420,7 @@ impl TavilyProxy {
             .await;
 
         match response {
-            Ok((response, _selected_proxy)) => {
+            Ok((response, _relay_lease)) => {
                 let status = response.status();
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
@@ -4652,7 +4627,7 @@ impl TavilyProxy {
             .await;
 
         match response {
-            Ok((response, _selected_proxy)) => {
+            Ok((response, _relay_lease)) => {
                 let status = response.status();
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
@@ -4898,7 +4873,7 @@ impl TavilyProxy {
             .await;
 
         match response {
-            Ok((response, _selected_proxy)) => {
+            Ok((response, _relay_lease)) => {
                 let status = response.status();
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;
@@ -5109,7 +5084,7 @@ impl TavilyProxy {
             .await;
 
         match response {
-            Ok((response, _selected_proxy)) => {
+            Ok((response, _relay_lease)) => {
                 let status = response.status();
                 let headers = response.headers().clone();
                 let body_bytes = response.bytes().await.map_err(ProxyError::Http)?;

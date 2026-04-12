@@ -20,7 +20,7 @@ use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 use tokio::{
     net::TcpStream,
     process::{Child, Command},
-    sync::RwLock,
+    sync::{Mutex, RwLock},
     time::{sleep, timeout},
 };
 
@@ -58,7 +58,7 @@ pub const FORWARD_PROXY_FAILURE_HANDSHAKE_TIMEOUT: &str = "handshake_timeout";
 pub const FORWARD_PROXY_FAILURE_STREAM_ERROR: &str = "stream_error";
 pub const FORWARD_PROXY_FAILURE_UPSTREAM_HTTP_429: &str = "upstream_http_429";
 pub const FORWARD_PROXY_FAILURE_UPSTREAM_HTTP_5XX: &str = "upstream_http_5xx";
-const XRAY_PROXY_READY_TIMEOUT_MS: u64 = 3_000;
+const XRAY_PROXY_READY_TIMEOUT_MS: u64 = 5_000;
 
 pub fn default_xray_binary() -> String {
     DEFAULT_XRAY_BINARY.to_string()
@@ -1147,6 +1147,47 @@ impl SelectedForwardProxy {
     }
 }
 
+#[derive(Debug)]
+pub struct ForwardProxyRelayLease {
+    supervisor: Arc<Mutex<XraySupervisor>>,
+    relay_id: Option<String>,
+}
+
+impl ForwardProxyRelayLease {
+    pub fn new(supervisor: Arc<Mutex<XraySupervisor>>, relay_id: Option<String>) -> Self {
+        Self {
+            supervisor,
+            relay_id,
+        }
+    }
+
+    pub fn relay_id(&self) -> Option<&str> {
+        self.relay_id.as_deref()
+    }
+
+    pub async fn release(mut self) {
+        if let Some(relay_id) = self.relay_id.take() {
+            self.supervisor
+                .lock()
+                .await
+                .release_relay_lease(&relay_id)
+                .await;
+        }
+    }
+}
+
+impl Drop for ForwardProxyRelayLease {
+    fn drop(&mut self) {
+        let Some(relay_id) = self.relay_id.take() else {
+            return;
+        };
+        let supervisor = Arc::clone(&self.supervisor);
+        tokio::spawn(async move {
+            supervisor.lock().await.release_relay_lease(&relay_id).await;
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ForwardProxyClientPool {
     direct_client: Client,
@@ -1366,25 +1407,55 @@ pub struct ForwardProxyLiveStatsResponse {
 }
 
 #[derive(Debug)]
-struct XrayInstance {
-    route_key: String,
-    local_proxy_url: Url,
+struct SharedXrayProcess {
+    api_server: String,
+    api_port: u16,
     config_path: PathBuf,
     child: Child,
 }
 
-#[derive(Debug)]
-struct RetiringXrayInstance {
-    remove_after: Instant,
-    instance: XrayInstance,
+#[derive(Debug, Clone)]
+struct SharedXrayRelayHandle {
+    relay_id: String,
+    endpoint_key: Option<String>,
+    route_key: String,
+    local_proxy_url: Url,
+    local_port: u16,
+    inbound_tag: String,
+    outbound_tags: Vec<String>,
+    rule_tag: String,
+    config_paths: Vec<PathBuf>,
+    lease_count: usize,
+    temporary: bool,
+}
+
+impl SharedXrayRelayHandle {
+    fn drop_runtime_files(&mut self) {
+        cleanup_paths(&self.config_paths);
+        self.config_paths.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(test)]
+pub struct XraySupervisorDebugSnapshot {
+    pub shared_pid: Option<u32>,
+    pub active_endpoint_handles: usize,
+    pub total_handles: usize,
+    pub retiring_handles: usize,
+    pub runtime_files: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct XraySupervisor {
     pub binary: String,
     pub runtime_dir: PathBuf,
-    instances: HashMap<String, XrayInstance>,
-    retiring_instances: Vec<RetiringXrayInstance>,
+    shared: Option<SharedXrayProcess>,
+    active_endpoint_handles: HashMap<String, String>,
+    handles: HashMap<String, SharedXrayRelayHandle>,
+    retiring_handles: HashSet<String>,
+    handle_by_url: HashMap<String, String>,
+    handle_nonce: u64,
 }
 
 impl XraySupervisor {
@@ -1392,8 +1463,12 @@ impl XraySupervisor {
         Self {
             binary,
             runtime_dir,
-            instances: HashMap::new(),
-            retiring_instances: Vec::new(),
+            shared: None,
+            active_endpoint_handles: HashMap::new(),
+            handles: HashMap::new(),
+            retiring_handles: HashSet::new(),
+            handle_by_url: HashMap::new(),
+            handle_nonce: 0,
         }
     }
 
@@ -1403,98 +1478,456 @@ impl XraySupervisor {
         egress_socks5_url: Option<&Url>,
     ) -> Result<(), ProxyError> {
         let _ = fs::create_dir_all(&self.runtime_dir);
-        self.reap_retiring_instances().await;
-        let desired_keys = endpoints
-            .iter()
-            .filter(|endpoint| endpoint.needs_local_relay(egress_socks5_url))
-            .map(|endpoint| build_xray_route_key(endpoint, egress_socks5_url))
-            .collect::<HashSet<_>>();
-        let stale_keys = self
-            .instances
-            .keys()
-            .filter(|key| !key.starts_with("__validate_xray__"))
-            .filter(|key| !desired_keys.contains(*key))
-            .cloned()
-            .collect::<Vec<_>>();
+        self.reset_if_shared_process_exited().await;
 
-        for endpoint in endpoints {
+        let mut desired_endpoint_keys = HashSet::new();
+        let mut retire_ids = Vec::new();
+
+        for endpoint in endpoints.iter_mut() {
             if !endpoint.needs_local_relay(egress_socks5_url) {
                 endpoint.endpoint_url = endpoint_transport_url(endpoint);
                 endpoint.uses_local_relay = false;
+                if let Some(old_id) = self.active_endpoint_handles.remove(&endpoint.key) {
+                    retire_ids.push(old_id);
+                }
                 continue;
             }
-            match self.ensure_instance(endpoint, egress_socks5_url).await {
-                Ok(route_url) => {
-                    endpoint.endpoint_url = Some(route_url);
-                    endpoint.uses_local_relay = true;
+
+            desired_endpoint_keys.insert(endpoint.key.clone());
+            let route_key = build_xray_route_key(endpoint, egress_socks5_url);
+            let existing_id = self.active_endpoint_handles.get(&endpoint.key).cloned();
+            let reusable_id = existing_id.clone().filter(|relay_id| {
+                self.handles
+                    .get(relay_id)
+                    .is_some_and(|handle| handle.route_key == route_key)
+            });
+
+            let relay_id = if let Some(relay_id) = reusable_id {
+                relay_id
+            } else {
+                match self
+                    .create_relay_handle(
+                        Some(endpoint.key.clone()),
+                        route_key.clone(),
+                        endpoint,
+                        egress_socks5_url,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(relay_id) => {
+                        if let Some(previous_id) = self
+                            .active_endpoint_handles
+                            .insert(endpoint.key.clone(), relay_id.clone())
+                            && previous_id != relay_id
+                        {
+                            retire_ids.push(previous_id);
+                        }
+                        relay_id
+                    }
+                    Err(_) => {
+                        endpoint.endpoint_url = None;
+                        endpoint.uses_local_relay = true;
+                        if let Some(previous_id) =
+                            self.active_endpoint_handles.remove(&endpoint.key)
+                        {
+                            retire_ids.push(previous_id);
+                        }
+                        continue;
+                    }
                 }
-                Err(_) => {
-                    endpoint.endpoint_url = None;
-                    endpoint.uses_local_relay = true;
-                }
+            };
+
+            if let Some(handle) = self.handles.get(&relay_id) {
+                endpoint.endpoint_url = Some(handle.local_proxy_url.clone());
+                endpoint.uses_local_relay = true;
+            } else {
+                endpoint.endpoint_url = None;
+                endpoint.uses_local_relay = true;
             }
         }
 
-        for key in stale_keys {
-            self.retire_instance(&key).await;
+        let stale_endpoint_keys = self
+            .active_endpoint_handles
+            .keys()
+            .filter(|key| !desired_endpoint_keys.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for endpoint_key in stale_endpoint_keys {
+            if let Some(relay_id) = self.active_endpoint_handles.remove(&endpoint_key) {
+                retire_ids.push(relay_id);
+            }
         }
+
+        retire_ids.sort();
+        retire_ids.dedup();
+        for relay_id in retire_ids {
+            self.mark_handle_retiring(&relay_id).await;
+        }
+        self.reap_retired_handles().await;
         Ok(())
     }
 
     pub async fn shutdown_all(&mut self) {
-        self.reap_retiring_instances().await;
-        let keys = self.instances.keys().cloned().collect::<Vec<_>>();
-        for key in keys {
-            self.remove_instance(&key).await;
+        let relay_ids = self.handles.keys().cloned().collect::<Vec<_>>();
+        for relay_id in relay_ids {
+            self.force_remove_handle(&relay_id).await;
         }
-        while let Some(mut retiring) = self.retiring_instances.pop() {
-            let _ =
-                terminate_child_process(&mut retiring.instance.child, Duration::from_secs(2)).await;
-            let _ = fs::remove_file(&retiring.instance.config_path);
-        }
+        self.active_endpoint_handles.clear();
+        self.retiring_handles.clear();
+        self.handle_by_url.clear();
+        self.shutdown_shared_process().await;
     }
 
-    pub async fn ensure_instance(
+    pub async fn resolve_validation_endpoint(
         &mut self,
         endpoint: &ForwardProxyEndpoint,
         egress_socks5_url: Option<&Url>,
-    ) -> Result<Url, ProxyError> {
-        self.reap_retiring_instances().await;
-        let route_key = build_xray_route_key(endpoint, egress_socks5_url);
-        if let Some(instance) = self.instances.get_mut(&route_key) {
-            match instance.child.try_wait() {
-                Ok(None) => return Ok(instance.local_proxy_url.clone()),
-                Ok(Some(_)) => {}
-                Err(_) => {}
+    ) -> Result<(ForwardProxyEndpoint, Option<String>), ProxyError> {
+        self.reset_if_shared_process_exited().await;
+        if endpoint.uses_local_relay
+            && let Some(relay_id) = self.acquire_relay_lease_by_url(endpoint.endpoint_url.as_ref())
+        {
+            return Ok((endpoint.clone(), Some(relay_id)));
+        }
+        if !endpoint.needs_local_relay(egress_socks5_url) {
+            return Ok((endpoint.clone(), None));
+        }
+
+        let route_key = format!(
+            "__validate_xray__{:016x}",
+            stable_hash_u64(&format!(
+                "{}|{}",
+                endpoint
+                    .raw_url
+                    .as_deref()
+                    .or_else(|| endpoint.endpoint_url.as_ref().map(Url::as_str))
+                    .unwrap_or_default(),
+                egress_socks5_url.map(Url::as_str).unwrap_or_default()
+            ))
+        );
+        let relay_id = self
+            .create_relay_handle(None, route_key, endpoint, egress_socks5_url, true)
+            .await?;
+        let lease_id = self.acquire_relay_lease(&relay_id);
+        let Some(handle) = self.handles.get(&relay_id) else {
+            return Err(ProxyError::Other(
+                "shared xray relay handle disappeared before validation".to_string(),
+            ));
+        };
+        let mut resolved = endpoint.clone();
+        resolved.endpoint_url = Some(handle.local_proxy_url.clone());
+        resolved.uses_local_relay = true;
+        Ok((resolved, lease_id))
+    }
+
+    pub async fn release_relay_lease(&mut self, relay_id: &str) {
+        if let Some(handle) = self.handles.get_mut(relay_id)
+            && handle.lease_count > 0
+        {
+            handle.lease_count -= 1;
+        }
+        self.reap_retired_handles().await;
+    }
+
+    #[cfg(test)]
+    pub async fn debug_snapshot(&mut self) -> XraySupervisorDebugSnapshot {
+        self.reset_if_shared_process_exited().await;
+        let runtime_files = fs::read_dir(&self.runtime_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>();
+        XraySupervisorDebugSnapshot {
+            shared_pid: self.shared.as_ref().and_then(|shared| shared.child.id()),
+            active_endpoint_handles: self.active_endpoint_handles.len(),
+            total_handles: self.handles.len(),
+            retiring_handles: self.retiring_handles.len(),
+            runtime_files,
+        }
+    }
+
+    pub fn acquire_relay_lease_by_url(&mut self, endpoint_url: Option<&Url>) -> Option<String> {
+        let endpoint_url = endpoint_url?;
+        let relay_id = self.handle_by_url.get(endpoint_url.as_str())?.clone();
+        self.acquire_relay_lease(&relay_id)
+    }
+
+    fn acquire_relay_lease(&mut self, relay_id: &str) -> Option<String> {
+        let handle = self.handles.get_mut(relay_id)?;
+        handle.lease_count = handle.lease_count.saturating_add(1);
+        Some(relay_id.to_string())
+    }
+
+    async fn create_relay_handle(
+        &mut self,
+        endpoint_key: Option<String>,
+        route_key: String,
+        endpoint: &ForwardProxyEndpoint,
+        egress_socks5_url: Option<&Url>,
+        temporary: bool,
+    ) -> Result<String, ProxyError> {
+        self.ensure_shared_process_started().await?;
+        let relay_id = self.next_relay_id(&route_key, temporary);
+        let local_port = pick_unused_local_port()?;
+        let local_proxy_url =
+            Url::parse(&format!("socks5h://127.0.0.1:{local_port}")).map_err(|err| {
+                ProxyError::Other(format!("failed to build local xray socks endpoint: {err}"))
+            })?;
+        let inbound_tag = format!("relay-in::{relay_id}");
+        let outbound_tag = format!("relay-out::{relay_id}");
+        let egress_tag = egress_socks5_url.map(|_| format!("relay-egress::{relay_id}"));
+        let rule_tag = format!("relay-rule::{relay_id}");
+        let config_paths = vec![
+            self.runtime_dir.join(format!("{relay_id}-inbounds.json")),
+            self.runtime_dir.join(format!("{relay_id}-outbounds.json")),
+            self.runtime_dir.join(format!("{relay_id}-rules.json")),
+        ];
+        let mut cleanup_handle = SharedXrayRelayHandle {
+            relay_id: relay_id.clone(),
+            endpoint_key: endpoint_key.clone(),
+            route_key: route_key.clone(),
+            local_proxy_url: local_proxy_url.clone(),
+            local_port,
+            inbound_tag: inbound_tag.clone(),
+            outbound_tags: {
+                let mut tags = vec![outbound_tag.clone()];
+                if let Some(egress_tag) = egress_tag.clone() {
+                    tags.push(egress_tag);
+                }
+                tags
+            },
+            rule_tag: rule_tag.clone(),
+            config_paths: config_paths.clone(),
+            lease_count: 0,
+            temporary,
+        };
+
+        let mut outbound = build_xray_outbound_for_endpoint(endpoint, egress_tag.as_deref())?;
+        set_xray_outbound_tag(&mut outbound, &outbound_tag);
+        let mut outbounds = vec![outbound];
+        if let Some(egress_socks5_url) = egress_socks5_url
+            && let Some(egress_outbound) =
+                build_xray_egress_outbound(Some(egress_socks5_url), egress_tag.as_deref())
+        {
+            outbounds.push(egress_outbound);
+        }
+        let inbound_config = json!({
+            "inbounds": [{
+                "tag": inbound_tag,
+                "listen": "127.0.0.1",
+                "port": local_port,
+                "protocol": "socks",
+                "settings": { "auth": "noauth", "udp": false }
+            }]
+        });
+        let outbound_config = json!({ "outbounds": outbounds });
+        let rules_config = json!({
+            "routing": {
+                "domainStrategy": "AsIs",
+                "rules": [{
+                    "type": "field",
+                    "inboundTag": [inbound_tag],
+                    "outboundTag": outbound_tag,
+                    "ruleTag": rule_tag,
+                }]
+            }
+        });
+
+        write_xray_runtime_json(&config_paths[0], &inbound_config)?;
+        write_xray_runtime_json(&config_paths[1], &outbound_config)?;
+        write_xray_runtime_json(&config_paths[2], &rules_config)?;
+
+        if let Err(err) = self
+            .run_shared_api_command("ado", &[config_paths[1].clone()], &[])
+            .await
+        {
+            cleanup_handle.drop_runtime_files();
+            return Err(err);
+        }
+        if let Err(err) = self
+            .run_shared_api_command("adi", &[config_paths[0].clone()], &[])
+            .await
+        {
+            if let Err(cleanup_err) = self
+                .run_shared_api_command(
+                    "rmo",
+                    &[],
+                    &[outbound_tag.clone(), egress_tag.clone().unwrap_or_default()],
+                )
+                .await
+            {
+                cleanup_handle.drop_runtime_files();
+                self.track_handle_for_retry(cleanup_handle);
+                return Err(ProxyError::Other(format!(
+                    "{err}; shared xray rollback failed after adi error: {cleanup_err}"
+                )));
+            }
+            cleanup_handle.drop_runtime_files();
+            return Err(err);
+        }
+        if let Err(err) = self
+            .run_shared_api_command(
+                "adrules",
+                &[config_paths[2].clone()],
+                &["-append".to_string()],
+            )
+            .await
+        {
+            let inbound_cleanup = self
+                .run_shared_api_command("rmi", &[], std::slice::from_ref(&inbound_tag))
+                .await;
+            let mut remove_outbound_args = vec![outbound_tag.clone()];
+            if let Some(egress_tag) = egress_tag.clone() {
+                remove_outbound_args.push(egress_tag);
+            }
+            let outbound_cleanup = self
+                .run_shared_api_command("rmo", &[], &remove_outbound_args)
+                .await;
+            cleanup_handle.drop_runtime_files();
+            if let Err(cleanup_err) = join_cleanup_errors([inbound_cleanup, outbound_cleanup]) {
+                self.track_handle_for_retry(cleanup_handle);
+                return Err(ProxyError::Other(format!(
+                    "{err}; shared xray rollback failed after adrules error: {cleanup_err}"
+                )));
+            }
+            return Err(err);
+        }
+        if let Err(err) = wait_for_local_port_ready(
+            local_port,
+            Duration::from_millis(XRAY_PROXY_READY_TIMEOUT_MS),
+        )
+        .await
+        {
+            let rule_cleanup = self
+                .run_shared_api_command("rmrules", &[], std::slice::from_ref(&rule_tag))
+                .await;
+            let inbound_cleanup = self
+                .run_shared_api_command("rmi", &[], std::slice::from_ref(&inbound_tag))
+                .await;
+            let mut remove_outbound_args = vec![outbound_tag.clone()];
+            if let Some(egress_tag) = egress_tag.clone() {
+                remove_outbound_args.push(egress_tag);
+            }
+            let outbound_cleanup = self
+                .run_shared_api_command("rmo", &[], &remove_outbound_args)
+                .await;
+            cleanup_handle.drop_runtime_files();
+            if let Err(cleanup_err) =
+                join_cleanup_errors([rule_cleanup, inbound_cleanup, outbound_cleanup])
+            {
+                self.track_handle_for_retry(cleanup_handle);
+                return Err(ProxyError::Other(format!(
+                    "{err}; shared xray rollback failed after local port wait error: {cleanup_err}"
+                )));
+            }
+            return Err(err);
+        }
+
+        self.handle_by_url
+            .insert(local_proxy_url.to_string(), relay_id.clone());
+        self.handles.insert(relay_id.clone(), cleanup_handle);
+        if temporary {
+            self.retiring_handles.insert(relay_id.clone());
+        }
+        Ok(relay_id)
+    }
+
+    async fn mark_handle_retiring(&mut self, relay_id: &str) {
+        if self.handles.contains_key(relay_id) {
+            self.retiring_handles.insert(relay_id.to_string());
+        }
+        self.reap_retired_handles().await;
+    }
+
+    async fn reap_retired_handles(&mut self) {
+        let removable = self
+            .retiring_handles
+            .iter()
+            .filter_map(|relay_id| {
+                self.handles
+                    .get(relay_id)
+                    .filter(|handle| handle.lease_count == 0)
+                    .map(|_| relay_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for relay_id in removable {
+            self.force_remove_handle(&relay_id).await;
+        }
+        self.shutdown_shared_process_if_idle().await;
+    }
+
+    async fn force_remove_handle(&mut self, relay_id: &str) {
+        let Some(handle) = self.handles.get(relay_id).cloned() else {
+            return;
+        };
+        self.active_endpoint_handles
+            .retain(|_, active_relay_id| active_relay_id != relay_id);
+        self.handle_by_url.remove(handle.local_proxy_url.as_str());
+        self.retiring_handles.insert(relay_id.to_string());
+        match self.cleanup_handle_from_shared_process(&handle).await {
+            Ok(()) => {
+                self.retiring_handles.remove(relay_id);
+                self.handles.remove(relay_id);
+            }
+            Err(_) => {
+                if let Some(tracked) = self.handles.get_mut(relay_id) {
+                    tracked.drop_runtime_files();
+                }
             }
         }
-        self.remove_instance(&route_key).await;
-        self.spawn_instance(&route_key, endpoint, egress_socks5_url)
-            .await
     }
 
-    async fn spawn_instance(
+    fn track_handle_for_retry(&mut self, mut handle: SharedXrayRelayHandle) {
+        handle.drop_runtime_files();
+        self.handles.insert(handle.relay_id.clone(), handle.clone());
+        self.retiring_handles.insert(handle.relay_id.clone());
+    }
+
+    async fn cleanup_handle_from_shared_process(
         &mut self,
-        route_key: &str,
-        endpoint: &ForwardProxyEndpoint,
-        egress_socks5_url: Option<&Url>,
-    ) -> Result<Url, ProxyError> {
-        let outbound = build_xray_outbound_for_endpoint(endpoint, egress_socks5_url)?;
-        let local_port = pick_unused_local_port()?;
+        handle: &SharedXrayRelayHandle,
+    ) -> Result<(), ProxyError> {
+        if self.shared.is_some() {
+            let rule_cleanup = self
+                .run_shared_api_command("rmrules", &[], std::slice::from_ref(&handle.rule_tag))
+                .await;
+            let inbound_cleanup = self
+                .run_shared_api_command("rmi", &[], std::slice::from_ref(&handle.inbound_tag))
+                .await;
+            let outbound_cleanup = self
+                .run_shared_api_command("rmo", &[], &handle.outbound_tags)
+                .await;
+            join_cleanup_errors([rule_cleanup, inbound_cleanup, outbound_cleanup])?;
+        }
+        cleanup_paths(&handle.config_paths);
+        Ok(())
+    }
+
+    async fn ensure_shared_process_started(&mut self) -> Result<(), ProxyError> {
+        self.reset_if_shared_process_exited().await;
+        if self.shared.is_some() {
+            return Ok(());
+        }
         let _ = fs::create_dir_all(&self.runtime_dir);
-        let config_path = self.runtime_dir.join(format!(
-            "forward-proxy-{:016x}.json",
-            stable_hash_u64(route_key)
-        ));
-        let config = build_xray_instance_config(local_port, outbound, egress_socks5_url);
-        let serialized = serde_json::to_vec_pretty(&config)
-            .map_err(|err| ProxyError::Other(format!("failed to serialize xray config: {err}")))?;
-        fs::write(&config_path, serialized).map_err(|err| {
-            ProxyError::Other(format!(
-                "failed to write xray config {}: {err}",
-                config_path.display()
-            ))
-        })?;
+        let api_port = pick_unused_local_port()?;
+        let api_server = format!("127.0.0.1:{api_port}");
+        let config_path = self.runtime_dir.join("shared-xray-base.json");
+        let config = json!({
+            "log": { "loglevel": "warning" },
+            "api": {
+                "tag": "api",
+                "listen": api_server.clone(),
+                "services": ["HandlerService", "RoutingService"]
+            },
+            "routing": {
+                "domainStrategy": "AsIs",
+                "rules": []
+            },
+            "outbounds": [{ "tag": "direct", "protocol": "freedom" }]
+        });
+        write_xray_runtime_json(&config_path, &config)?;
 
         let mut child = Command::new(&self.binary)
             .arg("run")
@@ -1511,9 +1944,9 @@ impl XraySupervisor {
                 ))
             })?;
 
-        if let Err(err) = wait_for_xray_proxy_ready(
+        if let Err(err) = wait_for_xray_api_ready(
             &mut child,
-            local_port,
+            api_port,
             Duration::from_millis(XRAY_PROXY_READY_TIMEOUT_MS),
         )
         .await
@@ -1545,53 +1978,108 @@ impl XraySupervisor {
             });
         }
 
-        let local_proxy_url =
-            Url::parse(&format!("socks5h://127.0.0.1:{local_port}")).map_err(|err| {
-                ProxyError::Other(format!("failed to build local xray socks endpoint: {err}"))
-            })?;
-        self.instances.insert(
-            route_key.to_string(),
-            XrayInstance {
-                route_key: route_key.to_string(),
-                local_proxy_url: local_proxy_url.clone(),
-                config_path,
-                child,
-            },
-        );
-        Ok(local_proxy_url)
+        self.shared = Some(SharedXrayProcess {
+            api_server,
+            api_port,
+            config_path,
+            child,
+        });
+        Ok(())
     }
 
-    pub async fn remove_instance(&mut self, key: &str) {
-        self.reap_retiring_instances().await;
-        if let Some(mut instance) = self.instances.remove(key) {
-            let _ = terminate_child_process(&mut instance.child, Duration::from_secs(2)).await;
-            let _ = fs::remove_file(&instance.config_path);
+    async fn shutdown_shared_process_if_idle(&mut self) {
+        if !self.handles.is_empty() {
+            return;
+        }
+        self.shutdown_shared_process().await;
+    }
+
+    async fn shutdown_shared_process(&mut self) {
+        if let Some(mut shared) = self.shared.take() {
+            let _ = terminate_child_process(&mut shared.child, Duration::from_secs(2)).await;
+            let _ = fs::remove_file(&shared.config_path);
         }
     }
 
-    async fn retire_instance(&mut self, key: &str) {
-        self.reap_retiring_instances().await;
-        if let Some(instance) = self.instances.remove(key) {
-            self.retiring_instances.push(RetiringXrayInstance {
-                remove_after: Instant::now() + Duration::from_secs(30),
-                instance,
-            });
+    async fn reset_if_shared_process_exited(&mut self) {
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        let exited = match shared.child.try_wait() {
+            Ok(None) => false,
+            Ok(Some(_)) => true,
+            Err(_) => true,
+        };
+        if !exited {
+            return;
         }
+        let _ = fs::remove_file(&shared.config_path);
+        let runtime_paths = self
+            .handles
+            .values()
+            .flat_map(|handle| handle.config_paths.iter().cloned())
+            .collect::<Vec<_>>();
+        cleanup_paths(&runtime_paths);
+        self.shared = None;
+        self.active_endpoint_handles.clear();
+        self.handles.clear();
+        self.retiring_handles.clear();
+        self.handle_by_url.clear();
     }
 
-    async fn reap_retiring_instances(&mut self) {
-        let now = Instant::now();
-        let mut index = 0usize;
-        while index < self.retiring_instances.len() {
-            if self.retiring_instances[index].remove_after > now {
-                index += 1;
-                continue;
+    async fn run_shared_api_command(
+        &mut self,
+        command: &str,
+        config_paths: &[PathBuf],
+        args: &[String],
+    ) -> Result<(), ProxyError> {
+        self.ensure_shared_process_started().await?;
+        let shared = self.shared.as_ref().ok_or_else(|| {
+            ProxyError::Other("shared xray process missing after startup".to_string())
+        })?;
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("api")
+            .arg(command)
+            .arg(format!("--server={}", shared.api_server))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        for arg in args {
+            if !arg.is_empty() {
+                cmd.arg(arg);
             }
-            let mut retiring = self.retiring_instances.swap_remove(index);
-            let _ =
-                terminate_child_process(&mut retiring.instance.child, Duration::from_secs(2)).await;
-            let _ = fs::remove_file(&retiring.instance.config_path);
         }
+        for config_path in config_paths {
+            cmd.arg(config_path);
+        }
+        let output = cmd.output().await.map_err(|err| {
+            ProxyError::Other(format!(
+                "failed to run xray api {command} via {}: {err}",
+                self.binary
+            ))
+        })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let suffix = if stderr.is_empty() {
+            format!("status {}", output.status)
+        } else {
+            stderr
+        };
+        Err(ProxyError::Other(format!(
+            "xray api {command} failed: {suffix}"
+        )))
+    }
+
+    fn next_relay_id(&mut self, route_key: &str, temporary: bool) -> String {
+        self.handle_nonce = self.handle_nonce.wrapping_add(1);
+        let prefix = if temporary { "temp" } else { "relay" };
+        format!(
+            "{prefix}-{:016x}-{:08x}",
+            stable_hash_u64(route_key),
+            self.handle_nonce,
+        )
     }
 }
 
@@ -3498,9 +3986,9 @@ pub fn failure_kind_from_http_error(err: &reqwest::Error) -> &'static str {
     }
 }
 
-async fn wait_for_xray_proxy_ready(
+async fn wait_for_xray_api_ready(
     child: &mut Child,
-    local_port: u16,
+    api_port: u16,
     ready_timeout: Duration,
 ) -> Result<(), ProxyError> {
     let deadline = Instant::now() + ready_timeout;
@@ -3512,13 +4000,36 @@ async fn wait_for_xray_proxy_ready(
                 "xray process exited before ready: {status}"
             )));
         }
-        let connect_attempt = timeout(
+        if timeout(
+            Duration::from_millis(250),
+            TcpStream::connect(("127.0.0.1", api_port)),
+        )
+        .await
+        .is_ok_and(|connection| connection.is_ok())
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(ProxyError::Other(
+                "xray api endpoint was not ready in time".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_local_port_ready(
+    local_port: u16,
+    ready_timeout: Duration,
+) -> Result<(), ProxyError> {
+    let deadline = Instant::now() + ready_timeout;
+    loop {
+        if timeout(
             Duration::from_millis(250),
             TcpStream::connect(("127.0.0.1", local_port)),
-        );
-        if connect_attempt
-            .await
-            .is_ok_and(|connection| connection.is_ok())
+        )
+        .await
+        .is_ok_and(|connection| connection.is_ok())
         {
             return Ok(());
         }
@@ -3601,36 +4112,41 @@ fn build_xray_route_key(
     }
 }
 
-fn build_xray_instance_config(
-    local_port: u16,
-    outbound: Value,
-    egress_socks5_url: Option<&Url>,
-) -> Value {
-    let mut outbounds = vec![outbound];
-    if let Some(egress_outbound) = build_xray_egress_outbound(egress_socks5_url) {
-        outbounds.push(egress_outbound);
-    }
-    outbounds.push(json!({ "tag": "direct", "protocol": "freedom" }));
-    json!({
-        "log": { "loglevel": "warning" },
-        "inbounds": [{
-            "tag": "inbound-local-socks",
-            "listen": "127.0.0.1",
-            "port": local_port,
-            "protocol": "socks",
-            "settings": { "auth": "noauth", "udp": false }
-        }],
-        "outbounds": outbounds,
-        "routing": {
-            "domainStrategy": "AsIs",
-            "rules": [{ "type": "field", "inboundTag": ["inbound-local-socks"], "outboundTag": "proxy" }]
-        }
+fn write_xray_runtime_json(path: &PathBuf, value: &Value) -> Result<(), ProxyError> {
+    let serialized = serde_json::to_vec_pretty(value)
+        .map_err(|err| ProxyError::Other(format!("failed to serialize xray config: {err}")))?;
+    fs::write(path, serialized).map_err(|err| {
+        ProxyError::Other(format!(
+            "failed to write xray config {}: {err}",
+            path.display()
+        ))
     })
+}
+
+fn cleanup_paths(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn join_cleanup_errors<const N: usize>(
+    results: [Result<(), ProxyError>; N],
+) -> Result<(), ProxyError> {
+    let errors = results
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|err| err.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ProxyError::Other(errors.join("; ")))
+    }
 }
 
 fn build_xray_outbound_for_endpoint(
     endpoint: &ForwardProxyEndpoint,
-    egress_socks5_url: Option<&Url>,
+    egress_tag: Option<&str>,
 ) -> Result<Value, ProxyError> {
     let raw = endpoint.raw_url.as_deref();
     let native_url = endpoint_transport_url(endpoint);
@@ -3670,8 +4186,8 @@ fn build_xray_outbound_for_endpoint(
             ));
         }
     };
-    if egress_socks5_url.is_some() {
-        attach_xray_proxy_settings(&mut outbound, "egress-socks");
+    if let Some(egress_tag) = egress_tag {
+        attach_xray_proxy_settings(&mut outbound, egress_tag);
     }
     Ok(outbound)
 }
@@ -3739,13 +4255,17 @@ fn build_socks_xray_outbound(proxy_url: &Url) -> Result<Value, ProxyError> {
     Ok(outbound)
 }
 
-fn build_xray_egress_outbound(egress_socks5_url: Option<&Url>) -> Option<Value> {
+fn build_xray_egress_outbound(egress_socks5_url: Option<&Url>, tag: Option<&str>) -> Option<Value> {
     let egress_socks5_url = egress_socks5_url?;
     let mut outbound = build_socks_xray_outbound(egress_socks5_url).ok()?;
-    if let Some(object) = outbound.as_object_mut() {
-        object.insert("tag".to_string(), Value::String("egress-socks".to_string()));
-    }
+    set_xray_outbound_tag(&mut outbound, tag.unwrap_or("egress-socks"));
     Some(outbound)
+}
+
+fn set_xray_outbound_tag(outbound: &mut Value, tag: &str) {
+    if let Some(object) = outbound.as_object_mut() {
+        object.insert("tag".to_string(), Value::String(tag.to_string()));
+    }
 }
 
 fn attach_xray_proxy_settings(outbound: &mut Value, tag: &str) {
@@ -4087,6 +4607,9 @@ fn query_flag_true(query: &HashMap<String, String>, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tavily_proxy::{TavilyProxy, TavilyProxyOptions};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn derive_probe_url_uses_public_probe_endpoint() {
@@ -4321,5 +4844,451 @@ rule-providers:
 
         assert!(manager.last_subscription_refresh_at.is_some());
         assert!(!manager.should_refresh_subscriptions());
+    }
+
+    fn temp_runtime_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).expect("create temp runtime dir");
+        dir
+    }
+
+    fn write_fake_xray_binary(prefix: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "{prefix}-fake-xray-{}-{}.py",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let script = r#"#!/usr/bin/env python3
+import json
+import os
+import signal
+import socket
+import sys
+import threading
+import time
+from pathlib import Path
+
+def state_path_for_server(server: str) -> Path:
+    port = server.rsplit(":", 1)[1]
+    return Path(f"/tmp/fake-xray-{port}.json")
+
+def load_json(path: Path):
+    if not path.exists():
+        return {"inbounds": {}, "outbounds": {}, "rules": {}}
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(path: Path, data):
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f)
+    tmp.replace(path)
+
+class DummyListener:
+    def __init__(self, host: str, port: int):
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((host, port))
+        self._sock.listen()
+        self._sock.settimeout(0.2)
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def close(self):
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=1)
+
+def run_mode(config_path: str) -> int:
+    config = load_json(Path(config_path))
+    listen = config["api"]["listen"]
+    host, port = listen.rsplit(":", 1)
+    port = int(port)
+    state_path = state_path_for_server(listen)
+    save_json(state_path, {"inbounds": {}, "outbounds": {}, "rules": {}})
+
+    api_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    api_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    api_sock.bind((host, port))
+    api_sock.listen()
+    api_sock.settimeout(0.2)
+
+    listeners = {}
+    stop = False
+
+    def handle_signal(_signum, _frame):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    try:
+        while not stop:
+            try:
+                conn, _ = api_sock.accept()
+                conn.close()
+            except socket.timeout:
+                pass
+            except OSError:
+                break
+
+            state = load_json(state_path)
+            desired = {
+                tag: int(item["port"])
+                for tag, item in state.get("inbounds", {}).items()
+            }
+            for tag, listener in list(listeners.items()):
+                if tag not in desired:
+                    listener.close()
+                    listeners.pop(tag, None)
+            for tag, inbound_port in desired.items():
+                if tag not in listeners:
+                    listeners[tag] = DummyListener("127.0.0.1", inbound_port)
+            time.sleep(0.05)
+    finally:
+        for listener in listeners.values():
+            listener.close()
+        try:
+            api_sock.close()
+        except OSError:
+            pass
+        try:
+            state_path.unlink()
+        except FileNotFoundError:
+            pass
+    return 0
+
+def collect_json_args(args):
+    return [Path(arg) for arg in args if arg.endswith(".json")]
+
+def parse_server(args):
+    server = "127.0.0.1:8080"
+    positionals = []
+    skip = False
+    for index, arg in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        if arg.startswith("--server="):
+            server = arg.split("=", 1)[1]
+            continue
+        if arg in ("--server", "-s"):
+            server = args[index + 1]
+            skip = True
+            continue
+        if arg in ("--timeout", "-t", "-append"):
+            if arg in ("--timeout", "-t"):
+                skip = True
+            continue
+        positionals.append(arg)
+    return server, positionals
+
+def api_mode(command: str, args) -> int:
+    server, positionals = parse_server(args)
+    state_path = state_path_for_server(server)
+    state = load_json(state_path)
+
+    if command == "adi":
+        for config_path in collect_json_args(positionals):
+            config = load_json(config_path)
+            for inbound in config.get("inbounds", []):
+                state.setdefault("inbounds", {})[inbound["tag"]] = {
+                    "port": inbound["port"]
+                }
+    elif command == "ado":
+        for config_path in collect_json_args(positionals):
+            config = load_json(config_path)
+            for outbound in config.get("outbounds", []):
+                state.setdefault("outbounds", {})[outbound["tag"]] = True
+    elif command == "adrules":
+        for config_path in collect_json_args(positionals):
+            config = load_json(config_path)
+            for rule in config.get("routing", {}).get("rules", []):
+                state.setdefault("rules", {})[rule["ruleTag"]] = rule.get("outboundTag")
+    elif command == "rmi":
+        for tag in positionals:
+            state.setdefault("inbounds", {}).pop(tag, None)
+    elif command == "rmo":
+        for tag in positionals:
+            state.setdefault("outbounds", {}).pop(tag, None)
+    elif command == "rmrules":
+        for tag in positionals:
+            state.setdefault("rules", {}).pop(tag, None)
+
+    save_json(state_path, state)
+    return 0
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        return 1
+    if argv[0] == "run":
+        config_path = argv[argv.index("-c") + 1]
+        return run_mode(config_path)
+    if argv[0] == "api":
+        return api_mode(argv[1], argv[2:])
+    return 1
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"#;
+        fs::write(&path, script).expect("write fake xray script");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&path)
+                .expect("fake xray metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake xray");
+        }
+        path.to_string_lossy().to_string()
+    }
+
+    fn sample_vless_share_link(host: &str, label: &str) -> String {
+        format!(
+            "vless://0688fa59-e971-4278-8c03-4b35821a71dc@{host}:443?encryption=none#{}",
+            urlencoding::encode(label)
+        )
+    }
+
+    fn subscription_vless_endpoint(key: &str, host: &str, label: &str) -> ForwardProxyEndpoint {
+        ForwardProxyEndpoint::new_subscription(
+            key.to_string(),
+            label.to_string(),
+            ForwardProxyProtocol::Vless,
+            None,
+            Some(sample_vless_share_link(host, label)),
+            "https://subscription.example.com/feed".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn xray_supervisor_reuses_single_shared_process_and_hot_swaps_changed_handles() {
+        let runtime_dir = temp_runtime_dir("shared-xray-hot-swap");
+        let mut supervisor =
+            XraySupervisor::new(write_fake_xray_binary("shared-xray-hot-swap"), runtime_dir);
+
+        let mut initial = vec![
+            subscription_vless_endpoint("node-a", "a.example.com", "Alpha"),
+            subscription_vless_endpoint("node-b", "b.example.com", "Bravo"),
+        ];
+        supervisor
+            .sync_endpoints(&mut initial, None)
+            .await
+            .expect("initial sync");
+        let first_snapshot = supervisor.debug_snapshot().await;
+        let first_pid = first_snapshot
+            .shared_pid
+            .expect("shared pid after first sync");
+        let initial_alpha_url = initial[0]
+            .endpoint_url
+            .clone()
+            .expect("alpha endpoint url after first sync");
+        let initial_bravo_url = initial[1]
+            .endpoint_url
+            .clone()
+            .expect("bravo endpoint url after first sync");
+        assert_eq!(first_snapshot.active_endpoint_handles, 2);
+        assert_eq!(first_snapshot.total_handles, 2);
+        assert_eq!(first_snapshot.retiring_handles, 0);
+
+        let mut updated = vec![
+            subscription_vless_endpoint("node-a", "a.example.com", "Alpha"),
+            subscription_vless_endpoint("node-b", "c.example.com", "Charlie"),
+        ];
+        supervisor
+            .sync_endpoints(&mut updated, None)
+            .await
+            .expect("updated sync");
+        let second_snapshot = supervisor.debug_snapshot().await;
+        assert_eq!(second_snapshot.shared_pid, Some(first_pid));
+        assert_eq!(second_snapshot.active_endpoint_handles, 2);
+        assert_eq!(second_snapshot.total_handles, 2);
+        assert_eq!(second_snapshot.retiring_handles, 0);
+        assert_eq!(updated[0].endpoint_url.as_ref(), Some(&initial_alpha_url));
+        assert_ne!(updated[1].endpoint_url.as_ref(), Some(&initial_bravo_url));
+
+        supervisor.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn xray_supervisor_drains_retired_handles_until_last_lease_releases() {
+        let runtime_dir = temp_runtime_dir("shared-xray-drain");
+        let mut supervisor =
+            XraySupervisor::new(write_fake_xray_binary("shared-xray-drain"), runtime_dir);
+
+        let mut initial = vec![subscription_vless_endpoint(
+            "node-a",
+            "a.example.com",
+            "Alpha",
+        )];
+        supervisor
+            .sync_endpoints(&mut initial, None)
+            .await
+            .expect("initial sync");
+        let old_url = initial[0]
+            .endpoint_url
+            .clone()
+            .expect("old endpoint url after sync");
+        let lease_id = supervisor
+            .acquire_relay_lease_by_url(Some(&old_url))
+            .expect("old relay lease id");
+
+        let mut changed = vec![subscription_vless_endpoint(
+            "node-a",
+            "changed.example.com",
+            "Alpha New",
+        )];
+        supervisor
+            .sync_endpoints(&mut changed, None)
+            .await
+            .expect("changed sync");
+        let draining_snapshot = supervisor.debug_snapshot().await;
+        assert_eq!(draining_snapshot.active_endpoint_handles, 1);
+        assert_eq!(draining_snapshot.total_handles, 2);
+        assert_eq!(draining_snapshot.retiring_handles, 1);
+        assert_ne!(changed[0].endpoint_url.as_ref(), Some(&old_url));
+
+        supervisor.release_relay_lease(&lease_id).await;
+        let settled_snapshot = supervisor.debug_snapshot().await;
+        assert_eq!(settled_snapshot.active_endpoint_handles, 1);
+        assert_eq!(settled_snapshot.total_handles, 1);
+        assert_eq!(settled_snapshot.retiring_handles, 0);
+
+        supervisor.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn xray_supervisor_validation_handles_cleanup_idle_shared_process() {
+        let runtime_dir = temp_runtime_dir("shared-xray-validate-temp");
+        let mut supervisor = XraySupervisor::new(
+            write_fake_xray_binary("shared-xray-validate-temp"),
+            runtime_dir,
+        );
+        let endpoint = subscription_vless_endpoint("validate-node", "validate.example.com", "Temp");
+
+        let (resolved, lease_id) = supervisor
+            .resolve_validation_endpoint(&endpoint, None)
+            .await
+            .expect("resolve validation endpoint");
+        let lease_id = lease_id.expect("temporary validation lease id");
+        assert!(resolved.uses_local_relay);
+        assert!(resolved.endpoint_url.is_some());
+
+        let active_snapshot = supervisor.debug_snapshot().await;
+        assert!(active_snapshot.shared_pid.is_some());
+        assert_eq!(active_snapshot.active_endpoint_handles, 0);
+        assert_eq!(active_snapshot.total_handles, 1);
+        assert_eq!(active_snapshot.retiring_handles, 1);
+
+        supervisor.release_relay_lease(&lease_id).await;
+        let cleaned_snapshot = supervisor.debug_snapshot().await;
+        assert_eq!(cleaned_snapshot.shared_pid, None);
+        assert_eq!(cleaned_snapshot.active_endpoint_handles, 0);
+        assert_eq!(cleaned_snapshot.total_handles, 0);
+        assert_eq!(cleaned_snapshot.retiring_handles, 0);
+        assert!(
+            cleaned_snapshot.runtime_files.is_empty(),
+            "temporary validation should not leave runtime files behind: {:?}",
+            cleaned_snapshot.runtime_files
+        );
+    }
+
+    #[tokio::test]
+    async fn tavily_proxy_save_and_revalidate_keep_shared_xray_pid() {
+        let root_dir = temp_runtime_dir("proxy-shared-xray-flow");
+        let db_path = root_dir.join("proxy.db");
+        let runtime_dir = root_dir.join("xray-runtime");
+        let proxy = TavilyProxy::with_options(
+            Vec::<String>::new(),
+            "http://127.0.0.1:9/mcp",
+            db_path
+                .to_str()
+                .expect("database path should be valid utf-8"),
+            TavilyProxyOptions {
+                xray_binary: write_fake_xray_binary("proxy-shared-xray-flow"),
+                xray_runtime_dir: runtime_dir,
+                forward_proxy_trace_url: Url::parse("http://127.0.0.1/cdn-cgi/trace")
+                    .expect("valid trace url"),
+            },
+        )
+        .await
+        .expect("create proxy with fake xray");
+
+        let first_settings = proxy
+            .update_forward_proxy_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![sample_vless_share_link("save-a.example.com", "Save A")],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
+                },
+                true,
+            )
+            .await
+            .expect("save initial settings");
+        let first_endpoint_url = first_settings.nodes[0]
+            .endpoint_url
+            .clone()
+            .expect("saved node endpoint url");
+        let first_snapshot = proxy.xray_supervisor.lock().await.debug_snapshot().await;
+        let first_pid = first_snapshot.shared_pid.expect("shared pid after save");
+
+        proxy
+            .revalidate_forward_proxy_with_progress(None)
+            .await
+            .expect("revalidate forward proxy settings");
+        let second_snapshot = proxy.xray_supervisor.lock().await.debug_snapshot().await;
+        assert_eq!(second_snapshot.shared_pid, Some(first_pid));
+        assert_eq!(second_snapshot.active_endpoint_handles, 1);
+
+        let second_settings = proxy
+            .update_forward_proxy_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![sample_vless_share_link("save-b.example.com", "Save B")],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
+                },
+                true,
+            )
+            .await
+            .expect("save updated settings");
+        let second_snapshot = proxy.xray_supervisor.lock().await.debug_snapshot().await;
+        assert_eq!(second_snapshot.shared_pid, Some(first_pid));
+        assert_eq!(second_snapshot.active_endpoint_handles, 1);
+        assert_eq!(second_snapshot.total_handles, 1);
+        assert_ne!(
+            second_settings.nodes[0].endpoint_url.as_deref(),
+            Some(first_endpoint_url.as_str())
+        );
+
+        proxy.xray_supervisor.lock().await.shutdown_all().await;
     }
 }
