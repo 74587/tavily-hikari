@@ -2053,10 +2053,12 @@ impl XraySupervisor {
             .retain(|_, active_relay_id| active_relay_id != relay_id);
         self.handle_by_url.remove(handle.local_proxy_url.as_str());
         self.retiring_handles.insert(relay_id.to_string());
-        if let Err(_) = self.cleanup_handle_from_shared_process(&handle).await
-            && let Some(tracked) = self.handles.get(relay_id)
-        {
-            tracked.drop_runtime_files();
+        match self.cleanup_handle_from_shared_process(&handle).await {
+            Ok(()) => {}
+            Err(_) => {
+                self.track_handle_for_retry(handle);
+                return;
+            }
         }
         self.retiring_handles.remove(relay_id);
         self.handles.remove(relay_id);
@@ -2073,18 +2075,21 @@ impl XraySupervisor {
         &mut self,
         handle: &SharedXrayRelayHandle,
     ) -> Result<(), ProxyError> {
-        if self.shared.is_some() {
-            let rule_cleanup = self
-                .run_shared_api_command("rmrules", &[], std::slice::from_ref(&handle.rule_tag))
-                .await;
-            let inbound_cleanup = self
-                .run_shared_api_command("rmi", &[], std::slice::from_ref(&handle.inbound_tag))
-                .await;
-            let outbound_cleanup = self
-                .run_shared_api_command("rmo", &[], &handle.outbound_tags)
-                .await;
-            join_cleanup_errors([rule_cleanup, inbound_cleanup, outbound_cleanup])?;
+        self.reset_if_shared_process_exited();
+        if self.shared.is_none() {
+            cleanup_paths(&handle.config_paths);
+            return Ok(());
         }
+        let rule_cleanup = self
+            .run_shared_api_command("rmrules", &[], std::slice::from_ref(&handle.rule_tag))
+            .await;
+        let inbound_cleanup = self
+            .run_shared_api_command("rmi", &[], std::slice::from_ref(&handle.inbound_tag))
+            .await;
+        let outbound_cleanup = self
+            .run_shared_api_command("rmo", &[], &handle.outbound_tags)
+            .await;
+        join_cleanup_errors([rule_cleanup, inbound_cleanup, outbound_cleanup])?;
         cleanup_paths(&handle.config_paths);
         Ok(())
     }
@@ -5918,11 +5923,11 @@ if __name__ == "__main__":
     }
 
     #[tokio::test]
-    async fn shared_xray_cleanup_failure_removes_retired_handle_locally() {
-        let runtime_dir = temp_runtime_dir("shared-xray-cleanup-removes-retired");
+    async fn shared_xray_cleanup_failure_keeps_retired_handle_retriable() {
+        let runtime_dir = temp_runtime_dir("shared-xray-cleanup-retriable");
         let mut supervisor = XraySupervisor::new(
             write_fake_xray_binary_with_api_failure(
-                "shared-xray-cleanup-removes-retired",
+                "shared-xray-cleanup-retriable",
                 Some("rmrules"),
             ),
             runtime_dir,
@@ -5937,6 +5942,10 @@ if __name__ == "__main__":
             .sync_endpoints(&mut initial, None)
             .await
             .expect("initial sync");
+        let retired_url = initial[0]
+            .endpoint_url
+            .clone()
+            .expect("endpoint url after initial sync");
 
         let mut changed = vec![subscription_vless_endpoint(
             "node-a",
@@ -5950,8 +5959,78 @@ if __name__ == "__main__":
 
         let snapshot = supervisor.debug_snapshot().await;
         assert_eq!(snapshot.active_endpoint_handles, 1);
-        assert_eq!(snapshot.total_handles, 1);
-        assert_eq!(snapshot.retiring_handles, 0);
+        assert_eq!(snapshot.total_handles, 2);
+        assert_eq!(snapshot.retiring_handles, 1);
+        assert_eq!(
+            supervisor
+                .acquire_relay_lease_by_url(Some(&retired_url))
+                .await,
+            None,
+            "failed cleanup should retire the stale relay without exposing it to new selections"
+        );
+
+        supervisor.binary = write_fake_xray_binary("shared-xray-cleanup-retriable-recovered");
+        supervisor.reap_retired_handles_now().await;
+        let recovered_snapshot = supervisor.debug_snapshot().await;
+        assert_eq!(recovered_snapshot.active_endpoint_handles, 1);
+        assert_eq!(recovered_snapshot.total_handles, 1);
+        assert_eq!(recovered_snapshot.retiring_handles, 0);
+    }
+
+    #[tokio::test]
+    async fn retired_handle_cleanup_does_not_restart_shared_process_after_crash() {
+        let runtime_dir = temp_runtime_dir("shared-xray-cleanup-no-restart");
+        let mut supervisor = XraySupervisor::new(
+            write_fake_xray_binary("shared-xray-cleanup-no-restart"),
+            runtime_dir,
+        );
+
+        let mut initial = vec![subscription_vless_endpoint(
+            "node-a",
+            "a.example.com",
+            "Alpha",
+        )];
+        supervisor
+            .sync_endpoints(&mut initial, None)
+            .await
+            .expect("initial sync");
+        let old_url = initial[0]
+            .endpoint_url
+            .clone()
+            .expect("old endpoint url after initial sync");
+        let lease_id = supervisor
+            .acquire_relay_lease_by_url(Some(&old_url))
+            .await
+            .expect("lease old relay before retirement");
+
+        let mut changed = vec![subscription_vless_endpoint(
+            "node-a",
+            "changed.example.com",
+            "Alpha New",
+        )];
+        supervisor
+            .sync_endpoints(&mut changed, None)
+            .await
+            .expect("changed sync");
+        let pre_crash_snapshot = supervisor.debug_snapshot().await;
+        assert!(pre_crash_snapshot.shared_pid.is_some());
+        assert_eq!(pre_crash_snapshot.total_handles, 2);
+        assert_eq!(pre_crash_snapshot.retiring_handles, 1);
+
+        let shared = supervisor
+            .shared
+            .as_mut()
+            .expect("shared process before crash cleanup");
+        terminate_child_process(&mut shared.child, Duration::from_secs(2))
+            .await
+            .expect("terminate fake shared xray");
+
+        supervisor.release_relay_lease(&lease_id).await;
+        let post_crash_snapshot = supervisor.debug_snapshot().await;
+        assert_eq!(post_crash_snapshot.shared_pid, None);
+        assert_eq!(post_crash_snapshot.active_endpoint_handles, 0);
+        assert_eq!(post_crash_snapshot.total_handles, 0);
+        assert_eq!(post_crash_snapshot.retiring_handles, 0);
     }
 
     #[tokio::test]
