@@ -604,15 +604,149 @@ fn mcp_response_requires_reconnect(status: StatusCode, body: &[u8]) -> bool {
 const REBALANCE_MCP_PROTOCOL_VERSION_DEFAULT: &str = "2025-03-26";
 const REBALANCE_MCP_SERVER_NAME: &str = "tavily-hikari-rebalance-mcp";
 
-fn normalize_rebalance_tavily_tool_name(tool: &str) -> Option<&'static str> {
-    match tool.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-        "tavily-search" => Some("search"),
-        "tavily-extract" => Some("extract"),
-        "tavily-crawl" => Some("crawl"),
-        "tavily-map" => Some("map"),
-        "tavily-research" => Some("research"),
-        _ => None,
+#[derive(Clone, Copy)]
+enum RebalanceMcpRequiredFieldType {
+    String,
+    StringOrStringArray,
+}
+
+#[derive(Clone, Copy)]
+struct RebalanceMcpToolDefinition {
+    advertised_name: &'static str,
+    hyphen_name: &'static str,
+    upstream_tool: &'static str,
+    description: &'static str,
+    required_field: &'static str,
+    required_field_type: RebalanceMcpRequiredFieldType,
+}
+
+const REBALANCE_MCP_TOOL_DEFINITIONS: [RebalanceMcpToolDefinition; 5] = [
+    RebalanceMcpToolDefinition {
+        advertised_name: "tavily_search",
+        hyphen_name: "tavily-search",
+        upstream_tool: "search",
+        description: "Search the web with Tavily",
+        required_field: "query",
+        required_field_type: RebalanceMcpRequiredFieldType::String,
+    },
+    RebalanceMcpToolDefinition {
+        advertised_name: "tavily_extract",
+        hyphen_name: "tavily-extract",
+        upstream_tool: "extract",
+        description: "Extract page content with Tavily",
+        required_field: "urls",
+        required_field_type: RebalanceMcpRequiredFieldType::StringOrStringArray,
+    },
+    RebalanceMcpToolDefinition {
+        advertised_name: "tavily_crawl",
+        hyphen_name: "tavily-crawl",
+        upstream_tool: "crawl",
+        description: "Crawl a site with Tavily",
+        required_field: "url",
+        required_field_type: RebalanceMcpRequiredFieldType::String,
+    },
+    RebalanceMcpToolDefinition {
+        advertised_name: "tavily_map",
+        hyphen_name: "tavily-map",
+        upstream_tool: "map",
+        description: "Map a site with Tavily",
+        required_field: "url",
+        required_field_type: RebalanceMcpRequiredFieldType::String,
+    },
+    RebalanceMcpToolDefinition {
+        advertised_name: "tavily_research",
+        hyphen_name: "tavily-research",
+        upstream_tool: "research",
+        description: "Run Tavily research",
+        required_field: "input",
+        required_field_type: RebalanceMcpRequiredFieldType::String,
+    },
+];
+
+fn rebalance_mcp_tool_definition_by_name(tool: &str) -> Option<&'static RebalanceMcpToolDefinition> {
+    let normalized = tool.trim().to_ascii_lowercase().replace('_', "-");
+    REBALANCE_MCP_TOOL_DEFINITIONS
+        .iter()
+        .find(|definition| definition.hyphen_name == normalized)
+}
+
+fn rebalance_mcp_required_field_schema(kind: RebalanceMcpRequiredFieldType) -> Value {
+    match kind {
+        RebalanceMcpRequiredFieldType::String => json!({ "type": "string" }),
+        RebalanceMcpRequiredFieldType::StringOrStringArray => json!({
+            "oneOf": [
+                { "type": "string" },
+                {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            ]
+        }),
     }
+}
+
+fn rebalance_mcp_tool_input_schema(tool: &RebalanceMcpToolDefinition) -> Value {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        tool.required_field.to_string(),
+        rebalance_mcp_required_field_schema(tool.required_field_type),
+    );
+    Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), Value::String("object".to_string())),
+        ("properties".to_string(), Value::Object(properties)),
+        (
+            "required".to_string(),
+            Value::Array(vec![Value::String(tool.required_field.to_string())]),
+        ),
+        ("additionalProperties".to_string(), Value::Bool(true)),
+    ]))
+}
+
+fn rebalance_mcp_argument_matches_type(value: &Value, kind: RebalanceMcpRequiredFieldType) -> bool {
+    match kind {
+        RebalanceMcpRequiredFieldType::String => value.is_string(),
+        RebalanceMcpRequiredFieldType::StringOrStringArray => {
+            value.is_string()
+                || value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(Value::is_string))
+        }
+    }
+}
+
+fn validate_rebalance_mcp_tool_arguments(
+    tool: &RebalanceMcpToolDefinition,
+    arguments: Option<&Value>,
+) -> Result<Value, String> {
+    let Some(arguments) = arguments else {
+        return Err(format!(
+            "Invalid arguments for {}: expected object with required '{}' field",
+            tool.advertised_name, tool.required_field
+        ));
+    };
+    let Value::Object(_) = arguments else {
+        return Err(format!(
+            "Invalid arguments for {}: expected object with required '{}' field",
+            tool.advertised_name, tool.required_field
+        ));
+    };
+    let Some(required_value) = arguments.get(tool.required_field) else {
+        return Err(format!(
+            "Invalid arguments for {}: missing required '{}' field",
+            tool.advertised_name, tool.required_field
+        ));
+    };
+    if !rebalance_mcp_argument_matches_type(required_value, tool.required_field_type) {
+        return Err(format!(
+            "Invalid arguments for {}: '{}' must match the advertised input schema",
+            tool.advertised_name, tool.required_field
+        ));
+    }
+    Ok(arguments.clone())
+}
+
+fn rebalance_mcp_tool_usage_metered(tool: &RebalanceMcpToolDefinition) -> bool {
+    matches!(tool.upstream_tool, "search" | "extract" | "crawl" | "map")
 }
 
 fn stable_rebalance_bucket(proxy_session_id: &str) -> i64 {
@@ -786,33 +920,16 @@ fn build_rebalance_mcp_initialize_body(
 }
 
 fn rebalance_mcp_tools_descriptor() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "tavily_search",
-            "description": "Search the web with Tavily",
-            "inputSchema": { "type": "object", "additionalProperties": true }
-        }),
-        json!({
-            "name": "tavily_extract",
-            "description": "Extract page content with Tavily",
-            "inputSchema": { "type": "object", "additionalProperties": true }
-        }),
-        json!({
-            "name": "tavily_crawl",
-            "description": "Crawl a site with Tavily",
-            "inputSchema": { "type": "object", "additionalProperties": true }
-        }),
-        json!({
-            "name": "tavily_map",
-            "description": "Map a site with Tavily",
-            "inputSchema": { "type": "object", "additionalProperties": true }
-        }),
-        json!({
-            "name": "tavily_research",
-            "description": "Run Tavily research",
-            "inputSchema": { "type": "object", "additionalProperties": true }
-        }),
-    ]
+    REBALANCE_MCP_TOOL_DEFINITIONS
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.advertised_name,
+                "description": tool.description,
+                "inputSchema": rebalance_mcp_tool_input_schema(tool),
+            })
+        })
+        .collect()
 }
 
 fn build_rebalance_mcp_tools_list_body(response_id: Option<&Value>) -> Vec<u8> {
@@ -1167,7 +1284,7 @@ async fn handle_rebalance_mcp_single_message(
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let Some(tool) = normalize_rebalance_tavily_tool_name(tool_name) else {
+            let Some(tool) = rebalance_mcp_tool_definition_by_name(tool_name) else {
                 let body = build_rebalance_mcp_error_body(response_id, -32601, "Unknown tool");
                 let request_log_id = log_rebalance_local_control_plane_response(
                     state,
@@ -1188,8 +1305,31 @@ async fn handle_rebalance_mcp_single_message(
                     request_log_id,
                 ));
             };
-            let options = params.get("arguments").cloned().unwrap_or(Value::Null);
-            match tool {
+            let options = match validate_rebalance_mcp_tool_arguments(tool, params.get("arguments")) {
+                Ok(arguments) => arguments,
+                Err(message) => {
+                    let body = build_rebalance_mcp_error_body(response_id, -32602, &message);
+                    let request_log_id = log_rebalance_local_control_plane_response(
+                        state,
+                        token_id,
+                        method,
+                        path,
+                        message_body,
+                        StatusCode::BAD_REQUEST,
+                        &body,
+                        proxy_session_id,
+                        routing_subject_hash,
+                        Some("invalid_tool_arguments"),
+                    )
+                    .await;
+                    return Ok(proxy_response_with_json_body(
+                        StatusCode::BAD_REQUEST,
+                        body,
+                        request_log_id,
+                    ));
+                }
+            };
+            match tool.upstream_tool {
                 "search" => state
                     .proxy
                     .proxy_rebalance_mcp_http_json_endpoint(
@@ -1909,6 +2049,39 @@ async fn proxy_handler(
         }
         active_mcp_session = Some(session);
     }
+    let mut planned_initialize_proxy_session_id: Option<String> = None;
+    let mut planned_initialize_ab_bucket: Option<i64> = None;
+    let mut planned_initialize_gateway_mode = active_mcp_gateway_mode.clone();
+    let mut planned_initialize_experiment_variant = active_mcp_experiment_variant.clone();
+    if is_mcp_initialize && incoming_proxy_session_id.is_none() {
+        let settings = state
+            .proxy
+            .get_system_settings()
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let proxy_session_id = nanoid::nanoid!(24);
+        let ab_bucket = stable_rebalance_bucket(&proxy_session_id);
+        let use_rebalance = settings.rebalance_mcp_enabled
+            && settings.rebalance_mcp_session_percent > 0
+            && ab_bucket < settings.rebalance_mcp_session_percent;
+        planned_initialize_proxy_session_id = Some(proxy_session_id);
+        planned_initialize_ab_bucket = Some(ab_bucket);
+        planned_initialize_gateway_mode = if use_rebalance {
+            tavily_hikari::MCP_GATEWAY_MODE_REBALANCE.to_string()
+        } else {
+            tavily_hikari::MCP_GATEWAY_MODE_UPSTREAM.to_string()
+        };
+        planned_initialize_experiment_variant = if use_rebalance {
+            tavily_hikari::MCP_EXPERIMENT_VARIANT_REBALANCE.to_string()
+        } else {
+            tavily_hikari::MCP_EXPERIMENT_VARIANT_CONTROL.to_string()
+        };
+    }
+    let rebalance_mcp_facade_active = is_mcp_request
+        && (active_mcp_gateway_mode == tavily_hikari::MCP_GATEWAY_MODE_REBALANCE
+            || (incoming_proxy_session_id.is_none()
+                && is_mcp_initialize
+                && planned_initialize_gateway_mode == tavily_hikari::MCP_GATEWAY_MODE_REBALANCE));
     let request_kind = classify_token_request_kind(&path, Some(body_bytes.as_ref()));
 
     // Billing plan (1:1 upstream credits):
@@ -1952,19 +2125,19 @@ async fn proxy_handler(
                     };
 
                     let handle_tool_call = |map: &mut serde_json::Map<String, Value>,
-                                        any_billable: &mut bool,
-                                        any_lockable: &mut bool,
-                                        all_non_billable: &mut bool,
-                                        reserved_billable_total: &mut i64,
-                                        expected_search_total: &mut i64,
-                                        billable_mcp_ids: &mut HashSet<String>,
-                                        billable_search_mcp_ids: &mut HashSet<String>,
-                                        has_billable_mcp_without_id: &mut bool,
-                                        has_search_mcp_without_id: &mut bool,
-                                        missing_usage_fallback_credits_by_id: &mut HashMap<String, i64>,
-                                        missing_usage_fallback_credits_without_id_total: &mut i64,
-                                        expected_search_credits_by_id: &mut HashMap<String, i64>,
-                                        expected_search_credits_without_id_total: &mut i64| {
+                                            any_billable: &mut bool,
+                                            any_lockable: &mut bool,
+                                            all_non_billable: &mut bool,
+                                            reserved_billable_total: &mut i64,
+                                            expected_search_total: &mut i64,
+                                            billable_mcp_ids: &mut HashSet<String>,
+                                            billable_search_mcp_ids: &mut HashSet<String>,
+                                            has_billable_mcp_without_id: &mut bool,
+                                            has_search_mcp_without_id: &mut bool,
+                                            missing_usage_fallback_credits_by_id: &mut HashMap<String, i64>,
+                                            missing_usage_fallback_credits_without_id_total: &mut i64,
+                                            expected_search_credits_by_id: &mut HashMap<String, i64>,
+                                            expected_search_credits_without_id_total: &mut i64| {
                     // tools/call is treated as billable by default unless we can prove it's
                     // a non-Tavily tool call (name does not start with `tavily-`).
                     *any_lockable = true;
@@ -1982,20 +2155,53 @@ async fn proxy_handler(
                             .trim()
                             .to_string();
 
-                        let normalized_tool = tool.to_ascii_lowercase().replace('_', "-");
-                        let usage_metered_tool = matches!(
-                            normalized_tool.as_str(),
-                            "tavily-search" | "tavily-extract" | "tavily-crawl" | "tavily-map"
-                        );
-                        let reserved_billable_tool = matches!(
-                            normalized_tool.as_str(),
-                            "tavily-search"
-                                | "tavily-extract"
-                                | "tavily-crawl"
-                                | "tavily-map"
-                                | "tavily-research"
-                        );
-                        let is_tavily_tool = normalized_tool.starts_with("tavily-");
+                        let rebalance_tool_definition = rebalance_mcp_facade_active
+                            .then(|| rebalance_mcp_tool_definition_by_name(&tool))
+                            .flatten();
+                        let (normalized_tool, usage_metered_tool, reserved_billable_tool, is_tavily_tool) =
+                            if let Some(rebalance_tool) = rebalance_tool_definition {
+                                if validate_rebalance_mcp_tool_arguments(
+                                    rebalance_tool,
+                                    params.get("arguments"),
+                                )
+                                .is_err()
+                                {
+                                    return;
+                                }
+                                (
+                                    rebalance_tool.hyphen_name.to_string(),
+                                    rebalance_mcp_tool_usage_metered(rebalance_tool),
+                                    true,
+                                    true,
+                                )
+                            } else {
+                                if rebalance_mcp_facade_active {
+                                    return;
+                                }
+                                let normalized_tool = tool.to_ascii_lowercase().replace('_', "-");
+                                let usage_metered_tool = matches!(
+                                    normalized_tool.as_str(),
+                                    "tavily-search"
+                                        | "tavily-extract"
+                                        | "tavily-crawl"
+                                        | "tavily-map"
+                                );
+                                let reserved_billable_tool = matches!(
+                                    normalized_tool.as_str(),
+                                    "tavily-search"
+                                        | "tavily-extract"
+                                        | "tavily-crawl"
+                                        | "tavily-map"
+                                        | "tavily-research"
+                                );
+                                let is_tavily_tool = normalized_tool.starts_with("tavily-");
+                                (
+                                    normalized_tool,
+                                    usage_metered_tool,
+                                    reserved_billable_tool,
+                                    is_tavily_tool,
+                                )
+                            };
 
                         if reserved_billable_tool || is_tavily_tool {
                             *any_billable = true;
@@ -2389,35 +2595,6 @@ async fn proxy_handler(
             eprintln!("mcp session request lock lost before upstream send: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    }
-
-    let mut planned_initialize_proxy_session_id: Option<String> = None;
-    let mut planned_initialize_ab_bucket: Option<i64> = None;
-    let mut planned_initialize_gateway_mode = active_mcp_gateway_mode.clone();
-    let mut planned_initialize_experiment_variant = active_mcp_experiment_variant.clone();
-    if is_mcp_initialize && incoming_proxy_session_id.is_none() {
-        let settings = state
-            .proxy
-            .get_system_settings()
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let proxy_session_id = nanoid::nanoid!(24);
-        let ab_bucket = stable_rebalance_bucket(&proxy_session_id);
-        let use_rebalance = settings.rebalance_mcp_enabled
-            && settings.rebalance_mcp_session_percent > 0
-            && ab_bucket < settings.rebalance_mcp_session_percent;
-        planned_initialize_proxy_session_id = Some(proxy_session_id);
-        planned_initialize_ab_bucket = Some(ab_bucket);
-        planned_initialize_gateway_mode = if use_rebalance {
-            tavily_hikari::MCP_GATEWAY_MODE_REBALANCE.to_string()
-        } else {
-            tavily_hikari::MCP_GATEWAY_MODE_UPSTREAM.to_string()
-        };
-        planned_initialize_experiment_variant = if use_rebalance {
-            tavily_hikari::MCP_EXPERIMENT_VARIANT_REBALANCE.to_string()
-        } else {
-            tavily_hikari::MCP_EXPERIMENT_VARIANT_CONTROL.to_string()
-        };
     }
 
     let control_gateway_mode = (is_mcp_request

@@ -25543,6 +25543,94 @@ colo=LAX
             Some(5),
             "rebalance tools/list should be served locally with five Tavily tools"
         );
+        let tools = body["result"]["tools"]
+            .as_array()
+            .expect("rebalance tools/list should include a tools array");
+        let tool_by_name = tools
+            .iter()
+            .filter_map(|tool| {
+                let name = tool.get("name").and_then(Value::as_str)?;
+                Some((name, tool))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            tool_by_name
+                .get("tavily_search")
+                .and_then(|tool| tool.get("inputSchema")),
+            Some(&json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"],
+                "additionalProperties": true
+            })),
+            "rebalance search schema should advertise required query"
+        );
+        assert_eq!(
+            tool_by_name
+                .get("tavily_extract")
+                .and_then(|tool| tool.get("inputSchema")),
+            Some(&json!({
+                "type": "object",
+                "properties": {
+                    "urls": {
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        ]
+                    }
+                },
+                "required": ["urls"],
+                "additionalProperties": true
+            })),
+            "rebalance extract schema should advertise required urls"
+        );
+        assert_eq!(
+            tool_by_name
+                .get("tavily_crawl")
+                .and_then(|tool| tool.get("inputSchema")),
+            Some(&json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" }
+                },
+                "required": ["url"],
+                "additionalProperties": true
+            })),
+            "rebalance crawl schema should advertise required url"
+        );
+        assert_eq!(
+            tool_by_name
+                .get("tavily_map")
+                .and_then(|tool| tool.get("inputSchema")),
+            Some(&json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" }
+                },
+                "required": ["url"],
+                "additionalProperties": true
+            })),
+            "rebalance map schema should advertise required url"
+        );
+        assert_eq!(
+            tool_by_name
+                .get("tavily_research")
+                .and_then(|tool| tool.get("inputSchema")),
+            Some(&json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string" }
+                },
+                "required": ["input"],
+                "additionalProperties": true
+            })),
+            "rebalance research schema should advertise required input"
+        );
 
         let recorded = seen
             .lock()
@@ -25908,6 +25996,574 @@ colo=LAX
                 .try_get::<String, _>("upstream_operation")
                 .unwrap(),
             "http_search"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn mcp_rebalance_tools_call_rejects_invalid_arguments_locally() {
+        let db_path = temp_db_path("mcp-rebalance-invalid-tool-arguments");
+        let db_str = db_path.to_string_lossy().to_string();
+        let expected_api_key = "tvly-rebalance-invalid-tool-arguments";
+        let seen: RecordedRebalanceGatewayCalls = Arc::new(Mutex::new(Vec::new()));
+        let upstream_addr =
+            spawn_rebalance_gateway_mock(expected_api_key.to_string(), seen.clone()).await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+        proxy
+            .set_system_settings(&tavily_hikari::SystemSettings {
+                mcp_session_affinity_key_count: 5,
+                rebalance_mcp_enabled: true,
+                rebalance_mcp_session_percent: 100,
+            })
+            .await
+            .expect("enable rebalance mcp");
+        let access_token = proxy
+            .create_access_token(Some("mcp-rebalance-invalid-tool-arguments"))
+            .await
+            .expect("create access token");
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+        let url = format!(
+            "http://{}/mcp?tavilyApiKey={}",
+            proxy_addr, access_token.token
+        );
+        let client = Client::new();
+
+        let initialize = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": "rebalance-invalid-args-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {}
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize request");
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let proxy_session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("initialize response should expose mcp-session-id")
+            .to_string();
+
+        let invalid_cases = vec![
+            (
+                "missing-arguments",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "missing-arguments",
+                    "method": "tools/call",
+                    "params": { "name": "tavily_search" }
+                }),
+                "tavily_search",
+            ),
+            (
+                "non-object-arguments",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "non-object-arguments",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_search",
+                        "arguments": "raw-search-args"
+                    }
+                }),
+                "tavily_search",
+            ),
+            (
+                "missing-query",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "missing-query",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_search",
+                        "arguments": {}
+                    }
+                }),
+                "tavily_search",
+            ),
+            (
+                "bad-query-type",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "bad-query-type",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_search",
+                        "arguments": { "query": 42 }
+                    }
+                }),
+                "tavily_search",
+            ),
+            (
+                "missing-urls",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "missing-urls",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_extract",
+                        "arguments": {}
+                    }
+                }),
+                "tavily_extract",
+            ),
+            (
+                "bad-urls-type",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "bad-urls-type",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_extract",
+                        "arguments": { "urls": [1, "https://example.com"] }
+                    }
+                }),
+                "tavily_extract",
+            ),
+            (
+                "missing-crawl-url",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "missing-crawl-url",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_crawl",
+                        "arguments": {}
+                    }
+                }),
+                "tavily_crawl",
+            ),
+            (
+                "missing-map-url",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "missing-map-url",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_map",
+                        "arguments": {}
+                    }
+                }),
+                "tavily_map",
+            ),
+            (
+                "missing-research-input",
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": "missing-research-input",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_research",
+                        "arguments": {}
+                    }
+                }),
+                "tavily_research",
+            ),
+        ];
+
+        for (case_id, payload, tool_name) in invalid_cases {
+            let response = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2025-03-26")
+                .header("mcp-session-id", proxy_session_id.as_str())
+                .json(&payload)
+                .send()
+                .await
+                .unwrap_or_else(|_| panic!("rebalance invalid argument case should send: {case_id}"));
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "invalid rebalance arguments should fail locally for case {case_id}"
+            );
+            let body: Value = response
+                .json()
+                .await
+                .unwrap_or_else(|_| panic!("invalid rebalance response should decode: {case_id}"));
+            assert_eq!(
+                body["error"]["code"].as_i64(),
+                Some(-32602),
+                "invalid rebalance arguments should map to -32602 for case {case_id}"
+            );
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(tool_name)),
+                "error message should mention the offending tool for case {case_id}"
+            );
+        }
+
+        let recorded = seen
+            .lock()
+            .expect("rebalance gateway calls lock poisoned")
+            .clone();
+        assert!(
+            recorded.is_empty(),
+            "invalid rebalance arguments should never hit upstream /mcp or Tavily HTTP"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn mcp_rebalance_invalid_arguments_bypass_business_quota_precheck() {
+        let db_path = temp_db_path("mcp-rebalance-invalid-tool-arguments-quota");
+        let db_str = db_path.to_string_lossy().to_string();
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1");
+        let expected_api_key = "tvly-rebalance-invalid-tool-arguments-quota";
+        let seen: RecordedRebalanceGatewayCalls = Arc::new(Mutex::new(Vec::new()));
+        let upstream_addr =
+            spawn_rebalance_gateway_mock(expected_api_key.to_string(), seen.clone()).await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+        proxy
+            .set_system_settings(&tavily_hikari::SystemSettings {
+                mcp_session_affinity_key_count: 5,
+                rebalance_mcp_enabled: true,
+                rebalance_mcp_session_percent: 100,
+            })
+            .await
+            .expect("enable rebalance mcp");
+        let access_token = proxy
+            .create_access_token(Some("mcp-rebalance-invalid-tool-arguments-quota"))
+            .await
+            .expect("create access token");
+
+        let hourly_limit = effective_token_hourly_limit();
+        for _ in 0..=hourly_limit {
+            let _ = proxy
+                .check_token_quota(&access_token.id)
+                .await
+                .expect("quota check ok");
+        }
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+        let url = format!(
+            "http://{}/mcp?tavilyApiKey={}",
+            proxy_addr, access_token.token
+        );
+        let client = Client::new();
+
+        let initialize = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": "rebalance-invalid-quota-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {}
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize request");
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let proxy_session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("initialize response should expose mcp-session-id")
+            .to_string();
+
+        let response = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", proxy_session_id.as_str())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": "rebalance-invalid-quota-call",
+                "method": "tools/call",
+                "params": {
+                    "name": "tavily_search",
+                    "arguments": {}
+                }
+            }))
+            .send()
+            .await
+            .expect("invalid rebalance search request");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid rebalance arguments should win over business quota prechecks"
+        );
+        let body: Value = response
+            .json()
+            .await
+            .expect("decode invalid rebalance quota body");
+        assert_eq!(body["error"]["code"].as_i64(), Some(-32602));
+
+        let recorded = seen
+            .lock()
+            .expect("rebalance gateway calls lock poisoned")
+            .clone();
+        assert!(
+            recorded.is_empty(),
+            "quota-exhausted invalid rebalance call should still stay local"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn mcp_rebalance_mixed_batch_ignores_invalid_items_in_reserved_credit_precheck() {
+        let db_path = temp_db_path("mcp-rebalance-mixed-batch-invalid-precheck");
+        let db_str = db_path.to_string_lossy().to_string();
+        let _hourly_business_guard = EnvVarGuard::set("TOKEN_HOURLY_LIMIT", "1");
+        let expected_api_key = "tvly-rebalance-mixed-batch-invalid-precheck";
+        let seen: RecordedRebalanceGatewayCalls = Arc::new(Mutex::new(Vec::new()));
+        let upstream_addr =
+            spawn_rebalance_gateway_mock(expected_api_key.to_string(), seen.clone()).await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+        proxy
+            .set_system_settings(&tavily_hikari::SystemSettings {
+                mcp_session_affinity_key_count: 5,
+                rebalance_mcp_enabled: true,
+                rebalance_mcp_session_percent: 100,
+            })
+            .await
+            .expect("enable rebalance mcp");
+        let access_token = proxy
+            .create_access_token(Some("mcp-rebalance-mixed-batch-invalid-precheck"))
+            .await
+            .expect("create access token");
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+        let url = format!(
+            "http://{}/mcp?tavilyApiKey={}",
+            proxy_addr, access_token.token
+        );
+        let client = Client::new();
+
+        let initialize = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": "rebalance-mixed-batch-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {}
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize request");
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let proxy_session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("initialize response should expose mcp-session-id")
+            .to_string();
+
+        let response = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", proxy_session_id.as_str())
+            .json(&json!([
+                {
+                    "jsonrpc": "2.0",
+                    "id": "invalid-crawl",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_crawl",
+                        "arguments": {}
+                    }
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": "valid-search",
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tavily_search",
+                        "arguments": {
+                            "query": "mixed batch valid search",
+                            "search_depth": "basic"
+                        }
+                    }
+                }
+            ]))
+            .send()
+            .await
+            .expect("mixed rebalance batch request");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "invalid rebalance batch items should not inflate reserved-credit quota prechecks"
+        );
+        let body: Value = response
+            .json()
+            .await
+            .expect("decode mixed rebalance batch body");
+        let results = body
+            .as_array()
+            .expect("mixed rebalance batch should return a JSON-RPC response array");
+        let by_id = results
+            .iter()
+            .filter_map(|item| {
+                let id = item.get("id")?;
+                Some((id.to_string(), item))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            by_id.get("\"invalid-crawl\"")
+                .and_then(|item| item.get("error"))
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_i64),
+            Some(-32602),
+            "invalid rebalance batch item should return local Invalid params"
+        );
+        assert_eq!(
+            by_id.get("\"valid-search\"")
+                .and_then(|item| item.get("result"))
+                .and_then(|result| result.get("structuredContent"))
+                .and_then(|content| content.get("usage"))
+                .and_then(|usage| usage.get("credits"))
+                .and_then(Value::as_i64),
+            Some(1),
+            "valid rebalance batch item should still execute and preserve billed usage"
+        );
+
+        let recorded = seen
+            .lock()
+            .expect("rebalance gateway calls lock poisoned")
+            .clone();
+        assert_eq!(
+            recorded.iter().filter(|call| call.path == "/search").count(),
+            1,
+            "only the valid rebalance search batch item should hit Tavily HTTP"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn mcp_rebalance_tools_call_accepts_hyphen_aliases() {
+        let db_path = temp_db_path("mcp-rebalance-hyphen-tool-alias");
+        let db_str = db_path.to_string_lossy().to_string();
+        let expected_api_key = "tvly-rebalance-hyphen-tool-alias";
+        let seen: RecordedRebalanceGatewayCalls = Arc::new(Mutex::new(Vec::new()));
+        let upstream_addr =
+            spawn_rebalance_gateway_mock(expected_api_key.to_string(), seen.clone()).await;
+        let upstream = format!("http://{}", upstream_addr);
+
+        let proxy =
+            TavilyProxy::with_endpoint(vec![expected_api_key.to_string()], &upstream, &db_str)
+                .await
+                .expect("proxy created");
+        proxy
+            .set_system_settings(&tavily_hikari::SystemSettings {
+                mcp_session_affinity_key_count: 5,
+                rebalance_mcp_enabled: true,
+                rebalance_mcp_session_percent: 100,
+            })
+            .await
+            .expect("enable rebalance mcp");
+        let access_token = proxy
+            .create_access_token(Some("mcp-rebalance-hyphen-tool-alias"))
+            .await
+            .expect("create access token");
+
+        let proxy_addr = spawn_proxy_server(proxy.clone(), upstream.clone()).await;
+        let url = format!(
+            "http://{}/mcp?tavilyApiKey={}",
+            proxy_addr, access_token.token
+        );
+        let client = Client::new();
+
+        let initialize = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": "rebalance-alias-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {}
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize request");
+        assert_eq!(initialize.status(), StatusCode::OK);
+        let proxy_session_id = initialize
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("initialize response should expose mcp-session-id")
+            .to_string();
+
+        let search = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", proxy_session_id.as_str())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": "rebalance-search-hyphen-alias",
+                "method": "tools/call",
+                "params": {
+                    "name": "tavily-search",
+                    "arguments": {
+                        "query": "hyphen alias",
+                        "search_depth": "basic"
+                    }
+                }
+            }))
+            .send()
+            .await
+            .expect("rebalance search request");
+        assert_eq!(search.status(), StatusCode::OK);
+
+        let recorded = seen
+            .lock()
+            .expect("rebalance gateway calls lock poisoned")
+            .clone();
+        assert_eq!(
+            recorded.iter().filter(|call| call.path == "/search").count(),
+            1,
+            "hyphen tool alias should still route through the search HTTP upstream"
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .find(|call| call.path == "/search")
+                .and_then(|call| call.body.get("query"))
+                .and_then(Value::as_str),
+            Some("hyphen alias")
         );
 
         let _ = std::fs::remove_file(db_path);
