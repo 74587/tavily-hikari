@@ -28,7 +28,7 @@ describe('AlertsCenter Storybook proofs', () => {
     const markup = renderToString(<AlertsCenterRefreshingStoryShell {...(BackgroundRefreshKeepsRows.args ?? {})} />)
 
     expect(markup).toContain('告警中心')
-    expect(markup).toContain('用户额度耗尽')
+    expect(markup).toContain('上游用量限制 432')
     expect(markup).not.toContain('admin-loading-region-placeholder')
   })
 })
