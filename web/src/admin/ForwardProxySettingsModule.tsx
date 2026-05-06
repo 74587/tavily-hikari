@@ -21,6 +21,11 @@ import { Icon } from '../lib/icons'
 import { useAnchoredFloatingLayer } from '../lib/useAnchoredFloatingLayer'
 import type {
   ForwardProxyActivityBucket,
+  ForwardProxyErrorActivityBucket,
+  ForwardProxyErrorKindCount,
+  ForwardProxyErrorStatsNode,
+  ForwardProxyErrorStatsResponse,
+  ForwardProxyErrorWindowStats,
   ForwardProxyProgressEvent,
   ForwardProxyProgressNodeState,
   ForwardProxySettings,
@@ -102,10 +107,13 @@ interface ForwardProxySettingsModuleProps {
   strings: AdminTranslations['proxySettings']
   settings: ForwardProxySettings | null
   stats: ForwardProxyStatsResponse | null
+  errorStats: ForwardProxyErrorStatsResponse | null
   settingsLoadState: QueryLoadState
   statsLoadState: QueryLoadState
+  errorStatsLoadState: QueryLoadState
   settingsError: string | null
   statsError: string | null
+  errorStatsError: string | null
   saveError: string | null
   revalidateError: string | null
   saving: boolean
@@ -126,6 +134,8 @@ interface ForwardProxySettingsModuleProps {
   ) => Promise<ForwardProxyValidationEntry[]>
   onRefresh: () => void
   onRevalidate: () => void
+  onSetNodesDisabled?: (proxyKeys: string[], disabled: boolean) => Promise<void>
+  initialNodeView?: 'pool' | 'errors'
   dialogPreview?: ForwardProxyDialogPreviewState | null
   onDialogPreviewClose?: () => void
 }
@@ -578,9 +588,9 @@ function buildWeightTrendGeometry(
 }
 
 function getWindowColumnClassName(index: number): string {
-  if (index === 1 || index === 2) return 'hidden text-center md:table-cell'
-  if (index === 3 || index === 4) return 'hidden text-center xl:table-cell'
-  return 'text-center'
+  if (index === 1 || index === 2) return 'hidden min-w-[5.5rem] text-center md:table-cell'
+  if (index === 3 || index === 4) return 'hidden min-w-[5.5rem] text-center xl:table-cell'
+  return 'min-w-[5.5rem] text-center'
 }
 
 function RequestTrendCell({
@@ -617,6 +627,274 @@ function RequestTrendCell({
           </div>
         )
       })}
+    </div>
+  )
+}
+
+const ERROR_KIND_COLORS: Record<string, string> = {
+  proxy_unreachable: 'hsl(var(--destructive))',
+  send_error: 'hsl(24 90% 58%)',
+  validation_failed: 'hsl(43 92% 56%)',
+  upstream_unknown_403: 'hsl(338 82% 62%)',
+  upstream_rate_limited_429: 'hsl(263 78% 68%)',
+  upstream_usage_limit_432: 'hsl(199 86% 56%)',
+  upstream_gateway_5xx: 'hsl(0 84% 60%)',
+  transport_send_error: 'hsl(172 66% 45%)',
+  unknown: 'hsl(var(--muted-foreground))',
+}
+
+function getErrorKindColor(kind: string): string {
+  return ERROR_KIND_COLORS[kind] ?? ERROR_KIND_COLORS.unknown
+}
+
+function formatErrorKind(kind: string): string {
+  return kind.replaceAll('_', ' ')
+}
+
+function polarToCartesian(cx: number, cy: number, radius: number, angleDegrees: number): { x: number; y: number } {
+  const angleRadians = ((angleDegrees - 90) * Math.PI) / 180
+  return {
+    x: cx + radius * Math.cos(angleRadians),
+    y: cy + radius * Math.sin(angleRadians),
+  }
+}
+
+function buildPieSlicePath(cx: number, cy: number, radius: number, startPercent: number, endPercent: number): string {
+  if (endPercent - startPercent >= 99.999) {
+    return [
+      `M ${cx} ${(cy - radius).toFixed(3)}`,
+      `A ${radius} ${radius} 0 1 1 ${cx} ${(cy + radius).toFixed(3)}`,
+      `A ${radius} ${radius} 0 1 1 ${cx} ${(cy - radius).toFixed(3)}`,
+      'Z',
+    ].join(' ')
+  }
+  const startAngle = startPercent * 3.6
+  const endAngle = endPercent * 3.6
+  const start = polarToCartesian(cx, cy, radius, endAngle)
+  const end = polarToCartesian(cx, cy, radius, startAngle)
+  const largeArcFlag = endAngle - startAngle > 180 ? 1 : 0
+  return [
+    `M ${cx} ${cy}`,
+    `L ${start.x.toFixed(3)} ${start.y.toFixed(3)}`,
+    `A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x.toFixed(3)} ${end.y.toFixed(3)}`,
+    'Z',
+  ].join(' ')
+}
+
+function formatErrorWindow(windowStats: ForwardProxyErrorWindowStats): JSX.Element {
+  if (windowStats.totalCount <= 0) {
+    return <span className="text-muted-foreground">—</span>
+  }
+  return (
+    <div className="flex flex-col items-center gap-0.5 py-1">
+      <span>{formatPercent(windowStats.errorRate)}</span>
+      <span className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground">
+        {formatNumber(windowStats.errorCount)} / {formatNumber(windowStats.totalCount)}
+      </span>
+    </div>
+  )
+}
+
+function ErrorActivityCell({
+  buckets,
+  chartBubbleHandlers,
+}: {
+  buckets: ForwardProxyErrorActivityBucket[]
+  chartBubbleHandlers: ForwardProxyChartBubbleHandlers
+}): JSX.Element {
+  if (buckets.length === 0) {
+    return <span className="text-[11px] text-muted-foreground">—</span>
+  }
+  const maxTotal = Math.max(...buckets.map((bucket) => bucket.totalCount), 1)
+  const openBucket = (bucket: ForwardProxyErrorActivityBucket, anchorEl: HTMLElement, pinned: boolean) => {
+    chartBubbleHandlers.openChartBubble(
+      {
+        title: formatTimeRange(bucket.bucketStart, bucket.bucketEnd),
+        content: buildErrorActivityBubbleContent(bucket),
+      },
+      anchorEl,
+      pinned,
+    )
+  }
+  return (
+    <div className="flex h-10 items-end gap-px">
+      {buckets.map((bucket) => {
+        const total = Math.max(bucket.totalCount, 0)
+        const height = total > 0 ? Math.max(4, (total / maxTotal) * 40) : 40
+        const errorTotal = bucket.errors.reduce((sum, item) => sum + item.count, 0)
+        const accessibleLabel = `${formatTimeRange(bucket.bucketStart, bucket.bucketEnd)} · success ${bucket.successCount} · error ${errorTotal} · total ${total}`
+        return (
+          <button
+            type="button"
+            key={bucket.bucketStart}
+            className="relative flex min-w-0 flex-1 flex-col justify-end overflow-hidden rounded-[3px] border border-border/40 bg-muted/30 transition-colors hover:border-border/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/45"
+            style={{ height }}
+            aria-label={accessibleLabel}
+            onMouseEnter={(event) => openBucket(bucket, event.currentTarget, false)}
+            onMouseLeave={chartBubbleHandlers.scheduleChartBubbleClose}
+            onFocus={(event) => openBucket(bucket, event.currentTarget, false)}
+            onBlur={chartBubbleHandlers.scheduleChartBubbleClose}
+            onClick={(event) => openBucket(bucket, event.currentTarget, true)}
+          >
+            {total > errorTotal && (
+              <span
+                className="block w-full bg-muted-foreground/15"
+                style={{ height: `${((total - errorTotal) / Math.max(total, 1)) * 100}%` }}
+              />
+            )}
+            {bucket.errors.map((item) => (
+              <span
+                key={`${bucket.bucketStart}-${item.kind}`}
+                className="block w-full"
+                style={{
+                  height: `${(item.count / Math.max(total, 1)) * 100}%`,
+                  backgroundColor: getErrorKindColor(item.kind),
+                }}
+              />
+            ))}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function ErrorPieCell({
+  distribution,
+  chartBubbleHandlers,
+}: {
+  distribution: ForwardProxyErrorKindCount[]
+  chartBubbleHandlers: ForwardProxyChartBubbleHandlers
+}): JSX.Element {
+  const [activeKind, setActiveKind] = useState<string | null>(null)
+  const total = distribution.reduce((sum, item) => sum + item.count, 0)
+  if (total <= 0) {
+    return <span className="text-[11px] text-muted-foreground">—</span>
+  }
+  let offsetPercent = 0
+  const slices = distribution
+    .map((item): ErrorPieSliceGeometry => {
+      const startPercent = offsetPercent
+      offsetPercent += (item.count / total) * 100
+      const endPercent = offsetPercent
+      const midAngle = ((startPercent + endPercent) / 2) * 3.6 - 90
+      const offsetRadius = item.kind === activeKind ? 2.2 : 0
+      return {
+        item,
+        startPercent,
+        endPercent,
+        path: buildPieSlicePath(20, 20, 19, startPercent, endPercent),
+        offsetX: Math.cos((midAngle * Math.PI) / 180) * offsetRadius,
+        offsetY: Math.sin((midAngle * Math.PI) / 180) * offsetRadius,
+      }
+    })
+  const title = distribution.map((item) => `${formatErrorKind(item.kind)}: ${item.count}`).join(' · ')
+  const openSlice = (item: ForwardProxyErrorKindCount, anchorEl: HTMLElement, pinned: boolean) => {
+    setActiveKind(item.kind)
+    chartBubbleHandlers.openChartBubble(
+      {
+        title: '24h error distribution',
+        content: buildErrorDistributionBubbleContent(distribution, item.kind, total),
+      },
+      anchorEl,
+      pinned,
+    )
+  }
+  const scheduleSliceClose = () => {
+    setActiveKind(null)
+    chartBubbleHandlers.scheduleChartBubbleClose()
+  }
+  return (
+    <div className="flex max-w-full items-center gap-3" aria-label={title}>
+      <svg className="block h-10 w-10 shrink-0 overflow-visible" viewBox="0 0 40 40" role="img" aria-label={title}>
+        {slices.map((slice) => (
+          <path
+            key={slice.item.kind}
+            d={slice.path}
+            className="forward-proxy-error-pie-slice"
+            fill={getErrorKindColor(slice.item.kind)}
+            stroke="hsl(var(--card))"
+            strokeWidth={slice.item.kind === activeKind ? 1.8 : 0.8}
+            transform={`translate(${slice.offsetX.toFixed(2)} ${slice.offsetY.toFixed(2)})`}
+            tabIndex={0}
+            role="button"
+            aria-label={`${formatErrorKind(slice.item.kind)} ${formatNumber(slice.item.count)} ${formatPercent(slice.item.count / total)}`}
+            onMouseEnter={(event) => openSlice(slice.item, event.currentTarget as unknown as HTMLElement, false)}
+            onMouseLeave={scheduleSliceClose}
+            onFocus={(event) => openSlice(slice.item, event.currentTarget as unknown as HTMLElement, false)}
+            onBlur={scheduleSliceClose}
+            onClick={(event) => openSlice(slice.item, event.currentTarget as unknown as HTMLElement, true)}
+          />
+        ))}
+      </svg>
+      <div className="min-w-0 text-[11px] text-muted-foreground">
+        <strong className="block text-foreground">{formatNumber(total)}</strong>
+        <span className="block truncate">{formatErrorKind(activeKind ?? distribution[0]?.kind ?? 'unknown')}</span>
+      </div>
+    </div>
+  )
+}
+
+function buildErrorActivityBubbleContent(bucket: ForwardProxyErrorActivityBucket): JSX.Element {
+  const errorTotal = bucket.errors.reduce((sum, item) => sum + item.count, 0)
+  return (
+    <div className="forward-proxy-chart-bubble-stack">
+      <div className="forward-proxy-chart-bubble-row">
+        <span>Success</span>
+        <strong>{formatNumber(bucket.successCount)}</strong>
+      </div>
+      {bucket.errors.length > 0 ? (
+        bucket.errors.map((item) => (
+          <div className="forward-proxy-chart-bubble-row" key={item.kind}>
+            <span>{formatErrorKind(item.kind)}</span>
+            <strong>{formatNumber(item.count)}</strong>
+          </div>
+        ))
+      ) : (
+        <div className="forward-proxy-chart-bubble-row">
+          <span>Errors</span>
+          <strong>0</strong>
+        </div>
+      )}
+      <div className="forward-proxy-chart-bubble-divider" />
+      <div className="forward-proxy-chart-bubble-row">
+        <span>Total</span>
+        <strong>{formatNumber(bucket.totalCount)}</strong>
+      </div>
+      <div className="forward-proxy-chart-bubble-row">
+        <span>Error rate</span>
+        <strong>{formatPercent(bucket.totalCount > 0 ? errorTotal / bucket.totalCount : null)}</strong>
+      </div>
+    </div>
+  )
+}
+
+function buildErrorDistributionBubbleContent(
+  distribution: ForwardProxyErrorKindCount[],
+  activeKind: string,
+  total: number,
+): JSX.Element {
+  return (
+    <div className="forward-proxy-chart-bubble-stack">
+      {distribution.map((item) => (
+        <div
+          className={`forward-proxy-chart-bubble-row forward-proxy-chart-bubble-distribution-row ${
+            item.kind === activeKind ? 'is-active' : ''
+          }`}
+          key={item.kind}
+        >
+          <span>{formatErrorKind(item.kind)}</span>
+          <strong>
+            {formatNumber(item.count)}
+            <small>{formatPercent(total > 0 ? item.count / total : null)}</small>
+          </strong>
+        </div>
+      ))}
+      <div className="forward-proxy-chart-bubble-divider" />
+      <div className="forward-proxy-chart-bubble-row">
+        <span>Total</span>
+        <strong>{formatNumber(total)}</strong>
+      </div>
     </div>
   )
 }
@@ -851,6 +1129,27 @@ interface ForwardProxyStatusBubbleState {
   pinned: boolean
 }
 
+interface ForwardProxyChartBubbleState {
+  anchorEl: HTMLElement
+  title: string
+  content: JSX.Element
+  pinned: boolean
+}
+
+interface ForwardProxyChartBubbleHandlers {
+  openChartBubble: (state: Omit<ForwardProxyChartBubbleState, 'anchorEl' | 'pinned'>, anchorEl: HTMLElement, pinned: boolean) => void
+  scheduleChartBubbleClose: () => void
+}
+
+interface ErrorPieSliceGeometry {
+  item: ForwardProxyErrorKindCount
+  startPercent: number
+  endPercent: number
+  path: string
+  offsetX: number
+  offsetY: number
+}
+
 function ForwardProxyStatusDetailBubble({
   strings,
   state,
@@ -932,6 +1231,83 @@ function ForwardProxyStatusDetailBubble({
         </button>
       </div>
       <p className="forward-proxy-status-bubble-message">{state.row.message}</p>
+    </div>,
+    document.body,
+  )
+}
+
+function ForwardProxyChartDetailBubble({
+  state,
+  onClose,
+  onPointerEnter,
+  onPointerLeave,
+}: {
+  state: ForwardProxyChartBubbleState | null
+  onClose: () => void
+  onPointerEnter: () => void
+  onPointerLeave: () => void
+}): JSX.Element | null {
+  const { layerRef: bubbleRef, position } = useAnchoredFloatingLayer<HTMLDivElement>({
+    open: Boolean(state),
+    anchorEl: state?.anchorEl ?? null,
+    placement: 'top',
+    align: 'center',
+    offset: 10,
+    viewportMargin: 12,
+    arrowPadding: 18,
+  })
+
+  useEffect(() => {
+    if (!state) return
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (bubbleRef.current?.contains(target)) return
+      if (state.anchorEl.contains(target)) return
+      onClose()
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [onClose, state])
+
+  if (!state || typeof document === 'undefined') return null
+
+  return createPortal(
+    <div
+      ref={bubbleRef}
+      className="forward-proxy-chart-bubble layer-popover"
+      role="dialog"
+      aria-label={state.title}
+      data-placement={position?.placement ?? 'top'}
+      style={{
+        top: `${position?.top ?? 0}px`,
+        left: `${position?.left ?? 0}px`,
+        visibility: position ? 'visible' : 'hidden',
+        pointerEvents: position ? 'auto' : 'none',
+        ['--forward-proxy-chart-bubble-arrow-offset' as string]: `${position?.arrowOffset ?? 24}px`,
+      }}
+      onMouseEnter={onPointerEnter}
+      onMouseLeave={onPointerLeave}
+    >
+      <div className="forward-proxy-chart-bubble-header">
+        <strong className="forward-proxy-chart-bubble-title">{state.title}</strong>
+        <button type="button" className="forward-proxy-chart-bubble-close" onClick={onClose} aria-label="Close">
+          <Icon icon="mdi:close" className="text-sm" />
+        </button>
+      </div>
+      <div className="forward-proxy-chart-bubble-content">{state.content}</div>
     </div>,
     document.body,
   )
@@ -1378,6 +1754,9 @@ function getNodeStateBadge(
   strings: AdminTranslations['proxySettings'],
   node: ForwardProxyStatsNode,
 ): { label: string; variant: StatusBadgeVariant } {
+  if (node.disabled) {
+    return { label: strings.states.disabled, variant: 'neutral' }
+  }
   if (node.source === 'direct') {
     return { label: strings.states.direct, variant: 'info' }
   }
@@ -1403,10 +1782,13 @@ export default function ForwardProxySettingsModule({
   strings,
   settings,
   stats,
+  errorStats,
   settingsLoadState,
   statsLoadState,
+  errorStatsLoadState,
   settingsError,
   statsError,
+  errorStatsError,
   saveError,
   revalidateError,
   saving,
@@ -1418,6 +1800,8 @@ export default function ForwardProxySettingsModule({
   onValidateCandidates,
   onRefresh,
   onRevalidate,
+  onSetNodesDisabled,
+  initialNodeView = 'pool',
   dialogPreview = null,
   onDialogPreviewClose,
 }: ForwardProxySettingsModuleProps): JSX.Element {
@@ -1428,6 +1812,101 @@ export default function ForwardProxySettingsModule({
     weight: summarizeWeight(node.weight24h),
     weightBuckets: resolveWeightBuckets(node),
   }))
+  const errorRows = [...(errorStats?.nodes ?? [])].sort((left, right) => {
+    const leftRate = left.errorRate24h
+    const rightRate = right.errorRate24h
+    if (leftRate == null && rightRate == null) return left.displayName.localeCompare(right.displayName)
+    if (leftRate == null) return 1
+    if (rightRate == null) return -1
+    return rightRate - leftRate || right.error24h - left.error24h || left.displayName.localeCompare(right.displayName)
+  })
+  const [nodeView, setNodeView] = useState<'pool' | 'errors'>(initialNodeView)
+  const [selectedNodeKeys, setSelectedNodeKeys] = useState<Set<string>>(() => new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkError, setBulkError] = useState<string | null>(null)
+  const [chartBubble, setChartBubble] = useState<ForwardProxyChartBubbleState | null>(null)
+  const chartBubbleCloseTimerRef = useRef<number | null>(null)
+  const clearChartBubbleCloseTimer = () => {
+    if (chartBubbleCloseTimerRef.current != null && typeof window !== 'undefined') {
+      window.clearTimeout(chartBubbleCloseTimerRef.current)
+      chartBubbleCloseTimerRef.current = null
+    }
+  }
+  const openChartBubble: ForwardProxyChartBubbleHandlers['openChartBubble'] = (state, anchorEl, pinned) => {
+    clearChartBubbleCloseTimer()
+    setChartBubble((current) => {
+      if (pinned && current?.pinned && current.anchorEl === anchorEl) return null
+      if (current?.pinned && !pinned && current.anchorEl !== anchorEl) return current
+      return {
+        ...state,
+        anchorEl,
+        pinned,
+      }
+    })
+  }
+  const scheduleChartBubbleClose = () => {
+    if (typeof window === 'undefined') return
+    clearChartBubbleCloseTimer()
+    chartBubbleCloseTimerRef.current = window.setTimeout(() => {
+      setChartBubble((current) => (current?.pinned ? current : null))
+      chartBubbleCloseTimerRef.current = null
+    }, 140)
+  }
+  const chartBubbleHandlers: ForwardProxyChartBubbleHandlers = {
+    openChartBubble,
+    scheduleChartBubbleClose,
+  }
+  const visibleNodeKeys = nodeView === 'errors'
+    ? errorRows.map((node) => node.key)
+    : nodeRows.map(({ node }) => node.key)
+  const selectedVisibleCount = visibleNodeKeys.filter((key) => selectedNodeKeys.has(key)).length
+  const selectedTotalCount = selectedNodeKeys.size
+  const toggleNodeSelection = (proxyKey: string) => {
+    setBulkError(null)
+    setSelectedNodeKeys((current) => {
+      const next = new Set(current)
+      if (next.has(proxyKey)) {
+        next.delete(proxyKey)
+      } else {
+        next.add(proxyKey)
+      }
+      return next
+    })
+  }
+  const selectVisibleNodes = () => {
+    setBulkError(null)
+    setSelectedNodeKeys((current) => {
+      const next = new Set(current)
+      for (const key of visibleNodeKeys) next.add(key)
+      return next
+    })
+  }
+  const invertVisibleNodes = () => {
+    setBulkError(null)
+    setSelectedNodeKeys((current) => {
+      const next = new Set(current)
+      for (const key of visibleNodeKeys) {
+        if (next.has(key)) {
+          next.delete(key)
+        } else {
+          next.add(key)
+        }
+      }
+      return next
+    })
+  }
+  const applyBulkDisabled = async (disabled: boolean) => {
+    if (!onSetNodesDisabled || selectedNodeKeys.size === 0) return
+    setBulkBusy(true)
+    setBulkError(null)
+    try {
+      await onSetNodesDisabled(Array.from(selectedNodeKeys), disabled)
+    } catch (error) {
+      setBulkError(error instanceof Error ? error.message : strings.bulk.updateFailed)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
   const requestBucketScaleMax = Math.max(
     ...nodeRows.flatMap(({ node }) => node.last24h.map((bucket) => bucket.successCount + bucket.failureCount)),
     0,
@@ -1500,6 +1979,16 @@ export default function ForwardProxySettingsModule({
     egressSocks5UrlDraft.trim() !== draft.egressSocks5Url.trim()
     || egressSocks5EnabledDraft !== draft.egressSocks5Enabled
   const egressApplyBusy = activeEgressProgress?.action === 'save'
+  useEffect(() => {
+    const knownKeys = new Set([
+      ...mergedNodes.map((node) => node.key),
+      ...errorRows.map((node) => node.key),
+    ])
+    setSelectedNodeKeys((current) => {
+      const next = new Set(Array.from(current).filter((key) => knownKeys.has(key)))
+      return next.size === current.size ? current : next
+    })
+  }, [mergedNodes, errorRows])
   const canAddSubscription = dialogSubscriptionCandidate != null
     && (!activeDialogValidating || dialogHasLiveImportableSubscription)
   const canAddManualBatch = dialogManualBatchValues.length > manualUrls.length
@@ -1928,6 +2417,24 @@ export default function ForwardProxySettingsModule({
             <CardTitle>{strings.nodes.title}</CardTitle>
             <CardDescription className="panel-description">{strings.nodes.description}</CardDescription>
           </div>
+          <div className="forward-proxy-view-switcher" role="tablist" aria-label={strings.nodes.viewSwitcherLabel}>
+            <Button
+              type="button"
+              size="sm"
+              variant={nodeView === 'pool' ? 'default' : 'outline'}
+              onClick={() => setNodeView('pool')}
+            >
+              {strings.nodes.views.pool}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={nodeView === 'errors' ? 'default' : 'outline'}
+              onClick={() => setNodeView('errors')}
+            >
+              {strings.nodes.views.errors}
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="forward-proxy-panel-content">
           {statsError && (
@@ -1935,13 +2442,24 @@ export default function ForwardProxySettingsModule({
               {statsError}
             </div>
           )}
+          {nodeView === 'errors' && errorStatsError && (
+            <div className="alert alert-error" role="alert">
+              {errorStatsError}
+            </div>
+          )}
+          {bulkError && (
+            <div className="alert alert-error" role="alert">
+              {bulkError}
+            </div>
+          )}
 
-          <AdminLoadingRegion
-            loadState={statsLoadState}
-            loadingLabel={strings.nodes.loading}
-            errorLabel={statsError || undefined}
-            minHeight={240}
-          >
+          {nodeView === 'pool' ? (
+            <AdminLoadingRegion
+              loadState={statsLoadState}
+              loadingLabel={strings.nodes.loading}
+              errorLabel={statsError || undefined}
+              minHeight={240}
+            >
             {mergedNodes.length === 0 ? (
               <div className="empty-state alert">{strings.nodes.empty}</div>
             ) : (
@@ -1953,6 +2471,13 @@ export default function ForwardProxySettingsModule({
                       <Card className="forward-proxy-node-mobile-card" key={`mobile-${node.key}`}>
                         <CardHeader className="forward-proxy-node-mobile-header">
                           <div className="forward-proxy-node-mobile-title-row">
+                            <input
+                              aria-label={`${strings.bulk.selectRow} ${node.displayName}`}
+                              checked={selectedNodeKeys.has(node.key)}
+                              className="forward-proxy-row-checkbox"
+                              onChange={() => toggleNodeSelection(node.key)}
+                              type="checkbox"
+                            />
                             <CardTitle className="text-base">{node.displayName}</CardTitle>
                           </div>
                           <div className="forward-proxy-node-chip-row">
@@ -2017,6 +2542,9 @@ export default function ForwardProxySettingsModule({
                   <Table className="forward-proxy-table min-w-[980px] table-fixed text-xs xl:min-w-0">
                     <TableHeader className="bg-muted/40 uppercase tracking-[0.08em] text-[11px] text-muted-foreground">
                       <TableRow className="hover:bg-transparent">
+                        <TableHead className="w-10">
+                          <span className="sr-only">{strings.bulk.selection}</span>
+                        </TableHead>
                         <TableHead className="w-[30%]">{strings.nodes.table.node}</TableHead>
                         {WINDOW_KEYS.map((windowDefinition, index) => (
                           <TableHead
@@ -2039,6 +2567,15 @@ export default function ForwardProxySettingsModule({
                         const stateBadge = getNodeStateBadge(strings, node)
                         return (
                           <TableRow key={node.key} className="forward-proxy-table-row border-0 align-top">
+                            <TableCell className="py-3">
+                              <input
+                                aria-label={`${strings.bulk.selectRow} ${node.displayName}`}
+                                checked={selectedNodeKeys.has(node.key)}
+                                className="forward-proxy-row-checkbox"
+                                onChange={() => toggleNodeSelection(node.key)}
+                                type="checkbox"
+                              />
+                            </TableCell>
                             <TableCell className="forward-proxy-node-cell py-3">
                               <div className="forward-proxy-node-cell-main min-w-0">
                                 <div className="forward-proxy-node-cell-title-row">
@@ -2097,7 +2634,136 @@ export default function ForwardProxySettingsModule({
                 </div>
               </>
             )}
-          </AdminLoadingRegion>
+            </AdminLoadingRegion>
+          ) : (
+            <AdminLoadingRegion
+              loadState={errorStatsLoadState}
+              loadingLabel={strings.nodes.errorStats.loading}
+              errorLabel={errorStatsError || undefined}
+              minHeight={240}
+            >
+              {errorRows.length === 0 ? (
+                <div className="empty-state alert">{strings.nodes.errorStats.empty}</div>
+              ) : (
+                <div className="forward-proxy-table-wrapper rounded-2xl border border-border/75 bg-card/50">
+                  <Table className="forward-proxy-table min-w-[1080px] table-fixed text-xs xl:min-w-0">
+                    <TableHeader className="bg-muted/40 uppercase tracking-[0.08em] text-[11px] text-muted-foreground">
+                      <TableRow className="hover:bg-transparent">
+                        <TableHead className="w-10">
+                          <span className="sr-only">{strings.bulk.selection}</span>
+                        </TableHead>
+                        <TableHead className="w-[34%]">{strings.nodes.table.node}</TableHead>
+                        {WINDOW_KEYS.map((windowDefinition, index) => (
+                          <TableHead
+                            className={`${getWindowColumnClassName(index)} forward-proxy-table-head-nowrap`}
+                            key={`error-head-${windowDefinition.key}`}
+                          >
+                            {strings.windows[windowDefinition.translationKey]}
+                          </TableHead>
+                        ))}
+                        <TableHead className="w-[20%] forward-proxy-table-head-nowrap">
+                          {strings.nodes.errorStats.activity24h}
+                        </TableHead>
+                        <TableHead className="w-[18%] forward-proxy-table-head-nowrap">
+                          {strings.nodes.errorStats.distribution24h}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody className="divide-y divide-border/65 [&_tr:last-child]:border-0">
+                      {errorRows.map((node) => (
+                        <TableRow key={node.key} className="forward-proxy-table-row border-0 align-top">
+                          <TableCell className="py-3">
+                            <input
+                              aria-label={`${strings.bulk.selectRow} ${node.displayName}`}
+                              checked={selectedNodeKeys.has(node.key)}
+                              className="forward-proxy-row-checkbox"
+                              onChange={() => toggleNodeSelection(node.key)}
+                              type="checkbox"
+                            />
+                          </TableCell>
+                          <TableCell className="forward-proxy-node-cell py-3">
+                            <div className="forward-proxy-node-cell-main min-w-0">
+                              <div className="forward-proxy-node-cell-title-row">
+                                <strong className="truncate text-sm">{node.displayName}</strong>
+                              </div>
+                              <div className="forward-proxy-node-chip-row">
+                                <Badge variant={node.source === 'subscription' ? 'info' : node.source === 'manual' ? 'outline' : 'neutral'}>
+                                  {getSourceLabel(strings, node.source)}
+                                </Badge>
+                                {node.disabled && <Badge variant="neutral">{strings.states.disabled}</Badge>}
+                                <span className="forward-proxy-node-chip-text">
+                                  {strings.nodes.errorStats.total24h}: <strong>{formatNumber(node.total24h)}</strong>
+                                </span>
+                                <span className="forward-proxy-node-chip-text">
+                                  {strings.nodes.errorStats.error24h}: <strong>{formatNumber(node.error24h)}</strong>
+                                </span>
+                              </div>
+                            </div>
+                          </TableCell>
+                          {WINDOW_KEYS.map((windowDefinition, index) => (
+                            <TableCell className={getWindowColumnClassName(index)} key={`${node.key}-error-${windowDefinition.key}`}>
+                              {formatErrorWindow(node.windows[windowDefinition.key])}
+                            </TableCell>
+                          ))}
+                          <TableCell className="py-3">
+                            <ErrorActivityCell buckets={node.last24h} chartBubbleHandlers={chartBubbleHandlers} />
+                          </TableCell>
+                          <TableCell className="py-3">
+                            <ErrorPieCell distribution={node.distribution24h} chartBubbleHandlers={chartBubbleHandlers} />
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </AdminLoadingRegion>
+          )}
+          {visibleNodeKeys.length > 0 && (
+            <div className={`forward-proxy-bulk-bar ${selectedTotalCount > 0 ? 'is-visible' : ''}`} aria-live="polite">
+              <span className="forward-proxy-bulk-count">
+                {strings.bulk.selected.replace('{count}', formatNumber(selectedTotalCount))}
+              </span>
+              <Button type="button" size="sm" variant="outline" onClick={selectVisibleNodes} disabled={bulkBusy}>
+                {strings.bulk.selectAll}
+              </Button>
+              <Button type="button" size="sm" variant="outline" onClick={invertVisibleNodes} disabled={bulkBusy}>
+                {strings.bulk.invert}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void applyBulkDisabled(true)}
+                disabled={bulkBusy || selectedTotalCount === 0 || !onSetNodesDisabled}
+              >
+                {strings.bulk.disable}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => void applyBulkDisabled(false)}
+                disabled={bulkBusy || selectedTotalCount === 0 || !onSetNodesDisabled}
+              >
+                {strings.bulk.enable}
+              </Button>
+              <span className="forward-proxy-bulk-scope">
+                {strings.bulk.visibleSelected.replace('{count}', formatNumber(selectedVisibleCount))}
+              </span>
+            </div>
+          )}
+          {chartBubble && (
+            <ForwardProxyChartDetailBubble
+              state={chartBubble}
+              onClose={() => {
+                clearChartBubbleCloseTimer()
+                setChartBubble(null)
+              }}
+              onPointerEnter={clearChartBubbleCloseTimer}
+              onPointerLeave={scheduleChartBubbleClose}
+            />
+          )}
         </CardContent>
       </Card>
 

@@ -222,6 +222,9 @@ impl TavilyProxy {
         let Some(current_endpoint) = manager.endpoint_by_key(proxy_key) else {
             return Ok(None);
         };
+        if manager.is_node_disabled(proxy_key) {
+            return Ok(None);
+        }
         if !current_endpoint.uses_local_relay {
             return Ok(current_endpoint
                 .is_selectable()
@@ -349,8 +352,8 @@ impl TavilyProxy {
     pub(crate) async fn probe_and_record_forward_proxy_endpoint(
         &self,
         endpoint: &forward_proxy::ForwardProxyEndpoint,
-        request_kind: &str,
-        api_key_id: Option<&str>,
+        _request_kind: &str,
+        _api_key_id: Option<&str>,
         timeout: Duration,
         cancellation: Option<&ForwardProxyCancellation>,
     ) -> Result<f64, ProxyError> {
@@ -360,26 +363,24 @@ impl TavilyProxy {
             .await;
         match result {
             Ok(latency_ms) => {
-                self.record_forward_proxy_attempt(
+                self.record_forward_proxy_attempt_inner(
                     endpoint.key.as_str(),
-                    api_key_id,
-                    request_kind,
                     true,
                     Some(latency_ms),
                     None,
+                    true,
                 )
                 .await?;
                 Ok(latency_ms)
             }
             Err(err) => {
                 let error_code = map_forward_proxy_validation_error_code(&err);
-                self.record_forward_proxy_attempt(
+                self.record_forward_proxy_attempt_inner(
                     endpoint.key.as_str(),
-                    api_key_id,
-                    request_kind,
                     false,
                     None,
                     Some(error_code.as_str()),
+                    true,
                 )
                 .await?;
                 Err(err)
@@ -606,7 +607,9 @@ impl TavilyProxy {
                     if endpoint.is_direct() && !allow_direct_primary {
                         return false;
                     }
-                    endpoint.is_selectable() && manager.runtime(proxy_key).is_some()
+                    endpoint.is_selectable()
+                        && !manager.is_node_disabled(proxy_key)
+                        && manager.runtime(proxy_key).is_some()
                 };
             let is_available = |proxy_key: &str,
                                 manager: &forward_proxy::ForwardProxyManager,
@@ -1424,6 +1427,7 @@ impl TavilyProxy {
                 if seen.insert(key.clone())
                     && let Some(endpoint) = manager.endpoint(key)
                     && endpoint.is_selectable()
+                    && !manager.is_node_disabled(key)
                     && manager.runtime(key).is_some_and(|runtime| {
                         runtime.available && runtime.weight.is_finite() && runtime.weight > 0.0
                     })
@@ -1452,7 +1456,9 @@ impl TavilyProxy {
             )
             .await?
         {
-            if seen.insert(endpoint.key.clone()) {
+            if seen.insert(endpoint.key.clone())
+                && !self.forward_proxy.lock().await.is_node_disabled(&endpoint.key)
+            {
                 plan.push(forward_proxy::SelectedForwardProxy::from_endpoint(
                     &endpoint,
                 ));
@@ -1650,12 +1656,12 @@ impl TavilyProxy {
             }
 
             let direct = {
-                let manager = self.forward_proxy.lock().await;
-                manager
-                    .endpoint_by_key(forward_proxy::FORWARD_PROXY_DIRECT_KEY)
-                    .filter(|endpoint| endpoint.is_selectable())
-                    .map(|endpoint| forward_proxy::SelectedForwardProxy::from_endpoint(&endpoint))
-            };
+            let manager = self.forward_proxy.lock().await;
+            manager
+                .endpoint_by_key(forward_proxy::FORWARD_PROXY_DIRECT_KEY)
+                .filter(|endpoint| endpoint.is_selectable() && !manager.is_node_disabled(&endpoint.key))
+                .map(|endpoint| forward_proxy::SelectedForwardProxy::from_endpoint(&endpoint))
+        };
             let Some(direct) = direct else {
                 return Err(last_error.unwrap_or_else(|| {
                     ProxyError::Other("no selectable forward proxy endpoints available".to_string())

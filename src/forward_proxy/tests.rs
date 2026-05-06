@@ -545,6 +545,140 @@ if __name__ == "__main__":
     }
 
     #[tokio::test]
+    async fn error_stats_count_real_requests_and_normalize_known_failures() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        ensure_forward_proxy_schema(&pool).await.expect("schema");
+        let proxy_key = "http://127.0.0.1:8080";
+        let other_key = "http://127.0.0.1:8081";
+        let now = Utc::now().timestamp();
+        for (key, success, failure_kind, is_probe) in [
+            (proxy_key, true, None, false),
+            (proxy_key, false, Some(FORWARD_PROXY_FAILURE_SEND_ERROR), false),
+            (
+                proxy_key,
+                false,
+                Some(FORWARD_PROXY_FAILURE_UPSTREAM_HTTP_429),
+                false,
+            ),
+            (proxy_key, false, Some("proxy_unreachable"), true),
+            (other_key, true, None, false),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO forward_proxy_attempts
+                    (proxy_key, is_success, latency_ms, failure_kind, is_probe, occurred_at)
+                VALUES (?1, ?2, 12.0, ?3, ?4, ?5)
+                "#,
+            )
+            .bind(key)
+            .bind(success as i64)
+            .bind(failure_kind)
+            .bind(is_probe as i64)
+            .bind(now - 30)
+            .execute(&pool)
+            .await
+            .expect("insert attempt");
+        }
+        let manager = ForwardProxyManager::new(
+            ForwardProxySettings {
+                proxy_urls: vec![proxy_key.to_string(), other_key.to_string()],
+                subscription_urls: Vec::new(),
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            Vec::new(),
+        );
+
+        let response = build_forward_proxy_error_stats_response(&pool, &manager)
+            .await
+            .expect("build error stats");
+        let node = response
+            .nodes
+            .iter()
+            .find(|node| node.key == proxy_key)
+            .expect("proxy node stats");
+        assert_eq!(node.windows.one_minute.total_count, 3);
+        assert_eq!(node.windows.one_minute.error_count, 2);
+        assert_eq!(node.total24h, 3);
+        assert_eq!(node.error24h, 2);
+        assert_eq!(
+            node.distribution24h
+                .iter()
+                .find(|item| item.kind == "send_error")
+                .map(|item| item.count),
+            Some(1)
+        );
+        assert_eq!(
+            node.distribution24h
+                .iter()
+                .find(|item| item.kind == "upstream_rate_limited_429")
+                .map(|item| item.count),
+            Some(1)
+        );
+        assert_eq!(response.nodes[0].key, proxy_key);
+    }
+
+    #[tokio::test]
+    async fn disabled_node_overrides_survive_runtime_pruning() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        ensure_forward_proxy_schema(&pool).await.expect("schema");
+        let proxy_key = "http://127.0.0.1:8080".to_string();
+
+        set_forward_proxy_nodes_disabled(&pool, std::slice::from_ref(&proxy_key), true)
+            .await
+            .expect("disable node");
+        persist_forward_proxy_runtime_snapshot(&pool, Vec::new())
+            .await
+            .expect("prune runtime");
+
+        let disabled = load_forward_proxy_disabled_node_keys(&pool)
+            .await
+            .expect("load disabled");
+        assert!(disabled.contains_key(&proxy_key));
+    }
+
+    #[test]
+    fn disabled_nodes_are_excluded_from_routing_candidates() {
+        let disabled_key = "http://127.0.0.1:8080".to_string();
+        let enabled_key = "http://127.0.0.1:8081".to_string();
+        let mut manager = ForwardProxyManager::new(
+            ForwardProxySettings {
+                proxy_urls: vec![disabled_key.clone(), enabled_key.clone()],
+                subscription_urls: Vec::new(),
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            Vec::new(),
+        );
+        manager.set_node_disabled(disabled_key.clone(), true);
+
+        for _ in 0..12 {
+            let selected = manager.select_proxy().expect("enabled node selected");
+            assert_eq!(selected.key, enabled_key);
+        }
+        assert!(
+            manager
+                .rank_candidates_for_subject("subject", &HashSet::new(), true, 4)
+                .iter()
+                .all(|endpoint| endpoint.key != disabled_key)
+        );
+
+        manager.set_node_disabled(enabled_key.clone(), true);
+        assert!(
+            manager.select_proxy().is_none(),
+            "disabled pool should not fall back to direct routing"
+        );
+    }
+
+    #[tokio::test]
     async fn wait_for_local_socks_ready_rejects_unrelated_listener() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -1032,6 +1166,61 @@ if __name__ == "__main__":
             "failed validation probe should not leak runtime files: {:?}",
             snapshot.runtime_files
         );
+    }
+
+    #[tokio::test]
+    async fn tavily_proxy_recorded_validation_attempts_are_probe_only() {
+        let root_dir = temp_runtime_dir("proxy-validation-attempts-are-probe");
+        let db_path = root_dir.join("proxy.db");
+        let db_path_str = db_path
+            .to_str()
+            .expect("database path should be valid utf-8")
+            .to_string();
+        let proxy = TavilyProxy::with_options(
+            Vec::<String>::new(),
+            "http://127.0.0.1:9/mcp",
+            &db_path_str,
+            TavilyProxyOptions {
+                xray_binary: write_fake_xray_binary("proxy-validation-attempts-are-probe"),
+                xray_runtime_dir: root_dir.join("xray-runtime"),
+                forward_proxy_trace_url: Url::parse("http://127.0.0.1/cdn-cgi/trace")
+                    .expect("valid trace url"),
+                low_quota_depletion_threshold: LOW_QUOTA_DEPLETION_THRESHOLD_DEFAULT,
+                health_readiness_grace_period: Duration::from_secs(90),
+            },
+        )
+        .await
+        .expect("create proxy");
+        let endpoint = ForwardProxyEndpoint::new_manual(
+            "http://127.0.0.1:9".to_string(),
+            "closed validation proxy".to_string(),
+            ForwardProxyProtocol::Http,
+            Some(Url::parse("http://127.0.0.1:9").expect("valid proxy url")),
+            None,
+        );
+
+        proxy
+            .probe_and_record_forward_proxy_endpoint(
+                &endpoint,
+                "revalidate",
+                None,
+                Duration::from_millis(100),
+                None,
+            )
+            .await
+            .expect_err("closed proxy probe should fail");
+
+        let pool = SqlitePool::connect(&db_path_str)
+            .await
+            .expect("connect sqlite");
+        let is_probe: i64 = sqlx::query_scalar(
+            "SELECT is_probe FROM forward_proxy_attempts WHERE proxy_key = ?1",
+        )
+        .bind(endpoint.key)
+        .fetch_one(&pool)
+        .await
+        .expect("recorded validation attempt");
+        assert_eq!(is_probe, 1);
     }
 
     #[tokio::test]
