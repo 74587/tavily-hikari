@@ -4,7 +4,7 @@
 
 ## Current Status
 
-- Implementation: 已实现（本地验证通过，PR 收敛中）
+- Implementation: 已实现（PR #284 收敛中）
 - Lifecycle: active
 - Catalog note: 用户控制台首页 Token 列表新增用户侧 secret rotate 操作。
 
@@ -16,11 +16,11 @@
 
 ## Remaining Gaps
 
-- 创建 PR 后补充 Related Changes。
+- None
 
 ## Related Changes
 
-- None
+- PR #284: 用户控制台 Token 重置功能。
 
 ## References
 

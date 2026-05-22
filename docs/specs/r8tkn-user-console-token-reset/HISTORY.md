@@ -5,6 +5,7 @@
 ## Decision Trace
 
 - 用户侧 Token 重置独立成新规范，因为 `2m7yv` 只覆盖用户控制台 Token 明文显示，且明确排除了轮换能力。
+- PR #284 创建后与 `origin/main` 同步，保留 main 上 clay redesign 相关规范索引，同时追加 `r8tkn` 条目。
 
 ## Key Reasons / Replacements
 
