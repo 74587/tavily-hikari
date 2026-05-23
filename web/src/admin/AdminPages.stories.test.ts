@@ -13,6 +13,7 @@ describe('AdminPages Storybook proofs', () => {
     expect(meta).toMatchObject({
       title: 'Admin/Pages',
     })
+    expect((meta as { decorators?: unknown }).decorators).toBeUndefined()
 
     expect(adminPageStories.KeysSelected).toMatchObject({})
     expect(adminPageStories.KeysSyncUsageInProgress).toMatchObject({})
@@ -24,6 +25,7 @@ describe('AdminPages Storybook proofs', () => {
     expect(adminPageStories.TokenDetailRecentRequests).toMatchObject({})
     expect(adminPageStories.UserDetailSharedUsageTooltip).toMatchObject({})
     expect(adminPageStories.UserDetailCompact).toMatchObject({})
+    expect(adminPageStories.UserDetailSingleTokenGuard).toMatchObject({})
   })
 
   it('renders the sync-progress story with the progress bubble copy', () => {
@@ -156,5 +158,29 @@ describe('AdminPages Storybook proofs', () => {
     expect(markup).toContain('admin-user-mobile-chip')
     expect(markup).toContain('累计请求')
     expect(markup).toContain('最终有效额度')
+  })
+
+  it('renders the user detail stories with add and delete token controls', () => {
+    const renderStory = adminPageStories.UserDetail.render as (() => JSX.Element) | undefined
+    const renderSingleStory = adminPageStories.UserDetailSingleTokenGuard.render as (() => JSX.Element) | undefined
+    expect(renderStory).toBeDefined()
+    expect(renderSingleStory).toBeDefined()
+
+    const renderMarkup = (renderFn: () => JSX.Element) =>
+      renderToStaticMarkup(
+        createElement(
+          LanguageProvider,
+          { initialLanguage: 'en' },
+          createElement(ThemeProvider, null, createElement(TooltipProvider, null, createElement(renderFn))),
+        ),
+      )
+
+    const multiMarkup = renderMarkup(renderStory!)
+    const singleMarkup = renderMarkup(renderSingleStory!)
+
+    expect(multiMarkup).toContain('Add token')
+    expect(multiMarkup).toContain('Delete token')
+    expect(singleMarkup).toContain('Add token')
+    expect(singleMarkup).toContain('At least one token must remain.')
   })
 })

@@ -6339,12 +6339,27 @@ function AdminDashboard(): JSX.Element {
 
   const openTokenDeleteConfirm = (id: string) => {
     if (!id) return
+    if (
+      routeRef.current.name === 'user' &&
+      selectedUserDetail?.tokens.length === 1 &&
+      selectedUserDetail.tokens[0]?.tokenId === id
+    ) {
+      return
+    }
     setPendingTokenDeleteId(id)
   }
 
   const confirmTokenDelete = async () => {
     if (!pendingTokenDeleteId) return
     const id = pendingTokenDeleteId
+    if (
+      routeRef.current.name === 'user' &&
+      selectedUserDetail?.tokens.length === 1 &&
+      selectedUserDetail.tokens[0]?.tokenId === id
+    ) {
+      setPendingTokenDeleteId(null)
+      return
+    }
     setDeletingId(id)
     try {
       await deleteToken(id)
@@ -8199,6 +8214,15 @@ function AdminDashboard(): JSX.Element {
                   <h2>{usersStrings.detail.tokensTitle}</h2>
                   <p className="panel-description">{usersStrings.detail.tokensDescription}</p>
                 </div>
+                {isAdmin && (
+                  <Button
+                    type="button"
+                    onClick={(event) => void handleAddToken(event.currentTarget)}
+                    disabled={submitting}
+                  >
+                    {submitting ? tokenStrings.creating : usersStrings.detail.tokensAddAction}
+                  </Button>
+                )}
               </div>
               <div className="table-wrapper jobs-table-wrapper">
                 <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={220}>
@@ -8208,6 +8232,8 @@ function AdminDashboard(): JSX.Element {
                     formatNumber={formatNumber}
                     formatTimestamp={(value) => formatTimestamp(value ?? null)}
                     onViewToken={navigateToken}
+                    onDeleteToken={isAdmin ? openTokenDeleteConfirm : undefined}
+                    deletingTokenId={deletingId}
                   />
                 </AdminLazyBoundary>
               </div>

@@ -17,6 +17,7 @@ const DEMO_BACKUP_KEY_ID = 'Sf02'
 const DEMO_EU_KEY_ID = 'Fr03'
 const DEMO_QUOTA_KEY_ID = 'Qt04'
 const DEMO_QUARANTINE_KEY_ID = 'Qr05'
+const DEMO_TOKEN_OWNER = { userId: 'user-demo-admin', displayName: 'Hikari Demo Admin', username: 'hikari-demo' }
 
 function truthy(value: string | boolean | undefined | null): boolean {
   if (value === true) return true
@@ -213,6 +214,39 @@ function createDemoState() {
     }, 3)],
     registration: { allowRegistration: false },
   }
+}
+
+function createDemoAuthToken(id: string, note: string | null, createdAt = nowSeconds()) {
+  return {
+    id,
+    enabled: true,
+    note: note ?? 'Story token',
+    group: 'demo',
+    owner: DEMO_TOKEN_OWNER,
+    total_requests: 0,
+    created_at: createdAt,
+    last_used_at: createdAt,
+    quota_state: 'normal',
+    quota_hourly_used: 0,
+    quota_hourly_limit: 180,
+    quota_daily_used: 0,
+    quota_daily_limit: 1600,
+    quota_monthly_used: 0,
+    quota_monthly_limit: 24000,
+    quota_hourly_reset_at: nowSeconds(2500),
+    quota_daily_reset_at: nowSeconds(3600 * 8),
+    quota_monthly_reset_at: nowSeconds(86400 * 13),
+  }
+}
+
+async function createDemoToken(init?: RequestInit): Promise<Response> {
+  const body = await readJsonBody(init)
+  const note = typeof body.note === 'string' && body.note.trim().length > 0 ? body.note.trim() : null
+  const id = `dm${String(demoState.tokens.length + 1).padStart(2, '0')}`
+  const secret = `th-${id}-demoaccesssecret`
+  demoState.tokens.unshift(createDemoAuthToken(id, note))
+  demoState.tokenSecrets.set(id, secret)
+  return jsonResponse({ token: secret })
 }
 
 function createDemoUserTag(
@@ -1019,7 +1053,7 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
   if (path === '/api/tokens/unbound-usage') return jsonResponse({ items: [], total: 0, page: 1, perPage: 20 })
   if (path === '/api/tokens/batch' && method === 'POST') return jsonResponse({ tokens: ['th-b001-demoaccesssecret', 'th-b002-demoaccesssecret'] })
   if (path === '/api/tokens' && method === 'GET') return jsonResponse(buildListPage(demoState.tokens, url, 10))
-  if (path === '/api/tokens' && method === 'POST') return jsonResponse({ token: 'th-new1-demoaccesssecret' })
+  if (path === '/api/tokens' && method === 'POST') return createDemoToken(init)
   if (path.startsWith('/api/tokens/')) return handleTokenRoute(path, url, method)
 
   if (path === '/api/settings') return jsonResponse({ forwardProxy: demoState.forwardProxy, systemSettings: demoState.systemSettings })
@@ -1096,6 +1130,7 @@ function handleUserRoute(path: string, url: URL, method: string, init?: RequestI
   if (path.endsWith('/broken-keys')) return jsonResponse({ ...buildListPage([{ keyId: DEMO_QUOTA_KEY_ID, currentStatus: 'exhausted', reasonCode: 'upstream_usage_limit_432', reasonSummary: 'Demo quota exhausted', latestBreakAt: nowSeconds(-4200), source: 'request_log', breakerTokenId: DEMO_TOKEN_ID, breakerUserId: user.userId, breakerUserDisplayName: user.displayName, manualActorDisplayName: null, relatedUsers: [] }], url) })
   return jsonResponse({
     ...user,
+    tokenCount: demoState.tokens.length,
     tokens: demoState.tokens.map((token) => ({ tokenId: token.id, enabled: token.enabled, note: token.note, createdAt: token.created_at, lastUsedAt: token.last_used_at, totalRequests: token.total_requests, dailySuccess: token.quota_daily_used, dailyFailure: 18, monthlySuccess: token.quota_monthly_used })),
     quotaBase: { hourlyAnyLimit: 100, hourlyLimit: 100, dailyLimit: 1000, monthlyLimit: 10000, inheritsDefaults: true },
     effectiveQuota: { hourlyAnyLimit: user.hourlyAnyLimit, hourlyLimit: user.quotaHourlyLimit, dailyLimit: user.quotaDailyLimit, monthlyLimit: user.quotaMonthlyLimit, inheritsDefaults: false },
@@ -1147,7 +1182,14 @@ function handleTokenRoute(path: string, url: URL, method: string): Response {
   const match = path.match(/^\/api\/tokens\/([^/]+)/)
   const id = decodeURIComponent(match?.[1] ?? DEMO_TOKEN_ID)
   const token = demoState.tokens.find((item) => item.id === id) ?? demoState.tokens[0]
-  if (method === 'DELETE' || path.endsWith('/status') || path.endsWith('/note')) return noContentResponse()
+  if (method === 'DELETE') {
+    if (demoState.tokens.length > 1) {
+      demoState.tokens = demoState.tokens.filter((item) => item.id !== id)
+      demoState.tokenSecrets.delete(id)
+    }
+    return noContentResponse()
+  }
+  if (path.endsWith('/status') || path.endsWith('/note')) return noContentResponse()
   if (path.endsWith('/secret') || path.endsWith('/secret/rotate')) return jsonResponse({ token: demoState.tokenSecrets.get(token.id) ?? DEMO_TOKEN })
   if (path.endsWith('/metrics/hourly')) return jsonResponse(range(25).map((index) => ({ bucket_start: nowSeconds(-(24 - index) * 3600), success_count: 12 + index, system_failure_count: index % 4, external_failure_count: index % 6 === 0 ? 2 : 0 })))
   if (path.endsWith('/metrics/usage-series')) return jsonResponse(tokenUsageSeries(url))

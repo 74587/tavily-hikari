@@ -11,6 +11,8 @@ interface UserDetailTokenTableProps {
   formatNumber: (value: number) => string
   formatTimestamp: (value: number | null | undefined) => string
   onViewToken: (tokenId: string) => void
+  onDeleteToken?: (tokenId: string) => void
+  deletingTokenId?: string | null
 }
 
 export function UserDetailTokenTable({
@@ -19,10 +21,14 @@ export function UserDetailTokenTable({
   formatNumber,
   formatTimestamp,
   onViewToken,
+  onDeleteToken,
+  deletingTokenId = null,
 }: UserDetailTokenTableProps): JSX.Element {
   if (tokens.length === 0) {
     return <div className="empty-state alert">{usersStrings.empty.noTokens}</div>
   }
+
+  const canDeleteTokens = tokens.length > 1
 
   return (
     <>
@@ -89,17 +95,33 @@ export function UserDetailTokenTable({
                     </div>
                   </td>
                   <td>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 rounded-full p-0 shadow-none"
-                      title={usersStrings.tokens.actions.view}
-                      aria-label={usersStrings.tokens.actions.view}
-                      onClick={() => onViewToken(token.tokenId)}
-                    >
-                      <Icon icon="mdi:eye-outline" width={16} height={16} />
-                    </Button>
+                    <div className="admin-user-token-actions">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 rounded-full p-0 shadow-none"
+                        title={usersStrings.tokens.actions.view}
+                        aria-label={usersStrings.tokens.actions.view}
+                        onClick={() => onViewToken(token.tokenId)}
+                      >
+                        <Icon icon="mdi:eye-outline" width={16} height={16} />
+                      </Button>
+                      {onDeleteToken && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 rounded-full p-0 shadow-none"
+                          title={canDeleteTokens ? usersStrings.tokens.actions.delete : usersStrings.tokens.actions.deleteLastDisabled}
+                          aria-label={usersStrings.tokens.actions.delete}
+                          onClick={() => onDeleteToken(token.tokenId)}
+                          disabled={!canDeleteTokens || deletingTokenId === token.tokenId}
+                        >
+                          <Icon icon="mdi:trash-outline" width={16} height={16} />
+                        </Button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               )
@@ -129,17 +151,33 @@ export function UserDetailTokenTable({
                     </div>
                   </div>
                 </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 rounded-full p-0 shadow-none admin-user-mobile-card-action"
-                  title={usersStrings.tokens.actions.view}
-                  aria-label={usersStrings.tokens.actions.view}
-                  onClick={() => onViewToken(token.tokenId)}
-                >
-                  <Icon icon="mdi:eye-outline" width={16} height={16} />
-                </Button>
+                <div className="admin-user-token-actions admin-user-mobile-card-action">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 rounded-full p-0 shadow-none"
+                    title={usersStrings.tokens.actions.view}
+                    aria-label={usersStrings.tokens.actions.view}
+                    onClick={() => onViewToken(token.tokenId)}
+                  >
+                    <Icon icon="mdi:eye-outline" width={16} height={16} />
+                  </Button>
+                  {onDeleteToken && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 rounded-full p-0 shadow-none"
+                      title={canDeleteTokens ? usersStrings.tokens.actions.delete : usersStrings.tokens.actions.deleteLastDisabled}
+                      aria-label={usersStrings.tokens.actions.delete}
+                      onClick={() => onDeleteToken(token.tokenId)}
+                      disabled={!canDeleteTokens || deletingTokenId === token.tokenId}
+                    >
+                      <Icon icon="mdi:trash-outline" width={16} height={16} />
+                    </Button>
+                  )}
+                </div>
               </div>
 
               <div className="admin-user-mobile-metric-grid admin-user-token-metric-grid">

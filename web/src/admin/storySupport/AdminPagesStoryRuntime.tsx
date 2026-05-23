@@ -1722,6 +1722,12 @@ const MOCK_USER_DETAIL: AdminUserDetail = {
   ],
 }
 
+const MOCK_USER_DETAIL_SINGLE_TOKEN: AdminUserDetail = {
+  ...MOCK_USER_DETAIL,
+  tokenCount: 1,
+  tokens: [MOCK_USER_TOKENS[0]],
+}
+
 const MOCK_MONTHLY_BROKEN_ITEMS: Record<string, MonthlyBrokenKeyDetail[]> = {
   'user:usr_alice': [
     {
@@ -5832,12 +5838,14 @@ function UserTagsPageCanvas({ editorMode = 'view' }: { editorMode?: StoryTagCard
 }
 function UserDetailPageCanvas({
   initialUsageSeries = 'quota1h',
+  initialDetail = MOCK_USER_DETAIL,
 }: {
   initialUsageSeries?: AdminUserUsageSeriesKey | 'ip'
+  initialDetail?: AdminUserDetail
 } = {}): JSX.Element {
   const users = useTranslate().admin.users
   const { language } = useLanguage()
-  const detail = MOCK_USER_DETAIL
+  const [detail, setDetail] = useState<AdminUserDetail>(initialDetail)
   const quotaSnapshot = buildStoryQuotaSnapshot(detail)
   const [quotaDraft, setQuotaDraft] = useState<Record<QuotaSliderField, string>>({
     hourlyAnyLimit: String(detail.quotaBase.hourlyAnyLimit),
@@ -5850,6 +5858,31 @@ function UserDetailPageCanvas({
   const hasBlockAllTag = detail.tags.some((tag) => tag.effectKind === 'block_all')
   const systemTagCount = detail.tags.filter((tag) => isSystemUserTag(tag)).length
   const manualTagCount = detail.tags.length - systemTagCount
+  const addToken = () => {
+    setDetail((current) => {
+      const nextIndex = current.tokens.length + 1
+      const nextToken: AdminUserTokenSummary = {
+        tokenId: `story_${nextIndex}`,
+        enabled: true,
+        note: `Story token ${nextIndex}`,
+        createdAt: now,
+        lastUsedAt: null,
+        totalRequests: 0,
+        dailySuccess: 0,
+        dailyFailure: 0,
+        monthlySuccess: 0,
+      }
+      const tokens = [...current.tokens, nextToken]
+      return { ...current, tokenCount: tokens.length, tokens }
+    })
+  }
+  const deleteToken = (tokenId: string) => {
+    setDetail((current) => {
+      if (current.tokens.length <= 1) return current
+      const tokens = current.tokens.filter((token) => token.tokenId !== tokenId)
+      return { ...current, tokenCount: tokens.length, tokens }
+    })
+  }
   return (
     <AdminPageFrame
       activeModule="users"
@@ -6124,6 +6157,9 @@ function UserDetailPageCanvas({
             <h2>{users.detail.tokensTitle}</h2>
             <p className="panel-description">{users.detail.tokensDescription}</p>
           </div>
+          <Button type="button" onClick={addToken}>
+            {users.detail.tokensAddAction}
+          </Button>
         </div>
         <div className="table-wrapper jobs-table-wrapper">
           <UserDetailTokenTable
@@ -6132,6 +6168,7 @@ function UserDetailPageCanvas({
             formatNumber={formatNumber}
             formatTimestamp={(value) => formatTimestamp(value ?? null)}
             onViewToken={() => {}}
+            onDeleteToken={deleteToken}
           />
         </div>
       </section>
@@ -6917,6 +6954,29 @@ export const UserDetail: Story = {
       throw new Error('Expected the token table headers to include total requests and created time.')
     }
 
+    const addButton = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button'))
+      .find((item) => item.textContent?.trim() === 'Add token')
+    if (!addButton) {
+      throw new Error('Expected the user detail token header to expose an Add token button.')
+    }
+    addButton.click()
+    await new Promise((resolve) => window.setTimeout(resolve, 40))
+    const tokenRowsAfterAdd = canvasElement.querySelectorAll('.admin-user-tokens-table tbody tr')
+    if (tokenRowsAfterAdd.length !== MOCK_USER_DETAIL.tokens.length + 1) {
+      throw new Error('Expected Add token to append one token row in the story runtime.')
+    }
+
+    const deleteButtons = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('.admin-user-tokens-table button[aria-label="Delete token"]'))
+    if (deleteButtons.length !== tokenRowsAfterAdd.length) {
+      throw new Error('Expected every token row to expose a delete action.')
+    }
+    deleteButtons[0]?.click()
+    await new Promise((resolve) => window.setTimeout(resolve, 40))
+    const tokenRowsAfterDelete = canvasElement.querySelectorAll('.admin-user-tokens-table tbody tr')
+    if (tokenRowsAfterDelete.length !== MOCK_USER_DETAIL.tokens.length) {
+      throw new Error('Expected deleting a token to refresh the story table.')
+    }
+
     const tokenTableWrapper = canvasElement.querySelector('.admin-user-tokens-table')?.closest<HTMLElement>('.admin-responsive-up')
     const breakdownTableWrapper = canvasElement.querySelector('.user-tag-breakdown-table')?.closest<HTMLElement>('.admin-responsive-up')
     for (const [label, wrapper] of [
@@ -6942,6 +7002,32 @@ export const UserDetail: Story = {
     const expected = ['quota1h', 'rate5m', 'quota24h', 'quotaMonth']
     if (expected.some((value) => !loadedSeries.includes(value))) {
       throw new Error(`Expected shared usage tabs to lazy-load all series after interaction, received ${loadedSeries.join(',')}.`)
+    }
+  },
+}
+
+export const UserDetailSingleTokenGuard: Story = {
+  render: () => <UserDetailPageCanvas initialDetail={MOCK_USER_DETAIL_SINGLE_TOKEN} />,
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+
+    const deleteButton = canvasElement.querySelector<HTMLButtonElement>(
+      '.admin-user-tokens-table button[aria-label="Delete token"]',
+    )
+    if (!deleteButton) {
+      throw new Error('Expected the single-token story to show a token delete button.')
+    }
+    if (!deleteButton.disabled) {
+      throw new Error('Expected the single-token delete button to be disabled.')
+    }
+    if (deleteButton.title !== 'At least one token must remain.') {
+      throw new Error('Expected the single-token delete guard to explain why deletion is disabled.')
+    }
+
+    const addButton = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button'))
+      .find((item) => item.textContent?.trim() === 'Add token')
+    if (!addButton) {
+      throw new Error('Expected the single-token story to keep the Add token action available.')
     }
   },
 }

@@ -714,6 +714,7 @@ export const ZH: TranslationShape = {
           ipUsageListEmpty: '暂无 IP 地址。',
           tokensTitle: '令牌列表',
           tokensDescription: '这里只展示令牌自己的状态、时间与成功统计；共享额度请看上方趋势图。',
+          tokensAddAction: '添加 token',
         },
         brokenKeys: {
           limitTitle: '封禁数限额',
@@ -867,6 +868,8 @@ export const ZH: TranslationShape = {
           },
           actions: {
             view: '查看令牌详情',
+            delete: '删除令牌',
+            deleteLastDisabled: '至少需要保留一个 token。',
           },
         },
       },

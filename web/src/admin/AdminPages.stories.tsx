@@ -1,6 +1,5 @@
 import type { Meta } from '@storybook/react-vite'
 
-import { LanguageProvider } from '../i18n'
 import * as RuntimeStories from './storySupport/AdminPagesStoryRuntime'
 
 const meta = {
@@ -18,23 +17,6 @@ const meta = {
     },
     layout: 'fullscreen',
   },
-  decorators: [
-    (Story) => (
-      <LanguageProvider>
-        <div
-          className="app-shell"
-          style={{
-            minHeight: '100vh',
-            padding: 24,
-            color: 'hsl(var(--foreground))',
-            background: 'var(--clay-canvas, hsl(var(--background)))',
-          }}
-        >
-          <Story />
-        </div>
-      </LanguageProvider>
-    ),
-  ],
 } satisfies Meta
 
 export default meta
@@ -76,6 +58,7 @@ export const UserTags = { ...RuntimeStories.UserTags }
 export const UserTagNew = { ...RuntimeStories.UserTagNew }
 export const UserTagEdit = { ...RuntimeStories.UserTagEdit }
 export const UserDetail = { ...RuntimeStories.UserDetail }
+export const UserDetailSingleTokenGuard = { ...RuntimeStories.UserDetailSingleTokenGuard }
 export const UserDetailCompact = { ...RuntimeStories.UserDetailCompact }
 export const UserDetailSharedUsageTooltip = { ...RuntimeStories.UserDetailSharedUsageTooltip }
 export const UserDetailMonthlyGap = { ...RuntimeStories.UserDetailMonthlyGap }
