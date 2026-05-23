@@ -1365,6 +1365,11 @@ tbody .log-details-row:hover {
   padding-bottom: 0;
 }
 
+.admin-main-content .app-shell {
+  max-width: none;
+  width: min(100%, 1760px);
+}
+
 .admin-main-content .app-footer {
   margin-top: auto;
 }

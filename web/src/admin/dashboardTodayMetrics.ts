@@ -74,6 +74,7 @@ interface BuildMetricCardOptions {
   id: string
   label: string
   value: string
+  valueNumber?: number
   marker?: string
   markerTone?: DashboardMetricCard['markerTone']
   valueMeta?: string
@@ -125,6 +126,7 @@ function buildMetricCard({
   id,
   label,
   value,
+  valueNumber,
   marker,
   markerTone,
   valueMeta,
@@ -136,6 +138,7 @@ function buildMetricCard({
     id,
     label,
     value,
+    valueNumber,
     marker,
     markerTone,
     valueMeta,
@@ -184,6 +187,7 @@ export function createDashboardTodayMetrics({
       id: 'today-total',
       label: labels.total,
       value: formatNumber(today.total_requests),
+      valueNumber: today.total_requests,
       subtitle: strings.asOfNow,
       comparison: buildTodayCountComparison({
         currentValue: today.total_requests,
@@ -198,6 +202,7 @@ export function createDashboardTodayMetrics({
       marker: labels.valuableTag,
       markerTone: 'primary',
       value: formatNumber(today.valuable_success_count),
+      valueNumber: today.valuable_success_count,
       valueMeta: buildWindowSubtitle(
         strings.todayShare,
         today.valuable_success_count,
@@ -216,6 +221,7 @@ export function createDashboardTodayMetrics({
       marker: labels.valuableTag,
       markerTone: 'primary',
       value: formatNumber(today.valuable_failure_count),
+      valueNumber: today.valuable_failure_count,
       valueMeta: buildWindowSubtitle(
         strings.todayShare,
         today.valuable_failure_count,
@@ -235,6 +241,7 @@ export function createDashboardTodayMetrics({
       marker: labels.otherTag,
       markerTone: 'secondary',
       value: formatNumber(today.other_success_count),
+      valueNumber: today.other_success_count,
       valueMeta: buildWindowSubtitle(
         strings.todayShare,
         today.other_success_count,
@@ -253,6 +260,7 @@ export function createDashboardTodayMetrics({
       marker: labels.otherTag,
       markerTone: 'secondary',
       value: formatNumber(today.other_failure_count),
+      valueNumber: today.other_failure_count,
       valueMeta: buildWindowSubtitle(
         strings.todayShare,
         today.other_failure_count,
@@ -270,6 +278,7 @@ export function createDashboardTodayMetrics({
       id: 'today-unknown',
       label: labels.unknownCalls,
       value: formatNumber(today.unknown_count),
+      valueNumber: today.unknown_count,
       valueMeta: buildWindowSubtitle(
         strings.todayShare,
         today.unknown_count,
@@ -287,6 +296,7 @@ export function createDashboardTodayMetrics({
       id: 'today-upstream-exhausted',
       label: labels.upstreamExhausted,
       value: formatNumber(today.upstream_exhausted_key_count),
+      valueNumber: today.upstream_exhausted_key_count,
       subtitle: strings.todayAdded,
       comparison: buildTodayCountComparison({
         currentValue: today.upstream_exhausted_key_count,
@@ -311,6 +321,7 @@ export function createDashboardMonthMetrics({
       id: 'month-total',
       label: labels.total,
       value: formatNumber(month.total_requests),
+      valueNumber: month.total_requests,
       subtitle: strings.monthToDate,
       fullWidth: true,
     }),
@@ -320,6 +331,7 @@ export function createDashboardMonthMetrics({
       marker: labels.valuableTag,
       markerTone: 'primary',
       value: formatNumber(month.valuable_success_count),
+      valueNumber: month.valuable_success_count,
       subtitle: buildWindowSubtitle(
         strings.monthShare,
         month.valuable_success_count,
@@ -333,6 +345,7 @@ export function createDashboardMonthMetrics({
       marker: labels.valuableTag,
       markerTone: 'primary',
       value: formatNumber(month.valuable_failure_count),
+      valueNumber: month.valuable_failure_count,
       subtitle: buildWindowSubtitle(
         strings.monthShare,
         month.valuable_failure_count,
@@ -346,6 +359,7 @@ export function createDashboardMonthMetrics({
       marker: labels.otherTag,
       markerTone: 'secondary',
       value: formatNumber(month.other_success_count),
+      valueNumber: month.other_success_count,
       subtitle: buildWindowSubtitle(
         strings.monthShare,
         month.other_success_count,
@@ -359,6 +373,7 @@ export function createDashboardMonthMetrics({
       marker: labels.otherTag,
       markerTone: 'secondary',
       value: formatNumber(month.other_failure_count),
+      valueNumber: month.other_failure_count,
       subtitle: buildWindowSubtitle(
         strings.monthShare,
         month.other_failure_count,
@@ -370,6 +385,7 @@ export function createDashboardMonthMetrics({
       id: 'month-unknown',
       label: labels.unknownCalls,
       value: formatNumber(month.unknown_count),
+      valueNumber: month.unknown_count,
       subtitle: buildWindowSubtitle(
         strings.monthShare,
         month.unknown_count,
@@ -381,18 +397,21 @@ export function createDashboardMonthMetrics({
       id: 'month-upstream-exhausted',
       label: labels.upstreamExhausted,
       value: formatNumber(month.upstream_exhausted_key_count),
+      valueNumber: month.upstream_exhausted_key_count,
       subtitle: strings.monthAdded,
     }),
     buildMetricCard({
       id: 'month-new-keys',
       label: labels.newKeys,
       value: formatNumber(month.new_keys),
+      valueNumber: month.new_keys,
       subtitle: strings.monthAdded,
     }),
     buildMetricCard({
       id: 'month-new-quarantines',
       label: labels.newQuarantines,
       value: formatNumber(month.new_quarantines),
+      valueNumber: month.new_quarantines,
       subtitle: strings.monthAdded,
     }),
   ]

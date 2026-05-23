@@ -171,6 +171,12 @@ describe('admin user tag api helpers', () => {
               today: { total_requests: 1, success_count: 1, error_count: 0, quota_exhausted_count: 0, valuable_success_count: 0, valuable_failure_count: 0, other_success_count: 0, other_failure_count: 0, unknown_count: 0, upstream_exhausted_key_count: 0, new_keys: 0, new_quarantines: 0 },
               yesterday: { total_requests: 0, success_count: 0, error_count: 0, quota_exhausted_count: 0, valuable_success_count: 0, valuable_failure_count: 0, other_success_count: 0, other_failure_count: 0, unknown_count: 0, upstream_exhausted_key_count: 0, new_keys: 0, new_quarantines: 0 },
               month: { total_requests: 1, success_count: 1, error_count: 0, quota_exhausted_count: 0, valuable_success_count: 0, valuable_failure_count: 0, other_success_count: 0, other_failure_count: 0, unknown_count: 0, upstream_exhausted_key_count: 0, new_keys: 0, new_quarantines: 0 },
+              today_start: 1_776_000_000,
+              today_end: 1_776_003_601,
+              yesterday_start: 1_775_913_600,
+              yesterday_end: 1_775_917_201,
+              month_start: 1_775_481_600,
+              month_end: 1_776_003_601,
             },
             siteStatus: {
               remainingQuota: 9,

@@ -45,6 +45,10 @@ function isoSeconds(offset = 0): string {
   return new Date((nowSeconds(offset)) * 1000).toISOString()
 }
 
+function demoPulse(now = Date.now()): number {
+  return Math.floor(now / 6000)
+}
+
 function range(count: number): number[] {
   return Array.from({ length: count }, (_, index) => index)
 }
@@ -402,49 +406,59 @@ function createDemoSystemSettings() {
 
 const demoState = createDemoState()
 
-function demoSummary() {
+function demoSummary(now = Date.now()) {
+  const pulse = demoPulse(now)
   const total = demoState.logs.length
   const success = demoState.logs.filter((log) => log.result_status === 'success').length
   const quota = demoState.logs.filter((log) => log.result_status === 'quota_exhausted').length
+  const requestDrift = pulse % 6
+  const quotaDrift = pulse % 4
   return {
-    total_requests: 24882,
-    success_count: 23710,
-    error_count: 992,
-    quota_exhausted_count: quota,
+    total_requests: 24882 + requestDrift * 48,
+    success_count: 23710 + requestDrift * 42,
+    error_count: 992 + quotaDrift * 8,
+    quota_exhausted_count: quota + quotaDrift,
     active_keys: demoState.keys.filter((key) => key.status === 'active').length,
     exhausted_keys: demoState.keys.filter((key) => key.status === 'exhausted').length,
     quarantined_keys: demoState.keys.filter((key) => key.status === 'quarantined').length,
     temporary_isolated_keys: demoState.keys.filter((key) => key.status === 'temporarily_isolated').length,
-    last_activity: demoState.logs[0]?.created_at ?? nowSeconds(-120),
+    last_activity: (demoState.logs[0]?.created_at ?? nowSeconds(-120)) + requestDrift * 45,
     total_quota_limit: 104000,
-    total_quota_remaining: 66360,
+    total_quota_remaining: 66360 - requestDrift * 64,
     _demo_window_total: total,
     _demo_window_success: success,
   }
 }
 
-function demoSummaryWindows() {
+function demoSummaryWindows(
+  currentHourStart = Math.floor(Date.now() / 3_600_000) * 3_600,
+  now = Date.now(),
+) {
+  const pulse = demoPulse(now)
+  const todayDrift = pulse % 5
+  const monthDrift = pulse % 12
+  const todayStart = currentHourStart - 23 * 3_600
   const quotaCharge = {
-    local_estimated_credits: 1260,
-    upstream_actual_credits: 1218,
+    local_estimated_credits: 1260 + todayDrift * 6,
+    upstream_actual_credits: 1218 + todayDrift * 5,
     sampled_key_count: 4,
     stale_key_count: 1,
-    latest_sync_at: nowSeconds(-900),
+    latest_sync_at: nowSeconds(-900 + todayDrift * 30),
   }
   return {
     today: {
-      total_requests: 760,
-      success_count: 714,
-      error_count: 36,
-      quota_exhausted_count: 10,
-      valuable_success_count: 482,
-      valuable_failure_count: 18,
-      other_success_count: 232,
-      other_failure_count: 18,
-      unknown_count: 0,
-      upstream_exhausted_key_count: 1,
-      new_keys: 1,
-      new_quarantines: 1,
+      total_requests: 760 + todayDrift * 4,
+      success_count: 714 + todayDrift * 3,
+      error_count: 36 + (todayDrift % 3),
+      quota_exhausted_count: 10 + (todayDrift % 2),
+      valuable_success_count: 482 + todayDrift * 2,
+      valuable_failure_count: 18 + (todayDrift % 3),
+      other_success_count: 232 + todayDrift,
+      other_failure_count: 18 + (todayDrift % 2),
+      unknown_count: todayDrift % 2,
+      upstream_exhausted_key_count: 1 + (todayDrift % 3 === 0 ? 1 : 0),
+      new_keys: 1 + (todayDrift % 4 === 0 ? 1 : 0),
+      new_quarantines: 1 + (todayDrift % 5 === 0 ? 1 : 0),
       quota_charge: quotaCharge,
     },
     yesterday: {
@@ -463,47 +477,55 @@ function demoSummaryWindows() {
       quota_charge: quotaCharge,
     },
     month: {
-      total_requests: 24882,
-      success_count: 23710,
-      error_count: 992,
-      quota_exhausted_count: 180,
-      valuable_success_count: 17880,
-      valuable_failure_count: 420,
-      other_success_count: 5830,
-      other_failure_count: 572,
-      unknown_count: 0,
-      upstream_exhausted_key_count: 1,
-      new_keys: 4,
-      new_quarantines: 2,
+      total_requests: 24882 + monthDrift * 60,
+      success_count: 23710 + monthDrift * 55,
+      error_count: 992 + monthDrift * 4,
+      quota_exhausted_count: 180 + monthDrift * 2,
+      valuable_success_count: 17880 + monthDrift * 38,
+      valuable_failure_count: 420 + (monthDrift % 4),
+      other_success_count: 5830 + monthDrift * 14,
+      other_failure_count: 572 + (monthDrift % 5),
+      unknown_count: monthDrift % 3,
+      upstream_exhausted_key_count: 1 + (monthDrift % 6 === 0 ? 1 : 0),
+      new_keys: 4 + (monthDrift % 4 === 0 ? 1 : 0),
+      new_quarantines: 2 + (monthDrift % 5 === 0 ? 1 : 0),
       quota_charge: quotaCharge,
     },
+    today_start: todayStart,
+    today_end: currentHourStart + 1,
+    yesterday_start: todayStart - 24 * 3_600,
+    yesterday_end: currentHourStart - 24 * 3_600 + 1,
+    month_start: todayStart - 14 * 24 * 3_600,
+    month_end: currentHourStart + 1,
   }
 }
 
-function demoDashboardOverview() {
+function demoDashboardOverview(now = Date.now()) {
+  const pulse = demoPulse(now)
+  const currentHourStart = Math.floor(Date.now() / 3_600_000) * 3_600
   return {
-    summary: demoSummary(),
-    summaryWindows: demoSummaryWindows(),
+    summary: demoSummary(now),
+    summaryWindows: demoSummaryWindows(currentHourStart, now),
     hourlyRequestWindow: {
       bucketSeconds: 3600,
-      visibleBuckets: 24,
-      retainedBuckets: 24,
-      buckets: range(24).map((index) => ({
-        bucketStart: nowSeconds(-(23 - index) * 3600),
-        secondarySuccess: 8 + index,
-        primarySuccess: 24 + index * 2,
-        secondaryFailure: index % 5,
-        primaryFailure429: index % 7 === 0 ? 2 : 0,
-        primaryFailureOther: index % 4,
-        unknown: 0,
-        mcpNonBillable: 4 + (index % 6),
-        mcpBillable: 10 + (index % 8),
-        apiNonBillable: 3 + (index % 5),
-        apiBillable: 18 + index,
+      visibleBuckets: 25,
+      retainedBuckets: 49,
+      buckets: range(49).map((index) => ({
+        bucketStart: currentHourStart - (48 - index) * 3_600,
+        secondarySuccess: 8 + index + (index >= 42 ? pulse % 4 : 0),
+        primarySuccess: 24 + index * 2 + (index >= 40 ? (pulse % 5) * 2 : 0),
+        secondaryFailure: (index % 5) + (index >= 44 ? pulse % 2 : 0),
+        primaryFailure429: index % 7 === 0 ? 2 + (index >= 45 ? pulse % 2 : 0) : 0,
+        primaryFailureOther: (index % 4) + (index >= 41 ? pulse % 3 : 0),
+        unknown: index === 48 && pulse % 4 === 0 ? 1 : 0,
+        mcpNonBillable: 4 + (index % 6) + (index >= 43 ? pulse % 2 : 0),
+        mcpBillable: 10 + (index % 8) + (index >= 44 ? pulse % 3 : 0),
+        apiNonBillable: 3 + (index % 5) + (index >= 42 ? pulse % 2 : 0),
+        apiBillable: 18 + index + (index >= 45 ? pulse % 4 : 0),
       })),
     },
     siteStatus: {
-      remainingQuota: 66360,
+      remainingQuota: 66360 - (pulse % 7) * 24,
       totalQuotaLimit: 104000,
       activeKeys: 2,
       quarantinedKeys: 1,
@@ -514,8 +536,8 @@ function demoDashboardOverview() {
     },
     forwardProxy: { availableNodes: 2, totalNodes: 3 },
     trend: {
-      request: range(24).map((index) => 28 + index * 2),
-      error: range(24).map((index) => index % 5),
+      request: range(24).map((index) => 28 + index * 2 + (index >= 20 ? pulse % 4 : 0)),
+      error: range(24).map((index) => (index % 5) + (index >= 20 ? pulse % 2 : 0)),
     },
     exhaustedKeys: demoState.keys.filter((key) => key.status !== 'active'),
     recentLogs: demoState.logs.slice(0, 8),
@@ -1172,6 +1194,7 @@ class DemoEventSource {
   onmessage: ((this: EventSource, ev: MessageEvent) => unknown) | null = null
   onerror: ((this: EventSource, ev: Event) => unknown) | null = null
   private listeners = new Map<string, Set<DemoListener>>()
+  private refreshTimer: number | null = null
 
   constructor(url: string | URL) {
     this.url = String(url)
@@ -1180,7 +1203,7 @@ class DemoEventSource {
       if (this.readyState === DemoEventSource.CLOSED) return
       this.readyState = DemoEventSource.OPEN
       this.dispatch('open', new Event('open'))
-      emitInitialDemoEvent(this)
+      this.emitInitialDemoEvent()
     }, 40)
   }
 
@@ -1203,6 +1226,10 @@ class DemoEventSource {
 
   close(): void {
     this.readyState = DemoEventSource.CLOSED
+    if (this.refreshTimer != null) {
+      window.clearInterval(this.refreshTimer)
+      this.refreshTimer = null
+    }
     activeEventSources.delete(this)
     this.listeners.clear()
   }
@@ -1225,47 +1252,69 @@ class DemoEventSource {
       }
     }
   }
+
+  private emitInitialDemoEvent(): void {
+    const url = parseUrl(this.url)
+    const path = url?.pathname ?? ''
+    if (path === '/api/events') {
+      this.emit('snapshot', demoDashboardOverview())
+      this.refreshTimer = window.setInterval(() => {
+        if (this.readyState !== DemoEventSource.OPEN) return
+        this.emit('snapshot', demoDashboardOverview())
+      }, 6000)
+      return
+    }
+    if (path === '/api/public/events') {
+      this.emit('metrics', {
+        public: { monthlySuccess: 23710, dailySuccess: 714 },
+        token: {
+          monthlySuccess: 8400,
+          dailySuccess: 388,
+          dailyFailure: 18,
+          quotaHourlyUsed: 42,
+          quotaHourlyLimit: 180,
+          quotaDailyUsed: 388,
+          quotaDailyLimit: 1600,
+          quotaMonthlyUsed: 8400,
+          quotaMonthlyLimit: 24000,
+        },
+      })
+      this.refreshTimer = window.setInterval(() => {
+        if (this.readyState !== DemoEventSource.OPEN) return
+        const pulse = demoPulse()
+        this.emit('metrics', {
+          public: { monthlySuccess: 23710 + (pulse % 6) * 20, dailySuccess: 714 + (pulse % 5) * 3 },
+          token: {
+            monthlySuccess: 8400 + (pulse % 6) * 12,
+            dailySuccess: 388 + (pulse % 5) * 2,
+            dailyFailure: 18 + (pulse % 3),
+            quotaHourlyUsed: 42 + (pulse % 4),
+            quotaHourlyLimit: 180,
+            quotaDailyUsed: 388 + (pulse % 5) * 2,
+            quotaDailyLimit: 1600,
+            quotaMonthlyUsed: 8400 + (pulse % 6) * 12,
+            quotaMonthlyLimit: 24000,
+          },
+        })
+      }, 6000)
+      return
+    }
+    if (path.startsWith('/api/user/tokens/')) {
+      const tokenId = decodeURIComponent(path.split('/')[4] ?? DEMO_TOKEN_ID)
+      const token = demoState.tokens.find((item) => item.id === tokenId) ?? demoState.tokens[0]
+      const logs = demoState.logs.filter((log) => log.auth_token_id === token.id)
+      this.emit('snapshot', { token, logs: publicTokenLogs(logs) })
+      return
+    }
+    if (path.startsWith('/api/tokens/')) {
+      const tokenId = decodeURIComponent(path.split('/')[3] ?? DEMO_TOKEN_ID)
+      const logs = demoState.logs.filter((log) => log.auth_token_id === tokenId)
+      this.emit('snapshot', { summary: tokenSummary(tokenId), logs: logs.slice(0, 12) })
+    }
+  }
 }
 
 const activeEventSources = new Set<DemoEventSource>()
-
-function emitInitialDemoEvent(source: DemoEventSource): void {
-  const url = parseUrl(source.url)
-  const path = url?.pathname ?? ''
-  if (path === '/api/events') {
-    source.emit('snapshot', demoDashboardOverview())
-    return
-  }
-  if (path === '/api/public/events') {
-    source.emit('metrics', {
-      public: { monthlySuccess: 23710, dailySuccess: 714 },
-      token: {
-        monthlySuccess: 8400,
-        dailySuccess: 388,
-        dailyFailure: 18,
-        quotaHourlyUsed: 42,
-        quotaHourlyLimit: 180,
-        quotaDailyUsed: 388,
-        quotaDailyLimit: 1600,
-        quotaMonthlyUsed: 8400,
-        quotaMonthlyLimit: 24000,
-      },
-    })
-    return
-  }
-  if (path.startsWith('/api/user/tokens/')) {
-    const tokenId = decodeURIComponent(path.split('/')[4] ?? DEMO_TOKEN_ID)
-    const token = demoState.tokens.find((item) => item.id === tokenId) ?? demoState.tokens[0]
-    const logs = demoState.logs.filter((log) => log.auth_token_id === token.id)
-    source.emit('snapshot', { token, logs: publicTokenLogs(logs) })
-    return
-  }
-  if (path.startsWith('/api/tokens/')) {
-    const tokenId = decodeURIComponent(path.split('/')[3] ?? DEMO_TOKEN_ID)
-    const logs = demoState.logs.filter((log) => log.auth_token_id === tokenId)
-    source.emit('snapshot', { summary: tokenSummary(tokenId), logs: logs.slice(0, 12) })
-  }
-}
 
 export function installDemoRuntime(): void {
   if (!isDemoMode() || typeof window === 'undefined' || window.__tavilyHikariDemoInstalled) return

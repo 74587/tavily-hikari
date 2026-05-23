@@ -1383,6 +1383,12 @@ pub struct SummaryWindows {
     pub today: SummaryWindowMetrics,
     pub yesterday: SummaryWindowMetrics,
     pub month: SummaryWindowMetrics,
+    pub today_start: i64,
+    pub today_end: i64,
+    pub yesterday_start: i64,
+    pub yesterday_end: i64,
+    pub month_start: i64,
+    pub month_end: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]

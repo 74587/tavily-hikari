@@ -126,6 +126,15 @@ async fn summary_windows_include_quota_charge_estimates_and_sample_diffs() {
     assert_eq!(summary.month.quota_charge.stale_key_count, 1);
     assert_eq!(summary.month.total_requests, expected_month_total);
     assert_eq!(summary.month.success_count, expected_month_total);
+    assert_eq!(summary.today_start, today_start);
+    assert_eq!(summary.today_end, now_ts.saturating_add(1));
+    assert_eq!(summary.yesterday_start, yesterday_start);
+    assert_eq!(
+        summary.yesterday_end,
+        previous_local_same_time_utc_ts(now).saturating_add(1)
+    );
+    assert_eq!(summary.month_start, local_month_start);
+    assert_eq!(summary.month_end, summary.today_end);
 
     // The same-time window should end before the sample inserted at the current day's midday.
     assert!(

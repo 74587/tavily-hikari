@@ -1672,6 +1672,19 @@
                 "summary windows should expose {pointer}"
             );
         }
+        for pointer in [
+            "/today_start",
+            "/today_end",
+            "/yesterday_start",
+            "/yesterday_end",
+            "/month_start",
+            "/month_end",
+        ] {
+            assert!(
+                body.pointer(pointer).and_then(|v| v.as_i64()).is_some(),
+                "summary windows should expose {pointer}"
+            );
+        }
         assert_eq!(
             body.pointer("/month/new_keys").and_then(|v| v.as_i64()),
             Some(3)

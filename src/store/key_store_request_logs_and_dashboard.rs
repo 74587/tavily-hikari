@@ -2747,6 +2747,12 @@ impl KeyStore {
                 },
                 ..month_metrics
             },
+            today_start,
+            today_end,
+            yesterday_start,
+            yesterday_end,
+            month_start,
+            month_end: today_end,
         })
     }
 

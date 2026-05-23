@@ -606,7 +606,7 @@
     padding: 9px 10px;
     border: 0;
     border-radius: 0;
-    background: hsl(var(--card) / 0.48);
+    background: hsl(var(--card) / 0.38);
     box-shadow: none;
   }
 
@@ -618,7 +618,7 @@
   .admin-main-content .dashboard-quota-charge-card {
     border: 1px solid hsl(var(--border) / 0.58);
     border-radius: 14px;
-    background: hsl(var(--background) / 0.18);
+    background: hsl(var(--background) / 0.13);
     box-shadow:
       inset 5px 5px 12px oklch(0.8 0.028 303 / 0.24),
       inset -5px -5px 12px oklch(1 0.006 303 / 0.78);

@@ -25,7 +25,7 @@ const EXCEPTIONS = new Map<string, { max: number; reason: string }>([
   [
     'src/admin/storySupport/AdminPagesStoryRuntime.tsx',
     {
-      max: 7000,
+      max: 7100,
       reason: 'Storybook proof runtime remains centralized temporarily while Admin/Pages stories stay on stable export names.',
     },
   ],

@@ -1164,10 +1164,13 @@ function buildDashboardQuotaChargeCard(
     title: strings.title,
     localLabel: strings.localEstimate,
     localValue: formatNumber(quotaCharge.local_estimated_credits),
+    localValueNumber: quotaCharge.local_estimated_credits,
     upstreamLabel: strings.upstreamActual,
     upstreamValue: formatNumber(quotaCharge.upstream_actual_credits),
+    upstreamValueNumber: quotaCharge.upstream_actual_credits,
     deltaLabel: strings.delta,
     deltaValue: formatSignedQuotaDelta(deltaValue),
+    deltaValueNumber: deltaValue,
     deltaTone: deltaValue === 0 ? 'neutral' : 'negative',
     coverage: `${strings.sampledKeys} ${formatNumber(quotaCharge.sampled_key_count)} · ${strings.staleKeys} ${formatNumber(quotaCharge.stale_key_count)}`,
     freshness: latestSync,
@@ -4705,6 +4708,7 @@ function AdminDashboard(): JSX.Element {
         id: 'remaining',
         label: metricsStrings.labels.remaining,
         value: formatNumber(dashboardSiteStatusSnapshot.remainingQuota),
+        valueNumber: dashboardSiteStatusSnapshot.remainingQuota,
         subtitle:
           dashboardSiteStatusSnapshot.totalQuotaLimit > 0
             ? `${adminStrings.dashboard.currentSnapshot} · ${formatPercent(dashboardSiteStatusSnapshot.remainingQuota, dashboardSiteStatusSnapshot.totalQuotaLimit)}`
@@ -4714,12 +4718,14 @@ function AdminDashboard(): JSX.Element {
         id: 'keys',
         label: metricsStrings.labels.keys,
         value: formatNumber(dashboardSiteStatusSnapshot.activeKeys),
+        valueNumber: dashboardSiteStatusSnapshot.activeKeys,
         subtitle: adminStrings.dashboard.currentSnapshot,
       },
       {
         id: 'quarantined',
         label: metricsStrings.labels.quarantined,
         value: formatNumber(dashboardSiteStatusSnapshot.quarantinedKeys),
+        valueNumber: dashboardSiteStatusSnapshot.quarantinedKeys,
         subtitle:
           dashboardSiteStatusSnapshot.quarantinedKeys > 0
             ? keyStrings.quarantine.badge
@@ -4731,6 +4737,7 @@ function AdminDashboard(): JSX.Element {
         id: 'temporary-isolated',
         label: metricsStrings.labels.temporaryIsolated,
         value: formatNumber(dashboardSiteStatusSnapshot.temporaryIsolatedKeys),
+        valueNumber: dashboardSiteStatusSnapshot.temporaryIsolatedKeys,
         subtitle:
           dashboardSiteStatusSnapshot.temporaryIsolatedKeys > 0
             ? metricsStrings.subtitles.keysTemporaryIsolated.replace('{count}', formatNumber(dashboardSiteStatusSnapshot.temporaryIsolatedKeys))
@@ -4742,6 +4749,7 @@ function AdminDashboard(): JSX.Element {
         id: 'exhausted',
         label: metricsStrings.labels.exhausted,
         value: formatNumber(dashboardSiteStatusSnapshot.exhaustedKeys),
+        valueNumber: dashboardSiteStatusSnapshot.exhaustedKeys,
         subtitle:
           allKeysAvailable
             ? metricsStrings.subtitles.keysAll
@@ -4754,6 +4762,7 @@ function AdminDashboard(): JSX.Element {
           dashboardSiteStatusSnapshot.availableProxyNodes == null
             ? '—'
             : formatNumber(dashboardSiteStatusSnapshot.availableProxyNodes),
+        valueNumber: dashboardSiteStatusSnapshot.availableProxyNodes ?? undefined,
         subtitle:
           dashboardSiteStatusSnapshot.availableProxyNodes != null &&
           dashboardSiteStatusSnapshot.totalProxyNodes != null &&
@@ -4768,6 +4777,7 @@ function AdminDashboard(): JSX.Element {
           dashboardSiteStatusSnapshot.totalProxyNodes == null
             ? '—'
             : formatNumber(dashboardSiteStatusSnapshot.totalProxyNodes),
+        valueNumber: dashboardSiteStatusSnapshot.totalProxyNodes ?? undefined,
         subtitle: adminStrings.dashboard.currentSnapshot,
       },
     ]
@@ -9493,6 +9503,7 @@ function AdminDashboard(): JSX.Element {
           monthMetrics={monthMetrics}
           monthQuotaCharge={monthQuotaCharge}
           statusMetrics={statusMetrics}
+          summaryWindows={dashboardSummaryWindows}
           hourlyRequestWindow={dashboardHourlyRequestWindow}
           chartPersistenceKey={DASHBOARD_HOURLY_CHART_PERSISTENCE_KEY}
           tokenCoverage={dashboardTokenCoverage}

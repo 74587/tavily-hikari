@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 
-import type { RecentAlertsSummary } from '../api'
+import type { RecentAlertsSummary, SummaryWindowsResponse } from '../api'
 import DashboardOverview, { type DashboardMetricCard, type DashboardQuotaChargeCardData } from './DashboardOverview'
 import {
   createDashboardMonthMetrics,
@@ -319,6 +319,57 @@ const monthQuotaCharge: DashboardQuotaChargeCardData = {
   freshness: 'Latest sync · 2 minutes ago · 14:28',
 }
 
+const summaryWindows: SummaryWindowsResponse = {
+  today: {
+    total_requests: 4_812,
+    success_count: 0,
+    error_count: 0,
+    quota_exhausted_count: 0,
+    valuable_success_count: 3_442,
+    valuable_failure_count: 604,
+    other_success_count: 498,
+    other_failure_count: 176,
+    unknown_count: 92,
+    upstream_exhausted_key_count: 7,
+    new_keys: 0,
+    new_quarantines: 0,
+  },
+  yesterday: {
+    total_requests: 4_386,
+    success_count: 0,
+    error_count: 0,
+    quota_exhausted_count: 0,
+    valuable_success_count: 3_118,
+    valuable_failure_count: 582,
+    other_success_count: 454,
+    other_failure_count: 161,
+    unknown_count: 71,
+    upstream_exhausted_key_count: 3,
+    new_keys: 0,
+    new_quarantines: 0,
+  },
+  month: {
+    total_requests: 105_041,
+    success_count: 0,
+    error_count: 0,
+    quota_exhausted_count: 0,
+    valuable_success_count: 70_211,
+    valuable_failure_count: 12_440,
+    other_success_count: 10_062,
+    other_failure_count: 4_083,
+    unknown_count: 1_844,
+    upstream_exhausted_key_count: 12,
+    new_keys: 3,
+    new_quarantines: 0,
+  },
+  today_start: Date.UTC(2026, 3, 7, 0, 0, 0) / 1000,
+  today_end: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000 + 1,
+  yesterday_start: Date.UTC(2026, 3, 6, 0, 0, 0) / 1000,
+  yesterday_end: Date.UTC(2026, 3, 6, 12, 0, 0) / 1000 + 1,
+  month_start: Date.UTC(2026, 3, 1, 0, 0, 0) / 1000,
+  month_end: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000 + 1,
+}
+
 const defaultHourlyRequestWindow = buildDashboardHourlyRequestWindowFixture({
   mapBucket: ({ index, bucket }) => ({
     secondarySuccess: (index % 5) + 2,
@@ -575,6 +626,7 @@ export const Default: Story = {
     monthMetrics,
     monthQuotaCharge,
     statusMetrics,
+    summaryWindows,
     hourlyRequestWindow: defaultHourlyRequestWindow,
     chartLabelTimeZone: 'Asia/Shanghai',
     tokenCoverage: 'ok',
@@ -893,6 +945,14 @@ export const ZhDarkEvidence: Story = {
     }
     if (canvasElement.querySelectorAll('.dashboard-quota-charge-card').length < 2) {
       throw new Error('Expected both today and month quota charge cards to render')
+    }
+    const cardBackdropCanvases = canvasElement.querySelectorAll('.dashboard-summary-card-backdrop canvas')
+    if (cardBackdropCanvases.length !== 16) {
+      throw new Error(`Expected 16 card backdrop charts, received ${cardBackdropCanvases.length}`)
+    }
+    const blockBackdropCanvases = canvasElement.querySelectorAll('.dashboard-summary-block-backdrop canvas')
+    if (blockBackdropCanvases.length !== 0) {
+      throw new Error(`Expected no block backdrop charts, received ${blockBackdropCanvases.length}`)
     }
     for (const selector of ['.metric-delta-positive', '.metric-delta-negative']) {
       if (canvasElement.querySelector(selector) == null) {

@@ -33,6 +33,7 @@ import type {
   RequestLogsCatalog,
   RequestLogsListPage,
   SortDirection,
+  SummaryWindowsResponse,
 } from '../../api'
 import AdminCompactIntro from '../../components/AdminCompactIntro'
 import AdminPanelHeader from '../../components/AdminPanelHeader'
@@ -3449,6 +3450,57 @@ function DashboardPageCanvas(): JSX.Element {
     },
   })
 
+  const summaryWindows: SummaryWindowsResponse = {
+    today: {
+      total_requests: totalRequests,
+      success_count: 0,
+      error_count: 0,
+      quota_exhausted_count: 0,
+      valuable_success_count: Math.max(0, successCount - 40),
+      valuable_failure_count: Math.max(0, errorCount + quotaExhaustedCount),
+      other_success_count: 32,
+      other_failure_count: 8,
+      unknown_count: 5,
+      upstream_exhausted_key_count: Math.max(0, Math.ceil(quotaExhaustedCount / 4)),
+      new_keys: 0,
+      new_quarantines: 0,
+    },
+    yesterday: {
+      total_requests: totalRequests - 128,
+      success_count: 0,
+      error_count: 0,
+      quota_exhausted_count: 0,
+      valuable_success_count: Math.max(0, successCount - 136),
+      valuable_failure_count: Math.max(0, errorCount + quotaExhaustedCount + 6),
+      other_success_count: 28,
+      other_failure_count: 7,
+      unknown_count: 2,
+      upstream_exhausted_key_count: Math.max(0, Math.ceil(quotaExhaustedCount / 5)),
+      new_keys: 0,
+      new_quarantines: 0,
+    },
+    month: {
+      total_requests: totalRequests * 14,
+      success_count: 0,
+      error_count: 0,
+      quota_exhausted_count: 0,
+      valuable_success_count: Math.max(0, successCount * 12),
+      valuable_failure_count: Math.max(0, (errorCount + quotaExhaustedCount) * 10),
+      other_success_count: 32 * 14,
+      other_failure_count: 8 * 14,
+      unknown_count: 5 * 14,
+      upstream_exhausted_key_count: Math.max(0, Math.ceil(quotaExhaustedCount / 2)),
+      new_keys: 3,
+      new_quarantines: 1,
+    },
+    today_start: Date.UTC(2026, 3, 7, 0, 0, 0) / 1000,
+    today_end: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000 + 1,
+    yesterday_start: Date.UTC(2026, 3, 6, 0, 0, 0) / 1000,
+    yesterday_end: Date.UTC(2026, 3, 6, 12, 0, 0) / 1000 + 1,
+    month_start: Date.UTC(2026, 3, 1, 0, 0, 0) / 1000,
+    month_end: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000 + 1,
+  }
+
   const totalProxyNodes = forwardProxyStorySettings.nodes.length
   const availableProxyNodes = forwardProxyStorySettings.nodes.filter((node) => node.available).length
 
@@ -3504,6 +3556,7 @@ function DashboardPageCanvas(): JSX.Element {
         overviewReady
         statusLoading={false}
         todayMetrics={todayMetrics}
+        summaryWindows={summaryWindows}
         monthMetrics={monthMetrics}
         statusMetrics={statusMetrics}
         hourlyRequestWindow={defaultDashboardHourlyRequestWindow}

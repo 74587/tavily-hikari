@@ -22,6 +22,7 @@ describe('DashboardOverview Storybook coverage', () => {
     expect(markup).toContain('Traffic Trends')
     expect(markup).toContain('Local time axis · Last 24 hours (25 server-time hour buckets, current hour included)')
     expect(markup).toContain('x-axis is shown in local time')
+    expect(markup).toContain('dashboard-summary-card-backdrop')
   })
 
   it('keeps the absolute charts on all-series defaults in the primary stories', () => {

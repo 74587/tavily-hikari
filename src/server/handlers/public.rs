@@ -51,6 +51,12 @@ struct SummaryWindowsView {
     today: SummaryWindowView,
     yesterday: SummaryWindowView,
     month: SummaryWindowView,
+    today_start: i64,
+    today_end: i64,
+    yesterday_start: i64,
+    yesterday_end: i64,
+    month_start: i64,
+    month_end: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,18 +123,7 @@ async fn fetch_summary_windows(
         .proxy
         .summary_windows()
         .await
-        .map(|summary| {
-            let tavily_hikari::SummaryWindows {
-                today,
-                yesterday,
-                month,
-            } = summary;
-            Json(SummaryWindowsView {
-                today: SummaryWindowView::from(today),
-                yesterday: SummaryWindowView::from(yesterday),
-                month: SummaryWindowView::from(month),
-            })
-        })
+        .map(|summary| Json(SummaryWindowsView::from(summary)))
         .map_err(|err| {
             eprintln!("summary windows error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -194,6 +189,33 @@ impl From<tavily_hikari::SummaryWindowMetrics> for SummaryWindowView {
                 stale_key_count: summary.quota_charge.stale_key_count,
                 latest_sync_at: summary.quota_charge.latest_sync_at,
             },
+        }
+    }
+}
+
+impl From<tavily_hikari::SummaryWindows> for SummaryWindowsView {
+    fn from(summary: tavily_hikari::SummaryWindows) -> Self {
+        let tavily_hikari::SummaryWindows {
+            today,
+            yesterday,
+            month,
+            today_start,
+            today_end,
+            yesterday_start,
+            yesterday_end,
+            month_start,
+            month_end,
+        } = summary;
+        Self {
+            today: SummaryWindowView::from(today),
+            yesterday: SummaryWindowView::from(yesterday),
+            month: SummaryWindowView::from(month),
+            today_start,
+            today_end,
+            yesterday_start,
+            yesterday_end,
+            month_start,
+            month_end,
         }
     }
 }
@@ -890,11 +912,7 @@ async fn build_dashboard_overview_payload(
     state: &Arc<AppState>,
 ) -> Result<DashboardOverviewPayload, ProxyError> {
     let summary = state.proxy.summary().await?;
-    let tavily_hikari::SummaryWindows {
-        today,
-        yesterday,
-        month,
-    } = state.proxy.summary_windows().await?;
+    let summary_windows = state.proxy.summary_windows().await?;
     let hourly_request_window = state.proxy.dashboard_hourly_request_window().await?;
     let forward_proxy = state.proxy.get_forward_proxy_dashboard_summary().await?;
     let exhausted_keys = state
@@ -952,11 +970,7 @@ async fn build_dashboard_overview_payload(
 
     Ok(DashboardOverviewPayload {
         summary: summary.clone().into(),
-        summary_windows: SummaryWindowsView {
-            today: SummaryWindowView::from(today),
-            yesterday: SummaryWindowView::from(yesterday),
-            month: SummaryWindowView::from(month),
-        },
+        summary_windows: SummaryWindowsView::from(summary_windows),
         hourly_request_window: DashboardHourlyRequestWindowView::from(hourly_request_window),
         site_status: DashboardSiteStatusView {
             remaining_quota: summary.total_quota_remaining,
@@ -1003,6 +1017,10 @@ async fn compute_signatures(
         today,
         yesterday,
         month,
+        today_start,
+        yesterday_start,
+        month_start,
+        ..
     } = state.proxy.summary_windows().await.map_err(|_| ())?;
     let forward_proxy = state
         .proxy
@@ -1120,6 +1138,7 @@ async fn compute_signatures(
             month.quota_charge.stale_key_count,
             month.quota_charge.latest_sync_at.unwrap_or_default(),
         ],
+        summary_window_starts: [today_start, yesterday_start, month_start],
         proxy: Some((forward_proxy.available_nodes, forward_proxy.total_nodes)),
         exhausted_keys,
         disabled_tokens: disabled_token_ids,

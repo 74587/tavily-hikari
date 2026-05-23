@@ -982,6 +982,14 @@ button:disabled {
   gap: 12px;
 }
 
+.dashboard-summary-block-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .dashboard-summary-block-primary {
   background: hsl(var(--card) / 0.9);
 }
@@ -1042,8 +1050,47 @@ button:disabled {
   min-height: 116px;
   padding: 16px 18px;
   border-radius: 18px;
-  background: hsl(var(--background) / 0.12);
+  background: hsl(var(--card) / 0.76);
   box-shadow: none;
+}
+
+.dashboard-summary-card-with-backdrop {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.dashboard-summary-card-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.dashboard-summary-card-backdrop canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.dashboard-summary-card-content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 8px;
+  height: 100%;
+  padding: 2px;
+}
+
+.dashboard-summary-card-with-backdrop::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, hsl(var(--card) / 0.86) 0%, hsl(var(--card) / 0.58) 54%, hsl(var(--card) / 0.22) 100%),
+    linear-gradient(180deg, hsl(var(--card) / 0.4) 0%, hsl(var(--card) / 0.05) 54%, hsl(var(--card) / 0.55) 100%);
 }
 
 .dashboard-summary-card-full-width {
@@ -1137,6 +1184,11 @@ button:disabled {
 
 .dashboard-quota-charge-card {
   display: grid;
+  gap: 14px;
+  background: hsl(var(--card) / 0.72);
+}
+
+.dashboard-quota-charge-card .dashboard-summary-card-content {
   gap: 14px;
 }
 

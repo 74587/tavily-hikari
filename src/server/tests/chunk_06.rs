@@ -1251,6 +1251,13 @@
                 .is_some(),
             "snapshot summary windows should expose quota charge upstream actual values"
         );
+        assert!(
+            snapshot_json
+                .pointer("/summaryWindows/today_start")
+                .and_then(|value| value.as_i64())
+                .is_some(),
+            "snapshot summary windows should expose server window boundaries"
+        );
         assert_eq!(
             snapshot_json
                 .pointer("/siteStatus/totalProxyNodes")
@@ -1339,6 +1346,12 @@
         assert!(
             legacy_log_count <= 5,
             "snapshot should keep logs payload lightweight"
+        );
+        let ping_event =
+            read_sse_event_until(&mut events_resp, |chunk| chunk.contains("event: ping"), "admin ping event").await;
+        assert!(
+            !ping_event.contains("event: snapshot"),
+            "idle dashboard SSE should not emit another full snapshot just because window end timestamps advanced"
         );
 
         drop(events_resp);
