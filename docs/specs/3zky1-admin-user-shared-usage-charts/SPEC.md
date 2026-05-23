@@ -257,6 +257,34 @@
 
 ![Token 列表语义纠偏](./assets/user-detail-token-table.png)
 
+### Token 管理控件
+
+- asset: `docs/specs/3zky1-admin-user-shared-usage-charts/assets/user-detail-token-controls-demo.png`
+- source_type: `demo_web_service`
+- story_id_or_title: `http://127.0.0.1:55174/admin/users/usr_alice`
+- target_program: `local-demo-web`
+- capture_scope: `element`
+- requested_viewport: `none`
+- viewport_strategy: `playwright-element-screenshot`
+- submission_gate: `approved`
+- evidence_note: 用户详情 Token 区域的局部证据：可见 `Add token` 按钮，以及每个 token 行上的删除入口；截图仅裁切 token 面板本体，不包含整页导航或其他面板，证明该任务的主交互控件已落在 demo web 服务里。
+
+![Token 管理控件](./assets/user-detail-token-controls-demo.png)
+
+### Token 删除二次确认
+
+- asset: `docs/specs/3zky1-admin-user-shared-usage-charts/assets/user-detail-token-delete-confirm.png`
+- source_type: `demo_web_service`
+- story_id_or_title: `http://127.0.0.1:55174/admin/users/usr_alice`
+- target_program: `local-demo-web`
+- capture_scope: `element`
+- requested_viewport: `none`
+- viewport_strategy: `playwright-element-screenshot`
+- submission_gate: `approved`
+- evidence_note: 用户详情 Token 列表的删除按钮已接入二次确认流程；点击删除后先展示确认弹窗，管理员确认后才会调用删除接口。该证据来自 demo web 服务的真实用户详情页，仅裁切确认弹窗局部，未使用 Storybook 截图。
+
+![Token 删除二次确认](./assets/user-detail-token-delete-confirm.png)
+
 ### 有效额度拆解表格无横向滚动
 
 - asset: `docs/specs/3zky1-admin-user-shared-usage-charts/assets/user-detail-quota-breakdown-table.png`
