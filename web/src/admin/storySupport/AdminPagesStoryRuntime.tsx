@@ -4,7 +4,6 @@ import { addons } from 'storybook/preview-api'
 import { SELECT_STORY } from 'storybook/internal/core-events'
 import { ArrowDown, ArrowUp, ArrowUpDown, ChartColumnIncreasing } from 'lucide-react'
 import { Fragment, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useLayoutEffect, useMemo, useState } from 'react'
-
 import type {
   AlertCatalog,
   AlertEvent,
@@ -64,6 +63,7 @@ import {
 } from '../../components/ui/dropdown-menu'
 import { Input } from '../../components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip'
+import { UserTagBindingControls } from '../UserTagBindingControls'
 import { Card } from '../../components/ui/card'
 import { Badge } from '../../components/ui/badge'
 import { LanguageProvider, useLanguage, useTranslate, type AdminTranslations } from '../../i18n'
@@ -5777,7 +5777,6 @@ function UserTagsPageCanvas({ editorMode = 'view' }: { editorMode?: StoryTagCard
     </AdminPageFrame>
   )
 }
-
 function UserDetailPageCanvas({
   initialUsageSeries = 'quota1h',
 }: {
@@ -5794,8 +5793,10 @@ function UserDetailPageCanvas({
     monthlyLimit: String(detail.quotaBase.monthlyLimit),
   })
   const [monthlyBrokenDrawerOpen, setMonthlyBrokenDrawerOpen] = useState(false)
+  const [selectedBindableTagId, setSelectedBindableTagId] = useState<string | undefined>(undefined)
   const hasBlockAllTag = detail.tags.some((tag) => tag.effectKind === 'block_all')
-
+  const systemTagCount = detail.tags.filter((tag) => isSystemUserTag(tag)).length
+  const manualTagCount = detail.tags.length - systemTagCount
   return (
     <AdminPageFrame
       activeModule="users"
@@ -5861,7 +5862,6 @@ function UserDetailPageCanvas({
           </div>
         </div>
       </section>
-
       <section className="surface panel">
         <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
           <div>
@@ -5873,13 +5873,38 @@ function UserDetailPageCanvas({
           </button>
         </div>
         <div className="user-tag-binding-toolbar">
-          <StoryUserTagBadgeList tags={detail.tags} users={users} emptyLabel={users.userTags.empty} />
-          <div className="user-tag-bind-controls">
-            <select className="select select-bordered" defaultValue="">
-              <option value="">{users.userTags.bindPlaceholder}</option>
-              <option value="suspended_manual">Suspended</option>
-            </select>
-            <button type="button" className="btn btn-primary">{users.userTags.bindAction}</button>
+          <div className="user-tag-binding-summary">
+            <div className="user-tag-binding-summary-top">
+              <StoryUserTagBadgeList tags={detail.tags} users={users} emptyLabel={users.userTags.empty} />
+              <p className="panel-description user-tag-binding-summary-note">
+                系统标签保持只读，手动标签在右侧选择后绑定。
+              </p>
+            </div>
+            <div className="user-tag-binding-summary-metrics" aria-label={users.userTags.title}>
+              <div className="user-tag-binding-summary-metric">
+                <span className="user-tag-binding-summary-label">已绑定</span>
+                <strong>{formatNumber(detail.tags.length)}</strong>
+              </div>
+              <div className="user-tag-binding-summary-metric">
+                <span className="user-tag-binding-summary-label">系统标签</span>
+                <strong>{formatNumber(systemTagCount)}</strong>
+              </div>
+              <div className="user-tag-binding-summary-metric">
+                <span className="user-tag-binding-summary-label">手动标签</span>
+                <strong>{formatNumber(manualTagCount)}</strong>
+              </div>
+            </div>
+          </div>
+          <div className="user-tag-binding-actions">
+            <UserTagBindingControls
+              bindableTags={[{ id: 'suspended_manual', displayName: 'Suspended' }]}
+              buttonLabel={users.userTags.bindAction}
+              emptyLabel="暂无可绑定标签"
+              onBind={() => undefined}
+              onSelectedTagIdChange={setSelectedBindableTagId}
+              placeholder={users.userTags.bindPlaceholder}
+              selectedTagId={selectedBindableTagId ?? ''}
+            />
           </div>
         </div>
         <div className="user-tag-binding-list">
@@ -6769,6 +6794,14 @@ export const UserDetail: Story = {
     if (!usagePanel) {
       throw new Error('Expected user detail story to render the shared usage panel.')
     }
+    const usagePanelStyle = getComputedStyle(usagePanel)
+    if (
+      usagePanelStyle.borderTopWidth !== '0px' ||
+      usagePanelStyle.backgroundColor !== 'rgba(0, 0, 0, 0)' ||
+      usagePanelStyle.boxShadow !== 'none'
+    ) {
+      throw new Error('Expected the shared usage panel content to avoid a nested card surface.')
+    }
     if (usagePanel.dataset.loadedSeries !== 'quota1h') {
       throw new Error(`Expected the default story to lazy-load only quota1h, received ${usagePanel.dataset.loadedSeries ?? '<empty>'}.`)
     }
@@ -6780,6 +6813,40 @@ export const UserDetail: Story = {
     }
     if (!canvasElement.textContent?.includes('账户共享请求频率、业务额度消耗与 IP 活跃趋势。')) {
       throw new Error('Expected the shared usage description to summarize the business metrics without interaction instructions.')
+    }
+
+    const bindingToolbar = canvasElement.querySelector<HTMLElement>('.user-tag-binding-toolbar')
+    if (!bindingToolbar || getComputedStyle(bindingToolbar).display !== 'grid') {
+      throw new Error('Expected the user tag binding area to use a two-column grid on desktop.')
+    }
+    const bindingMetrics = canvasElement.querySelectorAll('.user-tag-binding-summary-metric')
+    if (bindingMetrics.length !== 3) {
+      throw new Error(`Expected the user tag summary to show three compact metrics, received ${bindingMetrics.length}.`)
+    }
+    if (canvasElement.querySelector('.user-tag-bind-controls select')) {
+      throw new Error('Expected user tag binding to use the shared Select component instead of a native select.')
+    }
+    const tagSelectTrigger = canvasElement.querySelector<HTMLButtonElement>(
+      '.user-tag-bind-controls [role="combobox"]',
+    )
+    if (!tagSelectTrigger) {
+      throw new Error('Expected user tag binding to render an accessible Select combobox trigger.')
+    }
+    tagSelectTrigger.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+        button: 0,
+      }),
+    )
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+    const tagOptions = Array.from(
+      canvasElement.ownerDocument.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).map((item) => item.textContent?.trim())
+    if (!tagOptions.includes('Suspended')) {
+      throw new Error('Expected opening the user tag Select to reveal bindable tag options.')
     }
 
     const tabLabels = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('.admin-user-shared-usage-tabs .segmented-tab'))

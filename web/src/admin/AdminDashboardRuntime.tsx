@@ -40,6 +40,7 @@ import {
   DrawerContent,
 } from '../components/ui/drawer'
 import { Input } from '../components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -51,7 +52,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Card } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
 import { Table } from '../components/ui/table'
@@ -60,6 +60,7 @@ import { AnchoredInfoDisclosure } from '../components/ui/anchored-info-disclosur
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
 import { ArrowDown, ArrowUp, ArrowUpDown, ChartColumnIncreasing } from 'lucide-react'
+import { UserTagBindingControls } from './UserTagBindingControls'
 import AdminShell, { AdminShellSidebarUtility, type AdminNavItem, type AdminNavTarget } from './AdminShell'
 import AdminOverlayHost from './AdminOverlayHost'
 import DashboardOverview, { type DashboardQuotaChargeCardData } from './DashboardOverview'
@@ -7815,6 +7816,8 @@ function AdminDashboard(): JSX.Element {
     const detail = selectedUserDetail
     const tokenItems = detail?.tokens ?? []
     const boundTags = detail?.tags ?? []
+    const systemTagCount = boundTags.filter((tag) => isSystemUserTag(tag)).length
+    const manualTagCount = boundTags.length - systemTagCount
     const hasBlockAllTag = boundTags.some((tag) => tag.effectKind === 'block_all')
     const globalIpLimit = systemSettings?.globalIpLimit ?? 5
 
@@ -7946,34 +7949,45 @@ function AdminDashboard(): JSX.Element {
                 </button>
               </div>
               <div className="user-tag-binding-toolbar">
-                <UserTagBadgeList
-                  tags={boundTags}
-                  usersStrings={usersStrings}
-                  emptyLabel={usersStrings.userTags.empty}
-                  limit={Math.max(USER_TAG_DISPLAY_LIMIT, boundTags.length)}
-                />
-                <div className="user-tag-bind-controls">
-                  <select
-                    className="select select-bordered"
-                    value={selectedBindableTagId}
-                    onChange={(event) => setSelectedBindableTagId(event.target.value)}
-                    disabled={savingUserTagBinding || bindableCustomTags.length === 0}
-                  >
-                    <option value="">{usersStrings.userTags.bindPlaceholder}</option>
-                    {bindableCustomTags.map((tag) => (
-                      <option key={tag.id} value={tag.id}>
-                        {tag.displayName}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => void bindSelectedUserTag()}
-                    disabled={savingUserTagBinding || !selectedBindableTagId}
-                  >
-                    {savingUserTagBinding ? usersStrings.userTags.binding : usersStrings.userTags.bindAction}
-                  </button>
+                <div className="user-tag-binding-summary">
+                  <div className="user-tag-binding-summary-top">
+                    <UserTagBadgeList
+                      tags={boundTags}
+                      usersStrings={usersStrings}
+                      emptyLabel={usersStrings.userTags.empty}
+                      limit={Math.max(USER_TAG_DISPLAY_LIMIT, boundTags.length)}
+                    />
+                    <p className="panel-description user-tag-binding-summary-note">
+                      系统标签保持只读，手动标签在右侧选择后绑定。
+                    </p>
+                  </div>
+                  <div className="user-tag-binding-summary-metrics" aria-label={usersStrings.userTags.title}>
+                    <div className="user-tag-binding-summary-metric">
+                      <span className="user-tag-binding-summary-label">已绑定</span>
+                      <strong>{formatNumber(boundTags.length)}</strong>
+                    </div>
+                    <div className="user-tag-binding-summary-metric">
+                      <span className="user-tag-binding-summary-label">系统标签</span>
+                      <strong>{formatNumber(systemTagCount)}</strong>
+                    </div>
+                    <div className="user-tag-binding-summary-metric">
+                      <span className="user-tag-binding-summary-label">手动标签</span>
+                      <strong>{formatNumber(manualTagCount)}</strong>
+                    </div>
+                  </div>
+                </div>
+                <div className="user-tag-binding-actions">
+                  <UserTagBindingControls
+                    bindableTags={bindableCustomTags}
+                    buttonLabel={usersStrings.userTags.bindAction}
+                    buttonBusyLabel={usersStrings.userTags.binding}
+                    disabled={savingUserTagBinding}
+                    emptyLabel="暂无可绑定标签"
+                    onBind={() => void bindSelectedUserTag()}
+                    onSelectedTagIdChange={setSelectedBindableTagId}
+                    placeholder={usersStrings.userTags.bindPlaceholder}
+                    selectedTagId={selectedBindableTagId}
+                  />
                 </div>
               </div>
 
