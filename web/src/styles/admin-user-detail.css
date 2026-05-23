@@ -134,7 +134,7 @@
 
 .admin-user-mobile-card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
@@ -146,8 +146,7 @@
 
 .admin-user-mobile-card-action {
   flex: 0 0 auto;
-  align-self: center;
-  margin-top: 0;
+  margin-top: -2px;
 }
 
 .admin-user-mobile-note {
