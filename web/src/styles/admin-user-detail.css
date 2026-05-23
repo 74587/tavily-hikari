@@ -1,7 +1,7 @@
 .jobs-table.admin-user-tokens-table th:last-child,
 .jobs-table.admin-user-tokens-table td:last-child {
-  width: 104px;
-  min-width: 104px;
+  width: 86px;
+  min-width: 86px;
   text-align: center;
 }
 
@@ -14,10 +14,6 @@
 .jobs-table.admin-user-tokens-table th,
 .jobs-table.admin-user-tokens-table td {
   vertical-align: top;
-}
-
-.jobs-table.admin-user-tokens-table td:last-child {
-  vertical-align: middle;
 }
 
 .jobs-table.admin-user-tokens-table th:nth-child(1),
@@ -89,13 +85,6 @@
   width: fit-content;
 }
 
-.admin-user-token-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-
 .admin-mobile-kv--stacked {
   align-items: flex-start;
   flex-direction: column;
@@ -134,7 +123,7 @@
 
 .admin-user-mobile-card-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
@@ -146,7 +135,8 @@
 
 .admin-user-mobile-card-action {
   flex: 0 0 auto;
-  margin-top: -2px;
+  align-self: center;
+  margin-top: 0;
 }
 
 .admin-user-mobile-note {
