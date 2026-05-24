@@ -28,6 +28,8 @@ writer to coexist, but only one writer can hold the write slot at a time.
 - Logs contain `database is locked` while `/health` remains OK.
 - Request-path messages mention `token billing lock failed` or `mcp session ... lock failed`.
 - Background messages mention `token-usage-rollup: start job error`, `quota-sync-hot: start job error`, or LinuxDo OAuth upsert failures.
+- Startup logs may show `forward-proxy startup: ...` phases taking a long time when runtime
+  snapshot persistence or subscription refresh collides with another writer.
 - WAL can be large without itself proving corruption; it is a signal to inspect writer pressure and
   long readers before performing maintenance.
 
@@ -43,6 +45,10 @@ brief contention visible as HTTP 500s or failed background bookkeeping.
   inside the existing bounded lock wait or lease budget.
 - Retry background job bookkeeping writes before surfacing scheduler errors.
 - Retry OAuth upsert/refresh wrapper calls so login/profile sync can survive short writer collisions.
+- Retry forward-proxy runtime snapshot persistence at the startup/maintenance boundary so a short
+  writer collision does not stretch readiness.
+- Overlap startup subscription fetches where possible, but keep the refresh fail-closed if every
+  feed fails.
 - Prefer bounded retries and narrower write windows before increasing SQLite pool size.
 
 ## Guardrails / Reuse Notes

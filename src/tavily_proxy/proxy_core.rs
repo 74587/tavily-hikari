@@ -395,16 +395,29 @@ impl TavilyProxy {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        let startup_started = Instant::now();
         let sanitized: Vec<String> = keys
             .into_iter()
             .map(|k| k.into().trim().to_owned())
             .filter(|k| !k.is_empty())
             .collect();
 
+        let key_store_started = Instant::now();
         let key_store = KeyStore::new(database_path).await?;
+        eprintln!(
+            "forward-proxy startup: sqlite initialized in {}ms",
+            key_store_started.elapsed().as_millis()
+        );
         if !sanitized.is_empty() {
+            let sync_keys_started = Instant::now();
             key_store.sync_keys(&sanitized).await?;
+            eprintln!(
+                "forward-proxy startup: synced {} api keys in {}ms",
+                sanitized.len(),
+                sync_keys_started.elapsed().as_millis()
+            );
         }
+        let forward_proxy_load_started = Instant::now();
         let upstream = Url::parse(upstream).map_err(|source| ProxyError::InvalidEndpoint {
             endpoint: upstream.to_owned(),
             source,
@@ -425,6 +438,10 @@ impl TavilyProxy {
                 .keys()
                 .cloned()
                 .collect::<std::collections::HashSet<_>>(),
+        );
+        eprintln!(
+            "forward-proxy startup: loaded settings/runtime in {}ms",
+            forward_proxy_load_started.elapsed().as_millis()
         );
         let forward_proxy = Arc::new(Mutex::new(forward_proxy_manager));
         let key_store = Arc::new(key_store);
@@ -471,12 +488,21 @@ impl TavilyProxy {
             low_quota_depletion_threshold: options.low_quota_depletion_threshold,
             health_readiness_grace_until: Instant::now() + options.health_readiness_grace_period,
         };
+        eprintln!("forward-proxy startup: initializing runtime graph");
+        let runtime_init_started = Instant::now();
         proxy.initialize_forward_proxy_runtime().await?;
+        eprintln!(
+            "forward-proxy startup: runtime graph ready in {}ms; total startup {}ms",
+            runtime_init_started.elapsed().as_millis(),
+            startup_started.elapsed().as_millis()
+        );
         Ok(proxy)
     }
 
     pub(crate) async fn initialize_forward_proxy_runtime(&mut self) -> Result<(), ProxyError> {
-        if let Err(err) = self.refresh_forward_proxy_subscriptions().await {
+        let startup_started = Instant::now();
+        let refresh_started = Instant::now();
+        if let Err(err) = self.refresh_forward_proxy_subscriptions_for_startup().await {
             eprintln!("forward-proxy startup subscription refresh failed: {err}");
             let restored = {
                 let mut manager = self.forward_proxy.lock().await;
@@ -487,7 +513,14 @@ impl TavilyProxy {
                     "forward-proxy restored {restored} persisted subscription nodes after startup refresh failure"
                 );
             }
+        } else {
+            eprintln!(
+                "forward-proxy startup: refreshed subscriptions in {}ms",
+                refresh_started.elapsed().as_millis()
+            );
         }
+        let xray_started = Instant::now();
+        let persist_started = Instant::now();
         {
             let mut manager = self.forward_proxy.lock().await;
             let egress_socks5_url = manager.settings.effective_egress_socks5_url();
@@ -502,8 +535,18 @@ impl TavilyProxy {
             }
             self.sync_forward_proxy_runtime_state(&mut manager).await?;
         }
+        eprintln!(
+            "forward-proxy startup: xray sync + runtime snapshot persisted in {}ms",
+            persist_started.elapsed().as_millis()
+        );
         let manager = self.forward_proxy.lock().await;
-        forward_proxy::sync_manager_runtime_to_store(&self.key_store, &manager).await
+        forward_proxy::sync_manager_runtime_to_store(&self.key_store, &manager).await?;
+        eprintln!(
+            "forward-proxy startup: runtime store synced in {}ms (total init {}ms)",
+            xray_started.elapsed().as_millis(),
+            startup_started.elapsed().as_millis()
+        );
+        Ok(())
     }
 
     pub async fn is_forward_proxy_xray_ready(&self) -> bool {

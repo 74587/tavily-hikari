@@ -758,7 +758,28 @@ pub async fn sync_manager_runtime_to_store(
     key_store: &KeyStore,
     manager: &ForwardProxyManager,
 ) -> Result<(), ProxyError> {
-    persist_forward_proxy_runtime_snapshot(&key_store.pool, manager.snapshot_runtime()).await
+    let snapshot = manager.snapshot_runtime();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut retry_attempt = 0usize;
+    loop {
+        match persist_forward_proxy_runtime_snapshot(&key_store.pool, snapshot.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if crate::store::sleep_before_sqlite_transient_write_retry(
+                    "forward proxy runtime snapshot sync",
+                    retry_attempt,
+                    deadline,
+                    &err,
+                )
+                .await
+                {
+                    retry_attempt += 1;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
 }
 
 async fn load_forward_proxy_assignment_counts(

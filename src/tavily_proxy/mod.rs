@@ -522,7 +522,6 @@ fn low_quota_depletion_threshold_from_env() -> i64 {
 }
 
 include!("proxy_core.rs");
-include!("proxy_forward_proxy_maintenance.rs");
 include!("proxy_affinity.rs");
 include!("proxy_http_and_logs.rs");
 include!("proxy_auth_and_oauth.rs");
@@ -530,6 +529,8 @@ include!("proxy_usage_and_metrics.rs");
 include!("proxy_request_limits.rs");
 include!("proxy_alerts.rs");
 include!("proxy_admin_user_usage_series.rs");
+include!("proxy_quota_sync_and_jobs.rs");
+include!("proxy_forward_proxy_maintenance.rs");
 
 impl TokenQuota {
     pub(crate) fn new(store: Arc<KeyStore>) -> Self {
@@ -1371,5 +1372,3 @@ impl MemoryRequestRateLimitBackend {
         Self::maybe_gc(&mut state, now_ts, window_secs);
     }
 }
-
-include!("proxy_quota_sync_and_jobs.rs");

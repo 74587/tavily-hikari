@@ -9,7 +9,12 @@
   failure to background schedulers.
 - OAuth account upsert/profile refresh wrapper calls now retry transient SQLite busy/locked errors
   before returning failures to LinuxDo login or daily sync flows.
+- Forward-proxy startup now refreshes subscription-backed endpoints concurrently, syncs xray state
+  from the restored snapshot, and retries runtime snapshot persistence when SQLite briefly denies
+  the write slot.
 - Added local contention tests for quota subject lock acquisition and scheduled job start.
+- Added local contention coverage for forward-proxy startup subscription refresh and runtime
+  snapshot persistence.
 
 ## Validation
 
@@ -17,6 +22,8 @@
 - Targeted SQLite lock contention tests.
 - Existing billing/MCP/quota-sync tests relevant to the touched paths.
 - `cargo test`
+- `cargo clippy -- -D warnings`
+- Full `cargo test --locked --all-features`
 - `cargo clippy -- -D warnings`
 
 ## Operations Notes

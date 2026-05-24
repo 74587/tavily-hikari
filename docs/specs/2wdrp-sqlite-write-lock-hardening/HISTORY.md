@@ -7,3 +7,9 @@
 - Chose bounded retry hardening as the first repair because the evidence showed short writer
   collisions, while API rebalance selection and research result key pinning were behaving as
   designed.
+
+## 2026-05-24
+
+- Extended the same lock-hardening line to forward-proxy startup: subscription refresh now fetches
+  multiple feeds concurrently, runtime snapshot persistence retries transient busy/locked writes,
+  and startup logs now break out sqlite, refresh, xray, and store-sync phases.

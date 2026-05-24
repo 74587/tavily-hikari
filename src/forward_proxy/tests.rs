@@ -3,8 +3,13 @@ mod tests {
     use super::*;
     use crate::tavily_proxy::{TavilyProxy, TavilyProxyOptions};
     use crate::LOW_QUOTA_DEPLETION_THRESHOLD_DEFAULT;
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::{
+        path::PathBuf,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn derive_probe_url_uses_public_probe_endpoint() {
@@ -85,6 +90,17 @@ rule-providers:
         assert_eq!(parsed.display_name, "example.com:8443");
     }
 
+    fn temp_db_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tavily-hikari-{prefix}-{}-{unique}.db",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn parse_vless_forward_proxy_keeps_lossy_fragment_for_invalid_percent_encoding() {
         let parsed = parse_vless_forward_proxy(
@@ -134,6 +150,85 @@ rule-providers:
         };
 
         assert_eq!(endpoint_host(&endpoint).as_deref(), Some("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn persist_forward_proxy_runtime_snapshot_retries_transient_write_lock() {
+        let db_path = temp_db_path("forward-proxy-runtime-snapshot-retry");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_millis(1));
+        let pool = SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("connect sqlite");
+        ensure_forward_proxy_schema(&pool)
+            .await
+            .expect("ensure schema");
+
+        let key_store = crate::store::KeyStore {
+            pool: pool.clone(),
+            token_binding_cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            account_quota_resolution_cache: tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ),
+            request_logs_catalog_cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            admin_heavy_read_semaphore: tokio::sync::Semaphore::new(1),
+            #[cfg(test)]
+            forced_pending_claim_miss_log_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            ),
+        };
+        let manager = ForwardProxyManager::new(
+            ForwardProxySettings {
+                proxy_urls: vec!["http://198.51.100.8:8080".to_string()],
+                subscription_urls: Vec::new(),
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            Vec::new(),
+        );
+
+        let mut blocker = pool.acquire().await.expect("acquire sqlite writer");
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *blocker)
+            .await
+            .expect("begin immediate lock");
+
+        let key_store_for_write = key_store;
+        let manager_for_write = manager.clone();
+        let write_task = tokio::spawn(async move {
+            sync_manager_runtime_to_store(&key_store_for_write, &manager_for_write).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut *blocker)
+            .await
+            .expect("release sqlite writer lock");
+        drop(blocker);
+
+        write_task
+            .await
+            .expect("runtime snapshot write task")
+            .expect("runtime snapshot write should retry and succeed");
+
+        let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM forward_proxy_runtime")
+            .fetch_one(&pool)
+            .await
+            .expect("count runtime rows");
+        assert_eq!(row_count, 1);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 - Lifecycle: active
 - Created: 2026-05-07
-- Last: 2026-05-07
+- Last: 2026-05-24
 
 ## Background
 
@@ -18,6 +18,11 @@ misrouting. Billing, MCP session serialization, quota sync, scheduled job loggin
 upserts, and rollups all share the same SQLite database and can briefly compete for the single
 writer slot.
 
+Forward-proxy startup also participates in this same lock budget: it refreshes subscription-backed
+endpoints, syncs xray state, and persists runtime snapshots before the HTTP server reports itself
+ready. That startup path can amplify a short writer collision into a slow first healthy when the
+runtime snapshot write collides with other writers.
+
 ## Goals
 
 - Keep request-path billing and MCP session locks from failing on transient SQLite busy/locked
@@ -26,6 +31,8 @@ writer slot.
   and API rebalance behavior.
 - Make background job bookkeeping tolerate transient lock pressure without amplifying request-path
   failures.
+- Keep forward-proxy startup from turning short SQLite writer contention into a long readiness
+  delay.
 - Cover the lock-contention behavior with local tests that use only local/mock state.
 
 ## Non-goals
@@ -45,6 +52,10 @@ writer slot.
   background job logging failure.
 - LinuxDo OAuth account upsert/refresh calls must retry transient SQLite write errors at the proxy
   boundary so a short writer collision does not immediately fail user login/profile sync.
+- `forward_proxy` startup runtime snapshot persistence must retry transient SQLite write errors with
+  bounded backoff so a short writer collision does not delay readiness longer than necessary.
+- Startup subscription refresh may fetch multiple subscription URLs concurrently, as long as the
+  refresh still fails closed when every subscription fetch fails.
 - Retry logs may include operation, attempt, backoff, and final error context.
 
 ## Acceptance
@@ -53,6 +64,8 @@ writer slot.
   writer releases within the existing wait budget.
 - Under a competing SQLite writer, scheduled job start retries rather than immediately returning
   `database is locked`.
+- Under a competing SQLite writer, forward-proxy startup runtime snapshot persistence retries
+  transient lock errors rather than failing the startup path immediately.
 - Existing billing tests continue to prove locked billing subject stability, pending billing
   replay, and account/token quota attribution.
 - Existing MCP/API routing behavior remains unchanged, including research result GET key pinning.
