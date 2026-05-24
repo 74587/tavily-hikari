@@ -14,7 +14,7 @@ function RegistrationPaused(): JSX.Element {
     <div
       className={`min-h-screen text-foreground ${
         isDark
-          ? 'bg-[radial-gradient(circle_at_top,_rgba(31,64,175,0.26),_rgba(9,18,38,0.98)_34%,_rgba(3,7,18,1)_72%)]'
+          ? 'bg-[radial-gradient(circle_at_top,_hsl(var(--primary)/0.12),_hsl(var(--background))_38%,_oklch(0.145_0.024_305)_78%)]'
           : 'bg-[radial-gradient(circle_at_top,_rgba(255,244,214,0.95),_rgba(255,251,235,0.88)_32%,_rgba(255,255,255,0.98)_72%)]'
       }`}
     >
@@ -24,16 +24,16 @@ function RegistrationPaused(): JSX.Element {
             <div
               className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${
                 isDark
-                  ? 'border border-amber-300/30 bg-amber-200/10 text-amber-200'
+                  ? 'border border-warning/32 bg-warning/12 text-warning'
                   : 'border border-amber-300/80 bg-amber-100 text-amber-900'
               }`}
             >
               {strings.badge}
             </div>
-            <h1 className={`text-3xl font-semibold tracking-tight ${isDark ? 'text-amber-50' : 'text-amber-950'}`}>
+            <h1 className={`text-3xl font-semibold tracking-tight ${isDark ? 'text-foreground' : 'text-amber-950'}`}>
               {strings.title}
             </h1>
-            <p className={`max-w-2xl text-sm ${isDark ? 'text-slate-300' : 'text-amber-900/70'}`}>
+            <p className={`max-w-2xl text-sm ${isDark ? 'text-muted-foreground' : 'text-amber-900/70'}`}>
               {strings.description}
             </p>
           </div>
@@ -44,15 +44,15 @@ function RegistrationPaused(): JSX.Element {
         </div>
 
         <Card
-          className={`border-amber-300/60 backdrop-blur ${
+          className={`border-amber-300/60 ${
             isDark
-              ? 'border-amber-300/22 bg-slate-950/72 shadow-[0_28px_80px_-52px_rgba(245,158,11,0.28)]'
+              ? 'border-warning/28 bg-card/92 shadow-clayCard'
               : 'bg-white/90 shadow-[0_28px_80px_-44px_rgba(180,83,9,0.28)]'
           }`}
         >
           <CardHeader>
-            <CardTitle className={isDark ? 'text-amber-50' : 'text-amber-950'}>{strings.badge}</CardTitle>
-            <CardDescription className={isDark ? 'text-slate-300' : 'text-amber-900/70'}>
+            <CardTitle className={isDark ? 'text-foreground' : 'text-amber-950'}>{strings.badge}</CardTitle>
+            <CardDescription className={isDark ? 'text-muted-foreground' : 'text-amber-900/70'}>
               {strings.description}
             </CardDescription>
           </CardHeader>
@@ -60,7 +60,7 @@ function RegistrationPaused(): JSX.Element {
             <div
               className={`rounded-2xl border p-4 text-sm leading-6 ${
                 isDark
-                  ? 'border-amber-300/18 bg-amber-200/8 text-amber-50/88'
+                  ? 'border-warning/24 bg-warning/10 text-foreground'
                   : 'border-amber-200 bg-amber-50/80 text-amber-950/85'
               }`}
             >

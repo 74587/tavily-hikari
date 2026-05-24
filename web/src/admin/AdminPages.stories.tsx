@@ -22,6 +22,23 @@ const meta = {
 export default meta
 
 export const Dashboard = { ...RuntimeStories.Dashboard }
+export const DashboardDark = {
+  ...RuntimeStories.Dashboard,
+  globals: {
+    language: 'zh',
+    themeMode: 'dark',
+  },
+  parameters: {
+    ...RuntimeStories.Dashboard.parameters,
+    viewport: { defaultViewport: '1440-device-desktop' },
+    docs: {
+      description: {
+        story:
+          'Dark-theme admin dashboard proof for the repaired low-light clay shell, sidebar, dense cards, charts, and loading regions.',
+      },
+    },
+  },
+}
 export const DashboardStacked = { ...RuntimeStories.DashboardStacked }
 export const Tokens = { ...RuntimeStories.Tokens }
 export const Keys = { ...RuntimeStories.Keys }

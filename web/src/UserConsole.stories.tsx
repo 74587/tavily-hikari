@@ -851,6 +851,29 @@ export const ConsoleHome: Story = {
   },
 }
 
+export const ConsoleHomeDark: Story = {
+  args: {
+    consoleView: 'Console Home',
+    isAdmin: true,
+    landingFocus: 'Overview Focus',
+    tokenListState: 'Single Token',
+  },
+  globals: {
+    language: 'zh',
+    themeMode: 'dark',
+  },
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+    docs: {
+      description: {
+        story:
+          'Dark-theme user-console landing proof for the repaired low-light header, quota surfaces, token cards, and recent-request regions.',
+      },
+    },
+  },
+  play: ConsoleHome.play,
+}
+
 export const ConsoleHomeRoot: Story = {
   name: 'Console Home Root',
   args: {
@@ -911,6 +934,29 @@ export const ConsoleHomeAdminMobile: Story = {
       }
     }
   },
+}
+
+export const ConsoleHomeDarkMobile: Story = {
+  name: 'Console Home Dark Mobile',
+  args: {
+    consoleView: 'Console Home',
+    isAdmin: true,
+    landingFocus: 'Overview Focus',
+  },
+  globals: {
+    language: 'zh',
+    themeMode: 'dark',
+  },
+  parameters: {
+    viewport: { defaultViewport: '0390-device-iphone-14' },
+    docs: {
+      description: {
+        story:
+          'Mobile dark-theme user-console proof for touch targets, compact account chrome, and repaired clay contrast.',
+      },
+    },
+  },
+  play: ConsoleHomeAdminMobile.play,
 }
 
 export const ConsoleHomeAdminMobileMenuOpen: Story = {
@@ -1012,6 +1058,30 @@ export const TokenDetailOverview: Story = {
       throw new Error('Expected setup guide body to stay out of the initial detail layout.')
     }
   },
+}
+
+export const TokenDetailDark: Story = {
+  name: 'Token Detail Dark',
+  args: {
+    consoleView: 'Token Detail',
+    isAdmin: false,
+    landingFocus: 'Overview Focus',
+    tokenDetailPreview: 'Overview',
+  },
+  globals: {
+    language: 'zh',
+    themeMode: 'dark',
+  },
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+    docs: {
+      description: {
+        story:
+          'Dark-theme token detail proof for charts, setup disclosure, live logs, and token controls on the repaired material system.',
+      },
+    },
+  },
+  play: TokenDetailOverview.play,
 }
 
 export const TokenDetailLiveLogs: Story = {

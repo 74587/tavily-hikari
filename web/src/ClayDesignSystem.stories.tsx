@@ -148,3 +148,19 @@ export const Overview: Story = {
     </ClayPageFrame>
   ),
 }
+
+export const DarkOverview: Story = {
+  globals: {
+    themeMode: 'dark',
+  },
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+    docs: {
+      description: {
+        story:
+          'Dark-theme review surface for the shared clay tokens, buttons, badges, cards, recessed rows, and compact table sample.',
+      },
+    },
+  },
+  render: Overview.render,
+}

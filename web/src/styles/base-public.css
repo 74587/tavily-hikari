@@ -460,6 +460,7 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .guide-tabs {
@@ -496,6 +497,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
 }
 
 .guide-panel-header {
@@ -536,10 +538,12 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .guide-panel ol > li > code,
 .guide-panel p > code {
+  display: inline;
   border: 1px solid hsl(var(--border) / 0.72);
   background: hsl(var(--muted) / 0.58);
   color: hsl(var(--foreground) / 0.86);
@@ -569,6 +573,23 @@
     width: 100%;
     justify-content: center;
   }
+  .guide-panel {
+    padding: 1rem;
+  }
+  .guide-panel ol {
+    padding-left: 1.05rem;
+  }
+  .guide-panel ol > li {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .guide-panel ol > li > code,
+  .guide-panel p > code {
+    padding-inline: 0.28rem;
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
   .guide-reference a { min-height: 44px; display: inline-flex; align-items: center; }
 }
 
@@ -576,6 +597,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .guide-sample-title {
@@ -981,6 +1003,7 @@
     hsl(var(--card) / 0.86);
   box-shadow: inset 0 1px 0 hsl(var(--background) / 0.85);
   overflow: hidden;
+  width: 100%;
   min-width: 0;
 }
 
@@ -1004,6 +1027,17 @@
   border-radius: 0;
   font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   font-size: 0.965rem;
+}
+
+@media (max-width: 767px) {
+  .guide-code-shell pre {
+    padding: 0.95rem 0.95rem 1rem;
+  }
+
+  .guide-code-shell pre code {
+    font-size: 0.88rem;
+    line-height: 1.55;
+  }
 }
 
 .mockup-code code {

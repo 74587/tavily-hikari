@@ -6,11 +6,12 @@ active
 
 ## Summary
 
-Tavily Hikari's web surfaces adopt a light high-fidelity claymorphism visual system across the public homepage, user console, admin console, authentication screens, and shared UI components. The redesign keeps the existing React/Vite/Tailwind/shadcn architecture and does not change backend APIs or data contracts.
+Tavily Hikari's web surfaces adopt a high-fidelity claymorphism visual system across the public homepage, user console, admin console, authentication screens, and shared UI components. Light tropical clay remains the primary theme, while dark tropical clay is a low-light companion theme with calmer tinted neutrals, restrained semantic accents, and no decorative glassmorphism. The redesign keeps the existing React/Vite/Tailwind/shadcn architecture and does not change backend APIs or data contracts.
 
 ## Scope
 
 - Centralize clay palette, typography, radii, elevation, motion, and reduced-motion behavior.
+- Keep light and dark theme tokens aligned so shared components, page shells, and fallback routes inherit one material system.
 - Upgrade shared UI wrappers and legacy compatibility classes so existing pages inherit the new material language.
 - Keep admin data tables, request logs, quota controls, and settings panels dense and readable.
 - Keep Storybook as the primary review surface for page and component states.
@@ -20,24 +21,111 @@ Tavily Hikari's web surfaces adopt a light high-fidelity claymorphism visual sys
 - No backend API, database, authentication, proxy, or quota behavior changes.
 - No new design framework or daisyUI runtime dependency.
 - No marketing-only landing page rewrite that hides the actual proxy workflows.
+- No hard-coded dark-only visual language that bypasses the shared token system.
 
 ## Design Contract
 
 - Default surface is light tropical clay with a pale lavender canvas and saturated violet, pink, sky, emerald, and amber accents.
+- Dark surface is low-light tropical clay with warm violet tinted neutrals, subtle ambient color, and semantic accents used for state and selection rather than decoration.
 - Headings and large labels use Nunito; body and controls use DM Sans; code, tokens, and request paths remain monospace.
 - Buttons lift on hover and compress on active press. Inputs and selected controls use recessed pressed shadows.
 - Cards and panels use multi-layer clay shadows, but admin list and table density remains suitable for repeated operations.
+- Dark cards, dialogs, drawers, dropdowns, loading regions, and empty/error states avoid bright white rim lights, large outer glows, and glass blur.
 - Decorative motion must respect `prefers-reduced-motion`.
 
 ## Acceptance Criteria
 
 - Public, user console, admin, login, registration paused, and fallback/error states share the same clay token system.
 - Shared shadcn/Radix wrappers visually match the global compatibility classes.
-- Storybook covers the redesigned UI in light mode and retains dark-mode compatibility.
+- Storybook covers the redesigned UI in light mode and includes stable dark-mode evidence for shared components, admin dashboard, public home, user console, registration paused, and fallback routes.
 - Visual evidence is captured from stable Storybook or mock UI sources and stored under this spec.
 - `cd web && bun run build` passes.
 
 ## Visual Evidence
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: storybook-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: design-system-claymorphism--dark-overview
+  state: dark shared clay system
+  evidence_note: verifies the low-light clay token set, shared cards, buttons, badges, recessed rows, and dense table sample.
+  PR: include
+  image:
+  ![Dark shared clay system](./assets/dark-repair/dark-design-system.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: storybook-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: admin-pages--dashboard-dark
+  state: dark admin dashboard
+  evidence_note: verifies the repaired admin shell, sidebar, dashboard cards, chart region, alerts, and loading-compatible surfaces without bright rim lights.
+  PR: include
+  image:
+  ![Dark admin dashboard](./assets/dark-repair/dark-admin-dashboard.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: storybook-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: public-publichome--token-modal-open-dark
+  state: dark public token modal
+  evidence_note: verifies the public hero modal, form controls, dialog shell, and warning copy on the shared dark clay material.
+  PR: include
+  image:
+  ![Dark public token modal](./assets/dark-repair/dark-public-token-modal.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: storybook-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: user-console-userconsole--console-home-dark
+  state: dark user console
+  evidence_note: verifies the user-console header, quota surfaces, token list, guide card, and code blocks under the repaired dark clay tokens.
+  PR: include
+  image:
+  ![Dark user console](./assets/dark-repair/dark-user-console.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: storybook-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: support-pages-notfoundfallback--dark-theme
+  state: dark 404 fallback
+  evidence_note: verifies fallback routes inherit the shared dark background, shell, link, and text contrast instead of a one-off hard-coded page.
+  PR: include
+  image:
+  ![Dark 404 fallback](./assets/dark-repair/dark-404.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 390x900
+  viewport_strategy: storybook-viewport
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: public-publichome--guide-token-revealed-dark-mobile
+  state: dark public mobile guide
+  evidence_note: verifies mobile dark guide cards, tabs, code samples, token reveal copy, and touch-size controls on the shared material system.
+  PR: include
+  image:
+  ![Dark public mobile guide](./assets/dark-repair/dark-public-mobile-guide.png)
 
 - source_type: storybook_canvas
   target_program: mock-only
