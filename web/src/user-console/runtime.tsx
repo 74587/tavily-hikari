@@ -13,9 +13,9 @@ import ManualCopyBubble from '../components/ManualCopyBubble'
 import UserConsoleHeader from '../components/UserConsoleHeader'
 import DashboardQuotaGrid from './DashboardQuotaGrid'
 import TokenListActions from './TokenListActions'
-import RechargePanel, { DEFAULT_RECHARGE_UNIT_CREDITS } from './RechargePanel'
+import RechargePanel from './RechargePanel'
+import { DEFAULT_RECHARGE_UNIT_CREDITS, clampRechargeStep } from './rechargeControls'
 import TokenResetDialogs from './TokenResetDialogs'
-
 import {
   createBrowserTodayWindow,
   fetchVersion,
@@ -1392,8 +1392,13 @@ export default function UserConsole(): JSX.Element {
       setRechargeConfig(nextRechargeConfig)
       setRechargeOrders(nextRechargeOrders)
       if (nextRechargeConfig) {
-        setRechargeCredits((current) => Math.max(nextRechargeConfig.unitCredits, current))
-        setRechargeMonths((current) => Math.max(nextRechargeConfig.minMonths, current))
+        setRechargeCredits((current) => {
+          const next = current > 0 ? current : nextRechargeConfig.defaultCredits
+          const { minCredits, maxCredits, creditsStep } = nextRechargeConfig
+          return clampRechargeStep(next, minCredits, maxCredits, creditsStep)
+        })
+        setRechargeMonths((current) =>
+          Math.min(nextRechargeConfig.maxMonths, Math.max(nextRechargeConfig.minMonths, current)))
       }
       setError(null)
       setRechargeError(null)
@@ -2035,6 +2040,7 @@ export default function UserConsole(): JSX.Element {
   const showEmptyTokens = !loading && tokens.length === 0
   const showLandingGuide = shouldRenderLandingGuide(route, tokens.length)
   const rechargeMinMonths = rechargeConfig?.minMonths ?? 1
+  const rechargeMaxMonths = rechargeConfig?.maxMonths ?? 12
 
   const handleRechargeSubmit = useCallback(async () => {
     if (!rechargeConfig?.enabled || rechargeBusy) return
@@ -2641,7 +2647,8 @@ export default function UserConsole(): JSX.Element {
             busy={rechargeBusy}
             error={rechargeError}
             onCreditsChange={setRechargeCredits}
-            onMonthsChange={(value) => setRechargeMonths(Math.max(rechargeMinMonths, value))}
+            onMonthsChange={(value) =>
+              setRechargeMonths(Math.min(rechargeMaxMonths, Math.max(rechargeMinMonths, value)))}
             onCreateOrder={() => void handleRechargeSubmit()}
           />
 

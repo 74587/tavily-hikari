@@ -33,6 +33,7 @@
 }
 
 .user-console-recharge-summary > div,
+.user-console-recharge-delta-pill,
 .user-console-recharge-checkout {
   border-radius: 14px;
   border: 1px solid hsl(var(--border) / 0.78);
@@ -42,6 +43,7 @@
 
 .user-console-recharge-summary span,
 .user-console-recharge-field > span,
+.user-console-recharge-delta span,
 .user-console-recharge-checkout span,
 .user-console-recharge-orders h3,
 .user-console-recharge-orders li span {
@@ -70,18 +72,57 @@
   gap: 8px;
 }
 
-.user-console-recharge-presets {
-  display: flex;
-  flex-wrap: wrap;
+.user-console-recharge-test-price {
+  margin: 0;
+  border-radius: 12px;
+  border: 1px solid hsl(var(--border) / 0.78);
+  background: hsl(var(--muted) / 0.52);
+  color: hsl(var(--foreground));
+  padding: 10px 12px;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.user-console-recharge-stepper {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 160px) 44px;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-console-recharge-stepper .btn,
+.user-console-recharge-stepper button {
+  width: 44px;
+  min-height: 44px;
+  padding-inline: 0;
+}
+
+.user-console-recharge-readonly {
+  min-height: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.user-console-recharge-delta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
-.user-console-recharge-presets .btn {
-  min-height: 40px;
+.user-console-recharge-delta-pill {
+  appearance: none;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  text-align: left;
 }
 
-.user-console-recharge-months {
-  width: min(180px, 100%);
+.user-console-recharge-delta-pill strong {
+  color: hsl(var(--foreground));
+  font-size: 1rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .user-console-recharge-checkout {
@@ -168,6 +209,14 @@
   .user-console-recharge-checkout {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .user-console-recharge-stepper {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+  }
+
+  .user-console-recharge-delta {
+    grid-template-columns: 1fr;
   }
 
   .user-console-recharge-checkout .btn,

@@ -1492,13 +1492,17 @@ fn build_account_quota_resolution(
     base: AccountQuotaLimits,
     tags: Vec<UserTagBindingRecord>,
 ) -> AccountQuotaResolution {
-    build_account_quota_resolution_with_recharge(base, tags, 0)
+    build_account_quota_resolution_with_recharge(
+        base,
+        tags,
+        LinuxDoCreditRechargeQuotaDelta::default(),
+    )
 }
 
 fn build_account_quota_resolution_with_recharge(
     base: AccountQuotaLimits,
     tags: Vec<UserTagBindingRecord>,
-    recharge_monthly_delta: i64,
+    recharge_delta: LinuxDoCreditRechargeQuotaDelta,
 ) -> AccountQuotaResolution {
     let mut effective = base.clone();
     let mut breakdown = vec![AccountQuotaBreakdownRecord {
@@ -1543,7 +1547,7 @@ fn build_account_quota_resolution_with_recharge(
             apply_quota_delta(effective.monthly_limit, binding.tag.monthly_delta);
     }
 
-    if recharge_monthly_delta > 0 {
+    if recharge_delta.monthly_delta > 0 {
         breakdown.push(AccountQuotaBreakdownRecord {
             kind: "recharge".to_string(),
             label: "linuxdo_credit_recharge".to_string(),
@@ -1552,12 +1556,16 @@ fn build_account_quota_resolution_with_recharge(
             source: Some("linuxdo_credit".to_string()),
             effect_kind: "quota_delta".to_string(),
             hourly_any_delta: 0,
-            hourly_delta: 0,
-            daily_delta: 0,
-            monthly_delta: recharge_monthly_delta,
+            hourly_delta: recharge_delta.hourly_delta,
+            daily_delta: recharge_delta.daily_delta,
+            monthly_delta: recharge_delta.monthly_delta,
         });
+        effective.hourly_limit =
+            apply_quota_delta(effective.hourly_limit, recharge_delta.hourly_delta);
+        effective.daily_limit =
+            apply_quota_delta(effective.daily_limit, recharge_delta.daily_delta);
         effective.monthly_limit =
-            apply_quota_delta(effective.monthly_limit, recharge_monthly_delta);
+            apply_quota_delta(effective.monthly_limit, recharge_delta.monthly_delta);
     }
 
     effective = if block_all {

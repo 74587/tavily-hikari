@@ -2663,10 +2663,11 @@ impl KeyStore {
                 .cloned()
                 .unwrap_or_else(|| defaults.clone());
             let tags = tag_bindings.get(user_id).cloned().unwrap_or_default();
-            let monthly_recharge = recharge_credits.get(user_id).copied().unwrap_or(0);
+            let credits = recharge_credits.get(user_id).copied().unwrap_or(0);
+            let recharge_delta = linuxdo_credit_recharge_quota_delta(credits);
             map.insert(
                 user_id.clone(),
-                build_account_quota_resolution_with_recharge(base, tags, monthly_recharge)
+                build_account_quota_resolution_with_recharge(base, tags, recharge_delta)
                     .effective,
             );
         }
@@ -2683,10 +2684,11 @@ impl KeyStore {
 
         let base = self.ensure_account_quota_limits(user_id).await?;
         let tags = self.list_user_tag_bindings_for_user(user_id).await?;
-        let monthly_recharge = self
+        let recharge_credits = self
             .sum_current_linuxdo_credit_recharge_entitlements_for_month(user_id)
             .await?;
-        let resolution = build_account_quota_resolution_with_recharge(base, tags, monthly_recharge);
+        let recharge_delta = linuxdo_credit_recharge_quota_delta(recharge_credits);
+        let resolution = build_account_quota_resolution_with_recharge(base, tags, recharge_delta);
         self.cache_account_quota_resolution(user_id, &resolution)
             .await;
         Ok(resolution)

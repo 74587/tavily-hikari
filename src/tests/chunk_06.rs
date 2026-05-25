@@ -45,6 +45,65 @@ fn build_account_quota_resolution_clamps_negative_tag_totals_to_zero() {
     assert_eq!(effective_row.monthly_delta, 0);
 }
 
+#[test]
+fn linuxdo_credit_recharge_adds_hourly_daily_and_monthly_quota() {
+    let base = AccountQuotaLimits {
+        hourly_any_limit: 10,
+        hourly_limit: 20,
+        daily_limit: 30,
+        monthly_limit: 40,
+        inherits_defaults: false,
+    };
+    let resolution = build_account_quota_resolution_with_recharge(
+        base,
+        Vec::new(),
+        linuxdo_credit_recharge_quota_delta(2000),
+    );
+
+    assert_eq!(resolution.effective.hourly_any_limit, 10);
+    assert_eq!(resolution.effective.hourly_limit, 220);
+    assert_eq!(resolution.effective.daily_limit, 1030);
+    assert_eq!(resolution.effective.monthly_limit, 2040);
+    let recharge = resolution
+        .breakdown
+        .iter()
+        .find(|entry| entry.kind == "recharge")
+        .expect("recharge row");
+    assert_eq!(recharge.hourly_delta, 200);
+    assert_eq!(recharge.daily_delta, 1000);
+    assert_eq!(recharge.monthly_delta, 2000);
+}
+
+#[test]
+fn linuxdo_credit_recharge_price_config_enforces_normal_and_test_ranges() {
+    let normal = LinuxDoCreditRechargePriceConfig::normal();
+    assert_eq!(
+        linuxdo_credit_recharge_money_cents(1000, 1, normal),
+        Some(10_000)
+    );
+    assert_eq!(
+        linuxdo_credit_recharge_money_cents(20_000, 12, normal),
+        Some(24_000_00)
+    );
+    assert_eq!(linuxdo_credit_recharge_money_cents(1, 1, normal), None);
+    assert_eq!(
+        linuxdo_credit_recharge_money_cents(21_000, 1, normal),
+        None
+    );
+    assert_eq!(
+        linuxdo_credit_recharge_money_cents(1000, 13, normal),
+        None
+    );
+
+    let test = LinuxDoCreditRechargePriceConfig::test_price();
+    assert_eq!(
+        linuxdo_credit_recharge_money_cents(1, 1, test),
+        Some(100)
+    );
+    assert_eq!(linuxdo_credit_recharge_quota_delta(1).hourly_delta, 1);
+    assert_eq!(linuxdo_credit_recharge_quota_delta(1).daily_delta, 1);
+}
+
 #[tokio::test]
 async fn new_account_without_tags_defaults_to_zero_base_and_effective_quota() {
     let db_path = temp_db_path("new-account-zero-base");

@@ -37,6 +37,7 @@ pub struct LinuxDoCreditOptions {
     pub submit_url: String,
     pub notify_url: Option<String>,
     pub return_url: Option<String>,
+    pub test_price_enabled: bool,
 }
 
 impl LinuxDoCreditOptions {
@@ -50,6 +51,7 @@ impl LinuxDoCreditOptions {
             submit_url: "https://credit.linux.do/epay/pay/submit.php".to_string(),
             notify_url: None,
             return_url: None,
+            test_price_enabled: false,
         }
     }
 
@@ -70,6 +72,14 @@ impl LinuxDoCreditOptions {
                 .as_deref()
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty())
+    }
+
+    pub(crate) fn price_config(&self) -> tavily_hikari::LinuxDoCreditRechargePriceConfig {
+        if self.test_price_enabled {
+            tavily_hikari::LinuxDoCreditRechargePriceConfig::test_price()
+        } else {
+            tavily_hikari::LinuxDoCreditRechargePriceConfig::normal()
+        }
     }
 }
 

@@ -9,7 +9,17 @@ export interface RechargeConfig {
   enabled: boolean
   unitCredits: number
   unitPriceLdc: number
+  minCredits: number
+  maxCredits: number
+  creditsStep: number
+  defaultCredits: number
   minMonths: number
+  maxMonths: number
+  quotaDeltaBaseCredits: number
+  hourlyDeltaPerQuotaUnit: number
+  dailyDeltaPerQuotaUnit: number
+  monthlyDeltaPerQuotaUnit: number
+  testPriceEnabled: boolean
   currentMonthStart: number
   currentEntitlementCredits: number
   effectiveUntilMonthStart: number | null

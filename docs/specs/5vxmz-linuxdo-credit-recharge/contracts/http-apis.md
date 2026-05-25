@@ -5,9 +5,19 @@
 - Auth: `hikari_user_session`
 - Response `200`:
   - `enabled`: boolean
-  - `unitCredits`: `1000`
-  - `unitPriceLdc`: `100`
+  - `unitCredits`: `1000` in normal mode, `1` when test pricing is enabled
+  - `unitPriceLdc`: `100` in normal mode, `1` when test pricing is enabled
+  - `minCredits`: `1000` in normal mode, `1` when test pricing is enabled
+  - `maxCredits`: `20000`
+  - `creditsStep`: `1000` in normal mode, `1` when test pricing is enabled
+  - `defaultCredits`: initial UI value for the current pricing mode
   - `minMonths`: `1`
+  - `maxMonths`: `12`
+  - `quotaDeltaBaseCredits`: quota increment calculation base, currently `1000`
+  - `hourlyDeltaPerQuotaUnit`: quota-hour increment for one `quotaDeltaBaseCredits`
+  - `dailyDeltaPerQuotaUnit`: quota-day increment for one `quotaDeltaBaseCredits`
+  - `monthlyDeltaPerQuotaUnit`: quota-month increment for one `quotaDeltaBaseCredits`
+  - `testPriceEnabled`: boolean
   - `currentMonthStart`: Unix timestamp for current server-local month start in UTC
   - `currentEntitlementCredits`: current month purchased credits
   - `effectiveUntilMonthStart`: latest entitled month start, or `null`
@@ -29,7 +39,9 @@
 - Auth: `hikari_user_session`
 - Request JSON:
   - `credits`: positive integer, multiple of `1000`
-  - `months`: positive integer, minimum `1`
+    - normal mode: `1000..=20000`, step `1000`
+    - test pricing: `1..=20000`, step `1`
+  - `months`: integer in `1..=12`
 - Response `200`:
   - `order`: `RechargeOrder`
   - `paymentUrl`: Linux.do Credit payment URL

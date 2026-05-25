@@ -215,6 +215,14 @@ struct Cli {
     /// Optional order-level LinuxDo Credit return URL.
     #[arg(long, env = "LINUXDO_CREDIT_RETURN_URL")]
     linuxdo_credit_return_url: Option<String>,
+
+    /// Enable test pricing: 1 LDC buys 1 monthly credit.
+    #[arg(
+        long,
+        env = "LINUXDO_CREDIT_TEST_PRICE_ENABLED",
+        default_value_t = false
+    )]
+    linuxdo_credit_test_price_enabled: bool,
 }
 
 #[tokio::main]
@@ -399,6 +407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .linuxdo_credit_return_url
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
+        test_price_enabled: cli.linuxdo_credit_test_price_enabled,
     };
 
     let static_dir = cli.static_dir.or_else(|| {

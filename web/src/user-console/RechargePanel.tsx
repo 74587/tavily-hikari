@@ -1,11 +1,12 @@
-import { useMemo } from 'react'
 import type { RechargeConfig, RechargeOrder } from '../api'
 import type { UserDashboard } from '../api'
 import { Icon } from '../lib/icons'
 import { Button } from '../components/ui/button'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
+import { DEFAULT_RECHARGE_UNIT_CREDITS, clampRechargeStep } from './rechargeControls'
 
-export const DEFAULT_RECHARGE_UNIT_CREDITS = 1000
+const DEFAULT_RECHARGE_MAX_CREDITS = 20_000
+const DEFAULT_RECHARGE_MAX_MONTHS = 12
 
 interface RechargePanelText {
   title: string
@@ -17,6 +18,11 @@ interface RechargePanelText {
   noEntitlement: string
   credits: string
   months: string
+  quotaDelta: string
+  hourlyDelta: string
+  dailyDelta: string
+  monthlyDelta: string
+  testPrice: string
   amount: string
   create: string
   creating: string
@@ -68,12 +74,26 @@ export default function RechargePanel({
   onCreateOrder,
 }: RechargePanelProps): JSX.Element {
   const unitCredits = config?.unitCredits ?? DEFAULT_RECHARGE_UNIT_CREDITS
+  const minCredits = config?.minCredits ?? unitCredits
+  const maxCredits = config?.maxCredits ?? DEFAULT_RECHARGE_MAX_CREDITS
+  const creditsStep = config?.creditsStep ?? unitCredits
   const minMonths = config?.minMonths ?? 1
-  const presetCredits = useMemo(() => {
-    const base = unitCredits > 0 ? unitCredits : DEFAULT_RECHARGE_UNIT_CREDITS
-    return [base, base * 2, base * 5]
-  }, [unitCredits])
-  const amount = config ? (credits / config.unitCredits) * months * config.unitPriceLdc : 0
+  const maxMonths = config?.maxMonths ?? DEFAULT_RECHARGE_MAX_MONTHS
+  const normalizedCredits = clampRechargeStep(credits, minCredits, maxCredits, creditsStep)
+  const normalizedMonths = Math.min(maxMonths, Math.max(minMonths, months))
+  const amount = config
+    ? (normalizedCredits / config.unitCredits) * normalizedMonths * config.unitPriceLdc
+    : 0
+  const quotaBaseCredits = config?.quotaDeltaBaseCredits && config.quotaDeltaBaseCredits > 0
+    ? config.quotaDeltaBaseCredits
+    : DEFAULT_RECHARGE_UNIT_CREDITS
+  const quotaDelta = config
+    ? {
+        hourly: Math.ceil(normalizedCredits * config.hourlyDeltaPerQuotaUnit / quotaBaseCredits),
+        daily: Math.ceil(normalizedCredits * config.dailyDeltaPerQuotaUnit / quotaBaseCredits),
+        monthly: Math.round(normalizedCredits * config.monthlyDeltaPerQuotaUnit / quotaBaseCredits),
+      }
+    : { hourly: 0, daily: 0, monthly: normalizedCredits }
   const effectiveUntil = dashboard?.recharge.effectiveUntilMonthStart
     ?? config?.effectiveUntilMonthStart
     ?? null
@@ -106,39 +126,88 @@ export default function RechargePanel({
               <span>{text.effectiveUntil}</span>
               <strong>{effectiveUntil ? formatTimestamp(effectiveUntil) : text.noEntitlement}</strong>
             </div>
+            {config?.testPriceEnabled ? (
+              <p className="user-console-recharge-test-price">{text.testPrice}</p>
+            ) : null}
           </div>
 
           {config?.enabled ? (
             <div className="user-console-recharge-form">
               <div className="user-console-recharge-field">
                 <span>{text.credits}</span>
-                <div className="user-console-recharge-presets" role="group" aria-label={text.credits}>
-                  {presetCredits.map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`btn btn-outline btn-sm${credits === value ? ' btn-primary' : ''}`}
-                      onClick={() => onCreditsChange(value)}
-                    >
-                      {formatNumber(value)}
-                    </button>
-                  ))}
+                <div className="user-console-recharge-stepper">
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => onCreditsChange(clampRechargeStep(normalizedCredits - creditsStep, minCredits, maxCredits, creditsStep))}
+                    disabled={normalizedCredits <= minCredits}
+                    aria-label={`Decrease ${text.credits}`}
+                  >
+                    <Icon icon="mdi:minus" width={16} height={16} aria-hidden="true" />
+                  </button>
+                  <input
+                    className="input input-bordered user-console-recharge-readonly"
+                    type="text"
+                    readOnly
+                    value={formatNumber(normalizedCredits)}
+                    aria-label={text.credits}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => onCreditsChange(clampRechargeStep(normalizedCredits + creditsStep, minCredits, maxCredits, creditsStep))}
+                    disabled={normalizedCredits >= maxCredits}
+                    aria-label={`Increase ${text.credits}`}
+                  >
+                    <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
+                  </button>
                 </div>
               </div>
-              <label className="user-console-recharge-field">
+              <div className="user-console-recharge-field">
                 <span>{text.months}</span>
-                <input
-                  className="input input-bordered user-console-recharge-months"
-                  type="number"
-                  min={minMonths}
-                  step={1}
-                  value={months}
-                  onChange={(event) => {
-                    const next = Number.parseInt(event.currentTarget.value, 10)
-                    onMonthsChange(Number.isFinite(next) ? Math.max(minMonths, next) : minMonths)
-                  }}
-                />
-              </label>
+                <div className="user-console-recharge-stepper">
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => onMonthsChange(Math.max(minMonths, normalizedMonths - 1))}
+                    disabled={normalizedMonths <= minMonths}
+                    aria-label={`Decrease ${text.months}`}
+                  >
+                    <Icon icon="mdi:minus" width={16} height={16} aria-hidden="true" />
+                  </button>
+                  <input
+                    className="input input-bordered user-console-recharge-readonly"
+                    type="text"
+                    readOnly
+                    value={formatNumber(normalizedMonths)}
+                    aria-label={text.months}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => onMonthsChange(Math.min(maxMonths, normalizedMonths + 1))}
+                    disabled={normalizedMonths >= maxMonths}
+                    aria-label={`Increase ${text.months}`}
+                  >
+                    <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+              <div className="user-console-recharge-delta" aria-label={text.quotaDelta}>
+                {[
+                  [text.hourlyDelta, quotaDelta.hourly],
+                  [text.dailyDelta, quotaDelta.daily],
+                  [text.monthlyDelta, quotaDelta.monthly],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="user-console-recharge-delta-pill"
+                  >
+                    <span>{label}</span>
+                    <strong>+{formatNumber(Number(value))}</strong>
+                  </div>
+                ))}
+              </div>
               <div className="user-console-recharge-checkout">
                 <div>
                   <span>{text.amount}</span>

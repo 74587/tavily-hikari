@@ -668,6 +668,8 @@ impl TavilyProxy {
                     .get(&user_id)
                     .cloned()
                     .unwrap_or_else(|| default_limits.clone());
+                let recharge_credits = recharge_credits.get(&user_id).copied().unwrap_or(0);
+                let recharge_delta = linuxdo_credit_recharge_quota_delta(recharge_credits);
                 let metrics = log_metrics.get(&user_id).cloned().unwrap_or_default();
                 let request_rate =
                     request_rate_totals
@@ -694,10 +696,7 @@ impl TavilyProxy {
                         last_activity: metrics.last_activity,
                         recharge: LinuxDoCreditRechargeSummary {
                             current_month_start: local_month_start,
-                            current_month_entitlement_credits: recharge_credits
-                                .get(&user_id)
-                                .copied()
-                                .unwrap_or(0),
+                            current_month_entitlement_credits: recharge_delta.monthly_delta,
                             effective_until_month_start: None,
                         },
                     },

@@ -814,7 +814,17 @@ struct RechargeConfigView {
     enabled: bool,
     unit_credits: i64,
     unit_price_ldc: i64,
+    min_credits: i64,
+    max_credits: i64,
+    credits_step: i64,
+    default_credits: i64,
     min_months: i64,
+    max_months: i64,
+    quota_delta_base_credits: i64,
+    hourly_delta_per_quota_unit: i64,
+    daily_delta_per_quota_unit: i64,
+    monthly_delta_per_quota_unit: i64,
+    test_price_enabled: bool,
     current_month_start: i64,
     current_entitlement_credits: i64,
     effective_until_month_start: Option<i64>,
@@ -1051,11 +1061,24 @@ async fn get_user_recharge_config(
         .linuxdo_credit_recharge_summary(&user_session.user.user_id)
         .await
         .map_err(|err| map_recharge_error("load recharge summary", err))?;
+    let price = state.linuxdo_credit.price_config();
+    let quota_delta_base_credits = tavily_hikari::LINUXDO_CREDIT_RECHARGE_UNIT_CREDITS;
+    let quota_delta = tavily_hikari::linuxdo_credit_recharge_quota_delta(quota_delta_base_credits);
     Ok(Json(RechargeConfigView {
         enabled: state.linuxdo_credit.is_enabled_and_configured(),
-        unit_credits: tavily_hikari::LINUXDO_CREDIT_RECHARGE_UNIT_CREDITS,
-        unit_price_ldc: 100,
-        min_months: tavily_hikari::LINUXDO_CREDIT_RECHARGE_MIN_MONTHS,
+        unit_credits: price.unit_credits,
+        unit_price_ldc: price.unit_price_cents / 100,
+        min_credits: price.min_credits,
+        max_credits: price.max_credits,
+        credits_step: price.credits_step,
+        default_credits: price.default_credits,
+        min_months: price.min_months,
+        max_months: price.max_months,
+        quota_delta_base_credits,
+        hourly_delta_per_quota_unit: quota_delta.hourly_delta,
+        daily_delta_per_quota_unit: quota_delta.daily_delta,
+        monthly_delta_per_quota_unit: quota_delta.monthly_delta,
+        test_price_enabled: state.linuxdo_credit.test_price_enabled,
         current_month_start: summary.current_month_start,
         current_entitlement_credits: summary.current_month_entitlement_credits,
         effective_until_month_start: summary.effective_until_month_start,
@@ -1122,8 +1145,9 @@ async fn post_user_recharge_order(
     if !state.linuxdo_credit.is_enabled_and_configured() {
         return Err(linuxdo_credit_config_unavailable());
     }
+    let price = state.linuxdo_credit.price_config();
     let Some(money_cents) =
-        tavily_hikari::linuxdo_credit_recharge_money_cents(payload.credits, payload.months)
+        tavily_hikari::linuxdo_credit_recharge_money_cents(payload.credits, payload.months, price)
     else {
         return Err((StatusCode::BAD_REQUEST, "invalid credits or months".to_string()));
     };
