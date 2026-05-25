@@ -234,7 +234,75 @@ struct AdminUserDetailView {
     quota_base: AdminQuotaView,
     effective_quota: AdminQuotaView,
     quota_breakdown: Vec<AdminUserQuotaBreakdownView>,
+    recharge: AdminUserRechargeAuditView,
     tokens: Vec<AdminUserTokenSummaryView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserRechargeAuditView {
+    current_month_entitlement_credits: i64,
+    effective_until_month_start: Option<i64>,
+    orders: Vec<AdminUserRechargeOrderView>,
+    entitlements: Vec<AdminUserRechargeEntitlementView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserRechargeOrderView {
+    out_trade_no: String,
+    status: String,
+    credits: i64,
+    months: i64,
+    money: String,
+    trade_no: Option<String>,
+    payment_url: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    paid_at: Option<i64>,
+    last_notify_at: Option<i64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminUserRechargeEntitlementView {
+    id: i64,
+    out_trade_no: String,
+    month_start: i64,
+    credits: i64,
+    created_at: i64,
+}
+
+fn build_admin_user_recharge_order_view(
+    order: tavily_hikari::LinuxDoCreditRechargeOrder,
+) -> AdminUserRechargeOrderView {
+    AdminUserRechargeOrderView {
+        out_trade_no: order.out_trade_no,
+        status: order.status,
+        credits: order.credits,
+        months: order.months,
+        money: tavily_hikari::format_linuxdo_credit_money(order.money_cents),
+        trade_no: order.trade_no,
+        payment_url: order.payment_url,
+        created_at: order.created_at,
+        updated_at: order.updated_at,
+        paid_at: order.paid_at,
+        last_notify_at: order.last_notify_at,
+        last_error: order.last_error,
+    }
+}
+
+fn build_admin_user_recharge_entitlement_view(
+    entitlement: tavily_hikari::LinuxDoCreditRechargeEntitlement,
+) -> AdminUserRechargeEntitlementView {
+    AdminUserRechargeEntitlementView {
+        id: entitlement.id,
+        out_trade_no: entitlement.out_trade_no,
+        month_start: entitlement.month_start,
+        credits: entitlement.credits,
+        created_at: entitlement.created_at,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -570,6 +638,7 @@ fn empty_user_dashboard_summary() -> tavily_hikari::UserDashboardSummary {
         monthly_success: 0,
         monthly_failure: 0,
         last_activity: None,
+        recharge: tavily_hikari::LinuxDoCreditRechargeSummary::default(),
     }
 }
 

@@ -4,6 +4,7 @@
 @import './styles/public.css';
 @import './styles/alerts.css';
 @import './styles/user-console.css';
+@import './styles/user-console-recharge.css';
 @import './styles/user-console-recent-requests.css';
 @import './styles/admin.css';
 @import './styles/admin-user-console.css';

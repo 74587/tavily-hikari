@@ -1577,6 +1577,7 @@ pub struct UserDashboardSummary {
     pub monthly_success: i64,
     pub monthly_failure: i64,
     pub last_activity: Option<i64>,
+    pub recharge: LinuxDoCreditRechargeSummary,
 }
 
 #[derive(Debug, Clone, Default)]

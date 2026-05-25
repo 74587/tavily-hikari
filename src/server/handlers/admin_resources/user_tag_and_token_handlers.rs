@@ -749,6 +749,14 @@ async fn get_user_detail(
             monthly_success,
         });
     }
+    let recharge = state
+        .proxy
+        .linuxdo_credit_recharge_admin_audit(&user.user_id)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user recharge audit error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(AdminUserDetailView {
         user_id: user.user_id,
@@ -795,6 +803,20 @@ async fn get_user_detail(
             .iter()
             .map(build_admin_quota_breakdown_view)
             .collect(),
+        recharge: AdminUserRechargeAuditView {
+            current_month_entitlement_credits: recharge.current_month_entitlement_credits,
+            effective_until_month_start: recharge.effective_until_month_start,
+            orders: recharge
+                .orders
+                .into_iter()
+                .map(build_admin_user_recharge_order_view)
+                .collect(),
+            entitlements: recharge
+                .entitlements
+                .into_iter()
+                .map(build_admin_user_recharge_entitlement_view)
+                .collect(),
+        },
         tokens: token_items,
     }))
 }

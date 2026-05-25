@@ -1,4 +1,9 @@
-import type { RequestRate, UserDashboard, UserTokenSummary } from './runtime'
+import type {
+  RequestRate,
+  UserDashboard,
+  UserTokenSummary,
+} from './runtime'
+import type { RechargeConfig, RechargeOrder } from './recharge'
 
 type RecordLike = Record<string, unknown>
 
@@ -28,6 +33,68 @@ function readNumber(value: RecordLike, camelKey: string, snakeKey = camelKey, fa
 function readNullableNumber(value: RecordLike, camelKey: string, snakeKey = camelKey): number | null {
   const candidate = value[camelKey] ?? value[snakeKey]
   return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : null
+}
+
+function normalizeRechargeSummary(value: unknown): UserDashboard['recharge'] {
+  const source = isRecordLike(value) ? value : {}
+  return {
+    currentMonthStart: readNumber(source, 'currentMonthStart', 'current_month_start'),
+    currentEntitlementCredits: readNumber(
+      source,
+      'currentEntitlementCredits',
+      'current_entitlement_credits',
+    ),
+    effectiveUntilMonthStart: readNullableNumber(
+      source,
+      'effectiveUntilMonthStart',
+      'effective_until_month_start',
+    ),
+  }
+}
+
+export function normalizeRechargeConfig(value: unknown): RechargeConfig {
+  const source = isRecordLike(value) ? value : {}
+  return {
+    enabled: readBoolean(source, 'enabled', 'enabled'),
+    unitCredits: readNumber(source, 'unitCredits', 'unit_credits', 1000),
+    unitPriceLdc: readNumber(source, 'unitPriceLdc', 'unit_price_ldc', 100),
+    minMonths: readNumber(source, 'minMonths', 'min_months', 1),
+    currentMonthStart: readNumber(source, 'currentMonthStart', 'current_month_start'),
+    currentEntitlementCredits: readNumber(
+      source,
+      'currentEntitlementCredits',
+      'current_entitlement_credits',
+    ),
+    effectiveUntilMonthStart: readNullableNumber(
+      source,
+      'effectiveUntilMonthStart',
+      'effective_until_month_start',
+    ),
+  }
+}
+
+export function normalizeRechargeOrder(value: unknown): RechargeOrder {
+  const source = isRecordLike(value) ? value : {}
+  return {
+    outTradeNo: readString(source, 'outTradeNo', 'out_trade_no'),
+    status: readString(source, 'status', 'status'),
+    credits: readNumber(source, 'credits', 'credits'),
+    months: readNumber(source, 'months', 'months'),
+    money: readString(source, 'money', 'money'),
+    tradeNo: readNullableString(source, 'tradeNo', 'trade_no'),
+    paymentUrl: readNullableString(source, 'paymentUrl', 'payment_url'),
+    createdAt: readNumber(source, 'createdAt', 'created_at'),
+    updatedAt: readNumber(source, 'updatedAt', 'updated_at'),
+    paidAt: readNullableNumber(source, 'paidAt', 'paid_at'),
+    lastNotifyAt: readNullableNumber(source, 'lastNotifyAt', 'last_notify_at'),
+    lastError: readNullableString(source, 'lastError', 'last_error'),
+  }
+}
+
+export function normalizeRechargeOrderList(value: unknown): RechargeOrder[] {
+  const source = isRecordLike(value) ? value : {}
+  const items = Array.isArray(source.items) ? source.items : []
+  return items.map(normalizeRechargeOrder)
 }
 
 function normalizeRequestRate(value: unknown, fallback: RequestRate): RequestRate {
@@ -64,6 +131,7 @@ export function normalizeUserDashboard(value: unknown): UserDashboard {
     dailyFailure: readNumber(source, 'dailyFailure', 'daily_failure'),
     monthlySuccess: readNumber(source, 'monthlySuccess', 'monthly_success'),
     lastActivity: readNullableNumber(source, 'lastActivity', 'last_activity'),
+    recharge: normalizeRechargeSummary(source.recharge),
   }
 }
 

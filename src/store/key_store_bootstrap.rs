@@ -1081,6 +1081,8 @@ impl KeyStore {
             .await?;
         }
 
+        self.ensure_linuxdo_credit_recharge_schema().await?;
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS user_tags (

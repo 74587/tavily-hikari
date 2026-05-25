@@ -2652,6 +2652,9 @@ impl KeyStore {
         self.ensure_account_quota_limits_for_users(user_ids).await?;
         let base_limits = self.fetch_account_quota_limits_bulk(user_ids).await?;
         let tag_bindings = self.list_user_tag_bindings_for_users(user_ids).await?;
+        let recharge_credits = self
+            .sum_current_linuxdo_credit_recharge_entitlements_for_users(user_ids)
+            .await?;
         let defaults = AccountQuotaLimits::zero_base();
         let mut map = HashMap::new();
         for user_id in user_ids {
@@ -2660,9 +2663,11 @@ impl KeyStore {
                 .cloned()
                 .unwrap_or_else(|| defaults.clone());
             let tags = tag_bindings.get(user_id).cloned().unwrap_or_default();
+            let monthly_recharge = recharge_credits.get(user_id).copied().unwrap_or(0);
             map.insert(
                 user_id.clone(),
-                build_account_quota_resolution(base, tags).effective,
+                build_account_quota_resolution_with_recharge(base, tags, monthly_recharge)
+                    .effective,
             );
         }
         Ok(map)
@@ -2678,7 +2683,10 @@ impl KeyStore {
 
         let base = self.ensure_account_quota_limits(user_id).await?;
         let tags = self.list_user_tag_bindings_for_user(user_id).await?;
-        let resolution = build_account_quota_resolution(base, tags);
+        let monthly_recharge = self
+            .sum_current_linuxdo_credit_recharge_entitlements_for_month(user_id)
+            .await?;
+        let resolution = build_account_quota_resolution_with_recharge(base, tags, monthly_recharge);
         self.cache_account_quota_resolution(user_id, &resolution)
             .await;
         Ok(resolution)

@@ -1786,13 +1786,15 @@ export interface UserDashboard {
   dailyFailure: number
   monthlySuccess: number
   lastActivity: number | null
+  recharge: UserDashboardRechargeSummary
+}
+
+export interface UserDashboardRechargeSummary {
+  currentMonthStart: number; currentEntitlementCredits: number; effectiveUntilMonthStart: number | null
 }
 
 export interface UserTokenSummary {
-  tokenId: string
-  enabled: boolean
-  note: string | null
-  lastUsedAt: number | null
+  tokenId: string; enabled: boolean; note: string | null; lastUsedAt: number | null
   requestRate: RequestRate
   hourlyAnyUsed: number
   hourlyAnyLimit: number

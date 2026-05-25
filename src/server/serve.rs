@@ -9,6 +9,7 @@ pub async fn serve(
     usage_base: String,
     api_key_ip_geo_origin: String,
     linuxdo_oauth: LinuxDoOAuthOptions,
+    linuxdo_credit: LinuxDoCreditOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let AdminAuthOptions {
         forward_auth_enabled,
@@ -28,6 +29,7 @@ pub async fn serve(
         forward_auth_enabled,
         builtin_admin,
         linuxdo_oauth,
+        linuxdo_credit,
         dev_open_admin,
         usage_base: usage_base.clone(),
         api_key_ip_geo_origin,
@@ -75,6 +77,12 @@ pub async fn serve(
         linuxdo_user_sync_hour,
         linuxdo_user_sync_minute,
     );
+    println!(
+        "LinuxDo Credit: enabled={} configured={} submit_url={}",
+        state.linuxdo_credit.enabled,
+        state.linuxdo_credit.is_enabled_and_configured(),
+        state.linuxdo_credit.submit_url
+    );
 
     let mut router = Router::new()
         .route("/health", get(health_check))
@@ -94,6 +102,16 @@ pub async fn serve(
         .route("/api/user/logout", post(post_user_logout))
         .route("/api/user/token", get(get_user_token))
         .route("/api/user/dashboard", get(get_user_dashboard))
+        .route("/api/user/recharge/config", get(get_user_recharge_config))
+        .route(
+            "/api/user/recharge/orders",
+            get(get_user_recharge_orders).post(post_user_recharge_order),
+        )
+        .route(
+            "/api/user/recharge/orders/:out_trade_no",
+            get(get_user_recharge_order),
+        )
+        .route("/api/linuxdo-credit/notify", get(get_linuxdo_credit_notify))
         .route("/api/user/tokens", get(get_user_tokens))
         .route("/api/user/tokens/:id", get(get_user_token_detail))
         .route("/api/user/tokens/:id/secret", get(get_user_token_secret))

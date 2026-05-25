@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 
-import type { Profile, RequestRate, RequestRateScope, UserDashboard, UserTokenSummary } from './api'
+import type { Profile, RechargeConfig, RechargeOrder, RequestRate, RequestRateScope, UserDashboard, UserTokenSummary } from './api'
 import UserConsole from './UserConsole'
 import {
   DropdownMenu,
@@ -79,7 +79,53 @@ const dashboardSample: UserDashboard = {
   dailyFailure: 17,
   monthlySuccess: 3478,
   lastActivity: 1_762_386_800,
+  recharge: {
+    currentMonthStart: 1_762_041_600,
+    currentEntitlementCredits: 3000,
+    effectiveUntilMonthStart: 1_767_225_600,
+  },
 }
+
+const rechargeConfigSample: RechargeConfig = {
+  enabled: true,
+  unitCredits: 1000,
+  unitPriceLdc: 100,
+  minMonths: 1,
+  currentMonthStart: 1_762_041_600,
+  currentEntitlementCredits: 3000,
+  effectiveUntilMonthStart: 1_767_225_600,
+}
+
+const rechargeOrdersSample: RechargeOrder[] = [
+  {
+    outTradeNo: 'ldc_story_paid',
+    status: 'paid',
+    credits: 3000,
+    months: 2,
+    money: '600.00',
+    tradeNo: 'linuxdo-story-001',
+    paymentUrl: 'https://credit.linux.do/story-paid',
+    createdAt: 1_762_214_400,
+    updatedAt: 1_762_214_520,
+    paidAt: 1_762_214_520,
+    lastNotifyAt: 1_762_214_520,
+    lastError: null,
+  },
+  {
+    outTradeNo: 'ldc_story_pending',
+    status: 'pending',
+    credits: 1000,
+    months: 1,
+    money: '100.00',
+    tradeNo: null,
+    paymentUrl: 'https://credit.linux.do/story-pending',
+    createdAt: 1_762_386_200,
+    updatedAt: 1_762_386_200,
+    paidAt: null,
+    lastNotifyAt: null,
+    lastError: null,
+  },
+]
 
 const tokenSample: UserTokenSummary = {
   tokenId: 'a1b2',
@@ -359,6 +405,27 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
 
     if (url.pathname === '/api/user/dashboard') {
       return jsonResponse(dashboardSample)
+    }
+
+    if (url.pathname === '/api/user/recharge/config') {
+      return jsonResponse(rechargeConfigSample)
+    }
+
+    if (url.pathname === '/api/user/recharge/orders') {
+      if (request.method === 'POST') {
+        return jsonResponse({
+          order: rechargeOrdersSample[1],
+          paymentUrl: 'https://credit.linux.do/story-checkout',
+        })
+      }
+      return jsonResponse({ items: rechargeOrdersSample })
+    }
+
+    const rechargeOrderRoute = url.pathname.match(/^\/api\/user\/recharge\/orders\/([^/]+)$/)
+    if (rechargeOrderRoute) {
+      const outTradeNo = decodeURIComponent(rechargeOrderRoute[1])
+      const order = rechargeOrdersSample.find((item) => item.outTradeNo === outTradeNo)
+      return order ? jsonResponse(order) : jsonResponse({ message: 'Not Found' }, 404)
     }
 
     if (url.pathname === '/api/version') {
@@ -848,6 +915,7 @@ export const ConsoleHome: Story = {
       '.user-console-header-inline-meta',
       '.user-console-account-trigger',
       '.user-console-landing-stack',
+      '.user-console-recharge-section',
     ]) {
       if (canvasElement.querySelector(selector) == null) {
         throw new Error(`Expected ConsoleHome to render ${selector}`)

@@ -1,6 +1,7 @@
 mod admin_token_filters;
 mod analysis;
 mod forward_proxy;
+mod linuxdo_credit_recharge;
 mod models;
 mod store;
 mod tavily_proxy;
@@ -30,6 +31,7 @@ pub use forward_proxy::{
     ForwardProxyValidationProbeResult, ForwardProxyValidationResponse,
     ForwardProxyWeightHourlyBucketResponse,
 };
+pub use linuxdo_credit_recharge::*;
 pub use models::*;
 pub use tavily_proxy::*;
 
@@ -1485,9 +1487,18 @@ fn to_admin_quota_breakdown_entry(
     }
 }
 
+#[cfg(test)]
 fn build_account_quota_resolution(
     base: AccountQuotaLimits,
     tags: Vec<UserTagBindingRecord>,
+) -> AccountQuotaResolution {
+    build_account_quota_resolution_with_recharge(base, tags, 0)
+}
+
+fn build_account_quota_resolution_with_recharge(
+    base: AccountQuotaLimits,
+    tags: Vec<UserTagBindingRecord>,
+    recharge_monthly_delta: i64,
 ) -> AccountQuotaResolution {
     let mut effective = base.clone();
     let mut breakdown = vec![AccountQuotaBreakdownRecord {
@@ -1530,6 +1541,23 @@ fn build_account_quota_resolution(
         effective.daily_limit = apply_quota_delta(effective.daily_limit, binding.tag.daily_delta);
         effective.monthly_limit =
             apply_quota_delta(effective.monthly_limit, binding.tag.monthly_delta);
+    }
+
+    if recharge_monthly_delta > 0 {
+        breakdown.push(AccountQuotaBreakdownRecord {
+            kind: "recharge".to_string(),
+            label: "linuxdo_credit_recharge".to_string(),
+            tag_id: None,
+            tag_name: None,
+            source: Some("linuxdo_credit".to_string()),
+            effect_kind: "quota_delta".to_string(),
+            hourly_any_delta: 0,
+            hourly_delta: 0,
+            daily_delta: 0,
+            monthly_delta: recharge_monthly_delta,
+        });
+        effective.monthly_limit =
+            apply_quota_delta(effective.monthly_limit, recharge_monthly_delta);
     }
 
     effective = if block_all {

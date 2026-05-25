@@ -1,0 +1,182 @@
+.user-console-recharge-section {
+  scroll-margin-top: 28px;
+}
+
+.user-console-recharge-header {
+  gap: 12px;
+}
+
+.user-console-recharge-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(260px, 0.95fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.user-console-recharge-main,
+.user-console-recharge-orders {
+  border: 1px solid hsl(var(--border) / 0.82);
+  border-radius: 18px;
+  background: hsl(var(--card) / 0.9);
+  padding: 16px;
+}
+
+.user-console-recharge-main {
+  display: grid;
+  gap: 14px;
+}
+
+.user-console-recharge-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.user-console-recharge-summary > div,
+.user-console-recharge-checkout {
+  border-radius: 14px;
+  border: 1px solid hsl(var(--border) / 0.78);
+  background: hsl(var(--muted) / 0.42);
+  padding: 12px 14px;
+}
+
+.user-console-recharge-summary span,
+.user-console-recharge-field > span,
+.user-console-recharge-checkout span,
+.user-console-recharge-orders h3,
+.user-console-recharge-orders li span {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.user-console-recharge-summary strong,
+.user-console-recharge-checkout strong {
+  display: block;
+  margin-top: 4px;
+  color: hsl(var(--foreground));
+  font-size: 1.08rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.user-console-recharge-form {
+  display: grid;
+  gap: 12px;
+}
+
+.user-console-recharge-field {
+  display: grid;
+  gap: 8px;
+}
+
+.user-console-recharge-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.user-console-recharge-presets .btn {
+  min-height: 40px;
+}
+
+.user-console-recharge-months {
+  width: min(180px, 100%);
+}
+
+.user-console-recharge-checkout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.user-console-recharge-checkout .btn,
+.user-console-recharge-checkout button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.user-console-recharge-error {
+  margin: 0;
+  color: hsl(var(--destructive));
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.user-console-recharge-disabled {
+  margin: 0;
+}
+
+.user-console-recharge-orders {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.user-console-recharge-orders h3 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.98rem;
+}
+
+.user-console-recharge-orders ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.user-console-recharge-orders li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-radius: 14px;
+  border: 1px solid hsl(var(--border) / 0.72);
+  background: hsl(var(--background) / 0.38);
+  padding: 10px 12px;
+}
+
+.user-console-recharge-orders li > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.user-console-recharge-orders li strong {
+  color: hsl(var(--foreground));
+  font-size: 0.95rem;
+}
+
+.user-console-recharge-orders li span {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .user-console-recharge-grid,
+  .user-console-recharge-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .user-console-recharge-main,
+  .user-console-recharge-orders {
+    padding: 14px;
+  }
+
+  .user-console-recharge-checkout {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .user-console-recharge-checkout .btn,
+  .user-console-recharge-checkout button {
+    width: 100%;
+  }
+
+  .user-console-recharge-orders li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
