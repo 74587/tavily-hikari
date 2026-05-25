@@ -89,7 +89,6 @@ import {
 import { MobileGuideDropdown, buildGuideContent, resolveGuideSamples } from './guide'
 import { EN, ZH } from './text'
 
-
 export const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
 export const CLAUDE_DOC_URL = 'https://code.claude.com/docs/en/mcp'
 export const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
@@ -254,9 +253,7 @@ function formatQuotaPair(used: number, limit: number): string {
   return `${formatNumber(used)} / ${formatNumber(limit)}`
 }
 
-function formatLogCredits(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : '—'
-}
+const formatLogCredits = (value: number | null | undefined): string => typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : '—'
 
 function errorStatus(err: unknown): number | undefined {
   if (!err || typeof err !== 'object' || !('status' in err)) {

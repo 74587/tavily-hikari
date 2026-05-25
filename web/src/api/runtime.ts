@@ -264,7 +264,6 @@ export interface TokenUsageBucket {
   external_failure_count: number
 }
 
-// Public token logs (per access token)
 export interface PublicTokenLog {
   id: number
   method: string
@@ -278,7 +277,6 @@ export interface PublicTokenLog {
   created_at: number
 }
 
-// Server returns camelCase. Define the server shape and map to snake_case used in UI.
 interface ServerPublicTokenLog {
   id: number
   method: string
