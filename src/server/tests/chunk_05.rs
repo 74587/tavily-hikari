@@ -1679,6 +1679,8 @@
             "/yesterday_end",
             "/month_start",
             "/month_end",
+            "/previous_month_start",
+            "/previous_month_end",
         ] {
             assert!(
                 body.pointer(pointer).and_then(|v| v.as_i64()).is_some(),

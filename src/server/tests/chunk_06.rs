@@ -1258,6 +1258,13 @@
                 .is_some(),
             "snapshot summary windows should expose server window boundaries"
         );
+        assert!(
+            snapshot_json
+                .pointer("/summaryWindows/previous_month_start")
+                .and_then(|value| value.as_i64())
+                .is_some(),
+            "snapshot summary windows should expose previous month boundaries"
+        );
         assert_eq!(
             snapshot_json
                 .pointer("/siteStatus/totalProxyNodes")

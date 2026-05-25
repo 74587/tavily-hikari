@@ -57,6 +57,8 @@ struct SummaryWindowsView {
     yesterday_end: i64,
     month_start: i64,
     month_end: i64,
+    previous_month_start: i64,
+    previous_month_end: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +207,8 @@ impl From<tavily_hikari::SummaryWindows> for SummaryWindowsView {
             yesterday_end,
             month_start,
             month_end,
+            previous_month_start,
+            previous_month_end,
         } = summary;
         Self {
             today: SummaryWindowView::from(today),
@@ -216,6 +220,8 @@ impl From<tavily_hikari::SummaryWindows> for SummaryWindowsView {
             yesterday_end,
             month_start,
             month_end,
+            previous_month_start,
+            previous_month_end,
         }
     }
 }

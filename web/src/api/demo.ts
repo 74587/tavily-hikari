@@ -528,9 +528,11 @@ function demoSummaryWindows(
     today_start: todayStart,
     today_end: currentHourStart + 1,
     yesterday_start: todayStart - 24 * 3_600,
-    yesterday_end: currentHourStart - 24 * 3_600 + 1,
+    yesterday_end: todayStart,
     month_start: todayStart - 14 * 24 * 3_600,
     month_end: currentHourStart + 1,
+    previous_month_start: todayStart - 45 * 24 * 3_600,
+    previous_month_end: todayStart - 14 * 24 * 3_600,
   }
 }
 

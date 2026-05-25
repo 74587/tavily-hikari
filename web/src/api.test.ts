@@ -176,7 +176,7 @@ describe('admin user tag api helpers', () => {
               today_start: 1_776_000_000,
               today_end: 1_776_003_601,
               yesterday_start: 1_775_913_600,
-              yesterday_end: 1_775_917_201,
+              yesterday_end: 1_776_000_000,
               month_start: 1_775_481_600,
               month_end: 1_776_003_601,
             },

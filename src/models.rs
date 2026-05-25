@@ -1389,6 +1389,20 @@ pub struct SummaryWindows {
     pub yesterday_end: i64,
     pub month_start: i64,
     pub month_end: i64,
+    pub previous_month_start: i64,
+    pub previous_month_end: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SummaryWindowBounds {
+    pub today_start: i64,
+    pub today_end: i64,
+    pub yesterday_start: i64,
+    pub yesterday_end: i64,
+    pub month_start: i64,
+    pub month_quota_charge_start: i64,
+    pub previous_month_start: i64,
+    pub previous_month_end: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -2014,6 +2028,27 @@ pub(crate) fn start_of_local_month_utc_ts(now: chrono::DateTime<Local>) -> i64 {
     let naive = first_day
         .and_hms_opt(0, 0, 0)
         .expect("valid start of month time");
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => dt.with_timezone(&Utc).timestamp(),
+        chrono::LocalResult::Ambiguous(dt, _) => dt.with_timezone(&Utc).timestamp(),
+        chrono::LocalResult::None => {
+            // Extremely unlikely at midnight; fall back to current timestamp.
+            now.with_timezone(&Utc).timestamp()
+        }
+    }
+}
+
+pub(crate) fn previous_local_month_start_utc_ts(now: chrono::DateTime<Local>) -> i64 {
+    let (year, month) = if now.month() == 1 {
+        (now.year() - 1, 12)
+    } else {
+        (now.year(), now.month() - 1)
+    };
+    let first_day =
+        chrono::NaiveDate::from_ymd_opt(year, month, 1).expect("valid previous month date");
+    let naive = first_day
+        .and_hms_opt(0, 0, 0)
+        .expect("valid previous month time");
     match Local.from_local_datetime(&naive) {
         chrono::LocalResult::Single(dt) => dt.with_timezone(&Utc).timestamp(),
         chrono::LocalResult::Ambiguous(dt, _) => dt.with_timezone(&Utc).timestamp(),
@@ -2736,6 +2771,7 @@ pub(crate) fn previous_local_day_start_utc_ts(now: chrono::DateTime<Local>) -> i
     local_date_start_utc_ts(previous_date, now)
 }
 
+#[cfg(test)]
 pub(crate) fn previous_local_same_time_utc_ts(now: chrono::DateTime<Local>) -> i64 {
     let previous_date = now
         .date_naive()

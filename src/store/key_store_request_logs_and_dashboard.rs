@@ -2480,13 +2480,18 @@ impl KeyStore {
 
     pub(crate) async fn fetch_summary_windows(
         &self,
-        today_start: i64,
-        today_end: i64,
-        yesterday_start: i64,
-        yesterday_end: i64,
-        month_start: i64,
-        month_quota_charge_start: i64,
+        bounds: SummaryWindowBounds,
     ) -> Result<SummaryWindows, ProxyError> {
+        let SummaryWindowBounds {
+            today_start,
+            today_end,
+            yesterday_start,
+            yesterday_end,
+            month_start,
+            month_quota_charge_start,
+            previous_month_start,
+            previous_month_end,
+        } = bounds;
         let mut tx = self.pool.begin().await?;
         let sample_window_start = yesterday_start.min(month_quota_charge_start);
         let now_ts = today_end.saturating_sub(1);
@@ -2753,6 +2758,8 @@ impl KeyStore {
             yesterday_end,
             month_start,
             month_end: today_end,
+            previous_month_start,
+            previous_month_end,
         })
     }
 
