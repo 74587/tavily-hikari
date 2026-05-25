@@ -106,7 +106,6 @@ impl ForwardProxyManager {
         let restored = proxy_urls.len();
         if restored > 0 {
             self.rebuild_endpoints(subscription_endpoints);
-            self.last_subscription_refresh_at = Some(Utc::now().timestamp());
         }
         restored
     }

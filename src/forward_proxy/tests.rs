@@ -695,6 +695,10 @@ if __name__ == "__main__":
             .endpoint_by_key(&proxy_key)
             .expect("restored subscription endpoint");
         assert!(restored.subscription_sources.contains(&subscription_url));
+        assert!(
+            manager.should_refresh_subscriptions(),
+            "restored runtime must not suppress the maintenance subscription refresh"
+        );
 
         manager.apply_incremental_settings(settings, &std::collections::HashMap::new());
         assert!(

@@ -203,11 +203,11 @@
         proxy
             .maybe_run_forward_proxy_maintenance()
             .await
-            .expect("restored runtime maintenance should not refresh immediately");
+            .expect("restored runtime maintenance should refresh after startup");
         assert_eq!(
             subscription_hits.load(Ordering::SeqCst),
-            subscription_hits_after_seed,
-            "first maintenance after restored startup should defer remote subscription calibration"
+            subscription_hits_after_seed + 1,
+            "restored startup must not mark local runtime restore as a fresh remote refresh"
         );
 
         let _ = std::fs::remove_file(db_path);
