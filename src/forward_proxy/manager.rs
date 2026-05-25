@@ -3,6 +3,14 @@ impl ForwardProxyManager {
         settings: ForwardProxySettings,
         runtime_rows: Vec<ForwardProxyRuntimeState>,
     ) -> Self {
+        Self::new_with_settings_updated_at(settings, 0, runtime_rows)
+    }
+
+    pub fn new_with_settings_updated_at(
+        settings: ForwardProxySettings,
+        settings_updated_at: i64,
+        runtime_rows: Vec<ForwardProxyRuntimeState>,
+    ) -> Self {
         let runtime = runtime_rows
             .into_iter()
             .map(|entry| (entry.proxy_key.clone(), entry))
@@ -17,9 +25,11 @@ impl ForwardProxyManager {
             probe_in_flight: false,
             last_probe_at: Utc::now().timestamp() - FORWARD_PROXY_PROBE_INTERVAL_SECS,
             last_subscription_refresh_at: None,
+            settings_updated_at,
             window_stats_cache: Arc::new(RwLock::new(None)),
         };
         manager.rebuild_endpoints(Vec::new());
+        manager.restore_persisted_subscription_endpoints();
         manager
     }
 
@@ -47,11 +57,13 @@ impl ForwardProxyManager {
 
     pub fn apply_settings(&mut self, settings: ForwardProxySettings) {
         self.settings = settings;
+        self.settings_updated_at = Utc::now().timestamp();
         self.rebuild_endpoints(Vec::new());
     }
 
     pub fn update_settings_only(&mut self, settings: ForwardProxySettings) {
         self.settings = settings;
+        self.settings_updated_at = Utc::now().timestamp();
     }
 
     pub fn apply_subscription_refresh(
@@ -70,21 +82,40 @@ impl ForwardProxyManager {
     }
 
     pub fn restore_persisted_subscription_endpoints(&mut self) -> usize {
+        if self.settings.subscription_urls.len() != 1 {
+            return 0;
+        }
+        let subscription_url = &self.settings.subscription_urls[0];
         let proxy_urls = self
             .runtime
             .values()
             .filter(|entry| entry.source == FORWARD_PROXY_SOURCE_SUBSCRIPTION)
             .filter(|entry| entry.proxy_key != FORWARD_PROXY_DIRECT_KEY)
+            .filter(|entry| self.settings_updated_at <= 0 || entry.updated_at >= self.settings_updated_at)
+            .filter(|entry| {
+                entry.subscription_sources.contains(subscription_url)
+                    || entry.subscription_sources.is_empty()
+            })
             .filter(|entry| parse_forward_proxy_entry(&entry.proxy_key).is_some())
             .map(|entry| entry.proxy_key.clone())
             .collect::<Vec<_>>();
-        let subscription_endpoints =
-            normalize_subscription_endpoints_from_urls(&proxy_urls, FORWARD_PROXY_SOURCE_SUBSCRIPTION);
-        let restored = subscription_endpoints.len();
+        let subscription_endpoints = normalize_subscription_endpoints_from_urls(
+            &proxy_urls,
+            subscription_url,
+        );
+        let restored = proxy_urls.len();
         if restored > 0 {
             self.rebuild_endpoints(subscription_endpoints);
+            self.last_subscription_refresh_at = Some(Utc::now().timestamp());
         }
         restored
+    }
+
+    pub fn restored_subscription_endpoint_count(&self) -> usize {
+        self.endpoints
+            .iter()
+            .filter(|endpoint| endpoint.is_subscription_backed())
+            .count()
     }
 
     pub fn rebuild_endpoints(&mut self, subscription_endpoints: Vec<ForwardProxyEndpoint>) {
@@ -122,6 +153,8 @@ impl ForwardProxyManager {
                         .as_ref()
                         .map(Url::to_string)
                         .or_else(|| endpoint.raw_url.clone());
+                    runtime.subscription_sources =
+                        endpoint.subscription_sources.iter().cloned().collect();
                     runtime.available = endpoint.is_selectable();
                     runtime.last_error = if endpoint.is_selectable() {
                         None
@@ -239,6 +272,8 @@ impl ForwardProxyManager {
                         .as_ref()
                         .map(Url::to_string)
                         .or_else(|| endpoint.raw_url.clone());
+                    runtime.subscription_sources =
+                        endpoint.subscription_sources.iter().cloned().collect();
                     runtime.available = endpoint.is_selectable();
                     runtime.last_error = if endpoint.is_selectable() {
                         None

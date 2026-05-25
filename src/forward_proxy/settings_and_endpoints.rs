@@ -32,6 +32,12 @@ pub struct ForwardProxySettings {
     pub egress_socks5_url: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ForwardProxySettingsSnapshot {
+    pub settings: ForwardProxySettings,
+    pub updated_at: i64,
+}
+
 impl Default for ForwardProxySettings {
     fn default() -> Self {
         Self {
@@ -432,6 +438,7 @@ pub struct ForwardProxyRuntimeState {
     pub source: String,
     pub kind: String,
     pub endpoint_url: Option<String>,
+    pub subscription_sources: Vec<String>,
     pub resolved_ip_source: String,
     pub resolved_ips: Vec<String>,
     pub resolved_regions: Vec<String>,
@@ -442,6 +449,7 @@ pub struct ForwardProxyRuntimeState {
     pub success_ema: f64,
     pub latency_ema_ms: Option<f64>,
     pub consecutive_failures: u32,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -473,6 +481,7 @@ impl ForwardProxyRuntimeState {
                 .as_ref()
                 .map(Url::to_string)
                 .or_else(|| endpoint.raw_url.clone()),
+            subscription_sources: endpoint.subscription_sources.iter().cloned().collect(),
             resolved_ip_source: String::new(),
             resolved_ips: Vec::new(),
             resolved_regions: Vec::new(),
@@ -491,6 +500,7 @@ impl ForwardProxyRuntimeState {
             success_ema: 0.65,
             latency_ema_ms: None,
             consecutive_failures: 0,
+            updated_at: Utc::now().timestamp(),
         }
     }
 
@@ -507,9 +517,10 @@ struct ForwardProxySettingsRow {
     insert_direct: Option<i64>,
     egress_socks5_enabled: Option<i64>,
     egress_socks5_url: Option<String>,
+    updated_at: Option<i64>,
 }
 
-impl From<ForwardProxySettingsRow> for ForwardProxySettings {
+impl From<ForwardProxySettingsRow> for ForwardProxySettingsSnapshot {
     fn from(value: ForwardProxySettingsRow) -> Self {
         let proxy_urls = decode_string_vec_json(value.proxy_urls_json.as_deref());
         let subscription_urls = decode_string_vec_json(value.subscription_urls_json.as_deref());
@@ -523,7 +534,7 @@ impl From<ForwardProxySettingsRow> for ForwardProxySettings {
             .unwrap_or_else(default_forward_proxy_insert_direct);
         let egress_socks5_enabled = value.egress_socks5_enabled.is_some_and(|value| value != 0);
         let egress_socks5_url = value.egress_socks5_url.unwrap_or_default();
-        Self {
+        let settings = ForwardProxySettings {
             proxy_urls,
             subscription_urls,
             subscription_update_interval_secs: interval,
@@ -531,7 +542,11 @@ impl From<ForwardProxySettingsRow> for ForwardProxySettings {
             egress_socks5_enabled,
             egress_socks5_url,
         }
-        .normalized()
+        .normalized();
+        Self {
+            settings,
+            updated_at: value.updated_at.unwrap_or_default(),
+        }
     }
 }
 
@@ -541,6 +556,7 @@ struct ForwardProxyRuntimeRow {
     display_name: String,
     source: String,
     endpoint_url: Option<String>,
+    subscription_sources_json: Option<String>,
     resolved_ip_source: Option<String>,
     resolved_ips_json: Option<String>,
     resolved_regions_json: Option<String>,
@@ -549,6 +565,7 @@ struct ForwardProxyRuntimeRow {
     success_ema: f64,
     latency_ema_ms: Option<f64>,
     consecutive_failures: i64,
+    updated_at: Option<i64>,
 }
 
 impl From<ForwardProxyRuntimeRow> for ForwardProxyRuntimeState {
@@ -559,6 +576,7 @@ impl From<ForwardProxyRuntimeRow> for ForwardProxyRuntimeState {
             source: value.source,
             kind: "unknown".to_string(),
             endpoint_url: value.endpoint_url,
+            subscription_sources: decode_string_vec_json(value.subscription_sources_json.as_deref()),
             resolved_ip_source: value
                 .resolved_ip_source
                 .unwrap_or_default()
@@ -577,6 +595,7 @@ impl From<ForwardProxyRuntimeRow> for ForwardProxyRuntimeState {
                 .latency_ema_ms
                 .filter(|value| value.is_finite() && *value >= 0.0),
             consecutive_failures: value.consecutive_failures.max(0) as u32,
+            updated_at: value.updated_at.unwrap_or_default(),
         }
     }
 }
@@ -592,5 +611,6 @@ pub struct ForwardProxyManager {
     pub probe_in_flight: bool,
     pub last_probe_at: i64,
     pub last_subscription_refresh_at: Option<i64>,
+    pub settings_updated_at: i64,
     pub(crate) window_stats_cache: Arc<RwLock<Option<ForwardProxyWindowStatsSetCacheEntry>>>,
 }

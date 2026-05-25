@@ -198,6 +198,8 @@ impl TavilyProxy {
                     .as_ref()
                     .map(Url::to_string)
                     .or_else(|| endpoint.raw_url.clone());
+                runtime.subscription_sources =
+                    endpoint.subscription_sources.iter().cloned().collect();
                 runtime.available = endpoint.is_selectable();
                 if endpoint.is_direct() || endpoint.is_selectable() {
                     runtime.last_error = None;

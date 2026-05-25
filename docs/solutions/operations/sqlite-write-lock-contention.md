@@ -30,6 +30,8 @@ writer to coexist, but only one writer can hold the write slot at a time.
 - Background messages mention `token-usage-rollup: start job error`, `quota-sync-hot: start job error`, or LinuxDo OAuth upsert failures.
 - Startup logs may show `forward-proxy startup: ...` phases taking a long time when runtime
   snapshot persistence or subscription refresh collides with another writer.
+- Deploy health may remain `starting` when restart waits for remote subscription refresh before
+  restoring previously working subscription-backed proxy nodes from the local runtime table.
 - WAL can be large without itself proving corruption; it is a signal to inspect writer pressure and
   long readers before performing maintenance.
 
@@ -49,6 +51,9 @@ brief contention visible as HTTP 500s or failed background bookkeeping.
   writer collision does not stretch readiness.
 - Overlap startup subscription fetches where possible, but keep the refresh fail-closed if every
   feed fails.
+- Restore safely attributable persisted subscription-backed proxy nodes from `forward_proxy_runtime`
+  before attempting remote subscription refresh. If that restored graph exists, use it for startup
+  readiness and leave remote subscription calibration to the maintenance scheduler.
 - Prefer bounded retries and narrower write windows before increasing SQLite pool size.
 
 ## Guardrails / Reuse Notes

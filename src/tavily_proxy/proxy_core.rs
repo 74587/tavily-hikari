@@ -423,16 +423,18 @@ impl TavilyProxy {
             source,
         })?;
         let upstream_origin = origin_from_url(&upstream);
-        let forward_proxy_settings =
-            forward_proxy::load_forward_proxy_settings(&key_store.pool).await?;
+        let forward_proxy_settings_snapshot =
+            forward_proxy::load_forward_proxy_settings_snapshot(&key_store.pool).await?;
         let forward_proxy_runtime =
             forward_proxy::load_forward_proxy_runtime_states(&key_store.pool).await?;
         let forward_proxy_disabled_keys =
             forward_proxy::load_forward_proxy_disabled_node_keys(&key_store.pool).await?;
-        let mut forward_proxy_manager = forward_proxy::ForwardProxyManager::new(
-            forward_proxy_settings,
-            forward_proxy_runtime,
-        );
+        let mut forward_proxy_manager =
+            forward_proxy::ForwardProxyManager::new_with_settings_updated_at(
+                forward_proxy_settings_snapshot.settings,
+                forward_proxy_settings_snapshot.updated_at,
+                forward_proxy_runtime,
+            );
         forward_proxy_manager.set_disabled_keys(
             forward_proxy_disabled_keys
                 .keys()
@@ -501,23 +503,33 @@ impl TavilyProxy {
 
     pub(crate) async fn initialize_forward_proxy_runtime(&mut self) -> Result<(), ProxyError> {
         let startup_started = Instant::now();
-        let refresh_started = Instant::now();
-        if let Err(err) = self.refresh_forward_proxy_subscriptions_for_startup().await {
-            eprintln!("forward-proxy startup subscription refresh failed: {err}");
-            let restored = {
-                let mut manager = self.forward_proxy.lock().await;
-                manager.restore_persisted_subscription_endpoints()
-            };
-            if restored > 0 {
+        let restored_subscription_endpoints = {
+            let manager = self.forward_proxy.lock().await;
+            manager.restored_subscription_endpoint_count()
+        };
+        if restored_subscription_endpoints > 0 {
+            eprintln!(
+                "forward-proxy startup: restored {restored_subscription_endpoints} persisted subscription nodes; deferred subscription refresh to maintenance"
+            );
+        } else {
+            let refresh_started = Instant::now();
+            if let Err(err) = self.refresh_forward_proxy_subscriptions_for_startup().await {
+                eprintln!("forward-proxy startup subscription refresh failed: {err}");
+                let restored = {
+                    let mut manager = self.forward_proxy.lock().await;
+                    manager.restore_persisted_subscription_endpoints()
+                };
+                if restored > 0 {
+                    eprintln!(
+                        "forward-proxy restored {restored} persisted subscription nodes after startup refresh failure"
+                    );
+                }
+            } else {
                 eprintln!(
-                    "forward-proxy restored {restored} persisted subscription nodes after startup refresh failure"
+                    "forward-proxy startup: refreshed subscriptions in {}ms",
+                    refresh_started.elapsed().as_millis()
                 );
             }
-        } else {
-            eprintln!(
-                "forward-proxy startup: refreshed subscriptions in {}ms",
-                refresh_started.elapsed().as_millis()
-            );
         }
         let xray_started = Instant::now();
         let persist_started = Instant::now();
@@ -530,7 +542,7 @@ impl TavilyProxy {
                     .sync_endpoints(&mut manager.endpoints, egress_socks5_url.as_ref())
                     .await
                 {
-                    eprintln!("forward-proxy startup xray prewarm failed");
+                    eprintln!("forward-proxy startup xray prewarm failed: {_err}");
                 }
             }
             self.sync_forward_proxy_runtime_state(&mut manager).await?;
@@ -798,12 +810,6 @@ impl TavilyProxy {
         {
             let mut manager = self.forward_proxy.lock().await;
             manager.update_settings_only(normalized.clone());
-            {
-                let mut xray = self.xray_supervisor.lock().await;
-                xray.sync_endpoints(&mut manager.endpoints, next_egress_socks5_url.as_ref())
-                    .await?;
-            }
-            self.sync_forward_proxy_runtime_state(&mut manager).await?;
         }
         let fetched_subscriptions = self
             .fetch_forward_proxy_subscription_map_with_progress(
