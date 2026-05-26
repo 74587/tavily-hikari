@@ -1,5 +1,19 @@
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type DemoListener = EventListenerOrEventListenerObject
+interface DemoRechargeOrder {
+  outTradeNo: string
+  status: string
+  credits: number
+  months: number
+  money: string
+  tradeNo: string | null
+  paymentUrl: string | null
+  createdAt: number
+  updatedAt: number
+  paidAt: number | null
+  lastNotifyAt: number | null
+  lastError: string | null
+}
 
 declare global {
   interface Window {
@@ -18,6 +32,11 @@ const DEMO_EU_KEY_ID = 'Fr03'
 const DEMO_QUOTA_KEY_ID = 'Qt04'
 const DEMO_QUARANTINE_KEY_ID = 'Qr05'
 const DEMO_TOKEN_OWNER = { userId: 'user-demo-admin', displayName: 'Hikari Demo Admin', username: 'hikari-demo' }
+const DEMO_RECHARGE_UNIT_CREDITS = 1000
+const DEMO_RECHARGE_UNIT_PRICE_LDC = 100
+const DEMO_TEST_RECHARGE_CREDITS = 1
+const DEMO_TEST_RECHARGE_MONTHS = 1
+const DEMO_TEST_RECHARGE_AMOUNT_LDC = 1
 
 function truthy(value: string | boolean | undefined | null): boolean {
   if (value === true) return true
@@ -44,6 +63,11 @@ function nowSeconds(offset = 0): number {
 
 function isoSeconds(offset = 0): string {
   return new Date((nowSeconds(offset)) * 1000).toISOString()
+}
+
+function monthStartSeconds(monthOffset = 0): number {
+  const now = new Date()
+  return Math.floor(new Date(now.getFullYear(), now.getMonth() + monthOffset, 1).getTime() / 1000)
 }
 
 function demoPulse(now = Date.now()): number {
@@ -202,6 +226,7 @@ function createDemoState() {
     jobs: createDemoJobs(),
     forwardProxy: createDemoForwardProxy(),
     systemSettings: createDemoSystemSettings(),
+    rechargeOrders: createDemoRechargeOrders(),
     userTags: [createDemoUserTag('tag-demo', {
       name: 'demo',
       displayName: 'Demo',
@@ -213,6 +238,38 @@ function createDemoState() {
       monthlyDelta: 2000,
     }, 3)],
     registration: { allowRegistration: false },
+  }
+}
+
+function createDemoRechargeOrders(): DemoRechargeOrder[] {
+  return []
+}
+
+function demoRechargeSummary() {
+  return {
+    currentMonthStart: monthStartSeconds(),
+    currentEntitlementCredits: DEMO_TEST_RECHARGE_CREDITS,
+    effectiveUntilMonthStart: monthStartSeconds(1),
+  }
+}
+
+function demoRechargeConfig() {
+  return {
+    enabled: true,
+    unitCredits: DEMO_RECHARGE_UNIT_CREDITS,
+    unitPriceLdc: DEMO_RECHARGE_UNIT_PRICE_LDC,
+    minCredits: DEMO_RECHARGE_UNIT_CREDITS,
+    maxCredits: 20_000,
+    creditsStep: DEMO_RECHARGE_UNIT_CREDITS,
+    defaultCredits: DEMO_TEST_RECHARGE_CREDITS,
+    minMonths: 1,
+    maxMonths: 12,
+    quotaDeltaBaseCredits: DEMO_RECHARGE_UNIT_CREDITS,
+    hourlyDeltaPerQuotaUnit: 2,
+    dailyDeltaPerQuotaUnit: 34,
+    monthlyDeltaPerQuotaUnit: 1000,
+    testPriceEnabled: true,
+    ...demoRechargeSummary(),
   }
 }
 
@@ -1013,7 +1070,19 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
     dailyFailure: 18,
     monthlySuccess: 8400,
     lastActivity: nowSeconds(-120),
+    recharge: demoRechargeSummary(),
   })
+  if (path === '/api/user/recharge/config') return jsonResponse(demoRechargeConfig())
+  if (path === '/api/user/recharge/orders') {
+    if (method === 'POST') return handleCreateDemoRechargeOrder(init)
+    return jsonResponse({ items: demoState.rechargeOrders })
+  }
+  const rechargeOrderRoute = path.match(/^\/api\/user\/recharge\/orders\/([^/]+)$/)
+  if (rechargeOrderRoute) {
+    const outTradeNo = decodeURIComponent(rechargeOrderRoute[1])
+    const order = demoState.rechargeOrders.find((item) => item.outTradeNo === outTradeNo)
+    return order ? jsonResponse(order) : jsonResponse({ message: 'Demo recharge order not found' }, 404)
+  }
   if (path === '/api/user/tokens') return jsonResponse(demoState.tokens)
   if (path.startsWith('/api/user/tokens/')) return handleUserTokenRoute(path, url)
 
@@ -1203,6 +1272,44 @@ function handleTokenRoute(path: string, url: URL, method: string): Response {
   if (path.endsWith('/broken-keys')) return jsonResponse({ ...buildListPage([{ keyId: DEMO_QUOTA_KEY_ID, currentStatus: 'exhausted', reasonCode: 'upstream_usage_limit_432', reasonSummary: 'Demo quota exhausted', latestBreakAt: nowSeconds(-4200), source: 'request_log', breakerTokenId: id, breakerUserId: 'user-demo-admin', breakerUserDisplayName: 'Hikari Demo Admin', manualActorDisplayName: null, relatedUsers: [] }], url) })
   if (path.endsWith('/events')) return textResponse('demo event stream is provided by the browser demo runtime\n')
   return jsonResponse(token)
+}
+
+async function handleCreateDemoRechargeOrder(init?: RequestInit): Promise<Response> {
+  const body = await readJsonBody(init)
+  const credits = typeof body.credits === 'number' ? body.credits : 0
+  const months = typeof body.months === 'number' ? body.months : 0
+  const isTestOffer = credits === DEMO_TEST_RECHARGE_CREDITS && months === DEMO_TEST_RECHARGE_MONTHS
+  const isRegularOffer = credits >= DEMO_RECHARGE_UNIT_CREDITS
+    && credits <= 20_000
+    && credits % DEMO_RECHARGE_UNIT_CREDITS === 0
+    && months >= 1
+    && months <= 12
+
+  if (!isTestOffer && !isRegularOffer) {
+    return jsonResponse({ message: 'Demo recharge only supports 1x1 test offer or regular 1000-credit steps.' }, 400)
+  }
+
+  const amountLdc = isTestOffer
+    ? DEMO_TEST_RECHARGE_AMOUNT_LDC
+    : (credits / DEMO_RECHARGE_UNIT_CREDITS) * DEMO_RECHARGE_UNIT_PRICE_LDC * months
+  const outTradeNo = `ldc_demo_${Date.now()}`
+  const paymentUrl = `${window.location.origin}/console/dashboard?demo_checkout=${encodeURIComponent(outTradeNo)}`
+  const order: DemoRechargeOrder = {
+    outTradeNo,
+    status: 'pending',
+    credits,
+    months,
+    money: amountLdc.toFixed(2),
+    tradeNo: null,
+    paymentUrl,
+    createdAt: nowSeconds(),
+    updatedAt: nowSeconds(),
+    paidAt: null,
+    lastNotifyAt: null,
+    lastError: null,
+  }
+  demoState.rechargeOrders.unshift(order)
+  return jsonResponse({ order, paymentUrl })
 }
 
 function handleTavilyProbe(path: string): JsonValue {
