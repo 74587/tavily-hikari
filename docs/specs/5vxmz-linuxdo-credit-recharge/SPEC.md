@@ -51,7 +51,7 @@
 - 订单创建必须持久化 `out_trade_no`、用户、购买额度、月数、金额、状态、创建/更新时间。
 - 异步通知必须校验订单存在、金额一致、状态成功、签名有效，并对重复通知幂等返回 `success`。
 - 权益必须按服务器本地自然月展开为 `(user_id, month_start, credits)`，同一订单同一月份只能发放一次。
-- 当前月份的充值权益必须按 `1000 月积分 => +100 小时额度、+500 日额度、+1000 月额度` 派生并加入账户有效 quota，正数小额测试价至少显示并生效 `+1` 小时/日额度；`block_all` 生效时最终额度仍为 0。
+- 当前月份的充值权益必须按 `1000 月积分 => +2 小时额度、+34 日额度、+1000 月额度` 派生并加入账户有效 quota，正数小额测试价至少显示并生效 `+1` 小时/日额度；`block_all` 生效时最终额度仍为 0。
 
 ### SHOULD
 
@@ -111,7 +111,7 @@
 
 - Given 用户本月有 `3000` 充值权益，且基线/标签有效小时/日/月额度为 `100/500/5000`
   When 读取 dashboard 或做 quota precheck
-  Then 有效小时/日/月额度为 `400/2000/8000`。
+  Then 有效小时/日/月额度为 `106/602/8000`。
 
 - Given 测试价开关已开启
   When 用户购买 `1` 积分额度、`1` 个自然月
@@ -161,6 +161,8 @@
 ![Normal recharge quota controls](./assets/recharge-normal-story.png)
 
 ![Test-price recharge quota controls in the web demo](./assets/recharge-test-price-web-demo.png)
+
+![Reduced hourly and daily recharge deltas in the web demo](./assets/recharge-reduced-quota-web-demo.png)
 
 ## Related PRs
 

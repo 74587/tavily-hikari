@@ -61,16 +61,16 @@ fn linuxdo_credit_recharge_adds_hourly_daily_and_monthly_quota() {
     );
 
     assert_eq!(resolution.effective.hourly_any_limit, 10);
-    assert_eq!(resolution.effective.hourly_limit, 220);
-    assert_eq!(resolution.effective.daily_limit, 1030);
+    assert_eq!(resolution.effective.hourly_limit, 24);
+    assert_eq!(resolution.effective.daily_limit, 98);
     assert_eq!(resolution.effective.monthly_limit, 2040);
     let recharge = resolution
         .breakdown
         .iter()
         .find(|entry| entry.kind == "recharge")
         .expect("recharge row");
-    assert_eq!(recharge.hourly_delta, 200);
-    assert_eq!(recharge.daily_delta, 1000);
+    assert_eq!(recharge.hourly_delta, 4);
+    assert_eq!(recharge.daily_delta, 68);
     assert_eq!(recharge.monthly_delta, 2000);
 }
 
