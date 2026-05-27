@@ -44,14 +44,14 @@
 
 ### MUST
 
-- 默认价格固定为 `100 LDC = 1000 积分额度 / 自然月`；测试价开关开启后，`1 LDC = 1 积分额度 / 自然月`。
+- 默认价格固定为 `50 LDC = 1000 积分额度 / 自然月`；测试价开关开启后，`1 LDC = 1 积分额度 / 自然月`。
 - 用户选择的积分额度默认必须在 `1000..=20000` 内，且为 `1000` 的正整数倍；测试价开启后允许 `1..=20000` 且步进为 `1`。
 - 用户选择的自然月数必须在 `1..=12` 内。
-- 订单金额按 `credits / 1000 * months * 100` 计算，并以两位小数字符串提交给 Linux.do Credit。
+- 订单金额按 `credits / 1000 * months * 50` 计算，并以两位小数字符串提交给 Linux.do Credit。
 - 订单创建必须持久化 `out_trade_no`、用户、购买额度、月数、金额、状态、创建/更新时间。
 - 异步通知必须校验订单存在、金额一致、状态成功、签名有效，并对重复通知幂等返回 `success`。
 - 权益必须按服务器本地自然月展开为 `(user_id, month_start, credits)`，同一订单同一月份只能发放一次。
-- 当前月份的充值权益必须按 `1000 月积分 => +2 小时额度、+34 日额度、+1000 月额度` 派生并加入账户有效 quota，正数小额测试价至少显示并生效 `+1` 小时/日额度；`block_all` 生效时最终额度仍为 0。
+- 当前月份的充值权益必须按 `1000 月积分 => +20 小时额度、+100 日额度、+1000 月额度` 派生并加入账户有效 quota，正数小额测试价至少显示并生效 `+1` 小时/日额度；`block_all` 生效时最终额度仍为 0。
 
 ### SHOULD
 
@@ -104,7 +104,7 @@
 
 - Given 充值配置完整且用户已登录
   When 用户购买 `2000` 积分额度、`3` 个自然月
-  Then 订单金额为 `600.00` LDC，支付请求使用 `type=ldcpay` 和 Ed25519 签名。
+  Then 订单金额为 `300.00` LDC，支付请求使用 `type=ldcpay` 和 Ed25519 签名。
 
 - Given Linux.do Credit 发送同一成功通知两次
   When 服务处理通知
@@ -112,7 +112,7 @@
 
 - Given 用户本月有 `3000` 充值权益，且基线/标签有效小时/日/月额度为 `100/500/5000`
   When 读取 dashboard 或做 quota precheck
-  Then 有效小时/日/月额度为 `106/602/8000`。
+  Then 有效小时/日/月额度为 `160/800/8000`。
 
 - Given 测试价开关已开启
   When 用户购买 `1` 积分额度、`1` 个自然月
@@ -167,15 +167,7 @@
 
 ## Visual Evidence
 
-![Normal recharge quota controls](./assets/recharge-normal-story.png)
-
-![Test-price recharge quota controls in the web demo](./assets/recharge-test-price-web-demo.png)
-
-![Reduced hourly and daily recharge deltas in the web demo](./assets/recharge-reduced-quota-web-demo.png)
-
-![Recharge orders empty state fills the parent column](./assets/recharge-orders-fill-web-demo.png)
-
-![Recharge system settings switches](./assets/recharge-system-settings-switches.png)
+![Recharge burst price and quota controls](./assets/recharge-burst-price-story.png)
 
 ## Related PRs
 

@@ -33,7 +33,7 @@ const DEMO_QUOTA_KEY_ID = 'Qt04'
 const DEMO_QUARANTINE_KEY_ID = 'Qr05'
 const DEMO_TOKEN_OWNER = { userId: 'user-demo-admin', displayName: 'Hikari Demo Admin', username: 'hikari-demo' }
 const DEMO_RECHARGE_UNIT_CREDITS = 1000
-const DEMO_RECHARGE_UNIT_PRICE_LDC = 100
+const DEMO_RECHARGE_UNIT_PRICE_LDC = 50
 const DEMO_TEST_RECHARGE_CREDITS = 1
 const DEMO_TEST_RECHARGE_MONTHS = 1
 const DEMO_TEST_RECHARGE_AMOUNT_LDC = 1
@@ -266,8 +266,8 @@ function demoRechargeConfig() {
     minMonths: 1,
     maxMonths: 12,
     quotaDeltaBaseCredits: DEMO_RECHARGE_UNIT_CREDITS,
-    hourlyDeltaPerQuotaUnit: 2,
-    dailyDeltaPerQuotaUnit: 34,
+    hourlyDeltaPerQuotaUnit: 20,
+    dailyDeltaPerQuotaUnit: 100,
     monthlyDeltaPerQuotaUnit: 1000,
     testPriceEnabled: true,
     ...demoRechargeSummary(),

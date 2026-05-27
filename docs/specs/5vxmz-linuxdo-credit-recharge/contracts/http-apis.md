@@ -6,7 +6,7 @@
 - Response `200`:
   - `enabled`: boolean
   - `unitCredits`: `1000`
-  - `unitPriceLdc`: `100`
+  - `unitPriceLdc`: `50`
   - `minCredits`: `1000`
   - `maxCredits`: `20000`
   - `creditsStep`: `1000`
@@ -14,8 +14,8 @@
   - `minMonths`: `1`
   - `maxMonths`: `12`
   - `quotaDeltaBaseCredits`: quota increment calculation base, currently `1000`
-  - `hourlyDeltaPerQuotaUnit`: quota-hour increment for one `quotaDeltaBaseCredits`
-  - `dailyDeltaPerQuotaUnit`: quota-day increment for one `quotaDeltaBaseCredits`
+  - `hourlyDeltaPerQuotaUnit`: `20`
+  - `dailyDeltaPerQuotaUnit`: `100`
   - `monthlyDeltaPerQuotaUnit`: quota-month increment for one `quotaDeltaBaseCredits`
   - `testPriceEnabled`: boolean; when enabled, this only adds the extra `1 credit × 1 month`
     offer for `1 LDC`
