@@ -46,6 +46,7 @@
 - 公告必须包含标题、Markdown 正文、展示方式、状态、创建/更新时间，发布和归档时间按状态记录。
 - 管理员只能通过既有 admin 判定访问公告管理 API。
 - 管理端公告模块必须按列表、创建/编辑功能拆分；新增公告不得常驻在列表页内。
+- 管理端公告页的页面级标题必须由 admin shell 拥有；公告模块内部只渲染业务区标题与工具条，避免重复页头。
 - 管理端创建/编辑公告正文必须提供 Markdown 编辑器，不能只提供纯文本输入框。
 - 公告正文必须按 Markdown 原文保存，并在管理端列表预览和用户端公告展示中安全渲染。
 - 用户端弹窗公告只能展示管理员填写的标题、正文和固定确认操作，不展示非管理员填写的说明文案。
@@ -131,6 +132,13 @@
   evidence_note: 管理端公告列表页只展示列表、状态和发布/归档/编辑操作，并用紧凑 Markdown 预览公告正文。
   image:
   ![Admin announcements list](./assets/admin-announcements-markdown.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `Admin/Pages/Announcements`
+  state: admin shell with announcements module
+  evidence_note: 管理端公告页只保留 admin shell 的页面级公告标题，公告模块内部保留业务列表标题和工具条，不再重复渲染页面页头。
+  image:
+  ![Admin announcements single header](./assets/admin-announcements-single-header.png)
 
 - source_type: storybook_canvas
   story_id_or_title: `Admin/AnnouncementsModule/Create Announcement`

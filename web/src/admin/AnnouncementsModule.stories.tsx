@@ -179,6 +179,11 @@ export const Default: Story = {
     if (canvasElement.querySelector('.announcements-list-header') == null) {
       throw new Error('Expected announcements list header to render.')
     }
+    const duplicatePageHeader = Array.from(canvasElement.querySelectorAll('h2'))
+      .some((heading) => heading.textContent?.trim() === '公告')
+    if (duplicatePageHeader) {
+      throw new Error('Expected announcements module to leave the page title to the admin shell.')
+    }
   },
 }
 

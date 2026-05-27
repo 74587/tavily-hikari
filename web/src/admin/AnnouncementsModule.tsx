@@ -11,6 +11,7 @@ import {
   type AnnouncementMutationPayload,
   type AnnouncementStatus,
 } from '../api'
+import AdminModuleSurface from './AdminModuleSurface'
 import AdminLoadingRegion from '../components/AdminLoadingRegion'
 import MarkdownContent from '../components/MarkdownContent'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
@@ -55,8 +56,6 @@ const MarkdownEditor = lazy(() => import('../components/MarkdownEditor'))
 function copy(language: Language) {
   return language === 'zh'
     ? {
-        title: '公告',
-        description: '发布用户控制台公告。弹窗用于强提醒，滚动公告用于低打扰提示。',
         refresh: '刷新',
         refreshing: '刷新中…',
         loading: '正在加载公告…',
@@ -119,8 +118,6 @@ function copy(language: Language) {
         archived: '公告已归档。',
       }
     : {
-        title: 'Announcements',
-        description: 'Publish user-console notices. Modal announcements are high-attention, tickers are lower-interruption.',
         refresh: 'Refresh',
         refreshing: 'Refreshing…',
         loading: 'Loading announcements…',
@@ -828,31 +825,31 @@ export default function AnnouncementsModule({
     }
   }
 
-  return (
-    <section className="surface panel announcements-module">
-      <div className="panel-header announcements-module-header">
-        <div>
-          <h2>{strings.title}</h2>
-          <p className="panel-description">{strings.description}</p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => void load(undefined, 'refresh')}
-          disabled={loading || refreshing}
-        >
-          <Icon
-            icon={refreshing ? 'mdi:loading' : 'mdi:refresh'}
-            width={16}
-            height={16}
-            className={refreshing ? 'icon-spin' : undefined}
-            aria-hidden="true"
-          />
-          <span>{refreshing ? strings.refreshing : strings.refresh}</span>
-        </Button>
-      </div>
+  const toolbar = (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={() => void load(undefined, 'refresh')}
+      disabled={loading || refreshing}
+    >
+      <Icon
+        icon={refreshing ? 'mdi:loading' : 'mdi:refresh'}
+        width={16}
+        height={16}
+        className={refreshing ? 'icon-spin' : undefined}
+        aria-hidden="true"
+      />
+      <span>{refreshing ? strings.refreshing : strings.refresh}</span>
+    </Button>
+  )
 
+  return (
+    <AdminModuleSurface
+      className="announcements-module"
+      toolbar={toolbar}
+      toolbarClassName="admin-module-toolbar--end"
+    >
       {message ? <div className="announcements-message">{message}</div> : null}
       {error && !loading ? <div className="announcements-error">{error}</div> : null}
 
@@ -887,6 +884,6 @@ export default function AnnouncementsModule({
           />
         </>
       )}
-    </section>
+    </AdminModuleSurface>
   )
 }

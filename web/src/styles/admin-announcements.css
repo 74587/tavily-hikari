@@ -3,11 +3,6 @@
   gap: 18px;
 }
 
-.announcements-module-header {
-  align-items: flex-start;
-  gap: 14px;
-}
-
 .announcements-editor,
 .announcements-list {
   min-width: 0;
