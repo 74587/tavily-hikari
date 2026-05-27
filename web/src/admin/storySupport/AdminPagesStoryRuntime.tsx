@@ -3219,6 +3219,7 @@ interface AdminPageFrameProps {
   children: ReactNode
   overlays?: ReactNode
   showDefaultShellChrome?: boolean
+  actions?: ReactNode
 }
 
 function AdminPageFrame({
@@ -3226,6 +3227,7 @@ function AdminPageFrame({
   children,
   overlays,
   showDefaultShellChrome = true,
+  actions,
 }: AdminPageFrameProps): JSX.Element {
   const admin = useTranslate().admin
   const intro = (() => {
@@ -3350,7 +3352,7 @@ function AdminPageFrame({
               />
             </div>
             <div className="admin-desktop-only">
-              <AdminCompactIntro title={intro.title} description={intro.description} />
+              <AdminCompactIntro title={intro.title} description={intro.description} actions={actions} />
             </div>
           </>
         )}
@@ -6234,6 +6236,7 @@ const STORY_ANNOUNCEMENTS: Announcement[] = [
     archivedAt: null,
   },
 ]
+const ANNOUNCEMENTS_HEADER_ACTION_SLOT_ID = 'storybook-announcements-header-action-slot'
 
 function installStoryAnnouncementsFetchMock(): () => void {
   const originalFetch = window.fetch.bind(window)
@@ -6270,8 +6273,19 @@ function AnnouncementsPageCanvas(): JSX.Element {
   }, [])
 
   return (
-    <AdminPageFrame activeModule="announcements">
-      {ready ? <AnnouncementsModule language={language} /> : <div style={{ minHeight: 360 }} />}
+    <AdminPageFrame
+      activeModule="announcements"
+      actions={<div id={ANNOUNCEMENTS_HEADER_ACTION_SLOT_ID} />}
+    >
+      {ready ? (
+        <AnnouncementsModule
+          language={language}
+          headerActionSlotId={ANNOUNCEMENTS_HEADER_ACTION_SLOT_ID}
+          showListCreateAction={false}
+        />
+      ) : (
+        <div style={{ minHeight: 360 }} />
+      )}
     </AdminPageFrame>
   )
 }
@@ -7173,6 +7187,16 @@ export const Announcements: Story = {
     }
     if (!visibleHeadings.some((heading) => heading.tag === 'H3' && heading.text != null && listTitles.includes(heading.text))) {
       throw new Error('Expected the announcements business list heading to remain visible.')
+    }
+    const headerActionButton = canvasElement.querySelector<HTMLButtonElement>('.admin-compact-intro-actions button')
+    if (!headerActionButton?.textContent?.match(/新建公告|New announcement/)) {
+      throw new Error('Expected the create announcement action to live in the page title row.')
+    }
+    if (canvasElement.querySelector('.announcements-list-header button') != null) {
+      throw new Error('Expected the announcements list header to avoid a duplicate create action.')
+    }
+    if (canvasElement.querySelector('.announcements-module .admin-module-toolbar') != null) {
+      throw new Error('Expected the announcements module to avoid rendering a refresh toolbar.')
     }
   },
 }

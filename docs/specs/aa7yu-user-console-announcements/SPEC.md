@@ -47,6 +47,7 @@
 - 管理员只能通过既有 admin 判定访问公告管理 API。
 - 管理端公告模块必须按列表、创建/编辑功能拆分；新增公告不得常驻在列表页内。
 - 管理端公告页的页面级标题必须由 admin shell 拥有；公告模块内部只渲染业务区标题与工具条，避免重复页头。
+- 管理端公告页的新建公告入口必须位于页面标题行右端；公告模块内部不得再渲染刷新按钮或重复的新建入口。
 - 管理端桌面表格的公告操作列必须按按钮内容收缩，按钮保持单行排列；移动卡片中可按可用宽度换行。
 - 管理端创建/编辑公告正文必须提供 Markdown 编辑器，不能只提供纯文本输入框。
 - 公告正文必须按 Markdown 原文保存，并在管理端列表预览和用户端公告展示中安全渲染。
@@ -137,7 +138,7 @@
 - source_type: storybook_canvas
   story_id_or_title: `Admin/Pages/Announcements`
   state: admin shell with announcements module
-  evidence_note: 管理端公告页只保留 admin shell 的页面级公告标题，公告模块内部保留业务列表标题和工具条；桌面公告操作列按内容收缩，按钮保持单行排列。
+  evidence_note: 管理端公告页只保留 admin shell 的页面级公告标题，新建公告入口位于标题行右端；公告模块内部不再渲染刷新按钮或重复新建入口，桌面公告操作列按内容收缩且按钮保持单行排列。
   image:
   ![Admin announcements single header](./assets/admin-announcements-single-header.png)
 

@@ -308,6 +308,8 @@ const LazyUserDetailTokenTable = lazy(async () =>
   })),
 )
 
+const ANNOUNCEMENTS_HEADER_ACTION_SLOT_ID = 'announcements-header-action-slot'
+
 function AdminLazyBoundary({
   children,
   loadingLabel,
@@ -9617,6 +9619,8 @@ function AdminDashboard(): JSX.Element {
                             ? renderJobFilterToolbar('admin-module-toolbar--header-filter')
                             : showAlerts
                               ? renderAlertsViewTabs()
+                              : showAnnouncements
+                                ? <div id={ANNOUNCEMENTS_HEADER_ACTION_SLOT_ID} />
                               : undefined
             }
           />
@@ -11301,6 +11305,8 @@ function AdminDashboard(): JSX.Element {
           <LazyAnnouncementsModule
             language={language}
             refreshToken={announcementsRefreshToken}
+            headerActionSlotId={ANNOUNCEMENTS_HEADER_ACTION_SLOT_ID}
+            showListCreateAction={false}
           />
         </AdminLazyBoundary>
       )}

@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import {
   archiveAnnouncement,
@@ -28,6 +29,8 @@ interface AnnouncementsModuleProps {
   language: Language
   refreshToken?: number
   initialMode?: 'list' | 'create'
+  headerActionSlotId?: string
+  showListCreateAction?: boolean
 }
 
 interface AnnouncementDraft {
@@ -516,6 +519,7 @@ function AnnouncementsListPanel({
   busyId,
   strings,
   language,
+  showCreateAction,
   onCreate,
   onEdit,
   onPreview,
@@ -527,6 +531,7 @@ function AnnouncementsListPanel({
   busyId: string | null
   strings: AnnouncementCopy
   language: Language
+  showCreateAction: boolean
   onCreate: () => void
   onEdit: (item: Announcement) => void
   onPreview: (item: Announcement) => void
@@ -539,10 +544,12 @@ function AnnouncementsListPanel({
           <h3>{strings.listTitle}</h3>
           <p>{strings.listDescription}</p>
         </div>
-        <Button type="button" size="sm" onClick={onCreate}>
-          <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
-          <span>{strings.newAnnouncement}</span>
-        </Button>
+        {showCreateAction ? (
+          <Button type="button" size="sm" onClick={onCreate}>
+            <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
+            <span>{strings.newAnnouncement}</span>
+          </Button>
+        ) : null}
       </div>
       <AdminLoadingRegion
         loadState={loading ? 'initial_loading' : error ? 'error' : 'ready'}
@@ -553,10 +560,12 @@ function AnnouncementsListPanel({
         {items.length === 0 ? (
           <div className="empty-state alert announcements-empty-state">
             <span>{strings.empty}</span>
-            <Button type="button" size="sm" onClick={onCreate}>
-              <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
-              <span>{strings.newAnnouncement}</span>
-            </Button>
+            {showCreateAction ? (
+              <Button type="button" size="sm" onClick={onCreate}>
+                <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
+                <span>{strings.newAnnouncement}</span>
+              </Button>
+            ) : null}
           </div>
         ) : (
           <>
@@ -689,7 +698,6 @@ function AnnouncementsListPanel({
     </div>
   )
 }
-
 function AnnouncementUserPreview({
   item,
   language,
@@ -721,11 +729,13 @@ export default function AnnouncementsModule({
   language,
   refreshToken = 0,
   initialMode = 'list',
+  headerActionSlotId,
+  showListCreateAction = true,
 }: AnnouncementsModuleProps): JSX.Element {
   const strings = useMemo(() => copy(language), [language])
   const [items, setItems] = useState<Announcement[]>([])
   const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
+  const [, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [draft, setDraft] = useState<AnnouncementDraft>(EMPTY_DRAFT)
@@ -763,13 +773,13 @@ export default function AnnouncementsModule({
     return () => controller.abort()
   }, [load, refreshToken])
 
-  const startCreate = () => {
+  const startCreate = useCallback(() => {
     setEditorMode({ kind: 'create' })
     setDraft(EMPTY_DRAFT)
     setPreviewItem(null)
     setMessage(null)
     setError(null)
-  }
+  }, [])
 
   const startEdit = (item: Announcement) => {
     setEditorMode({ kind: 'edit', id: item.id, status: item.status })
@@ -832,31 +842,22 @@ export default function AnnouncementsModule({
     }
   }
 
-  const toolbar = (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      onClick={() => void load(undefined, 'refresh')}
-      disabled={loading || refreshing}
-    >
-      <Icon
-        icon={refreshing ? 'mdi:loading' : 'mdi:refresh'}
-        width={16}
-        height={16}
-        className={refreshing ? 'icon-spin' : undefined}
-        aria-hidden="true"
-      />
-      <span>{refreshing ? strings.refreshing : strings.refresh}</span>
-    </Button>
-  )
+  const headerActionHost = headerActionSlotId && typeof document !== 'undefined'
+    ? document.getElementById(headerActionSlotId)
+    : null
+  const headerAction = headerActionHost && !editorMode
+    ? createPortal(
+      <Button type="button" size="sm" onClick={startCreate}>
+        <Icon icon="mdi:plus" width={16} height={16} aria-hidden="true" />
+        <span>{strings.newAnnouncement}</span>
+      </Button>,
+      headerActionHost,
+    )
+    : null
 
   return (
-    <AdminModuleSurface
-      className="announcements-module"
-      toolbar={toolbar}
-      toolbarClassName="admin-module-toolbar--end"
-    >
+    <AdminModuleSurface className="announcements-module">
+      {headerAction}
       {message ? <div className="announcements-message">{message}</div> : null}
       {error && !loading ? <div className="announcements-error">{error}</div> : null}
 
@@ -884,6 +885,7 @@ export default function AnnouncementsModule({
             busyId={busyId}
             strings={strings}
             language={language}
+            showCreateAction={showListCreateAction}
             onCreate={startCreate}
             onEdit={startEdit}
             onPreview={setPreviewItem}
