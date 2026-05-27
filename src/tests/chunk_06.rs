@@ -83,7 +83,7 @@ fn linuxdo_credit_recharge_price_config_enforces_normal_and_test_ranges() {
     );
     assert_eq!(
         linuxdo_credit_recharge_money_cents(20_000, 12, normal),
-        Some(24_000_00)
+        Some(2_400_000)
     );
     assert_eq!(linuxdo_credit_recharge_money_cents(1, 1, normal), None);
     assert_eq!(
