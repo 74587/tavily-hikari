@@ -1,9 +1,27 @@
 import type { RechargeConfig, RechargeOrder } from '../api'
 import type { UserDashboard } from '../api'
-import { Minus, Plus } from 'lucide-react'
+import { Eye, Minus, Plus } from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { Icon } from '../lib/icons'
 import { Button } from '../components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog'
+import {
+  Drawer,
+  DrawerClose,
+  DrawerContent,
+  DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from '../components/ui/drawer'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
+import { useViewportMode } from '../lib/responsive'
 import {
   DEFAULT_RECHARGE_UNIT_CREDITS,
   TEST_RECHARGE_AMOUNT_LDC,
@@ -34,6 +52,15 @@ interface RechargePanelText {
   monthlyDelta: string
   testPrice: string
   amount: string
+  preview: string
+  previewTitle: string
+  previewDescription: string
+  previewMonth: string
+  previewCurrentQuota: string
+  previewDelta: string
+  previewExpectedQuota: string
+  previewAfterExpiry: string
+  closePreview: string
   create: string
   creating: string
   unavailable: string
@@ -54,6 +81,14 @@ interface RechargePanelProps {
   onCreditsChange: (value: number) => void
   onMonthsChange: (value: number) => void
   onCreateOrder: () => void
+}
+
+interface RechargePreviewMonth {
+  monthStart: number
+  currentQuota: number
+  delta: number
+  expectedQuota: number
+  afterExpiry: boolean
 }
 
 function formatRechargeMoney(value: number): string {
@@ -83,6 +118,8 @@ export default function RechargePanel({
   onMonthsChange,
   onCreateOrder,
 }: RechargePanelProps): JSX.Element {
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const viewportMode = useViewportMode()
   const unitCredits = config?.unitCredits ?? DEFAULT_RECHARGE_UNIT_CREDITS
   const minCredits = config?.minCredits ?? unitCredits
   const maxCredits = config?.maxCredits ?? DEFAULT_RECHARGE_MAX_CREDITS
@@ -125,6 +162,16 @@ export default function RechargePanel({
   const currentEntitlement = dashboard?.recharge.currentEntitlementCredits
     ?? config?.currentEntitlementCredits
     ?? 0
+  const currentMonthStart = dashboard?.recharge.currentMonthStart
+    ?? config?.currentMonthStart
+    ?? currentBrowserMonthStartSeconds()
+  const previewMonths = useMemo(() => buildRechargePreviewMonths({
+    currentMonthStart,
+    currentEntitlement,
+    currentEffectiveUntil: effectiveUntil,
+    credits: normalizedCredits,
+    months: normalizedMonths,
+  }), [currentEntitlement, currentMonthStart, effectiveUntil, normalizedCredits, normalizedMonths])
   const applyCreditsChange = (value: number) => {
     onCreditsChange(value)
     if (config?.testPriceEnabled && value === TEST_RECHARGE_CREDITS) {
@@ -258,10 +305,21 @@ export default function RechargePanel({
                   <span>{text.amount}</span>
                   <strong>{formatRechargeMoney(amount)} LDC</strong>
                 </div>
-                <Button type="button" disabled={busy} aria-busy={busy} onClick={onCreateOrder}>
-                  <Icon icon={busy ? 'mdi:loading' : 'mdi:credit-card-outline'} width={16} height={16} aria-hidden="true" />
-                  {busy ? text.creating : text.create}
-                </Button>
+                <div className="user-console-recharge-actions">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => setPreviewOpen(true)}
+                  >
+                    <Eye size={16} strokeWidth={2.2} aria-hidden="true" />
+                    {text.preview}
+                  </Button>
+                  <Button type="button" disabled={busy} aria-busy={busy} onClick={onCreateOrder}>
+                    <Icon icon={busy ? 'mdi:loading' : 'mdi:credit-card-outline'} width={16} height={16} aria-hidden="true" />
+                    {busy ? text.creating : text.create}
+                  </Button>
+                </div>
               </div>
               {error ? (
                 <p className="user-console-recharge-error" role="status" aria-live="polite">{error}</p>
@@ -293,6 +351,44 @@ export default function RechargePanel({
           )}
         </div>
       </div>
+      {viewportMode === 'small' ? (
+        <Drawer open={previewOpen} onOpenChange={setPreviewOpen} shouldScaleBackground={false}>
+          <DrawerContent className="user-console-recharge-preview-drawer">
+            <DrawerHeader>
+              <DrawerTitle>{text.previewTitle}</DrawerTitle>
+              <DrawerDescription>{text.previewDescription}</DrawerDescription>
+            </DrawerHeader>
+            <RechargePreviewBody
+              text={text}
+              amount={amount}
+              credits={normalizedCredits}
+              months={normalizedMonths}
+              rows={previewMonths}
+            />
+            <DrawerFooter>
+              <DrawerClose asChild>
+                <Button type="button" variant="outline">{text.closePreview}</Button>
+              </DrawerClose>
+            </DrawerFooter>
+          </DrawerContent>
+        </Drawer>
+      ) : (
+        <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+          <DialogContent className="user-console-recharge-preview-modal max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>{text.previewTitle}</DialogTitle>
+              <DialogDescription>{text.previewDescription}</DialogDescription>
+            </DialogHeader>
+            <RechargePreviewBody
+              text={text}
+              amount={amount}
+              credits={normalizedCredits}
+              months={normalizedMonths}
+              rows={previewMonths}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
     </section>
   )
 }
@@ -301,6 +397,126 @@ const numberFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 
 
 function formatNumber(value: number): string {
   return numberFormatter.format(value)
+}
+
+function currentBrowserMonthStartSeconds(): number {
+  const now = new Date()
+  return Math.floor(new Date(now.getFullYear(), now.getMonth(), 1).getTime() / 1000)
+}
+
+function addMonthsToMonthStart(monthStart: number, offset: number): number {
+  const month = new Date(monthStart * 1000)
+  return Math.floor(new Date(month.getFullYear(), month.getMonth() + offset, 1).getTime() / 1000)
+}
+
+function buildRechargePreviewMonths(input: {
+  currentMonthStart: number
+  currentEntitlement: number
+  currentEffectiveUntil: number | null
+  credits: number
+  months: number
+}): RechargePreviewMonth[] {
+  const purchaseEnd = addMonthsToMonthStart(input.currentMonthStart, input.months)
+  const currentEffectiveUntil = input.currentEffectiveUntil ?? input.currentMonthStart
+  const previewEnd = Math.max(purchaseEnd, currentEffectiveUntil)
+  const rows: RechargePreviewMonth[] = []
+
+  for (
+    let monthStart = input.currentMonthStart;
+    monthStart <= previewEnd;
+    monthStart = addMonthsToMonthStart(monthStart, 1)
+  ) {
+    const currentQuota = monthStart < currentEffectiveUntil ? input.currentEntitlement : 0
+    const delta = monthStart < purchaseEnd ? input.credits : 0
+    rows.push({
+      monthStart,
+      currentQuota,
+      delta,
+      expectedQuota: currentQuota + delta,
+      afterExpiry: monthStart === previewEnd,
+    })
+  }
+
+  return rows
+}
+
+function formatMonthLabel(monthStart: number): string {
+  try {
+    return new Date(monthStart * 1000).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'long',
+    })
+  } catch {
+    return String(monthStart)
+  }
+}
+
+function RechargePreviewBody({
+  text,
+  amount,
+  credits,
+  months,
+  rows,
+}: {
+  text: RechargePanelText
+  amount: number
+  credits: number
+  months: number
+  rows: RechargePreviewMonth[]
+}): JSX.Element {
+  return (
+    <div className="user-console-recharge-preview">
+      <div className="user-console-recharge-preview-summary">
+        <div>
+          <span>{text.credits}</span>
+          <strong>{formatNumber(credits)}</strong>
+        </div>
+        <div>
+          <span>{text.months}</span>
+          <strong>{formatNumber(months)}</strong>
+        </div>
+        <div>
+          <span>{text.amount}</span>
+          <strong>{formatRechargeMoney(amount)} LDC</strong>
+        </div>
+      </div>
+
+      <div className="user-console-recharge-preview-table" role="table">
+        <div className="user-console-recharge-preview-row user-console-recharge-preview-head" role="row">
+          <span role="columnheader">{text.previewMonth}</span>
+          <span role="columnheader">{text.previewCurrentQuota}</span>
+          <span role="columnheader">{text.previewDelta}</span>
+          <span role="columnheader">{text.previewExpectedQuota}</span>
+        </div>
+        {rows.map((row) => (
+          <div
+            key={row.monthStart}
+            className={row.afterExpiry
+              ? 'user-console-recharge-preview-row is-after-expiry'
+              : 'user-console-recharge-preview-row'}
+            role="row"
+          >
+            <span role="cell">
+              {formatMonthLabel(row.monthStart)}
+              {row.afterExpiry ? <em>{text.previewAfterExpiry}</em> : null}
+            </span>
+            <strong role="cell" data-label={text.previewCurrentQuota}>
+              <span className="user-console-recharge-preview-cell-label">{text.previewCurrentQuota}</span>
+              {formatNumber(row.currentQuota)}
+            </strong>
+            <strong role="cell" data-label={text.previewDelta}>
+              <span className="user-console-recharge-preview-cell-label">{text.previewDelta}</span>
+              +{formatNumber(row.delta)}
+            </strong>
+            <strong role="cell" data-label={text.previewExpectedQuota}>
+              <span className="user-console-recharge-preview-cell-label">{text.previewExpectedQuota}</span>
+              {formatNumber(row.expectedQuota)}
+            </strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function formatTimestamp(ts: number): string {
