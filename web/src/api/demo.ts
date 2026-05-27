@@ -198,6 +198,7 @@ function createDemoState() {
     tokenSecrets: new Map(tokens.map((token) => [token.id, token.id === DEMO_TOKEN_ID ? DEMO_TOKEN : `th-${token.id}-demoaccesssecret`])),
     keys,
     logs,
+    announcements: createDemoAnnouncements(),
     users: createDemoUsers(),
     jobs: createDemoJobs(),
     forwardProxy: createDemoForwardProxy(),
@@ -214,6 +215,44 @@ function createDemoState() {
     }, 3)],
     registration: { allowRegistration: false },
   }
+}
+
+function createDemoAnnouncements() {
+  return [
+    {
+      id: 'ann-demo-modal',
+      title: '维护窗口通知',
+      body: '**今晚 23:00 至 23:10** 会重启 Tavily Hikari 服务。\n\n- MCP 会话可能短暂重连\n- HTTP API 会自动重试',
+      displayKind: 'modal',
+      status: 'published',
+      createdAt: nowSeconds(-7200),
+      updatedAt: nowSeconds(-3600),
+      publishedAt: nowSeconds(-3600),
+      archivedAt: null,
+    },
+    {
+      id: 'ann-demo-ticker',
+      title: '额度计数已刷新',
+      body: '每日额度窗口已刷新，用户控制台的 `Token` 详情现在也显示实时请求更新。',
+      displayKind: 'ticker',
+      status: 'draft',
+      createdAt: nowSeconds(-5400),
+      updatedAt: nowSeconds(-3000),
+      publishedAt: null,
+      archivedAt: null,
+    },
+    {
+      id: 'ann-demo-archived',
+      title: '端点迁移完成',
+      body: 'Tavily 兼容端点迁移已完成，详见 [迁移记录](https://example.com)。',
+      displayKind: 'ticker',
+      status: 'archived',
+      createdAt: nowSeconds(-172800),
+      updatedAt: nowSeconds(-86400),
+      publishedAt: nowSeconds(-160000),
+      archivedAt: nowSeconds(-86400),
+    },
+  ]
 }
 
 function createDemoAuthToken(id: string, note: string | null, createdAt = nowSeconds()) {
@@ -1014,6 +1053,8 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
   })
   if (path === '/api/user/tokens') return jsonResponse(demoState.tokens)
   if (path.startsWith('/api/user/tokens/')) return handleUserTokenRoute(path, url)
+  if (path === '/api/user/announcements') return jsonResponse({ items: demoUserActiveAnnouncements() })
+  if (path === '/api/user/announcements/history') return jsonResponse({ items: demoUserAnnouncementHistory() })
 
   if (path === '/api/keys/validate' && method === 'POST') return jsonResponse({
     summary: { input_lines: 2, valid_lines: 2, unique_in_input: 2, duplicate_in_input: 0, already_exists: 1, ok: 1, exhausted: 1, invalid: 0, error: 0 },
@@ -1043,6 +1084,9 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
   if (path === '/api/logs') return jsonResponse(requestLogsPage(url))
   if (/^\/api\/logs\/\d+\/details$/.test(path)) return jsonResponse(demoLogDetailForPath(path))
   if (path === '/api/jobs') return jsonResponse({ ...buildListPage(demoState.jobs, url, 10), groupCounts: { all: demoState.jobs.length, quota: 4, usage: 4, logs: 2, geo: 2, linuxdo: 0 } })
+
+  if (path === '/api/announcements') return handleAnnouncementsRoute(path, method, init)
+  if (path.startsWith('/api/announcements/')) return handleAnnouncementsRoute(path, method, init)
 
   if (path === '/api/users') return jsonResponse(buildListPage(demoState.users, url))
   if (path.startsWith('/api/users/')) return handleUserRoute(path, url, method, init)
@@ -1078,6 +1122,130 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
 
   if (path.startsWith('/api/tavily/')) return jsonResponse(handleTavilyProbe(path))
   return method === 'GET' ? jsonResponse({ demo: true, path }) : noContentResponse()
+}
+
+function demoUserActiveAnnouncements() {
+  return ['modal', 'ticker'].flatMap((displayKind) => {
+    const item = demoState.announcements
+      .filter((announcement) => announcement.status === 'published' && announcement.displayKind === displayKind)
+      .sort((a, b) => (b.publishedAt ?? b.updatedAt) - (a.publishedAt ?? a.updatedAt))[0]
+    return item ? [item] : []
+  })
+}
+
+function demoUserAnnouncementHistory() {
+  return demoState.announcements
+    .filter((announcement) => announcement.status === 'published' || (announcement.status === 'archived' && announcement.publishedAt != null))
+    .sort((a, b) => {
+      const aTime = a.status === 'archived' ? (a.archivedAt ?? a.publishedAt ?? a.updatedAt) : (a.publishedAt ?? a.updatedAt)
+      const bTime = b.status === 'archived' ? (b.archivedAt ?? b.publishedAt ?? b.updatedAt) : (b.publishedAt ?? b.updatedAt)
+      return bTime - aTime
+    })
+}
+
+function nextDemoAnnouncementId() {
+  return `ann-demo-${demoState.announcements.length + 1}-${Date.now().toString(36)}`
+}
+
+async function demoAnnouncementPayload(init?: RequestInit) {
+  const body = await readJsonBody(init)
+  return {
+    title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : 'Demo announcement',
+    body: typeof body.body === 'string' && body.body.trim() ? body.body.trim() : 'Demo announcement body.',
+    displayKind: body.displayKind === 'ticker' ? 'ticker' : 'modal',
+  }
+}
+
+async function handleAnnouncementsRoute(path: string, method: string, init?: RequestInit): Promise<Response> {
+  if (path === '/api/announcements' && method === 'GET') return jsonResponse({ items: demoState.announcements })
+
+  if (path === '/api/announcements' && method === 'POST') {
+    const payload = await demoAnnouncementPayload(init)
+    const now = nowSeconds()
+    const item = {
+      id: nextDemoAnnouncementId(),
+      ...payload,
+      status: 'draft',
+      createdAt: now,
+      updatedAt: now,
+      publishedAt: null,
+      archivedAt: null,
+    }
+    demoState.announcements.unshift(item)
+    return jsonResponse(item)
+  }
+
+  const match = path.match(/^\/api\/announcements\/([^/]+)(?:\/(publish|archive))?$/)
+  if (!match) return jsonResponse({ items: demoState.announcements })
+
+  const id = decodeURIComponent(match[1])
+  const action = match[2] ?? 'update'
+  const item = demoState.announcements.find((announcement) => announcement.id === id)
+  if (!item) return jsonResponse({ message: 'announcement not found' }, 404)
+  const now = nowSeconds()
+
+  if (action === 'archive') {
+    item.status = 'archived'
+    item.updatedAt = now
+    item.archivedAt = item.archivedAt ?? now
+    return jsonResponse(item)
+  }
+
+  if (action === 'publish') {
+    if (item.status === 'archived') {
+      const next = {
+        ...item,
+        id: nextDemoAnnouncementId(),
+        status: 'published',
+        createdAt: now,
+        updatedAt: now,
+        publishedAt: now,
+        archivedAt: null,
+      }
+      demoState.announcements.unshift(next)
+      return jsonResponse(next)
+    }
+    item.status = 'published'
+    item.updatedAt = now
+    item.publishedAt = item.publishedAt ?? now
+    item.archivedAt = null
+    return jsonResponse(item)
+  }
+
+  const payload = await demoAnnouncementPayload(init)
+  if (item.status === 'published') {
+    item.status = 'archived'
+    item.updatedAt = now
+    item.archivedAt = now
+    const next = {
+      id: nextDemoAnnouncementId(),
+      ...payload,
+      status: 'published',
+      createdAt: now,
+      updatedAt: now,
+      publishedAt: now,
+      archivedAt: null,
+    }
+    demoState.announcements.unshift(next)
+    return jsonResponse(next)
+  }
+
+  if (item.status === 'archived') {
+    const next = {
+      id: nextDemoAnnouncementId(),
+      ...payload,
+      status: 'draft',
+      createdAt: now,
+      updatedAt: now,
+      publishedAt: null,
+      archivedAt: null,
+    }
+    demoState.announcements.unshift(next)
+    return jsonResponse(next)
+  }
+
+  Object.assign(item, payload, { updatedAt: now })
+  return jsonResponse(item)
 }
 
 function handleUserTokenRoute(path: string, url: URL): Response {
