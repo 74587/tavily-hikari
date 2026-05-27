@@ -144,11 +144,10 @@
 }
 
 .user-console-recharge-actions {
-  display: grid;
+  display: flex;
   grid-column: 2 / span 2;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
-  justify-items: end;
+  justify-content: flex-end;
   gap: 8px;
   min-width: 0;
 }
@@ -367,7 +366,6 @@
 
   .user-console-recharge-actions {
     grid-column: auto;
-    grid-template-columns: 1fr;
   }
 
   .user-console-recharge-stepper {
