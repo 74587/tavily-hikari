@@ -14,16 +14,16 @@ fn linuxdo_credit_recharge_adds_hourly_daily_and_monthly_quota() {
     );
 
     assert_eq!(resolution.effective.hourly_any_limit, 10);
-    assert_eq!(resolution.effective.hourly_limit, 24);
-    assert_eq!(resolution.effective.daily_limit, 98);
+    assert_eq!(resolution.effective.hourly_limit, 60);
+    assert_eq!(resolution.effective.daily_limit, 230);
     assert_eq!(resolution.effective.monthly_limit, 2040);
     let recharge = resolution
         .breakdown
         .iter()
         .find(|entry| entry.kind == "recharge")
         .expect("recharge row");
-    assert_eq!(recharge.hourly_delta, 4);
-    assert_eq!(recharge.daily_delta, 68);
+    assert_eq!(recharge.hourly_delta, 40);
+    assert_eq!(recharge.daily_delta, 200);
     assert_eq!(recharge.monthly_delta, 2000);
 }
 
@@ -32,11 +32,15 @@ fn linuxdo_credit_recharge_price_config_enforces_normal_and_test_ranges() {
     let normal = LinuxDoCreditRechargePriceConfig::normal();
     assert_eq!(
         linuxdo_credit_recharge_money_cents(1000, 1, normal),
-        Some(10_000)
+        Some(5_000)
+    );
+    assert_eq!(
+        linuxdo_credit_recharge_money_cents(2000, 3, normal),
+        Some(30_000)
     );
     assert_eq!(
         linuxdo_credit_recharge_money_cents(20_000, 12, normal),
-        Some(2_400_000)
+        Some(1_200_000)
     );
     assert_eq!(linuxdo_credit_recharge_money_cents(1, 1, normal), None);
     assert_eq!(
@@ -57,7 +61,7 @@ fn linuxdo_credit_recharge_price_config_enforces_normal_and_test_ranges() {
     assert_eq!(linuxdo_credit_recharge_money_cents(1, 2, test), None);
     assert_eq!(
         linuxdo_credit_recharge_money_cents(1000, 1, test),
-        Some(10_000)
+        Some(5_000)
     );
     assert_eq!(linuxdo_credit_recharge_quota_delta(1).hourly_delta, 1);
     assert_eq!(linuxdo_credit_recharge_quota_delta(1).daily_delta, 1);
@@ -92,7 +96,7 @@ async fn linuxdo_credit_recharge_entitlement_starts_from_payment_month() {
         status: LINUXDO_CREDIT_RECHARGE_STATUS_PENDING.to_string(),
         credits: 1000,
         months: 2,
-        money_cents: 20_000,
+        money_cents: 10_000,
         trade_no: None,
         payment_url: None,
         order_name: "Payment month recharge".to_string(),

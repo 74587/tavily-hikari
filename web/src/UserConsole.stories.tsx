@@ -93,7 +93,7 @@ const rechargeConfigSample: RechargeConfig = {
   visible: true,
   enabled: true,
   unitCredits: 1000,
-  unitPriceLdc: 100,
+  unitPriceLdc: 50,
   minCredits: 1000,
   maxCredits: 20_000,
   creditsStep: 1000,
@@ -101,8 +101,8 @@ const rechargeConfigSample: RechargeConfig = {
   minMonths: 1,
   maxMonths: 12,
   quotaDeltaBaseCredits: 1000,
-  hourlyDeltaPerQuotaUnit: 2,
-  dailyDeltaPerQuotaUnit: 34,
+  hourlyDeltaPerQuotaUnit: 20,
+  dailyDeltaPerQuotaUnit: 100,
   monthlyDeltaPerQuotaUnit: 1000,
   testPriceEnabled: false,
   currentMonthStart: 1_762_041_600,
@@ -123,7 +123,7 @@ const rechargeOrdersSample: RechargeOrder[] = [
     status: 'paid',
     credits: 3000,
     months: 2,
-    money: '600.00',
+    money: '300.00',
     tradeNo: 'linuxdo-story-001',
     paymentUrl: 'https://credit.linux.do/story-paid',
     createdAt: 1_762_214_400,
@@ -137,7 +137,7 @@ const rechargeOrdersSample: RechargeOrder[] = [
     status: 'pending',
     credits: 1000,
     months: 1,
-    money: '100.00',
+    money: '50.00',
     tradeNo: null,
     paymentUrl: 'https://credit.linux.do/story-pending',
     createdAt: 1_762_386_200,
@@ -959,6 +959,12 @@ export const ConsoleHome: Story = {
     ]) {
       if (canvasElement.querySelector(selector) == null) {
         throw new Error(`Expected ConsoleHome to render ${selector}`)
+      }
+    }
+    const rechargeText = canvasElement.querySelector('.user-console-recharge-section')?.textContent ?? ''
+    for (const expected of ['50.00 LDC', '+20', '+100', '+1,000']) {
+      if (!rechargeText.includes(expected)) {
+        throw new Error(`Expected recharge section to include ${expected}`)
       }
     }
   },

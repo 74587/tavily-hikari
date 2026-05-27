@@ -1547,6 +1547,19 @@ colo=LAX
             admin_config.json().await.expect("admin config json");
         assert_eq!(admin_body.get("visible"), Some(&serde_json::Value::Bool(true)));
         assert_eq!(admin_body.get("enabled"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(admin_body.get("unitPriceLdc").and_then(|v| v.as_i64()), Some(50));
+        assert_eq!(
+            admin_body
+                .get("hourlyDeltaPerQuotaUnit")
+                .and_then(|v| v.as_i64()),
+            Some(20)
+        );
+        assert_eq!(
+            admin_body
+                .get("dailyDeltaPerQuotaUnit")
+                .and_then(|v| v.as_i64()),
+            Some(100)
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
