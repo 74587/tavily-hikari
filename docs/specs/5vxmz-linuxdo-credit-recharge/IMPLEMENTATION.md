@@ -17,6 +17,7 @@
   `+1/+1/+credits`。
 - 商户私钥解析支持 32-byte Ed25519 seed、PKCS#8 PEM/DER，以及 Linux.do Credit
   线上配置中出现的 48-byte 最小 Ed25519 PKCS#8 v1 DER。
+- Linux.do Credit 创建订单响应按浏览器跳转模型处理：后端禁用 HTTP 自动重定向，保存并返回上游 3xx `Location` 作为支付 URL，避免服务端跟随到需要用户态认证的支付页并误判为 `403`。
 
 ## Remaining Gaps
 
