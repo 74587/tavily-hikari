@@ -1075,6 +1075,57 @@ fn verify_linuxdo_credit_notify_sign(query: &LinuxDoCreditNotifyQuery, secret: &
     digest.eq_ignore_ascii_case(sign)
 }
 
+fn linuxdo_credit_location_payment_url(
+    submit_url: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    let raw = headers
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return Some(raw.to_string());
+    }
+    reqwest::Url::parse(submit_url)
+        .ok()
+        .and_then(|base| base.join(raw).ok())
+        .map(|url| url.to_string())
+}
+
+fn linuxdo_credit_payment_url_from_response(
+    submit_url: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> Result<String, &'static str> {
+    if status.is_redirection()
+        && let Some(payment_url) = linuxdo_credit_location_payment_url(submit_url, headers)
+    {
+        return Ok(payment_url);
+    }
+    let value: Value = serde_json::from_str(body).map_err(|_| "invalid payment response")?;
+    value
+        .get("url")
+        .or_else(|| value.get("payment_url"))
+        .or_else(|| value.get("pay_url"))
+        .and_then(|it| it.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("data")
+                .and_then(|data| {
+                    data.get("url")
+                        .or_else(|| data.get("payment_url"))
+                        .or_else(|| data.get("pay_url"))
+                })
+                .and_then(|it| it.as_str())
+                .map(str::to_string)
+        })
+        .filter(|url| !url.trim().is_empty())
+        .ok_or("payment url missing")
+}
+
 async fn get_user_recharge_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1234,7 +1285,14 @@ async fn post_user_recharge_order(
         .await
         .map_err(|err| map_recharge_error("persist recharge order", err))?;
 
-    let resp = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|err| {
+            eprintln!("linuxdo credit client build error: {err}");
+            (StatusCode::BAD_GATEWAY, "failed to create payment order".to_string())
+        })?;
+    let resp = client
         .post(&submit_url)
         .form(&submit_params)
         .send()
@@ -1255,8 +1313,9 @@ async fn post_user_recharge_order(
             (StatusCode::BAD_GATEWAY, "failed to create payment order".to_string())
         })?;
     let status = resp.status();
+    let headers = resp.headers().clone();
     let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
+    if !status.is_success() && !status.is_redirection() {
         state
             .proxy
             .fail_linuxdo_credit_recharge_order(
@@ -1271,53 +1330,25 @@ async fn post_user_recharge_order(
             format!("payment upstream returned {status}"),
         ));
     }
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|_| {
-            let proxy = state.proxy.clone();
-            let out_trade_no = out_trade_no.clone();
-            tokio::spawn(async move {
-                let _ = proxy
-                    .fail_linuxdo_credit_recharge_order(
-                        &out_trade_no,
-                        "invalid payment response",
-                        Utc::now().timestamp(),
-                    )
-                    .await;
-            });
-            (StatusCode::BAD_GATEWAY, "invalid payment response".to_string())
-        })?;
-    let payment_url = value
-        .get("url")
-        .or_else(|| value.get("payment_url"))
-        .or_else(|| value.get("pay_url"))
-        .and_then(|it| it.as_str())
-        .map(str::to_string)
-        .or_else(|| {
-            value
-                .get("data")
-                .and_then(|data| {
-                    data.get("url")
-                        .or_else(|| data.get("payment_url"))
-                        .or_else(|| data.get("pay_url"))
-                })
-                .and_then(|it| it.as_str())
-                .map(str::to_string)
-        })
-        .filter(|url| !url.trim().is_empty())
-        .ok_or_else(|| {
-            let proxy = state.proxy.clone();
-            let out_trade_no = out_trade_no.clone();
-            tokio::spawn(async move {
-                let _ = proxy
-                    .fail_linuxdo_credit_recharge_order(
-                        &out_trade_no,
-                        "payment url missing",
-                        Utc::now().timestamp(),
-                    )
-                    .await;
-            });
-            (StatusCode::BAD_GATEWAY, "payment url missing".to_string())
-        })?;
+    let payment_url =
+        linuxdo_credit_payment_url_from_response(&submit_url, status, &headers, &body).map_err(
+            |message| {
+                let proxy = state.proxy.clone();
+                let out_trade_no = out_trade_no.clone();
+                let message = message.to_string();
+                let stored_message = message.clone();
+                tokio::spawn(async move {
+                    let _ = proxy
+                        .fail_linuxdo_credit_recharge_order(
+                            &out_trade_no,
+                            &stored_message,
+                            Utc::now().timestamp(),
+                        )
+                        .await;
+                });
+                (StatusCode::BAD_GATEWAY, message)
+            },
+        )?;
     state
         .proxy
         .set_linuxdo_credit_recharge_payment_url(&out_trade_no, &payment_url, Utc::now().timestamp())
@@ -1845,5 +1876,42 @@ mod linuxdo_credit_key_tests {
         let signature = sign_linuxdo_credit_ldc(&[("money", "50.00".to_string())], &cfg)
             .expect("sign with pkcs8 v1 der");
         assert!(!signature.is_empty());
+    }
+
+    #[test]
+    fn linuxdo_credit_submit_redirect_location_is_payment_url() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            reqwest::header::HeaderValue::from_static("/epay/pay/checkout.php?trade_no=123"),
+        );
+
+        let payment_url = linuxdo_credit_payment_url_from_response(
+            "https://credit.linux.do/epay/pay/submit.php",
+            reqwest::StatusCode::FOUND,
+            &headers,
+            "",
+        )
+        .expect("redirect location should be accepted");
+
+        assert_eq!(
+            payment_url,
+            "https://credit.linux.do/epay/pay/checkout.php?trade_no=123"
+        );
+    }
+
+    #[test]
+    fn linuxdo_credit_submit_json_payment_url_is_still_supported() {
+        let headers = reqwest::header::HeaderMap::new();
+
+        let payment_url = linuxdo_credit_payment_url_from_response(
+            "https://credit.linux.do/epay/pay/submit.php",
+            reqwest::StatusCode::OK,
+            &headers,
+            r#"{"data":{"pay_url":"https://credit.linux.do/pay/123"}}"#,
+        )
+        .expect("json payment url should be accepted");
+
+        assert_eq!(payment_url, "https://credit.linux.do/pay/123");
     }
 }

@@ -70,7 +70,7 @@
 
 - 用户打开 `/console`，在充值卡片中用只读步进器选择积分额度与自然月数，并看到本次购买会增加多少小时、日、月额度。
 - 前端调用创建订单 API，后端生成唯一 `out_trade_no`，持久化 pending 订单，使用官方 LDC 签名调用 Linux.do Credit 创建订单。
-- 后端返回支付 URL；浏览器跳转到 Linux.do Credit 完成认证支付。
+- 后端不跟随 Linux.do Credit 创建订单响应的跳转；若上游返回 3xx `Location`，将该地址作为支付 URL 返回给浏览器，由浏览器跳转到 Linux.do Credit 完成认证支付。
 - Linux.do Credit GET 通知本服务 notify endpoint；服务验签和校验金额后，将订单置为 paid，并按购买月份展开权益。
 - 用户回到 `/console?payment=<out_trade_no>` 后，控制台刷新 dashboard 和订单列表，显示当前生效额度与订单状态。
 
