@@ -163,6 +163,13 @@
   image:
   ![Admin announcement editor focus ring](./assets/admin-announcements-editor-focus-ring.png)
 
+- source_type: local_preview
+  story_id_or_title: `http://127.0.0.1:58910/admin/announcements`
+  state: WYSIWYG toolbar near left-edge text selection
+  evidence_note: 真实管理页中，所见即所得正文编辑器选中靠左文本时显示悬浮格式工具条；工具条使用 absolute/flex 布局并被限制在编辑器横向边界内。
+  image:
+  ![Admin announcement toolbar visible](./assets/admin-announcements-toolbar-visible.png)
+
 - source_type: storybook_canvas
   story_id_or_title: `Admin/AnnouncementsModule/Default`
   state: admin list preview using user-console ticker display

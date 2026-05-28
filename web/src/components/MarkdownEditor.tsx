@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Crepe, CrepeFeature } from '@milkdown/crepe'
 import { replaceAll } from '@milkdown/kit/utils'
-import '@milkdown/crepe/theme/frame.css'
 
 import { Textarea } from './ui/textarea'
 import { cn } from '../lib/utils'
@@ -18,6 +17,56 @@ interface MarkdownEditorProps {
   readOnly?: boolean
   className?: string
   onChange: (value: string) => void
+}
+
+function keepToolbarInsideShell(shell: HTMLElement): () => void {
+  let frame: number | null = null
+
+  const update = () => {
+    frame = null
+
+    const toolbar = shell.querySelector<HTMLElement>('.milkdown-toolbar[data-show="true"]')
+    const milkdown = shell.querySelector<HTMLElement>('.milkdown')
+    if (!toolbar || !milkdown) return
+
+    const toolbarWidth = toolbar.getBoundingClientRect().width
+    const boundaryWidth =
+      toolbar.offsetParent instanceof HTMLElement
+        ? toolbar.offsetParent.getBoundingClientRect().width
+        : milkdown.getBoundingClientRect().width
+    const currentLeft = Number.parseFloat(toolbar.style.left)
+    if (!Number.isFinite(currentLeft) || toolbarWidth <= 0 || boundaryWidth <= 0) return
+
+    const padding = 12
+    const maxLeft = Math.max(padding, boundaryWidth - toolbarWidth - padding)
+    const nextLeft = Math.min(Math.max(currentLeft, padding), maxLeft)
+    if (Math.abs(nextLeft - currentLeft) > 0.5) toolbar.style.left = `${nextLeft}px`
+  }
+
+  const schedule = () => {
+    if (frame != null) return
+    frame = window.requestAnimationFrame(update)
+  }
+
+  const observer = new MutationObserver(schedule)
+  observer.observe(shell, {
+    attributes: true,
+    attributeFilter: ['data-show', 'style'],
+    childList: true,
+    subtree: true,
+  })
+  document.addEventListener('selectionchange', schedule)
+  window.addEventListener('resize', schedule)
+  window.addEventListener('scroll', schedule, true)
+  schedule()
+
+  return () => {
+    if (frame != null) window.cancelAnimationFrame(frame)
+    document.removeEventListener('selectionchange', schedule)
+    window.removeEventListener('resize', schedule)
+    window.removeEventListener('scroll', schedule, true)
+    observer.disconnect()
+  }
 }
 
 export default function MarkdownEditor({
@@ -53,6 +102,7 @@ export default function MarkdownEditor({
     if (!root) return undefined
 
     let cancelled = false
+    let cleanupToolbarBounds: (() => void) | null = null
     root.innerHTML = ''
     setFallback(false)
     const interactiveTools = !readonly
@@ -95,6 +145,7 @@ export default function MarkdownEditor({
         }
         editorRef.current = editor
         editor.setReadonly(readonly)
+        if (root.parentElement) cleanupToolbarBounds = keepToolbarInsideShell(root.parentElement)
       })
       .catch(() => {
         if (!cancelled) setFallback(true)
@@ -102,6 +153,7 @@ export default function MarkdownEditor({
 
     return () => {
       cancelled = true
+      cleanupToolbarBounds?.()
       editorRef.current = null
       void editor.destroy()
     }
