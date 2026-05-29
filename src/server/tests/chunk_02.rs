@@ -2226,6 +2226,30 @@ async fn spawn_forward_proxy_subscription_server(body: String) -> SocketAddr {
     addr
 }
 
+async fn spawn_forward_proxy_subscription_server_with_delay(
+    body: String,
+    delay: Duration,
+) -> SocketAddr {
+    let app = Router::new().route(
+        "/subscription",
+        get(move || {
+            let body = body.clone();
+            async move {
+                tokio::time::sleep(delay).await;
+                (StatusCode::OK, body)
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+    addr
+}
+
 async fn spawn_mutable_forward_proxy_subscription_server(
     state: Arc<Mutex<(StatusCode, String)>>,
 ) -> SocketAddr {

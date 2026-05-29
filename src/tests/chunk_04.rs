@@ -32,8 +32,8 @@ async fn summary_windows_include_quota_charge_estimates_and_sample_diffs() {
     };
     let today_start = start_of_local_day_utc_ts(now);
     let yesterday_start = previous_local_day_start_utc_ts(now);
-    let yesterday_same_time = previous_local_same_time_utc_ts(now);
     let local_month_start = start_of_local_month_utc_ts(now);
+    let previous_month_start = previous_local_month_start_utc_ts(now);
     let utc_month_start = start_of_month(now.with_timezone(&Utc)).timestamp();
     let now_ts = now.with_timezone(&Utc).timestamp();
     let today_quota_sample_start = today_start.max(utc_month_start);
@@ -129,22 +129,13 @@ async fn summary_windows_include_quota_charge_estimates_and_sample_diffs() {
     assert_eq!(summary.today_start, today_start);
     assert_eq!(summary.today_end, now_ts.saturating_add(1));
     assert_eq!(summary.yesterday_start, yesterday_start);
-    assert_eq!(
-        summary.yesterday_end,
-        previous_local_same_time_utc_ts(now).saturating_add(1)
-    );
+    assert_eq!(summary.yesterday_end, today_start);
     assert_eq!(summary.month_start, local_month_start);
     assert_eq!(summary.month_end, summary.today_end);
+    assert_eq!(summary.previous_month_start, previous_month_start);
+    assert_eq!(summary.previous_month_end, local_month_start);
 
-    // The same-time window should end before the sample inserted at the current day's midday.
-    assert!(
-        summary
-            .yesterday
-            .quota_charge
-            .latest_sync_at
-            .unwrap_or_default()
-            <= yesterday_same_time + 180
-    );
+    assert!(summary.yesterday.quota_charge.latest_sync_at.unwrap_or_default() < today_start);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -187,14 +178,16 @@ async fn summary_windows_month_bucket_fallback_skips_unaligned_first_local_day_b
 
     let summary = proxy
         .key_store
-        .fetch_summary_windows(
-            start_of_local_day_utc_ts(now),
-            now.with_timezone(&Utc).timestamp().saturating_add(1),
-            previous_local_day_start_utc_ts(now),
-            previous_local_same_time_utc_ts(now).saturating_add(1),
+        .fetch_summary_windows(SummaryWindowBounds {
+            today_start: start_of_local_day_utc_ts(now),
+            today_end: now.with_timezone(&Utc).timestamp().saturating_add(1),
+            yesterday_start: previous_local_day_start_utc_ts(now),
+            yesterday_end: start_of_local_day_utc_ts(now),
             month_start,
-            month_start,
-        )
+            month_quota_charge_start: month_start,
+            previous_month_start: month_start.saturating_sub(31 * 24 * 60 * 60),
+            previous_month_end: month_start,
+        })
         .await
         .expect("summary windows");
 
@@ -239,14 +232,16 @@ async fn summary_windows_month_reads_dashboard_rollup_day_buckets_for_historical
 
     let summary = proxy
         .key_store
-        .fetch_summary_windows(
-            start_of_local_day_utc_ts(now),
-            now.with_timezone(&Utc).timestamp().saturating_add(1),
-            previous_local_day_start_utc_ts(now),
-            previous_local_same_time_utc_ts(now).saturating_add(1),
+        .fetch_summary_windows(SummaryWindowBounds {
+            today_start: start_of_local_day_utc_ts(now),
+            today_end: now.with_timezone(&Utc).timestamp().saturating_add(1),
+            yesterday_start: previous_local_day_start_utc_ts(now),
+            yesterday_end: start_of_local_day_utc_ts(now),
             month_start,
-            month_start,
-        )
+            month_quota_charge_start: month_start,
+            previous_month_start: month_start.saturating_sub(31 * 24 * 60 * 60),
+            previous_month_end: month_start,
+        })
         .await
         .expect("summary windows");
 

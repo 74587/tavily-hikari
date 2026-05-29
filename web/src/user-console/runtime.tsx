@@ -92,7 +92,6 @@ import {
 import { MobileGuideDropdown, buildGuideContent, resolveGuideSamples } from './guide'
 import { EN, ZH } from './text'
 
-
 export const CODEX_DOC_URL = 'https://github.com/openai/codex/blob/main/docs/config.md'
 export const CLAUDE_DOC_URL = 'https://code.claude.com/docs/en/mcp'
 export const MCP_SPEC_URL = 'https://modelcontextprotocol.io/introduction'
@@ -256,6 +255,8 @@ function formatNumber(value: number): string {
 function formatQuotaPair(used: number, limit: number): string {
   return `${formatNumber(used)} / ${formatNumber(limit)}`
 }
+
+const formatLogCredits = (value: number | null | undefined): string => typeof value === 'number' && Number.isFinite(value) ? formatNumber(value) : '—'
 
 function errorStatus(err: unknown): number | undefined {
   if (!err || typeof err !== 'object' || !('status' in err)) {
@@ -2909,6 +2910,7 @@ export default function UserConsole(): JSX.Element {
                     <tr>
                       <th>{text.detail.table.request}</th>
                       <th>{text.detail.table.transport}</th>
+                      <th>{text.detail.table.credits}</th>
                       <th>{text.detail.table.result}</th>
                     </tr>
                   </thead>
@@ -2935,6 +2937,9 @@ export default function UserConsole(): JSX.Element {
                               <strong>{log.mcp_status ?? '—'}</strong>
                             </span>
                           </div>
+                        </td>
+                        <td className="user-console-log-credits">
+                          {formatLogCredits(log.business_credits)}
                         </td>
                         <td>
                           <div className="user-console-log-result-line">
@@ -2969,6 +2974,7 @@ export default function UserConsole(): JSX.Element {
                       <time dateTime={new Date(log.created_at * 1000).toISOString()}>{formatTimestamp(log.created_at)}</time>
                       <span>H {log.http_status ?? '—'}</span>
                       <span>T {log.mcp_status ?? '—'}</span>
+                      <span>{text.detail.table.credits} {formatLogCredits(log.business_credits)}</span>
                     </div>
                     <p className="user-console-log-card-error">
                       {log.error_message ?? text.detail.noError}

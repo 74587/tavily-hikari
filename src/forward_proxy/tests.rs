@@ -614,6 +614,229 @@ if __name__ == "__main__":
     }
 
     #[test]
+    fn restore_persisted_subscription_endpoints_requires_configured_subscription() {
+        let proxy_key = sample_vless_share_link("198.51.100.7", "stale-subscription");
+        let runtime = ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+            &proxy_key,
+            "198.51.100.7",
+            "stale-subscription",
+        ));
+        let mut manager = ForwardProxyManager::new(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: Vec::new(),
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            vec![runtime],
+        );
+
+        assert_eq!(manager.restored_subscription_endpoint_count(), 0);
+        assert_eq!(manager.restore_persisted_subscription_endpoints(), 0);
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_none(),
+            "stale subscription runtime must not be restored when subscriptions are disabled"
+        );
+    }
+
+    #[test]
+    fn restore_persisted_subscription_endpoints_skips_ambiguous_sources() {
+        let proxy_key = sample_vless_share_link("198.51.100.9", "ambiguous-subscription");
+        let runtime = ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+            &proxy_key,
+            "198.51.100.9",
+            "ambiguous-subscription",
+        ));
+        let mut manager = ForwardProxyManager::new(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: vec![
+                    "https://subscription.example.com/feed-a".to_string(),
+                    "https://subscription.example.com/feed-b".to_string(),
+                ],
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            vec![runtime],
+        );
+
+        assert_eq!(manager.restored_subscription_endpoint_count(), 0);
+        assert_eq!(manager.restore_persisted_subscription_endpoints(), 0);
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_none(),
+            "multi-feed runtime cannot be restored without persisted feed ownership"
+        );
+    }
+
+    #[test]
+    fn restore_persisted_subscription_endpoints_uses_configured_sources() {
+        let subscription_url = "https://subscription.example.com/feed".to_string();
+        let proxy_key = sample_vless_share_link("198.51.100.8", "restored-subscription");
+        let runtime = ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+            &proxy_key,
+            "198.51.100.8",
+            "restored-subscription",
+        ));
+        let settings = ForwardProxySettings {
+            proxy_urls: Vec::new(),
+            subscription_urls: vec![subscription_url.clone()],
+            subscription_update_interval_secs: 3600,
+            insert_direct: false,
+            egress_socks5_enabled: false,
+            egress_socks5_url: String::new(),
+        };
+        let mut manager = ForwardProxyManager::new(settings.clone(), vec![runtime]);
+
+        let restored = manager
+            .endpoint_by_key(&proxy_key)
+            .expect("restored subscription endpoint");
+        assert!(restored.subscription_sources.contains(&subscription_url));
+        assert!(
+            manager.should_refresh_subscriptions(),
+            "restored runtime must not suppress the maintenance subscription refresh"
+        );
+
+        manager.apply_incremental_settings(settings, &std::collections::HashMap::new());
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_some(),
+            "saving unchanged subscription settings must retain restored runtime nodes"
+        );
+    }
+
+    #[test]
+    fn restore_persisted_subscription_endpoints_requires_runtime_after_settings_update() {
+        let subscription_url = "https://subscription.example.com/feed".to_string();
+        let proxy_key = sample_vless_share_link("198.51.100.10", "old-subscription");
+        let mut runtime =
+            ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+                &proxy_key,
+                "198.51.100.10",
+                "old-subscription",
+            ));
+        runtime.updated_at = 100;
+        runtime.subscription_sources = vec![subscription_url.clone()];
+        let manager = ForwardProxyManager::new_with_settings_updated_at(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: vec![subscription_url],
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            200,
+            vec![runtime],
+        );
+
+        assert_eq!(manager.restored_subscription_endpoint_count(), 0);
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_none(),
+            "runtime older than the current subscription settings may belong to a previous feed"
+        );
+    }
+
+    #[test]
+    fn restore_persisted_subscription_endpoints_allows_legacy_single_source_runtime() {
+        let subscription_url = "https://subscription.example.com/feed".to_string();
+        let proxy_key = sample_vless_share_link("198.51.100.12", "legacy-feed");
+        let mut runtime =
+            ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+                &proxy_key,
+                "198.51.100.12",
+                "legacy-feed",
+            ));
+        runtime.updated_at = 300;
+        runtime.subscription_sources.clear();
+        let manager = ForwardProxyManager::new_with_settings_updated_at(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: vec![subscription_url],
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            200,
+            vec![runtime],
+        );
+
+        assert_eq!(manager.restored_subscription_endpoint_count(), 1);
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_some(),
+            "legacy runtimes without source attribution should recover when exactly one current feed exists"
+        );
+    }
+
+    #[test]
+    fn restore_persisted_subscription_endpoints_allows_legacy_unknown_settings_timestamp() {
+        let subscription_url = "https://subscription.example.com/feed".to_string();
+        let proxy_key = sample_vless_share_link("198.51.100.13", "legacy-settings");
+        let mut runtime =
+            ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+                &proxy_key,
+                "198.51.100.13",
+                "legacy-settings",
+            ));
+        runtime.updated_at = 300;
+        runtime.subscription_sources.clear();
+        let manager = ForwardProxyManager::new_with_settings_updated_at(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: vec![subscription_url],
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            0,
+            vec![runtime],
+        );
+
+        assert_eq!(manager.restored_subscription_endpoint_count(), 1);
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_some(),
+            "legacy settings rows without updated_at must not invalidate existing runtime recovery"
+        );
+    }
+
+    #[test]
+    fn restore_persisted_subscription_endpoints_requires_matching_source() {
+        let current_subscription_url = "https://subscription.example.com/feed-new".to_string();
+        let old_subscription_url = "https://subscription.example.com/feed-old".to_string();
+        let proxy_key = sample_vless_share_link("198.51.100.11", "old-feed");
+        let mut runtime =
+            ForwardProxyRuntimeState::default_for_endpoint(&subscription_vless_endpoint(
+                &proxy_key,
+                "198.51.100.11",
+                "old-feed",
+            ));
+        runtime.updated_at = 300;
+        runtime.subscription_sources = vec![old_subscription_url];
+        let manager = ForwardProxyManager::new_with_settings_updated_at(
+            ForwardProxySettings {
+                proxy_urls: Vec::new(),
+                subscription_urls: vec![current_subscription_url],
+                subscription_update_interval_secs: 3600,
+                insert_direct: false,
+                egress_socks5_enabled: false,
+                egress_socks5_url: String::new(),
+            },
+            200,
+            vec![runtime],
+        );
+
+        assert_eq!(manager.restored_subscription_endpoint_count(), 0);
+        assert!(
+            manager.endpoint_by_key(&proxy_key).is_none(),
+            "runtime from a previous feed must not be restored under a new subscription URL"
+        );
+    }
+
+    #[test]
     fn reserved_local_port_keeps_port_bound_until_release() {
         let mut reservation = reserve_unused_local_port().expect("reserve loopback port");
         let port = reservation.port();

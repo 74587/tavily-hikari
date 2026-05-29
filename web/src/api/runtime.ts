@@ -52,6 +52,7 @@ export interface SummaryWindowsResponse {
   today_start: number; today_end: number
   yesterday_start: number; yesterday_end: number
   month_start: number; month_end: number
+  previous_month_start?: number; previous_month_end?: number
 }
 
 export interface DashboardSiteStatusSnapshot {
@@ -263,8 +264,6 @@ export interface TokenUsageBucket {
   system_failure_count: number
   external_failure_count: number
 }
-
-// Public token logs (per access token)
 export interface PublicTokenLog {
   id: number
   method: string
@@ -277,8 +276,6 @@ export interface PublicTokenLog {
   error_message: string | null
   created_at: number
 }
-
-// Server returns camelCase. Define the server shape and map to snake_case used in UI.
 interface ServerPublicTokenLog {
   id: number
   method: string
@@ -1891,7 +1888,7 @@ export async function fetchUserTokenLogs(id: string, limit = 20, signal?: AbortS
     query: it.query,
     http_status: it.httpStatus,
     mcp_status: it.mcpStatus,
-    business_credits: it.businessCredits,
+    business_credits: it.businessCredits ?? null,
     result_status: it.resultStatus,
     error_message: it.errorMessage,
     created_at: it.createdAt,
@@ -1909,7 +1906,7 @@ export function parseUserTokenEventSnapshot(raw: string): UserTokenEventSnapshot
       query: it.query,
       http_status: it.httpStatus,
       mcp_status: it.mcpStatus,
-      business_credits: it.businessCredits,
+      business_credits: it.businessCredits ?? null,
       result_status: it.resultStatus,
       error_message: it.errorMessage,
       created_at: it.createdAt,

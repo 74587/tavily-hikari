@@ -1,5 +1,10 @@
-import type { DashboardHourlyRequestBucket, DashboardHourlyRequestWindow } from '../api'
-import { getHourlyBucketsInRange } from './dashboardHourlyCharts'
+import type {
+  DashboardHourlyRequestBucket,
+  DashboardHourlyRequestWindow,
+  SummaryWindowMetrics,
+  SummaryWindowsResponse,
+} from '../api'
+import { buildHourlyRangeSlots } from './dashboardHourlyCharts'
 
 export type DashboardBackdropMetricKey =
   | 'total'
@@ -13,14 +18,55 @@ export type DashboardBackdropMetricKey =
   | 'newQuarantines'
 
 export interface DashboardCardBackdropSeries {
-  current: number[]
-  comparison: number[]
+  current: Array<number | null>
+  comparison: Array<number | null>
   baseline?: number
   color?: string
   comparisonColor?: string
 }
 
 export type DashboardCardBackdropMap = Partial<Record<DashboardBackdropMetricKey, DashboardCardBackdropSeries>>
+
+export function buildBackdropBaseline(total: number, values: ReadonlyArray<number | null>): number {
+  const visibleTotal = values.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+  return Math.max(total - visibleTotal, 0)
+}
+
+export function buildMonthBackdropBaseline(
+  month: SummaryWindowMetrics,
+  metricKey: DashboardBackdropMetricKey,
+  values: ReadonlyArray<number | null>,
+): number {
+  return buildBackdropBaseline(getSummaryMetricValue(month, metricKey), values)
+}
+
+export function getPreviousMonthRange(summaryWindows: SummaryWindowsResponse): { rangeStart: number; rangeEnd: number } {
+  const rangeStart = summaryWindows.previous_month_start
+  const rangeEnd = summaryWindows.previous_month_end
+  if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd) && rangeEnd! > rangeStart!) {
+    return { rangeStart: rangeStart!, rangeEnd: rangeEnd! }
+  }
+  return { rangeStart: summaryWindows.month_start, rangeEnd: summaryWindows.month_start }
+}
+
+function getSummaryMetricValue(month: SummaryWindowMetrics, metricKey: DashboardBackdropMetricKey): number {
+  switch (metricKey) {
+    case 'total':
+      return month.total_requests
+    case 'valuableSuccess':
+      return month.valuable_success_count
+    case 'valuableFailure':
+      return month.valuable_failure_count
+    case 'otherSuccess':
+      return month.other_success_count
+    case 'otherFailure':
+      return month.other_failure_count
+    case 'unknown':
+      return month.unknown_count
+    default:
+      return 0
+  }
+}
 
 export function getBackdropMetricKey(id: string): DashboardBackdropMetricKey | null {
   const normalizedId = id.replace(/^(today|month)-/, '')
@@ -55,13 +101,17 @@ export function buildHourlyBackdropSeries(
   metricKey: DashboardBackdropMetricKey = 'total',
   comparisonRangeStart = rangeStart,
   comparisonRangeEnd = rangeEnd,
-): { current: number[]; comparison: number[] } {
-  const visibleBuckets = getHourlyBucketsInRange(hourlyRequestWindow, rangeStart, rangeEnd)
-  const comparisonBuckets = getHourlyBucketsInRange(hourlyRequestWindow, comparisonRangeStart, comparisonRangeEnd)
-  const current = visibleBuckets.map((bucket) => getBackdropMetricValue(bucket, metricKey))
-  const comparison = visibleBuckets.map((_, index) => {
-    const comparisonBucket = comparisonBuckets[index]
-    return comparisonBucket ? getBackdropMetricValue(comparisonBucket, metricKey) : 0
+): { current: Array<number | null>; comparison: Array<number | null> } {
+  const visibleSlots = buildHourlyRangeSlots(hourlyRequestWindow, rangeStart, rangeEnd)
+  const comparisonSlots = buildHourlyRangeSlots(hourlyRequestWindow, comparisonRangeStart, comparisonRangeEnd)
+  const slotCount = Math.max(visibleSlots.length, comparisonSlots.length)
+  const current = Array.from({ length: slotCount }, (_, index) => {
+    const bucket = visibleSlots[index]?.bucket ?? null
+    return bucket ? getBackdropMetricValue(bucket, metricKey) : null
+  })
+  const comparison = Array.from({ length: slotCount }, (_, index) => {
+    const comparisonBucket = comparisonSlots[index]?.bucket ?? null
+    return comparisonBucket ? getBackdropMetricValue(comparisonBucket, metricKey) : null
   })
   return { current, comparison }
 }

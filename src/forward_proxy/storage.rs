@@ -24,6 +24,7 @@ pub async fn ensure_forward_proxy_schema(pool: &SqlitePool) -> Result<(), ProxyE
     .await?;
     ensure_forward_proxy_settings_column(pool, "egress_socks5_url", "TEXT NOT NULL DEFAULT ''")
         .await?;
+    ensure_forward_proxy_settings_column(pool, "updated_at", "INTEGER NOT NULL DEFAULT 0").await?;
 
     sqlx::query(
         r#"
@@ -60,6 +61,12 @@ pub async fn ensure_forward_proxy_schema(pool: &SqlitePool) -> Result<(), ProxyE
         .await?;
     ensure_forward_proxy_runtime_column(pool, "geo_refreshed_at", "INTEGER NOT NULL DEFAULT 0")
         .await?;
+    ensure_forward_proxy_runtime_column(
+        pool,
+        "subscription_sources_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )
+    .await?;
 
     sqlx::query(
         r#"
@@ -168,6 +175,12 @@ pub async fn ensure_forward_proxy_schema(pool: &SqlitePool) -> Result<(), ProxyE
 pub async fn load_forward_proxy_settings(
     pool: &SqlitePool,
 ) -> Result<ForwardProxySettings, ProxyError> {
+    Ok(load_forward_proxy_settings_snapshot(pool).await?.settings)
+}
+
+pub async fn load_forward_proxy_settings_snapshot(
+    pool: &SqlitePool,
+) -> Result<ForwardProxySettingsSnapshot, ProxyError> {
     let row = sqlx::query_as::<_, ForwardProxySettingsRow>(
         r#"
         SELECT
@@ -176,7 +189,8 @@ pub async fn load_forward_proxy_settings(
             subscription_update_interval_secs,
             insert_direct,
             egress_socks5_enabled,
-            egress_socks5_url
+            egress_socks5_url,
+            updated_at
         FROM forward_proxy_settings
         WHERE id = ?1
         LIMIT 1
@@ -185,7 +199,10 @@ pub async fn load_forward_proxy_settings(
     .bind(FORWARD_PROXY_SETTINGS_SINGLETON_ID)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(Into::into).unwrap_or_default())
+    Ok(row.map(Into::into).unwrap_or_else(|| ForwardProxySettingsSnapshot {
+        settings: ForwardProxySettings::default(),
+        updated_at: 0,
+    }))
 }
 
 pub async fn save_forward_proxy_settings(
@@ -241,10 +258,12 @@ pub async fn load_forward_proxy_runtime_states(
             resolved_ips_json,
             resolved_regions_json,
             geo_refreshed_at,
+            subscription_sources_json,
             weight,
             success_ema,
             latency_ema_ms,
-            consecutive_failures
+            consecutive_failures,
+            updated_at
         FROM forward_proxy_runtime
         "#,
     )
@@ -376,6 +395,12 @@ pub async fn persist_forward_proxy_runtime_health_state(
     let resolved_regions_json = serde_json::to_string(&state.resolved_regions).map_err(|err| {
         ProxyError::Other(format!("failed to serialize forward proxy regions: {err}"))
     })?;
+    let subscription_sources_json =
+        serde_json::to_string(&state.subscription_sources).map_err(|err| {
+            ProxyError::Other(format!(
+                "failed to serialize forward proxy subscription sources: {err}"
+            ))
+        })?;
     sqlx::query(
         r#"
         INSERT INTO forward_proxy_runtime (
@@ -387,17 +412,19 @@ pub async fn persist_forward_proxy_runtime_health_state(
             resolved_ips_json,
             resolved_regions_json,
             geo_refreshed_at,
+            subscription_sources_json,
             weight,
             success_ema,
             latency_ema_ms,
             consecutive_failures,
             is_penalized,
             updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, strftime('%s', 'now'))
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, strftime('%s', 'now'))
         ON CONFLICT(proxy_key) DO UPDATE SET
             display_name = excluded.display_name,
             source = excluded.source,
             endpoint_url = excluded.endpoint_url,
+            subscription_sources_json = excluded.subscription_sources_json,
             weight = excluded.weight,
             success_ema = excluded.success_ema,
             latency_ema_ms = excluded.latency_ema_ms,
@@ -414,6 +441,7 @@ pub async fn persist_forward_proxy_runtime_health_state(
     .bind(resolved_ips_json)
     .bind(resolved_regions_json)
     .bind(state.geo_refreshed_at)
+    .bind(subscription_sources_json)
     .bind(state.weight)
     .bind(state.success_ema)
     .bind(state.latency_ema_ms)
@@ -444,6 +472,12 @@ async fn persist_forward_proxy_runtime_state_tx(
     let resolved_regions_json = serde_json::to_string(&state.resolved_regions).map_err(|err| {
         ProxyError::Other(format!("failed to serialize forward proxy regions: {err}"))
     })?;
+    let subscription_sources_json =
+        serde_json::to_string(&state.subscription_sources).map_err(|err| {
+            ProxyError::Other(format!(
+                "failed to serialize forward proxy subscription sources: {err}"
+            ))
+        })?;
     sqlx::query(
         r#"
         INSERT INTO forward_proxy_runtime (
@@ -455,13 +489,14 @@ async fn persist_forward_proxy_runtime_state_tx(
             resolved_ips_json,
             resolved_regions_json,
             geo_refreshed_at,
+            subscription_sources_json,
             weight,
             success_ema,
             latency_ema_ms,
             consecutive_failures,
             is_penalized,
             updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, strftime('%s', 'now'))
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, strftime('%s', 'now'))
         ON CONFLICT(proxy_key) DO UPDATE SET
             display_name = excluded.display_name,
             source = excluded.source,
@@ -470,6 +505,7 @@ async fn persist_forward_proxy_runtime_state_tx(
             resolved_ips_json = excluded.resolved_ips_json,
             resolved_regions_json = excluded.resolved_regions_json,
             geo_refreshed_at = excluded.geo_refreshed_at,
+            subscription_sources_json = excluded.subscription_sources_json,
             weight = excluded.weight,
             success_ema = excluded.success_ema,
             latency_ema_ms = excluded.latency_ema_ms,
@@ -486,6 +522,7 @@ async fn persist_forward_proxy_runtime_state_tx(
     .bind(resolved_ips_json)
     .bind(resolved_regions_json)
     .bind(state.geo_refreshed_at)
+    .bind(subscription_sources_json)
     .bind(state.weight)
     .bind(state.success_ema)
     .bind(state.latency_ema_ms)

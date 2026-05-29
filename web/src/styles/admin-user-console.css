@@ -34,7 +34,7 @@
 
 .user-console-logs-table th:nth-child(1),
 .user-console-logs-table td:nth-child(1) {
-  width: 44%;
+  width: 40%;
   min-width: 0;
 }
 
@@ -47,7 +47,14 @@
 
 .user-console-logs-table th:nth-child(3),
 .user-console-logs-table td:nth-child(3) {
-  width: 40%;
+  width: 12%;
+  min-width: 0;
+  text-align: left;
+}
+
+.user-console-logs-table th:nth-child(4),
+.user-console-logs-table td:nth-child(4) {
+  width: 32%;
   min-width: 0;
   text-align: left;
 }
@@ -189,6 +196,12 @@
 
 .user-console-log-transport-item strong {
   font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.user-console-log-credits {
+  color: hsl(var(--foreground));
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-weight: 700;
 }
 
 .user-console-log-result-line {

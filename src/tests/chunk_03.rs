@@ -2203,11 +2203,11 @@ async fn summary_windows_split_today_yesterday_and_month() {
     assert_eq!(
         summary.yesterday,
         SummaryWindowMetrics {
-            total_requests: 7,
-            success_count: 5,
+            total_requests: 10,
+            success_count: 8,
             error_count: 1,
             quota_exhausted_count: 1,
-            valuable_success_count: 5,
+            valuable_success_count: 8,
             valuable_failure_count: 2,
             quota_charge: SummaryQuotaCharge {
                 stale_key_count: 1,

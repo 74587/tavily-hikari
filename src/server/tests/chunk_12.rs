@@ -124,6 +124,153 @@
     }
 
     #[tokio::test]
+    async fn startup_restores_subscription_runtime_before_refreshing_slow_subscription() {
+        let db_path = temp_db_path("startup-restore-subscription-runtime");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let proxy_hits = Arc::new(AtomicUsize::new(0));
+        let fake_proxy_addr =
+            spawn_counted_fake_forward_proxy(StatusCode::NOT_FOUND, Duration::ZERO, proxy_hits)
+                .await;
+        let subscription_hits = Arc::new(AtomicUsize::new(0));
+        let subscription_addr = {
+            let hits = subscription_hits.clone();
+            let body = format!("http://{}\n", fake_proxy_addr);
+            let app = Router::new().route(
+                "/subscription",
+                get(move || {
+                    let hits = hits.clone();
+                    let body = body.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        (StatusCode::OK, body)
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app.into_make_service())
+                    .await
+                    .unwrap();
+            });
+            addr
+        };
+
+        {
+            let proxy =
+                TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+                    .await
+                    .expect("create seed proxy");
+            proxy
+                .update_forward_proxy_settings(
+                    ForwardProxySettings {
+                        proxy_urls: Vec::new(),
+                        subscription_urls: vec![format!(
+                            "http://{}/subscription",
+                            subscription_addr
+                        )],
+                        subscription_update_interval_secs: 3600,
+                        insert_direct: false,
+                        egress_socks5_enabled: false,
+                        egress_socks5_url: String::new(),
+                    },
+                    true,
+                )
+                .await
+                .expect("persist subscription runtime");
+        }
+        let subscription_hits_after_seed = subscription_hits.load(Ordering::SeqCst);
+
+        let startup_started = Instant::now();
+        let proxy =
+            TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+                .await
+                .expect("restart proxy from restored runtime");
+        assert!(
+            startup_started.elapsed() < Duration::from_secs(3),
+            "restored runtime startup should not wait for slow subscription refresh"
+        );
+        assert!(proxy.is_forward_proxy_xray_ready().await);
+        assert_eq!(
+            subscription_hits.load(Ordering::SeqCst),
+            subscription_hits_after_seed,
+            "startup should not refresh slow subscription when restored runtime exists"
+        );
+
+        proxy
+            .maybe_run_forward_proxy_maintenance()
+            .await
+            .expect("restored runtime maintenance should refresh after startup");
+        assert_eq!(
+            subscription_hits.load(Ordering::SeqCst),
+            subscription_hits_after_seed + 1,
+            "restored startup must not mark local runtime restore as a fresh remote refresh"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn startup_without_restored_runtime_still_waits_for_subscription_readiness() {
+        let db_path = temp_db_path("startup-no-restored-runtime");
+        let db_str = db_path.to_string_lossy().to_string();
+        let upstream_addr = spawn_forward_proxy_probe_upstream().await;
+        let upstream = format!("http://{}/mcp", upstream_addr);
+        let fake_proxy_addr =
+            spawn_counted_fake_forward_proxy(StatusCode::NOT_FOUND, Duration::ZERO, Arc::new(AtomicUsize::new(0)))
+                .await;
+        let subscription_addr = spawn_forward_proxy_subscription_server_with_delay(
+            format!("http://{}\n", fake_proxy_addr),
+            Duration::from_secs(3),
+        )
+        .await;
+
+        {
+            let proxy =
+                TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str)
+                    .await
+                    .expect("create proxy schema");
+            drop(proxy);
+            let pool = connect_sqlite_test_pool(&db_str).await;
+            sqlx::query(
+                r#"
+                UPDATE forward_proxy_settings
+                SET subscription_urls_json = ?1,
+                    insert_direct = 0,
+                    updated_at = strftime('%s', 'now')
+                WHERE id = 1
+                "#,
+            )
+            .bind(
+                serde_json::to_string(&vec![format!(
+                    "http://{}/subscription",
+                    subscription_addr
+                )])
+                .expect("subscription url json"),
+            )
+            .execute(&pool)
+            .await
+            .expect("seed subscription settings without runtime");
+            pool.close().await;
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            TavilyProxy::with_endpoint::<Vec<String>, String>(Vec::new(), &upstream, &db_str),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "without restored runtime, startup must still wait for subscription readiness"
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn admin_system_settings_reject_invalid_rebalance_percent() {
         let db_path = temp_db_path("admin-system-settings-invalid-rebalance-percent");
         let db_str = db_path.to_string_lossy().to_string();

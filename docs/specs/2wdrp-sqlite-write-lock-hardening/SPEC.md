@@ -23,6 +23,12 @@ endpoints, syncs xray state, and persists runtime snapshots before the HTTP serv
 ready. That startup path can amplify a short writer collision into a slow first healthy when the
 runtime snapshot write collides with other writers.
 
+Dockrev `job_01KSEPDVXF8NAQCEQGJKV33T4F` showed a related startup-order failure after the previous
+hardening: the service was healthy before restart, but startup still waited on remote subscription
+refresh before restoring the locally persisted subscription runtime. A restart should recover known
+proxy nodes from `forward_proxy_runtime` first; remote subscription refresh is only the calibration
+source when a usable persisted runtime already exists.
+
 ## Goals
 
 - Keep request-path billing and MCP session locks from failing on transient SQLite busy/locked
@@ -56,6 +62,10 @@ runtime snapshot write collides with other writers.
   bounded backoff so a short writer collision does not delay readiness longer than necessary.
 - Startup subscription refresh may fetch multiple subscription URLs concurrently, as long as the
   refresh still fails closed when every subscription fetch fails.
+- Startup must restore persisted subscription endpoints before remote subscription refresh when
+  their configured subscription ownership is unambiguous. When at least one restored subscription
+  endpoint exists, startup must not block on remote refresh before xray sync/runtime persistence;
+  without safely restorable endpoints, startup continues to wait for subscription readiness.
 - Retry logs may include operation, attempt, backoff, and final error context.
 
 ## Acceptance
@@ -66,6 +76,10 @@ runtime snapshot write collides with other writers.
   `database is locked`.
 - Under a competing SQLite writer, forward-proxy startup runtime snapshot persistence retries
   transient lock errors rather than failing the startup path immediately.
+- With safely restorable persisted subscription runtime and a slow subscription endpoint, restart
+  restores the local runtime and completes without waiting for the slow remote refresh.
+- Without persisted subscription runtime, startup remains strict and waits for subscription
+  readiness instead of reporting healthy from an empty proxy graph.
 - Existing billing tests continue to prove locked billing subject stability, pending billing
   replay, and account/token quota attribution.
 - Existing MCP/API routing behavior remains unchanged, including research result GET key pinning.

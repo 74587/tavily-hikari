@@ -30,8 +30,8 @@ import {
   type TooltipItem,
 } from 'chart.js'
 import {
-  buildDeltaSeriesValues,
-  buildHourlyBucketLookup,
+  buildDeltaSeriesSlotValues,
+  buildHourlyRangeSlots,
   DASHBOARD_RESULT_SERIES_ORDER,
   DASHBOARD_TYPE_SERIES_ORDER,
   DEFAULT_VISIBLE_RESULT_SERIES,
@@ -40,7 +40,6 @@ import {
   formatHourlyBucketLabel,
   getResultSeriesValue,
   getTypeSeriesValue,
-  getVisibleHourlyBuckets,
   readDashboardHourlyChartPreferences,
   toggleSeriesSelection,
   writeDashboardHourlyChartPreferences,
@@ -52,7 +51,9 @@ import {
 } from './dashboardHourlyCharts'
 import {
   buildHourlyBackdropSeries,
+  buildMonthBackdropBaseline,
   getBackdropMetricKey,
+  getPreviousMonthRange,
   type DashboardBackdropMetricKey,
   type DashboardCardBackdropMap,
   type DashboardCardBackdropSeries,
@@ -233,16 +234,22 @@ function withOpacity(color: string, opacity: number): string {
     : color
 }
 
-function buildCumulativeSeries(values: ReadonlyArray<number>, initialValue = 0): number[] {
+function buildCumulativeNullableSeries(
+  values: ReadonlyArray<number | null>,
+  initialValue = 0,
+): Array<number | null> {
   let runningTotal = initialValue
   return values.map((value) => {
+    if (value == null) return null
     runningTotal += Math.max(0, value)
     return runningTotal
   })
 }
 
-function formatChartWindow(copy: string, count: number): string {
-  return copy.replace('{count}', String(count))
+function formatChartWindow(copy: string, count: number, comparisonCount: number): string {
+  return copy
+    .replace('{count}', String(count))
+    .replace('{comparisonCount}', String(comparisonCount))
 }
 
 function MetricValue({
@@ -396,9 +403,9 @@ function DashboardUsageBackdropChart({
   className,
 }: {
   ariaLabel: string
-  primaryValues: ReadonlyArray<number>
+  primaryValues: ReadonlyArray<number | null>
   primaryColor: string
-  comparisonValues?: ReadonlyArray<number>
+  comparisonValues?: ReadonlyArray<number | null>
   comparisonColor?: string
   primaryInitialValue?: number
   comparisonInitialValue?: number
@@ -413,7 +420,7 @@ function DashboardUsageBackdropChart({
     const datasets: ChartData<'line'>['datasets'] = [
       {
         label: 'current',
-        data: buildCumulativeSeries(primaryValues, primaryInitialValue),
+        data: buildCumulativeNullableSeries(primaryValues, primaryInitialValue),
         borderColor: primaryColor,
         backgroundColor: withOpacity(primaryColor, 0.12),
         fill: true,
@@ -421,7 +428,7 @@ function DashboardUsageBackdropChart({
         pointRadius: 0,
         pointHitRadius: 0,
         tension: 0.38,
-        spanGaps: true,
+        spanGaps: false,
         order: 1,
       },
     ]
@@ -429,7 +436,7 @@ function DashboardUsageBackdropChart({
     if (comparisonValues && comparisonValues.length > 0) {
       datasets.push({
         label: 'comparison',
-        data: buildCumulativeSeries(comparisonValues, comparisonInitialValue),
+        data: buildCumulativeNullableSeries(comparisonValues, comparisonInitialValue),
         borderColor: comparisonColor ?? primaryColor,
         backgroundColor: 'transparent',
         fill: false,
@@ -438,7 +445,7 @@ function DashboardUsageBackdropChart({
         pointRadius: 0,
         pointHitRadius: 0,
         tension: 0.34,
-        spanGaps: true,
+        spanGaps: false,
         order: 0,
       })
     }
@@ -532,6 +539,7 @@ function DashboardTrendPanel({
   strings,
   overviewReady,
   hourlyRequestWindow,
+  summaryWindows,
   initialChartMode = 'results',
   initialVisibleResultSeries = DEFAULT_VISIBLE_RESULT_SERIES,
   initialVisibleTypeSeries = DEFAULT_VISIBLE_TYPE_SERIES,
@@ -543,6 +551,7 @@ function DashboardTrendPanel({
   strings: DashboardOverviewStrings
   overviewReady: boolean
   hourlyRequestWindow: DashboardHourlyRequestWindow
+  summaryWindows: SummaryWindowsResponse
   initialChartMode?: DashboardHourlyChartMode
   initialVisibleResultSeries?: ReadonlyArray<DashboardResultSeriesId>
   initialVisibleTypeSeries?: ReadonlyArray<DashboardTypeSeriesId>
@@ -595,13 +604,29 @@ function DashboardTrendPanel({
   ])
 
   const palette = readDashboardChartPalette()
-  const visibleBuckets = useMemo(() => getVisibleHourlyBuckets(hourlyRequestWindow), [hourlyRequestWindow])
-  const retainedLookup = useMemo(() => buildHourlyBucketLookup(hourlyRequestWindow.buckets), [hourlyRequestWindow.buckets])
-  const labels = useMemo(
-    () => visibleBuckets.map((bucket) => formatHourlyBucketLabel(bucket.bucketStart, chartLabelTimeZone ?? undefined)),
-    [chartLabelTimeZone, visibleBuckets],
+  const currentRangeStart = summaryWindows.today_start
+  const currentRangeEnd = summaryWindows.today_end
+  const comparisonRangeStart = summaryWindows.yesterday_start
+  const comparisonRangeEnd = summaryWindows.yesterday_end
+  const rangeSlots = useMemo(
+    () => buildHourlyRangeSlots(hourlyRequestWindow, currentRangeStart, currentRangeEnd),
+    [currentRangeEnd, currentRangeStart, hourlyRequestWindow],
   )
-
+  const comparisonRangeSlots = useMemo(
+    () => buildHourlyRangeSlots(hourlyRequestWindow, comparisonRangeStart, comparisonRangeEnd),
+    [comparisonRangeEnd, comparisonRangeStart, hourlyRequestWindow],
+  )
+  const isDeltaMode = chartMode === 'resultsDelta' || chartMode === 'typesDelta'
+  const labels = useMemo(
+    () => {
+      const slotCount = isDeltaMode ? Math.max(rangeSlots.length, comparisonRangeSlots.length) : rangeSlots.length
+      return Array.from({ length: slotCount }, (_, index) => {
+        const bucketStart = rangeSlots[index]?.bucketStart ?? comparisonRangeSlots[index]?.bucketStart
+        return bucketStart == null ? ['', ''] : formatHourlyBucketLabel(bucketStart, chartLabelTimeZone ?? undefined)
+      })
+    },
+    [chartLabelTimeZone, comparisonRangeSlots, isDeltaMode, rangeSlots],
+  )
   const resultSeriesLabels: Record<DashboardResultSeriesId, string> = {
     secondarySuccess: strings.chartResultSecondarySuccess,
     primarySuccess: strings.chartResultPrimarySuccess,
@@ -643,7 +668,7 @@ function DashboardTrendPanel({
   }, [chartMode, resultDeltaSeries, typeDeltaSeries, visibleResultSeries, visibleTypeSeries])
 
   const chartData = useMemo<ChartData<'bar'>>(() => {
-    if (visibleBuckets.length === 0 || activeSeries.length === 0) {
+    if (rangeSlots.length === 0 || activeSeries.length === 0) {
       return { labels, datasets: [] }
     }
 
@@ -652,7 +677,10 @@ function DashboardTrendPanel({
         labels,
         datasets: activeSeries.map((seriesId) => ({
           label: resultSeriesLabels[seriesId as DashboardResultSeriesId],
-          data: visibleBuckets.map((bucket) => getResultSeriesValue(bucket, seriesId as DashboardResultSeriesId)),
+          data: labels.map((_, index) => {
+            const bucket = rangeSlots[index]?.bucket ?? null
+            return bucket ? getResultSeriesValue(bucket, seriesId as DashboardResultSeriesId) : null
+          }),
           backgroundColor: seriesColors[seriesId as DashboardResultSeriesId],
           borderRadius: 4,
           borderSkipped: false,
@@ -666,7 +694,10 @@ function DashboardTrendPanel({
         labels,
         datasets: activeSeries.map((seriesId) => ({
           label: typeSeriesLabels[seriesId as DashboardTypeSeriesId],
-          data: visibleBuckets.map((bucket) => getTypeSeriesValue(bucket, seriesId as DashboardTypeSeriesId)),
+          data: labels.map((_, index) => {
+            const bucket = rangeSlots[index]?.bucket ?? null
+            return bucket ? getTypeSeriesValue(bucket, seriesId as DashboardTypeSeriesId) : null
+          }),
           backgroundColor: seriesColors[seriesId as DashboardTypeSeriesId],
           borderRadius: 4,
           borderSkipped: false,
@@ -681,14 +712,18 @@ function DashboardTrendPanel({
         label: (chartMode === 'resultsDelta'
           ? resultSeriesLabels[seriesId as DashboardResultSeriesId]
           : typeSeriesLabels[seriesId as DashboardTypeSeriesId]),
-        data: buildDeltaSeriesValues(visibleBuckets, retainedLookup, seriesId as DashboardResultSeriesId | DashboardTypeSeriesId),
+        data: buildDeltaSeriesSlotValues(
+          rangeSlots,
+          comparisonRangeSlots,
+          seriesId as DashboardResultSeriesId | DashboardTypeSeriesId,
+        ),
         backgroundColor: seriesColors[seriesId as DashboardResultSeriesId | DashboardTypeSeriesId],
         borderRadius: 4,
         borderSkipped: false,
         stack: 'delta',
       })),
     }
-  }, [activeSeries, chartMode, labels, resultSeriesLabels, retainedLookup, seriesColors, typeSeriesLabels, visibleBuckets])
+  }, [activeSeries, chartMode, comparisonRangeSlots, labels, rangeSlots, resultSeriesLabels, seriesColors, typeSeriesLabels])
 
   const chartOptions = useMemo<ChartOptions<'bar'>>(() => {
     const isDelta = chartMode === 'resultsDelta' || chartMode === 'typesDelta'
@@ -707,7 +742,8 @@ function DashboardTrendPanel({
           callbacks: {
             label(context: TooltipItem<'bar'>) {
               const prefix = `${context.dataset.label}: `
-              const value = typeof context.raw === 'number' ? context.raw : Number(context.raw ?? 0)
+              if (context.raw == null) return `${prefix}—`
+              const value = typeof context.raw === 'number' ? context.raw : Number(context.raw)
               return prefix + (isDelta ? formatSignedValue(value) : value)
             },
           },
@@ -749,7 +785,7 @@ function DashboardTrendPanel({
     { value: 'typesDelta' as const, label: strings.chartModeTypesDelta },
   ]
 
-  const showEmpty = overviewReady && (visibleBuckets.length === 0 || activeSeries.length === 0)
+  const showEmpty = overviewReady && (rangeSlots.length === 0 || activeSeries.length === 0)
 
   return (
     <section className="surface panel dashboard-trend-panel">
@@ -758,7 +794,7 @@ function DashboardTrendPanel({
           <h2>{strings.trendsTitle}</h2>
           <p className="panel-description">{strings.trendsDescription}</p>
         </div>
-        <div className="dashboard-trend-meta">{formatChartWindow(strings.chartUtcWindow, hourlyRequestWindow.visibleBuckets)}</div>
+        <div className="dashboard-trend-meta">{formatChartWindow(strings.chartUtcWindow, rangeSlots.length, comparisonRangeSlots.length)}</div>
       </div>
 
       <SegmentedTabs<DashboardHourlyChartMode>
@@ -992,6 +1028,9 @@ export default function DashboardOverview({
   }
   const comparisonRangeStart = summaryWindowValues.yesterday_start
   const comparisonRangeEnd = summaryWindowValues.yesterday_end
+  const previousMonthRange = getPreviousMonthRange(summaryWindowValues)
+  const monthComparisonRangeStart = previousMonthRange.rangeStart
+  const monthComparisonRangeEnd = previousMonthRange.rangeEnd
   const todayBackdrop = useMemo(
     () => buildHourlyBackdropSeries(
       hourlyRequestWindow,
@@ -1100,49 +1139,54 @@ export default function DashboardOverview({
     todayBackdrop,
   ])
   const monthBackdrop = useMemo(
-    () => buildHourlyBackdropSeries(
-      hourlyRequestWindow,
-      summaryWindowValues.today_start,
-      summaryWindowValues.today_end,
-      'total',
-      comparisonRangeStart,
-      comparisonRangeEnd,
-    ),
+    () => {
+      const backdrop = buildHourlyBackdropSeries(
+        hourlyRequestWindow,
+        summaryWindowValues.month_start,
+        summaryWindowValues.month_end,
+        'total',
+        monthComparisonRangeStart,
+        monthComparisonRangeEnd,
+      )
+      return {
+        ...backdrop,
+        baseline: buildMonthBackdropBaseline(summaryWindowValues.month, 'total', backdrop.current),
+      }
+    },
     [
-      comparisonRangeEnd,
-      comparisonRangeStart,
       hourlyRequestWindow,
-      summaryWindowValues.today_end,
-      summaryWindowValues.today_start,
+      monthComparisonRangeEnd,
+      monthComparisonRangeStart,
+      summaryWindowValues.month_end,
+      summaryWindowValues.month,
+      summaryWindowValues.month_start,
     ],
-  )
-  const monthBackdropBaseline = Math.max(
-    summaryWindowValues.month.total_requests - summaryWindowValues.today.total_requests,
-    0,
   )
   const monthCardBackdrops = useMemo<DashboardCardBackdropMap>(() => {
     const buildMonthCardBackdrop = (
       metricKey: DashboardBackdropMetricKey,
       color = backdropColors.month,
-    ): DashboardCardBackdropSeries => ({
-      ...buildHourlyBackdropSeries(
+    ): DashboardCardBackdropSeries => {
+      const backdrop = buildHourlyBackdropSeries(
         hourlyRequestWindow,
-        summaryWindowValues.today_start,
-        summaryWindowValues.today_end,
+        summaryWindowValues.month_start,
+        summaryWindowValues.month_end,
         metricKey,
-        comparisonRangeStart,
-        comparisonRangeEnd,
-      ),
-      baseline: metricKey === 'total' ? monthBackdropBaseline : 0,
-      color,
-      comparisonColor: backdropColors.today,
-    })
+        monthComparisonRangeStart,
+        monthComparisonRangeEnd,
+      )
+      return {
+        ...backdrop,
+        baseline: buildMonthBackdropBaseline(summaryWindowValues.month, metricKey, backdrop.current),
+        color,
+        comparisonColor: backdropColors.yesterday,
+      }
+    }
     return {
       total: {
         ...monthBackdrop,
-        baseline: monthBackdropBaseline,
         color: backdropColors.month,
-        comparisonColor: backdropColors.today,
+        comparisonColor: backdropColors.yesterday,
       },
       valuableSuccess: buildMonthCardBackdrop('valuableSuccess'),
       valuableFailure: buildMonthCardBackdrop('valuableFailure', readChartColorVar('--destructive', 'hsl(0 84% 60%)')),
@@ -1153,14 +1197,14 @@ export default function DashboardOverview({
     }
   }, [
     backdropColors.month,
-    backdropColors.today,
-    comparisonRangeEnd,
-    comparisonRangeStart,
+    backdropColors.yesterday,
     hourlyRequestWindow,
+    monthComparisonRangeEnd,
+    monthComparisonRangeStart,
     monthBackdrop,
-    monthBackdropBaseline,
-    summaryWindowValues.today_end,
-    summaryWindowValues.today_start,
+    summaryWindowValues.month,
+    summaryWindowValues.month_end,
+    summaryWindowValues.month_start,
   ])
   const alertGroupCount = overviewReady && recentAlerts.totalEvents > 0 ? 1 : 0
   const priorityCount = riskItems.length + alertGroupCount
@@ -1323,6 +1367,7 @@ export default function DashboardOverview({
         strings={strings}
         overviewReady={overviewReady}
         hourlyRequestWindow={hourlyRequestWindow}
+        summaryWindows={summaryWindowValues}
         initialChartMode={initialChartMode}
         initialVisibleResultSeries={initialVisibleResultSeries}
         initialVisibleTypeSeries={initialVisibleTypeSeries}

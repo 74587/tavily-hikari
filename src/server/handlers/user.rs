@@ -4,6 +4,40 @@ struct UserTokenView {
     token: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserTokenLogView {
+    id: i64,
+    method: String,
+    path: String,
+    query: Option<String>,
+    http_status: Option<i64>,
+    mcp_status: Option<i64>,
+    business_credits: Option<i64>,
+    result_status: String,
+    error_message: Option<String>,
+    created_at: i64,
+}
+
+impl UserTokenLogView {
+    fn from_record(record: TokenLogRecord, language: UiLanguage) -> Self {
+        let business_credits = record.business_credits;
+        let public_view = PublicTokenLogView::from_record(record, language);
+        Self {
+            id: public_view.id,
+            method: public_view.method,
+            path: public_view.path,
+            query: public_view.query,
+            http_status: public_view.http_status,
+            mcp_status: public_view.mcp_status,
+            business_credits,
+            result_status: public_view.result_status,
+            error_message: public_view.error_message,
+            created_at: public_view.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LinuxDoCallbackQuery {
     code: Option<String>,
@@ -754,7 +788,7 @@ struct UserTodayWindowQuery {
 #[derive(Debug, Serialize)]
 struct UserTokenSnapshot {
     token: UserTokenSummaryView,
-    logs: Vec<PublicTokenLogView>,
+    logs: Vec<UserTokenLogView>,
 }
 
 fn parse_user_today_window_query(
@@ -907,7 +941,7 @@ async fn build_user_token_logs_view(
     token_id: &str,
     limit: usize,
     language: UiLanguage,
-) -> Result<Vec<PublicTokenLogView>, StatusCode> {
+) -> Result<Vec<UserTokenLogView>, StatusCode> {
     let items = state
         .proxy
         .token_recent_logs(token_id, limit.clamp(1, 20), None)
@@ -918,7 +952,7 @@ async fn build_user_token_logs_view(
         })?;
     Ok(items
         .into_iter()
-        .map(|record| PublicTokenLogView::from_record(record, language))
+        .map(|record| UserTokenLogView::from_record(record, language))
         .map(|mut view| {
             if let Some(err) = view.error_message.as_ref() {
                 view.error_message = Some(redact_sensitive(err));
@@ -1133,7 +1167,7 @@ async fn get_user_token_logs(
     headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<UserTokenLogsQuery>,
-) -> Result<Json<Vec<PublicTokenLogView>>, StatusCode> {
+) -> Result<Json<Vec<UserTokenLogView>>, StatusCode> {
     if !state.linuxdo_oauth.is_enabled_and_configured() {
         return Err(StatusCode::NOT_FOUND);
     }

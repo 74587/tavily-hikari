@@ -12,9 +12,16 @@
 - Forward-proxy startup now refreshes subscription-backed endpoints concurrently, syncs xray state
   from the restored snapshot, and retries runtime snapshot persistence when SQLite briefly denies
   the write slot.
+- Forward-proxy startup now restores persisted subscription endpoints from `forward_proxy_runtime`
+  before attempting remote subscription refresh when the current settings contain one unambiguous
+  subscription source. If restored endpoints exist, startup skips the blocking remote refresh and
+  proceeds to xray sync/runtime persistence; the existing maintenance scheduler performs
+  subscription calibration after the service is running.
 - Added local contention tests for quota subject lock acquisition and scheduled job start.
 - Added local contention coverage for forward-proxy startup subscription refresh and runtime
   snapshot persistence.
+- Added startup-order coverage for restored subscription runtime with a slow subscription endpoint,
+  plus the strict no-runtime fallback where startup still waits for subscription readiness.
 
 ## Validation
 

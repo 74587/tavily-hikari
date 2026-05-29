@@ -141,6 +141,7 @@ interface ServerPublicTokenLogMock {
   query: string | null
   httpStatus: number | null
   mcpStatus: number | null
+  businessCredits: number | null
   resultStatus: string
   errorMessage: string | null
   createdAt: number
@@ -154,6 +155,7 @@ const tokenLogsSample: ServerPublicTokenLogMock[] = [
     query: 'q=rust',
     httpStatus: 200,
     mcpStatus: 200,
+    businessCredits: 2,
     resultStatus: 'success',
     errorMessage: null,
     createdAt: 1_762_386_640,
@@ -165,6 +167,7 @@ const tokenLogsSample: ServerPublicTokenLogMock[] = [
     query: null,
     httpStatus: 429,
     mcpStatus: 429,
+    businessCredits: null,
     resultStatus: 'quota_exhausted',
     errorMessage: 'Account hourly limit reached',
     createdAt: 1_762_386_590,
@@ -176,6 +179,7 @@ const tokenLogsSample: ServerPublicTokenLogMock[] = [
     query: null,
     httpStatus: 500,
     mcpStatus: 500,
+    businessCredits: null,
     resultStatus: 'error',
     errorMessage: 'upstream timeout',
     createdAt: 1_762_386_520,
@@ -692,6 +696,7 @@ function emitUserTokenSnapshot(): void {
           query: null,
           httpStatus: 200,
           mcpStatus: 200,
+          businessCredits: 1,
           resultStatus: 'success',
           errorMessage: null,
           createdAt: 1_762_386_780,
@@ -1314,6 +1319,48 @@ export const TokenDetailOverview: Story = {
 
     if (canvasElement.querySelector('.user-console-guide-disclosure-body') != null) {
       throw new Error('Expected setup guide body to stay out of the initial detail layout.')
+    }
+
+    if (canvasElement.querySelector('.user-console-logs-table th:nth-child(3)')?.textContent?.trim() !== 'Credits') {
+      throw new Error('Expected token detail logs table to render the Credits column between transport and result.')
+    }
+
+    const creditedRows = Array.from(canvasElement.querySelectorAll('.user-console-log-credits'))
+      .map((node) => node.textContent?.trim())
+    if (!creditedRows.includes('2') || !creditedRows.includes('—')) {
+      throw new Error('Expected token detail logs to render both charged and uncharged credit values.')
+    }
+  },
+}
+
+export const TokenDetailMobileCredits: Story = {
+  name: 'Token Detail Mobile Credits',
+  args: {
+    consoleView: 'Token Detail',
+    isAdmin: false,
+    landingFocus: 'Overview Focus',
+    tokenDetailPreview: 'Overview',
+  },
+  globals: {
+    language: 'zh',
+  },
+  parameters: {
+    viewport: { defaultViewport: '0390-device-iphone-14' },
+    docs: {
+      description: {
+        story:
+          'Mobile token detail proof that recent request cards show charged credits without crowding status or error text.',
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 160))
+
+    const metaText = Array.from(canvasElement.querySelectorAll('.user-console-log-card-meta'))
+      .map((node) => node.textContent ?? '')
+      .join(' ')
+    if (!metaText.includes('积分 2') || !metaText.includes('积分 —')) {
+      throw new Error('Expected mobile token request cards to render charged and uncharged credit values.')
     }
   },
 }

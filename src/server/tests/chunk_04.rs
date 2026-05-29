@@ -1327,6 +1327,29 @@ colo=LAX
             .create_user_session(&user, 3600)
             .await
             .expect("create user session");
+        let pool = connect_sqlite_test_pool(&db_str).await;
+        sqlx::query(
+            r#"
+            INSERT INTO auth_token_logs (
+                token_id,
+                method,
+                path,
+                query,
+                http_status,
+                mcp_status,
+                business_credits,
+                billing_state,
+                result_status,
+                error_message,
+                created_at
+            ) VALUES (?, 'POST', '/mcp', NULL, 200, 200, 7, 'charged', 'success', NULL, ?)
+            "#,
+        )
+        .bind(&bound_token.id)
+        .bind(Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .expect("insert user token charged log");
         let proxy_for_test = proxy.clone();
 
         let mut oauth_options = linuxdo_oauth_options_for_test();
@@ -1588,6 +1611,16 @@ colo=LAX
             .await
             .expect("user token logs request");
         assert_eq!(token_logs_resp.status(), reqwest::StatusCode::OK);
+        let token_logs_body: serde_json::Value =
+            token_logs_resp.json().await.expect("user token logs json");
+        assert_eq!(
+            token_logs_body
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(|value| value.get("businessCredits"))
+                .and_then(|value| value.as_i64()),
+            Some(7)
+        );
 
         proxy_for_test
             .set_access_token_enabled(&bound_token.id, false)
@@ -1696,10 +1729,12 @@ colo=LAX
                 query,
                 http_status,
                 mcp_status,
+                business_credits,
+                billing_state,
                 result_status,
                 error_message,
                 created_at
-            ) VALUES (?, 'POST', '/mcp', 'q=health', 200, 200, 'success', NULL, ?)
+            ) VALUES (?, 'POST', '/mcp', 'q=health', 200, 200, 7, 'charged', 'success', NULL, ?)
             "#,
         )
         .bind(&bound_token.id)
@@ -1766,6 +1801,11 @@ colo=LAX
             Some(1),
             "initial snapshot should include the current recent logs",
         );
+        assert_eq!(
+            first_snapshot["logs"][0]["businessCredits"].as_i64(),
+            Some(7),
+            "initial snapshot should expose charged credits to the token owner",
+        );
 
         sqlx::query(
             r#"
@@ -1776,10 +1816,12 @@ colo=LAX
                 query,
                 http_status,
                 mcp_status,
+                business_credits,
+                billing_state,
                 result_status,
                 error_message,
                 created_at
-            ) VALUES (?, 'POST', '/api/tavily/search', 'q=live', 200, 200, 'success', NULL, ?)
+            ) VALUES (?, 'POST', '/api/tavily/search', 'q=live', 200, 200, 3, 'charged', 'success', NULL, ?)
             "#,
         )
         .bind(&bound_token.id)
@@ -1806,6 +1848,11 @@ colo=LAX
             refreshed_snapshot["logs"].as_array().map(Vec::len),
             Some(2),
             "refreshed snapshot should include the new token log",
+        );
+        assert_eq!(
+            refreshed_snapshot["logs"][0]["businessCredits"].as_i64(),
+            Some(3),
+            "refreshed snapshot should expose the latest charged credits",
         );
 
         let _ = std::fs::remove_file(db_path);
@@ -2747,6 +2794,7 @@ colo=LAX
         assert!(object.get("failureKind").is_none());
         assert!(object.get("keyEffectCode").is_none());
         assert!(object.get("keyEffectSummary").is_none());
+        assert!(object.get("businessCredits").is_none());
         assert!(
             object
                 .get("errorMessage")
