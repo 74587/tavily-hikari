@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn system_settings_default_api_rebalance_is_disabled_at_zero_percent() {
+async fn system_settings_safe_defaults_disable_rollouts() {
     let db_path = temp_db_path("system-settings-api-rebalance-defaults");
     let db_str = db_path.to_string_lossy().to_string();
 
@@ -10,6 +10,8 @@ async fn system_settings_default_api_rebalance_is_disabled_at_zero_percent() {
 
     assert!(!settings.api_rebalance_enabled);
     assert_eq!(settings.api_rebalance_percent, 0);
+    assert!(!settings.recharge_feature_enabled);
+    assert!(!settings.recharge_user_enabled);
 
     let _ = std::fs::remove_file(db_path);
 }

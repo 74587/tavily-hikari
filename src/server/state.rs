@@ -6,6 +6,7 @@ struct AppState {
     forward_auth_enabled: bool,
     builtin_admin: BuiltinAdminAuth,
     linuxdo_oauth: LinuxDoOAuthOptions,
+    linuxdo_credit: LinuxDoCreditOptions,
     dev_open_admin: bool,
     usage_base: String,
     api_key_ip_geo_origin: String,
@@ -25,6 +26,61 @@ pub struct AdminAuthOptions {
     pub builtin_auth_enabled: bool,
     pub builtin_auth_password: Option<String>,
     pub builtin_auth_password_hash: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LinuxDoCreditOptions {
+    pub enabled: bool,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub merchant_private_key: Option<String>,
+    pub submit_url: String,
+    pub notify_url: Option<String>,
+    pub return_url: Option<String>,
+    pub test_price_enabled: bool,
+}
+
+impl LinuxDoCreditOptions {
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            client_id: None,
+            client_secret: None,
+            merchant_private_key: None,
+            submit_url: "https://credit.linux.do/epay/pay/submit.php".to_string(),
+            notify_url: None,
+            return_url: None,
+            test_price_enabled: false,
+        }
+    }
+
+    fn is_enabled_and_configured(&self) -> bool {
+        self.enabled
+            && self
+                .client_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            && self
+                .client_secret
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            && self
+                .merchant_private_key
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+    }
+
+    pub(crate) fn price_config(&self) -> tavily_hikari::LinuxDoCreditRechargePriceConfig {
+        if self.test_price_enabled {
+            tavily_hikari::LinuxDoCreditRechargePriceConfig::test_price()
+        } else {
+            tavily_hikari::LinuxDoCreditRechargePriceConfig::normal()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

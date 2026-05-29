@@ -67,12 +67,62 @@ impl TavilyProxy {
         page: i64,
         per_page: i64,
     ) -> Result<(Vec<AuthToken>, i64), ProxyError> {
+        self.list_access_tokens_filtered_paged(page, per_page, AdminTokenListFilters::default())
+            .await
+    }
+
+    pub async fn list_access_tokens_filtered_paged(
+        &self,
+        page: i64,
+        per_page: i64,
+        filters: AdminTokenListFilters,
+    ) -> Result<(Vec<AuthToken>, i64), ProxyError> {
+        if filters.quota_state.is_some() {
+            let mut tokens = self.key_store.list_access_tokens_for_filters(&filters).await?;
+            self.populate_token_quota(&mut tokens).await?;
+            let quota_state = filters.quota_state.as_deref().unwrap_or("normal");
+            tokens.retain(|token| {
+                token
+                    .quota
+                    .as_ref()
+                    .map(|quota| quota.state_key())
+                    .unwrap_or("normal")
+                    == quota_state
+            });
+            let total = tokens.len() as i64;
+            let page = page.max(1);
+            let per_page = per_page.clamp(1, 200);
+            let start = ((page - 1) * per_page).max(0) as usize;
+            let end = start.saturating_add(per_page as usize).min(tokens.len());
+            let items = if start >= tokens.len() {
+                Vec::new()
+            } else {
+                tokens[start..end].to_vec()
+            };
+            return Ok((items, total));
+        }
+
         let (mut tokens, total) = self
             .key_store
-            .list_access_tokens_paged(page, per_page)
+            .list_access_tokens_filtered_paged(page, per_page, &filters)
             .await?;
         self.populate_token_quota(&mut tokens).await?;
         Ok((tokens, total))
+    }
+
+    pub async fn set_access_tokens_enabled(
+        &self,
+        ids: &[String],
+        enabled: bool,
+    ) -> Result<AdminTokenBatchMutationResult, ProxyError> {
+        self.key_store.set_access_tokens_enabled(ids, enabled).await
+    }
+
+    pub async fn delete_access_tokens(
+        &self,
+        ids: &[String],
+    ) -> Result<AdminTokenBatchMutationResult, ProxyError> {
+        self.key_store.delete_access_tokens(ids).await
     }
 
     pub(crate) async fn populate_token_quota(
@@ -531,6 +581,7 @@ impl TavilyProxy {
             monthly_success: 0,
             monthly_failure: 0,
             last_activity: None,
+            recharge: LinuxDoCreditRechargeSummary::default(),
         }))
     }
 
@@ -592,6 +643,14 @@ impl TavilyProxy {
             .key_store
             .fetch_account_monthly_counts(&deduped_user_ids, month_start)
             .await?;
+        let local_month_start = start_of_local_month_utc_ts(now.with_timezone(&Local));
+        let recharge_credits = self
+            .key_store
+            .sum_linuxdo_credit_recharge_entitlements_for_users(
+                &deduped_user_ids,
+                local_month_start,
+            )
+            .await?;
         let log_metrics = self
             .key_store
             .fetch_user_log_metrics_bulk(
@@ -609,6 +668,8 @@ impl TavilyProxy {
                     .get(&user_id)
                     .cloned()
                     .unwrap_or_else(|| default_limits.clone());
+                let recharge_credits = recharge_credits.get(&user_id).copied().unwrap_or(0);
+                let recharge_delta = linuxdo_credit_recharge_quota_delta(recharge_credits);
                 let metrics = log_metrics.get(&user_id).cloned().unwrap_or_default();
                 let request_rate =
                     request_rate_totals
@@ -633,6 +694,11 @@ impl TavilyProxy {
                         monthly_success: metrics.monthly_success,
                         monthly_failure: metrics.monthly_failure,
                         last_activity: metrics.last_activity,
+                        recharge: LinuxDoCreditRechargeSummary {
+                            current_month_start: local_month_start,
+                            current_month_entitlement_credits: recharge_delta.monthly_delta,
+                            effective_until_month_start: None,
+                        },
                     },
                 )
             })
@@ -1034,6 +1100,98 @@ impl TavilyProxy {
                 .map(to_admin_user_tag_binding)
                 .collect(),
         }))
+    }
+
+    pub async fn linuxdo_credit_recharge_summary(
+        &self,
+        user_id: &str,
+    ) -> Result<LinuxDoCreditRechargeSummary, ProxyError> {
+        self.key_store
+            .linuxdo_credit_recharge_summary_for_user(
+                user_id,
+                start_of_local_month_utc_ts(Local::now()),
+            )
+            .await
+    }
+
+    pub async fn linuxdo_credit_recharge_admin_audit(
+        &self,
+        user_id: &str,
+    ) -> Result<LinuxDoCreditRechargeAdminAudit, ProxyError> {
+        self.key_store
+            .linuxdo_credit_recharge_admin_audit(user_id, start_of_local_month_utc_ts(Local::now()))
+            .await
+    }
+
+    pub async fn create_linuxdo_credit_recharge_order(
+        &self,
+        order: &LinuxDoCreditRechargeOrder,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .create_linuxdo_credit_recharge_order(order)
+            .await
+    }
+
+    pub async fn set_linuxdo_credit_recharge_payment_url(
+        &self,
+        out_trade_no: &str,
+        payment_url: &str,
+        updated_at: i64,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .update_linuxdo_credit_recharge_order_payment_url(
+                out_trade_no,
+                payment_url,
+                updated_at,
+            )
+            .await
+    }
+
+    pub async fn fail_linuxdo_credit_recharge_order(
+        &self,
+        out_trade_no: &str,
+        message: &str,
+        updated_at: i64,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .mark_linuxdo_credit_recharge_order_failed(out_trade_no, message, updated_at)
+            .await
+    }
+
+    pub async fn get_linuxdo_credit_recharge_order(
+        &self,
+        out_trade_no: &str,
+    ) -> Result<Option<LinuxDoCreditRechargeOrder>, ProxyError> {
+        self.key_store
+            .fetch_linuxdo_credit_recharge_order(out_trade_no)
+            .await
+    }
+
+    pub async fn list_linuxdo_credit_recharge_orders(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<LinuxDoCreditRechargeOrder>, ProxyError> {
+        self.key_store
+            .list_linuxdo_credit_recharge_orders_for_user(user_id, limit)
+            .await
+    }
+
+    pub async fn apply_linuxdo_credit_recharge_payment(
+        &self,
+        out_trade_no: &str,
+        trade_no: &str,
+        notify_payload: &str,
+        paid_at: i64,
+    ) -> Result<LinuxDoCreditRechargeOrder, ProxyError> {
+        self.key_store
+            .apply_linuxdo_credit_recharge_payment(
+                out_trade_no,
+                trade_no,
+                notify_payload,
+                paid_at,
+            )
+            .await
     }
 
     /// Create persisted user session.

@@ -1,11 +1,14 @@
+mod admin_token_filters;
 mod analysis;
 mod forward_proxy;
+mod linuxdo_credit_recharge;
 mod models;
 mod store;
 mod tavily_proxy;
 #[cfg(test)]
 mod tests;
 
+pub use admin_token_filters::*;
 pub use analysis::{
     analyze_http_attempt, analyze_mcp_attempt, canonical_request_kind_key_for_filter,
     canonicalize_request_log_request_kind, classify_token_request_kind,
@@ -28,6 +31,7 @@ pub use forward_proxy::{
     ForwardProxyValidationProbeResult, ForwardProxyValidationResponse,
     ForwardProxyWeightHourlyBucketResponse,
 };
+pub use linuxdo_credit_recharge::*;
 pub use models::*;
 pub use tavily_proxy::*;
 
@@ -639,6 +643,8 @@ const META_KEY_ACCOUNT_USAGE_ROLLUP_QUOTA_MONTH_COVERAGE_START: &str =
     "account_usage_rollup_quota_month_coverage_start";
 const META_KEY_ACCOUNT_LIMIT_SNAPSHOT_BACKFILL_V1: &str = "account_limit_snapshot_backfill_v1";
 const META_KEY_ALLOW_REGISTRATION_V1: &str = "allow_registration_v1";
+const META_KEY_RECHARGE_FEATURE_ENABLED_V1: &str = "recharge_feature_enabled_v1";
+const META_KEY_RECHARGE_USER_ENABLED_V1: &str = "recharge_user_enabled_v1";
 const META_KEY_REQUEST_RATE_LIMIT_V1: &str = "request_rate_limit_v1";
 const META_KEY_MCP_SESSION_AFFINITY_KEY_COUNT_V1: &str = "mcp_session_affinity_key_count_v1";
 const META_KEY_REBALANCE_MCP_ENABLED_V1: &str = "rebalance_mcp_enabled_v1";
@@ -1483,9 +1489,22 @@ fn to_admin_quota_breakdown_entry(
     }
 }
 
+#[cfg(test)]
 fn build_account_quota_resolution(
     base: AccountQuotaLimits,
     tags: Vec<UserTagBindingRecord>,
+) -> AccountQuotaResolution {
+    build_account_quota_resolution_with_recharge(
+        base,
+        tags,
+        LinuxDoCreditRechargeQuotaDelta::default(),
+    )
+}
+
+fn build_account_quota_resolution_with_recharge(
+    base: AccountQuotaLimits,
+    tags: Vec<UserTagBindingRecord>,
+    recharge_delta: LinuxDoCreditRechargeQuotaDelta,
 ) -> AccountQuotaResolution {
     let mut effective = base.clone();
     let mut breakdown = vec![AccountQuotaBreakdownRecord {
@@ -1528,6 +1547,27 @@ fn build_account_quota_resolution(
         effective.daily_limit = apply_quota_delta(effective.daily_limit, binding.tag.daily_delta);
         effective.monthly_limit =
             apply_quota_delta(effective.monthly_limit, binding.tag.monthly_delta);
+    }
+
+    if recharge_delta.monthly_delta > 0 {
+        breakdown.push(AccountQuotaBreakdownRecord {
+            kind: "recharge".to_string(),
+            label: "linuxdo_credit_recharge".to_string(),
+            tag_id: None,
+            tag_name: None,
+            source: Some("linuxdo_credit".to_string()),
+            effect_kind: "quota_delta".to_string(),
+            hourly_any_delta: 0,
+            hourly_delta: recharge_delta.hourly_delta,
+            daily_delta: recharge_delta.daily_delta,
+            monthly_delta: recharge_delta.monthly_delta,
+        });
+        effective.hourly_limit =
+            apply_quota_delta(effective.hourly_limit, recharge_delta.hourly_delta);
+        effective.daily_limit =
+            apply_quota_delta(effective.daily_limit, recharge_delta.daily_delta);
+        effective.monthly_limit =
+            apply_quota_delta(effective.monthly_limit, recharge_delta.monthly_delta);
     }
 
     effective = if block_all {

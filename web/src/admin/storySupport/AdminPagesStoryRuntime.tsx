@@ -3217,6 +3217,7 @@ function buildNavItems(strings: AdminTranslations): AdminNavItem[] {
 interface AdminPageFrameProps {
   activeModule: AdminNavTarget
   children: ReactNode
+  introActions?: ReactNode
   overlays?: ReactNode
   showDefaultShellChrome?: boolean
   actions?: ReactNode
@@ -3228,8 +3229,10 @@ function AdminPageFrame({
   overlays,
   showDefaultShellChrome = true,
   actions,
+  introActions,
 }: AdminPageFrameProps): JSX.Element {
   const admin = useTranslate().admin
+  const headerActions = actions ?? introActions
   const intro = (() => {
     switch (activeModule) {
       case 'dashboard':
@@ -3352,7 +3355,7 @@ function AdminPageFrame({
               />
             </div>
             <div className="admin-desktop-only">
-              <AdminCompactIntro title={intro.title} description={intro.description} actions={actions} />
+              <AdminCompactIntro title={intro.title} description={intro.description} actions={headerActions} />
             </div>
           </>
         )}
@@ -3593,62 +3596,63 @@ function DashboardPageCanvas(): JSX.Element {
 function TokensPageCanvas(): JSX.Element {
   const admin = useTranslate().admin
   const tokenStrings = admin.tokens
+  const tokenToolbar = (
+    <div className="admin-module-toolbar admin-module-toolbar--tokens">
+      <button
+        type="button"
+        className="btn btn-outline admin-token-toolbar-secondary-action"
+        aria-label={tokenStrings.actions.viewLeaderboard}
+      >
+        <Icon icon="mdi:chart-timeline-variant" width={16} height={16} aria-hidden="true" />
+        <span>{tokenStrings.actions.viewLeaderboard}</span>
+      </button>
+      <div className="admin-module-toolbar-actions admin-module-toolbar-actions--tokens">
+        <input
+          type="text"
+          className="input input-bordered"
+          readOnly
+          value="marketing-ab-test"
+          aria-label={tokenStrings.notePlaceholder}
+        />
+        <button type="button" className="btn btn-primary">
+          {tokenStrings.newToken}
+        </button>
+        <button type="button" className="btn btn-outline">
+          {tokenStrings.batchCreate}
+        </button>
+      </div>
+    </div>
+  )
 
   return (
-    <AdminPageFrame activeModule="tokens">
+    <AdminPageFrame activeModule="tokens" introActions={tokenToolbar}>
       <section className="surface panel">
-        <div className="panel-header" style={{ flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' }}>
-          <div style={{ flex: '1 1 320px', minWidth: 240 }}>
-            <h2 style={{ margin: 0 }}>{tokenStrings.title}</h2>
-            <p className="panel-description">{tokenStrings.description}</p>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginLeft: 'auto' }}>
-            <input
-              type="text"
-              className="input input-bordered"
-              readOnly
-              value="marketing-ab-test"
-              aria-label={tokenStrings.notePlaceholder}
-            />
-            <button type="button" className="btn btn-primary">
-              {tokenStrings.newToken}
-            </button>
-            <button type="button" className="btn btn-outline">
-              {tokenStrings.batchCreate}
-            </button>
-          </div>
+        <div className="admin-stacked-only">
+          {tokenToolbar}
         </div>
-
-        <div className="token-groups-container">
-          <div className="token-groups-label">
-            <span>{tokenStrings.groups.label}</span>
+        <div className="token-filters-bar">
+          <div className="token-filter-search">
+            <input type="text" className="input input-bordered" readOnly value="legacy" aria-label={tokenStrings.filters.searchPlaceholder} />
+            <button type="button" className="btn btn-outline btn-sm">
+              <Icon icon="mdi:filter-outline" width={16} height={16} aria-hidden="true" />
+              {tokenStrings.filters.search}
+            </button>
           </div>
-          <div className="token-groups-row">
-            <div className="token-groups-list token-groups-list-expanded">
-              <button type="button" className="token-group-chip token-group-chip-active">
-                <span className="token-group-name">{tokenStrings.groups.all}</span>
-              </button>
-              <button type="button" className="token-group-chip">
-                <span className="token-group-name">production</span>
-                <span className="token-group-count">2</span>
-              </button>
-              <button type="button" className="token-group-chip">
-                <span className="token-group-name">ops</span>
-                <span className="token-group-count">2</span>
-              </button>
-              <button type="button" className="token-group-chip">
-                <span className="token-group-name">batch</span>
-                <span className="token-group-count">1</span>
-              </button>
-            </div>
-          </div>
+          {[
+            `${tokenStrings.groups.label}: legacy`,
+            `${tokenStrings.filters.owner}: ${tokenStrings.filters.ownerUnbound}`,
+            `${tokenStrings.filters.quota}: ${tokenStrings.filters.quotaAll}`,
+            `${tokenStrings.filters.status}: ${tokenStrings.filters.statusFrozen}`,
+          ].map((label) => <button key={label} type="button" className="btn btn-outline btn-sm token-filter-select">{label}</button>)}
+          <button type="button" className="btn btn-ghost btn-sm">{tokenStrings.filters.clear}</button>
         </div>
 
         <div className="table-wrapper jobs-table-wrapper admin-users-usage-table-wrapper">
           <table className="jobs-table tokens-table">
             <thead>
               <tr>
-                <th>{tokenStrings.table.id}</th>
+                <th className="token-select-col"><input type="checkbox" className="token-selection-checkbox" checked readOnly aria-label="selected page" /></th>
+                <th className="token-id-col">{tokenStrings.table.id}</th>
                 <th>{tokenStrings.table.owner}</th>
                 <th>{tokenStrings.table.note}</th>
                 <th>{tokenStrings.table.usage}</th>
@@ -3660,22 +3664,13 @@ function TokensPageCanvas(): JSX.Element {
             <tbody>
               {MOCK_TOKENS.map((token) => (
                 <tr key={token.id}>
-                  <td>
+                  <td className="token-select-col"><input type="checkbox" className="token-selection-checkbox" checked={token.id === 'Lt2R' || token.id === 'Q4sE'} readOnly aria-label={token.id} /></td>
+                  <td className="token-id-col">
                     <div className="token-id-cell">
                       <code className="token-id-code">{token.id}</code>
-                      <span
-                        className="token-status-slot"
-                        aria-hidden={token.enabled ? true : undefined}
-                        title={token.enabled ? undefined : tokenStrings.statusBadges.disabled}
-                      >
+                      <span className="token-status-slot" aria-hidden={token.enabled ? true : undefined} title={token.enabled ? undefined : tokenStrings.statusBadges.disabled}>
                         {!token.enabled && (
-                          <Icon
-                            className="token-status-icon"
-                            icon="mdi:pause-circle-outline"
-                            width={14}
-                            height={14}
-                            aria-label={tokenStrings.statusBadges.disabled}
-                          />
+                          <Icon className="token-status-icon" icon="mdi:pause-circle-outline" width={14} height={14} aria-label={tokenStrings.statusBadges.disabled} />
                         )}
                       </span>
                     </div>
@@ -3724,12 +3719,28 @@ function TokensPageCanvas(): JSX.Element {
         <div className="table-pagination">
           <span className="panel-description">{tokenStrings.pagination.page.replace('{page}', '1').replace('{total}', '3')}</span>
           <div style={{ display: 'inline-flex', gap: 8 }}>
-            <button type="button" className="btn btn-outline">
-              {tokenStrings.pagination.prev}
-            </button>
-            <button type="button" className="btn btn-outline">
-              {tokenStrings.pagination.next}
-            </button>
+            <button type="button" className="btn btn-outline">{tokenStrings.pagination.prev}</button>
+            <button type="button" className="btn btn-outline">{tokenStrings.pagination.next}</button>
+          </div>
+        </div>
+        <div className="token-bulk-action-panel" role="region" aria-live="polite">
+          <div className="token-bulk-action-summary">
+            <strong>{tokenStrings.bulk.selected.replace('{count}', '2')}</strong>
+            <span>{tokenStrings.bulk.pageSelected.replace('{count}', '2').replace('{total}', String(MOCK_TOKENS.length))}</span>
+            <span className="token-bulk-feedback">{tokenStrings.bulk.result.replace('{updated}', '2')}</span>
+          </div>
+          <div className="token-bulk-action-buttons">
+            {[
+              ['mdi:play-circle-outline', tokenStrings.bulk.activate, 'btn-outline token-bulk-secondary-action'],
+              ['mdi:pause-circle-outline', tokenStrings.bulk.freeze, 'btn-outline token-bulk-secondary-action'],
+              ['mdi:trash-outline', tokenStrings.bulk.delete, 'btn-error token-bulk-delete-action'],
+            ].map(([icon, label, variant]) => (
+              <button key={label} type="button" className={`btn ${variant} btn-sm`}>
+                <Icon icon={icon} width={16} height={16} aria-hidden="true" />
+                {label}
+              </button>
+            ))}
+            <button type="button" className="btn btn-ghost btn-sm token-bulk-clear-action">{tokenStrings.bulk.clear}</button>
           </div>
         </div>
       </section>
@@ -6336,6 +6347,8 @@ function SystemSettingsPageCanvas(): JSX.Element {
           rebalanceMcpSessionPercent: 100,
           apiRebalanceEnabled: false,
           apiRebalancePercent: 0,
+          rechargeFeatureEnabled: true,
+          rechargeUserEnabled: true,
           userBlockedKeyBaseLimit: 5,
           globalIpLimit: 5,
           trustedProxyCidrs: ["127.0.0.0/8", "::1/128"],

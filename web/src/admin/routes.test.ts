@@ -69,6 +69,15 @@ describe('admin user tag routes', () => {
     expect(tokenDetailPath('tok 42', 'ops', 2, 'quotaMonthlyUsed', 'asc', 'unbound-usage')).toBe(
       '/admin/tokens/tok%2042?q=ops&page=2&sort=quotaMonthlyUsed&order=asc&view=unbound-usage',
     )
+    expect(tokenDetailPath('tok 42', undefined, undefined, undefined, undefined, 'tokens', {
+      query: 'legacy',
+      group: 'ops',
+      owner: 'bound',
+      enabled: 'frozen',
+      quotaState: 'day',
+      page: 3,
+      perPage: 50,
+    })).toBe('/admin/tokens/tok%2042?q=legacy&group=ops&owner=bound&enabled=frozen&quota_state=day&page=3&perPage=50')
     expect(userTagCreatePath()).toBe('/admin/users/tags/new')
     expect(userTagEditPath('linuxdo l2')).toBe('/admin/users/tags/linuxdo%20l2')
     expect(announcementListPath()).toBe('/admin/announcements')

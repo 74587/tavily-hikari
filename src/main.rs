@@ -179,6 +179,50 @@ struct Cli {
     /// One-time OAuth login state TTL.
     #[arg(long, env = "OAUTH_LOGIN_STATE_TTL_SECS", default_value_t = 600)]
     oauth_login_state_ttl_secs: i64,
+
+    /// Enable LinuxDo Credit recharge payment flow.
+    #[arg(long, env = "LINUXDO_CREDIT_ENABLED", default_value_t = false)]
+    linuxdo_credit_enabled: bool,
+
+    /// LinuxDo Credit application client id.
+    #[arg(long, env = "LINUXDO_CREDIT_CLIENT_ID")]
+    linuxdo_credit_client_id: Option<String>,
+
+    /// LinuxDo Credit application client secret.
+    #[arg(long, env = "LINUXDO_CREDIT_CLIENT_SECRET", hide_env_values = true)]
+    linuxdo_credit_client_secret: Option<String>,
+
+    /// Ed25519 merchant private key for LinuxDo Credit LDC signing.
+    #[arg(
+        long,
+        env = "LINUXDO_CREDIT_MERCHANT_PRIVATE_KEY",
+        hide_env_values = true
+    )]
+    linuxdo_credit_merchant_private_key: Option<String>,
+
+    /// LinuxDo Credit LDC submit endpoint.
+    #[arg(
+        long,
+        env = "LINUXDO_CREDIT_SUBMIT_URL",
+        default_value = "https://credit.linux.do/epay/pay/submit.php"
+    )]
+    linuxdo_credit_submit_url: String,
+
+    /// Optional order-level LinuxDo Credit notify URL.
+    #[arg(long, env = "LINUXDO_CREDIT_NOTIFY_URL")]
+    linuxdo_credit_notify_url: Option<String>,
+
+    /// Optional order-level LinuxDo Credit return URL.
+    #[arg(long, env = "LINUXDO_CREDIT_RETURN_URL")]
+    linuxdo_credit_return_url: Option<String>,
+
+    /// Enable test pricing: 1 LDC buys 1 monthly credit.
+    #[arg(
+        long,
+        env = "LINUXDO_CREDIT_TEST_PRICE_ENABLED",
+        default_value_t = false
+    )]
+    linuxdo_credit_test_price_enabled: bool,
 }
 
 #[tokio::main]
@@ -340,6 +384,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_max_age_secs: cli.user_session_max_age_secs.max(60),
         login_state_ttl_secs: cli.oauth_login_state_ttl_secs.max(60),
     };
+    let linuxdo_credit = server::LinuxDoCreditOptions {
+        enabled: cli.linuxdo_credit_enabled,
+        client_id: cli
+            .linuxdo_credit_client_id
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        client_secret: cli
+            .linuxdo_credit_client_secret
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        merchant_private_key: cli
+            .linuxdo_credit_merchant_private_key
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        submit_url: cli.linuxdo_credit_submit_url.trim().to_string(),
+        notify_url: cli
+            .linuxdo_credit_notify_url
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        return_url: cli
+            .linuxdo_credit_return_url
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        test_price_enabled: cli.linuxdo_credit_test_price_enabled,
+    };
 
     let static_dir = cli.static_dir.or_else(|| {
         let default = PathBuf::from("web/dist");
@@ -360,6 +429,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.usage_base,
         cli.api_key_ip_geo_origin,
         linuxdo_oauth,
+        linuxdo_credit,
     )
     .await?;
 

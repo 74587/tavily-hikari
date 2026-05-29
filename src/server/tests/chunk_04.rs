@@ -379,6 +379,7 @@ colo=LAX
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: format!("http://{geo_addr}/geo"),
@@ -479,6 +480,7 @@ colo=LAX
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "http://127.0.0.1:9/geo".to_string(),
@@ -574,6 +576,7 @@ colo=LAX
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "http://127.0.0.1:9/geo".to_string(),
@@ -662,6 +665,7 @@ colo=LAX
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: format!("http://{geo_addr}/geo"),
@@ -1672,6 +1676,163 @@ colo=LAX
     }
 
     #[tokio::test]
+    async fn user_recharge_default_switches_hide_config_and_reject_orders() {
+        let db_path = temp_db_path("linuxdo-recharge-default-off");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-recharge-default-user".to_string(),
+                username: Some("default_user".to_string()),
+                name: Some("Default User".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(2),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert oauth user");
+        let session = proxy
+            .create_user_session(&user, 3600)
+            .await
+            .expect("create user session");
+
+        let addr =
+            spawn_user_oauth_recharge_server(proxy.clone(), linuxdo_credit_options_for_test(), true)
+                .await;
+        let client = Client::new();
+        let user_cookie = format!("{USER_SESSION_COOKIE_NAME}={}", session.token);
+        let config_resp = client
+            .get(format!("http://{addr}/api/user/recharge/config"))
+            .header(reqwest::header::COOKIE, user_cookie.clone())
+            .send()
+            .await
+            .expect("recharge config request");
+        assert_eq!(config_resp.status(), reqwest::StatusCode::OK);
+        let config_body: serde_json::Value =
+            config_resp.json().await.expect("recharge config json");
+        assert_eq!(config_body.get("visible"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(config_body.get("enabled"), Some(&serde_json::Value::Bool(false)));
+
+        let order_resp = client
+            .post(format!("http://{addr}/api/user/recharge/orders"))
+            .header(reqwest::header::COOKIE, user_cookie)
+            .json(&serde_json::json!({ "credits": 1, "months": 1 }))
+            .send()
+            .await
+            .expect("create recharge order request");
+        assert_eq!(order_resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn user_recharge_non_admin_switch_keeps_admin_preview_enabled() {
+        let db_path = temp_db_path("linuxdo-recharge-user-off");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let user = proxy
+            .upsert_oauth_account(&OAuthAccountProfile {
+                provider: "linuxdo".to_string(),
+                provider_user_id: "linuxdo-recharge-admin-preview".to_string(),
+                username: Some("admin_preview".to_string()),
+                name: Some("Admin Preview".to_string()),
+                avatar_template: None,
+                active: true,
+                trust_level: Some(3),
+                raw_payload_json: None,
+            })
+            .await
+            .expect("upsert oauth user");
+        let session = proxy
+            .create_user_session(&user, 3600)
+            .await
+            .expect("create user session");
+        let mut settings = proxy
+            .get_system_settings()
+            .await
+            .expect("load system settings");
+        settings.recharge_feature_enabled = true;
+        settings.recharge_user_enabled = false;
+        proxy
+            .set_system_settings(&settings)
+            .await
+            .expect("disable non-admin recharge");
+
+        let client = Client::new();
+        let user_cookie = format!("{USER_SESSION_COOKIE_NAME}={}", session.token);
+        let non_admin_addr = spawn_user_oauth_recharge_server(
+            proxy.clone(),
+            linuxdo_credit_options_for_test(),
+            false,
+        )
+        .await;
+        let non_admin_config = client
+            .get(format!("http://{non_admin_addr}/api/user/recharge/config"))
+            .header(reqwest::header::COOKIE, user_cookie.clone())
+            .send()
+            .await
+            .expect("non-admin recharge config request");
+        assert_eq!(non_admin_config.status(), reqwest::StatusCode::OK);
+        let non_admin_body: serde_json::Value =
+            non_admin_config.json().await.expect("non-admin config json");
+        assert_eq!(
+            non_admin_body.get("visible"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            non_admin_body.get("enabled"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        let non_admin_order = client
+            .post(format!("http://{non_admin_addr}/api/user/recharge/orders"))
+            .header(reqwest::header::COOKIE, user_cookie.clone())
+            .json(&serde_json::json!({ "credits": 1, "months": 1 }))
+            .send()
+            .await
+            .expect("non-admin create recharge order request");
+        assert_eq!(
+            non_admin_order.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let admin_addr =
+            spawn_user_oauth_recharge_server(proxy.clone(), linuxdo_credit_options_for_test(), true)
+                .await;
+        let admin_config = client
+            .get(format!("http://{admin_addr}/api/user/recharge/config"))
+            .header(reqwest::header::COOKIE, user_cookie)
+            .send()
+            .await
+            .expect("admin recharge config request");
+        assert_eq!(admin_config.status(), reqwest::StatusCode::OK);
+        let admin_body: serde_json::Value =
+            admin_config.json().await.expect("admin config json");
+        assert_eq!(admin_body.get("visible"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(admin_body.get("enabled"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(admin_body.get("unitPriceLdc").and_then(|v| v.as_i64()), Some(50));
+        assert_eq!(
+            admin_body
+                .get("hourlyDeltaPerQuotaUnit")
+                .and_then(|v| v.as_i64()),
+            Some(20)
+        );
+        assert_eq!(
+            admin_body
+                .get("dailyDeltaPerQuotaUnit")
+                .and_then(|v| v.as_i64()),
+            Some(100)
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn user_token_events_stream_snapshot_and_enforce_owner_scope() {
         let db_path = temp_db_path("linuxdo-user-token-events");
         let db_str = db_path.to_string_lossy().to_string();
@@ -1999,6 +2160,7 @@ colo=LAX
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: linuxdo_oauth_options_for_test(),
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
@@ -2484,6 +2646,7 @@ colo=LAX
             forward_auth_enabled: false,
             builtin_admin: BuiltinAdminAuth::new(false, None, None),
             linuxdo_oauth: oauth_options,
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),

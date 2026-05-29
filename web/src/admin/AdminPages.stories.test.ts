@@ -97,6 +97,30 @@ describe('AdminPages Storybook proofs', () => {
     expect(markup).not.toContain('10 页')
   })
 
+  it('keeps the tokens story title and creation toolbar on the shell chrome', () => {
+    const renderStory = adminPageStories.Tokens.render as (() => JSX.Element) | undefined
+    expect(renderStory).toBeDefined()
+
+    const markup = renderToStaticMarkup(
+      createElement(
+        LanguageProvider,
+        { initialLanguage: 'en' },
+        createElement(ThemeProvider, null, createElement(TooltipProvider, null, createElement(renderStory!))),
+      ),
+    )
+
+    const accessTokenHeadings = markup.match(/<h1[^>]*>Access Tokens<\/h1>/g) ?? []
+    const panelAccessTokenHeadings = markup.match(/<h2[^>]*>Access Tokens<\/h2>/g) ?? []
+    const tokenToolbars = markup.match(/admin-module-toolbar admin-module-toolbar--tokens/g) ?? []
+
+    expect(accessTokenHeadings).toHaveLength(1)
+    expect(panelAccessTokenHeadings).toHaveLength(0)
+    expect(tokenToolbars).toHaveLength(2)
+    expect(markup).toContain('View unbound token usage')
+    expect(markup).toContain('New Token')
+    expect(markup).toContain('Batch Create')
+  })
+
   it('renders user tables with one sortable 7-day IP count column', () => {
     const renderUsersStory = adminPageStories.Users.render as (() => JSX.Element) | undefined
     const renderUsageStory = adminPageStories.UsersUsage.render as (() => JSX.Element) | undefined

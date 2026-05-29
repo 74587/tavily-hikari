@@ -29,6 +29,7 @@ mod admin_resources_tests {
             monthly_success: 0,
             monthly_failure: 0,
             last_activity: None,
+            recharge: tavily_hikari::LinuxDoCreditRechargeSummary::default(),
         }
     }
 

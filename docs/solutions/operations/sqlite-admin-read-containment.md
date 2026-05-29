@@ -12,6 +12,7 @@ status: active
 related_specs:
   - docs/specs/ev4td-admin-recent-requests-performance-copy/SPEC.md
   - docs/specs/66t8u-admin-dashboard-overview-performance/SPEC.md
+  - docs/specs/urk9j-admin-token-bulk-filters/SPEC.md
 ---
 
 # SQLite admin read containment

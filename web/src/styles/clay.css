@@ -366,20 +366,49 @@
 
   .admin-compact-intro-actions .admin-module-toolbar--tokens {
     flex-wrap: nowrap;
+    gap: 0.5rem;
   }
 
   .admin-compact-intro-actions .admin-module-toolbar--tokens .admin-token-toolbar-secondary-action {
     flex: 0 0 auto;
+    min-height: 2.35rem;
+    opacity: 0.82;
+    white-space: nowrap;
   }
 
   .admin-compact-intro-actions .admin-module-toolbar-actions--tokens {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     flex-wrap: nowrap;
+    gap: 0.45rem;
   }
 
   .admin-compact-intro-actions .admin-module-toolbar-actions--tokens input {
     width: clamp(12rem, 18vw, 22rem);
     min-width: 12rem;
+  }
+
+  .admin-compact-intro-actions .admin-module-toolbar-actions--tokens button {
+    flex: 0 0 auto;
+    min-height: 2.35rem;
+    white-space: nowrap;
+  }
+
+  @media (min-width: 1101px) and (max-width: 1260px) {
+    .admin-compact-intro-actions .admin-module-toolbar--tokens .admin-token-toolbar-secondary-action {
+      width: 2.5rem;
+      min-width: 2.5rem;
+      padding-inline: 0;
+      justify-content: center;
+    }
+
+    .admin-compact-intro-actions .admin-module-toolbar--tokens .admin-token-toolbar-secondary-action span {
+      display: none;
+    }
+
+    .admin-compact-intro-actions .admin-module-toolbar-actions--tokens input {
+      width: 6.75rem;
+      min-width: 6.75rem;
+    }
   }
 
   .admin-module-toolbar--keys {

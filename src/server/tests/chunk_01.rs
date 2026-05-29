@@ -4,7 +4,7 @@
     use axum::extract::{Form, Json, Query, State};
     use axum::http::{HeaderMap, Method, Uri};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::{any, get, patch, post};
+    use axum::routing::{any, delete, get, patch, post};
     use bytes::Bytes;
     use nanoid::nanoid;
     use reqwest::Client;
@@ -2422,4 +2422,3 @@
         });
         (addr, hits)
     }
-

@@ -25,9 +25,11 @@ use axum::{
     response::{Json, Redirect},
     routing::{any, delete, get, patch, post, put},
 };
+use base64::Engine as _;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone, Utc};
 use futures_util::stream as futures_stream;
 use futures_util::{Stream, StreamExt};
+use nanoid::nanoid;
 use rand::Rng;
 use reqwest::header::{HeaderMap as ReqHeaderMap, HeaderValue as ReqHeaderValue};
 use serde::{Deserialize, Serialize};
@@ -56,7 +58,8 @@ struct SummarySig {
 }
 use std::time::{Duration, Instant};
 use tavily_hikari::{
-    AdminUserIdentity, AdminUserUsageSeriesKind, ApiKeyMetrics, ApiKeyStickyNode, ApiKeyStickyUser,
+    AdminTokenEnabledFilter, AdminTokenListFilters, AdminTokenOwnerFilter, AdminUserIdentity,
+    AdminUserUsageSeriesKind, ApiKeyMetrics, ApiKeyStickyNode, ApiKeyStickyUser,
     ApiKeyUserUsageBucket, AuthToken, ClientIpInfo, ForwardProxyHourlyBucketResponse,
     ForwardProxyStatsResponse, ForwardProxyWeightHourlyBucketResponse, JobLog, LogFacetOption,
     OAuthAccountProfile, PendingBillingSettleOutcome, ProxyError, ProxyRequest, ProxyResponse,

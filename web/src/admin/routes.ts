@@ -1,8 +1,27 @@
-import type { AdminUnboundTokenUsageSortField, AdminUsersSortField, SortDirection } from '../api'
+import type {
+  AdminTokenEnabledFilter,
+  AdminTokenOwnerFilter,
+  AdminTokenQuotaStateFilter,
+  AdminUnboundTokenUsageSortField,
+  AdminUsersSortField,
+  SortDirection,
+} from '../api'
 
 export type AdminUsersCollectionView = 'users' | 'usage'
 export type AdminTokensCollectionView = 'tokens' | 'unbound-usage'
 export type AlertsCenterView = 'events' | 'groups'
+
+export interface AdminTokensListContext {
+  query?: string | null
+  group?: string | null
+  noGroup?: boolean | null
+  owner?: AdminTokenOwnerFilter | null
+  enabled?: AdminTokenEnabledFilter | null
+  quotaState?: AdminTokenQuotaStateFilter | null
+  page?: number | null
+  perPage?: number | null
+  resetSelection?: boolean | null
+}
 
 export type AdminModuleId =
   | 'dashboard'
@@ -32,6 +51,16 @@ export type AdminPathRoute =
 
 const ADMIN_BASE = '/admin'
 const DEFAULT_KEYS_PER_PAGE = 20
+const DEFAULT_TOKENS_PER_PAGE = 20
+const TOKEN_PER_PAGE_OPTIONS = [20, 50, 100, 200] as const
+
+function normalizeTokenPerPage(value?: number | null): number {
+  if (!Number.isFinite(value)) return DEFAULT_TOKENS_PER_PAGE
+  const parsed = Math.trunc(value as number)
+  return TOKEN_PER_PAGE_OPTIONS.includes(parsed as (typeof TOKEN_PER_PAGE_OPTIONS)[number])
+    ? parsed
+    : DEFAULT_TOKENS_PER_PAGE
+}
 
 function normalize(pathname: string): string {
   if (!pathname) return ADMIN_BASE
@@ -270,21 +299,53 @@ function appendTokensContext(
   sort?: AdminUnboundTokenUsageSortField | null,
   order?: SortDirection | null,
   collection?: AdminTokensCollectionView | null,
+  listContext?: AdminTokensListContext | null,
 ): string {
   const params = new URLSearchParams()
   const normalizedQuery = query?.trim()
   const normalizedPage = Number.isFinite(page) ? Math.max(1, Math.trunc(page as number)) : 1
-  if (normalizedQuery) params.set('q', normalizedQuery)
-  if (normalizedPage > 1) params.set('page', String(normalizedPage))
-  if (sort) {
-    params.set('sort', sort)
-    params.set('order', order ?? 'desc')
-  }
   if (collection === 'unbound-usage') {
+    if (normalizedQuery) params.set('q', normalizedQuery)
+    if (normalizedPage > 1) params.set('page', String(normalizedPage))
+    if (sort) {
+      params.set('sort', sort)
+      params.set('order', order ?? 'desc')
+    }
     params.set('view', 'unbound-usage')
+  } else {
+    appendTokenListParams(params, listContext ?? { query, page })
   }
   const search = params.toString()
   return search ? `${path}?${search}` : path
+}
+
+function appendTokenListParams(params: URLSearchParams, context?: AdminTokensListContext | null): void {
+  const normalizedQuery = context?.query?.trim()
+  const normalizedGroup = context?.group?.trim()
+  const normalizedPage = Number.isFinite(context?.page) ? Math.max(1, Math.trunc(context?.page as number)) : 1
+  const normalizedPerPage = normalizeTokenPerPage(context?.perPage)
+  if (normalizedQuery) params.set('q', normalizedQuery)
+  if (context?.noGroup) {
+    params.set('no_group', 'true')
+  } else if (normalizedGroup) {
+    params.set('group', normalizedGroup)
+  }
+  if (context?.owner && context.owner !== 'all') params.set('owner', context.owner)
+  if (context?.enabled && context.enabled !== 'all') params.set('enabled', context.enabled)
+  if (context?.quotaState && context.quotaState !== 'all') params.set('quota_state', context.quotaState)
+  if (normalizedPage > 1) params.set('page', String(normalizedPage))
+  if (normalizedPerPage !== DEFAULT_TOKENS_PER_PAGE) params.set('perPage', String(normalizedPerPage))
+}
+
+function appendTokenListContext(path: string, context?: AdminTokensListContext | null): string {
+  const params = new URLSearchParams()
+  appendTokenListParams(params, context)
+  const search = params.toString()
+  return search ? `${path}?${search}` : path
+}
+
+export function buildAdminTokensPath(context?: AdminTokensListContext | null): string {
+  return appendTokenListContext(`${ADMIN_BASE}/tokens`, context)
 }
 
 export function tokenDetailPath(
@@ -294,6 +355,7 @@ export function tokenDetailPath(
   sort?: AdminUnboundTokenUsageSortField | null,
   order?: SortDirection | null,
   collection?: AdminTokensCollectionView | null,
+  listContext?: AdminTokensListContext | null,
 ): string {
   return appendTokensContext(
     `${ADMIN_BASE}/tokens/${encodeURIComponent(id)}`,
@@ -302,6 +364,7 @@ export function tokenDetailPath(
     sort,
     order,
     collection,
+    listContext,
   )
 }
 

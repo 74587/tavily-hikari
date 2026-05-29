@@ -749,6 +749,14 @@ async fn get_user_detail(
             monthly_success,
         });
     }
+    let recharge = state
+        .proxy
+        .linuxdo_credit_recharge_admin_audit(&user.user_id)
+        .await
+        .map_err(|err| {
+            eprintln!("get admin user recharge audit error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(AdminUserDetailView {
         user_id: user.user_id,
@@ -795,6 +803,20 @@ async fn get_user_detail(
             .iter()
             .map(build_admin_quota_breakdown_view)
             .collect(),
+        recharge: AdminUserRechargeAuditView {
+            current_month_entitlement_credits: recharge.current_month_entitlement_credits,
+            effective_until_month_start: recharge.effective_until_month_start,
+            orders: recharge
+                .orders
+                .into_iter()
+                .map(build_admin_user_recharge_order_view)
+                .collect(),
+            entitlements: recharge
+                .entitlements
+                .into_iter()
+                .map(build_admin_user_recharge_entitlement_view)
+                .collect(),
+        },
         tokens: token_items,
     }))
 }
@@ -1005,6 +1027,10 @@ struct ListTokensQuery {
     per_page: Option<i64>,
     group: Option<String>,
     no_group: Option<bool>,
+    q: Option<String>,
+    owner: Option<String>,
+    quota_state: Option<String>,
+    enabled: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1014,6 +1040,59 @@ struct ListTokensResponse {
     total: i64,
     page: i64,
     per_page: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchTokenIdsRequest {
+    ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchTokenStatusRequest {
+    ids: Vec<String>,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchTokenMutationResponse {
+    updated: i64,
+    missing: Vec<String>,
+}
+
+fn normalize_token_ids(ids: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for id in ids {
+        let id = id.trim();
+        if id.is_empty() || normalized.iter().any(|existing| existing == id) {
+            continue;
+        }
+        normalized.push(id.to_owned());
+    }
+    normalized
+}
+
+fn parse_token_owner_filter(value: Option<&str>) -> AdminTokenOwnerFilter {
+    match value.map(str::trim) {
+        Some("bound") => AdminTokenOwnerFilter::Bound,
+        Some("unbound") => AdminTokenOwnerFilter::Unbound,
+        _ => AdminTokenOwnerFilter::All,
+    }
+}
+
+fn parse_token_enabled_filter(value: Option<&str>) -> AdminTokenEnabledFilter {
+    match value.map(str::trim) {
+        Some("active") => AdminTokenEnabledFilter::Active,
+        Some("frozen") => AdminTokenEnabledFilter::Frozen,
+        _ => AdminTokenEnabledFilter::All,
+    }
+}
+
+fn parse_token_quota_state(value: Option<&str>) -> Option<String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value @ ("normal" | "hour" | "day" | "month")) => Some(value.to_owned()),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1061,87 +1140,32 @@ async fn list_tokens(
         .map(str::to_owned);
     let no_group = q.no_group.unwrap_or(false);
 
-    if no_group {
-        match state.proxy.list_access_tokens().await {
-            Ok(items) => {
-                let filtered: Vec<AuthToken> = items
-                    .into_iter()
-                    .filter(|t| {
-                        t.group_name
-                            .as_deref()
-                            .map(str::trim)
-                            .map(|g| g.is_empty())
-                            .unwrap_or(true)
-                    })
-                    .collect();
-                let total = filtered.len() as i64;
-                let start = ((page - 1) * per_page).max(0) as usize;
-                let end = start.saturating_add(per_page as usize).min(total as usize);
-                let slice = if start >= total as usize {
-                    Vec::new()
-                } else {
-                    filtered[start..end].to_vec()
-                };
-                Ok(Json(ListTokensResponse {
-                    items: build_auth_token_views(&state, slice).await.map_err(|err| {
-                        eprintln!("list tokens owner resolution error: {err}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-                    total,
-                    page,
-                    per_page,
-                }))
-            }
-            Err(err) => {
-                eprintln!("list tokens (no_group filter) error: {err}");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-        }
-    } else if let Some(group) = group {
-        match state.proxy.list_access_tokens().await {
-            Ok(items) => {
-                let filtered: Vec<AuthToken> = items
-                    .into_iter()
-                    .filter(|t| t.group_name.as_deref() == Some(group.as_str()))
-                    .collect();
-                let total = filtered.len() as i64;
-                let start = ((page - 1) * per_page).max(0) as usize;
-                let end = start.saturating_add(per_page as usize).min(total as usize);
-                let slice = if start >= total as usize {
-                    Vec::new()
-                } else {
-                    filtered[start..end].to_vec()
-                };
-                Ok(Json(ListTokensResponse {
-                    items: build_auth_token_views(&state, slice).await.map_err(|err| {
-                        eprintln!("list tokens owner resolution error: {err}");
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    })?,
-                    total,
-                    page,
-                    per_page,
-                }))
-            }
-            Err(err) => {
-                eprintln!("list tokens (group filter) error: {err}");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
-        }
-    } else {
-        match state.proxy.list_access_tokens_paged(page, per_page).await {
-            Ok((items, total)) => Ok(Json(ListTokensResponse {
-                items: build_auth_token_views(&state, items).await.map_err(|err| {
-                    eprintln!("list tokens owner resolution error: {err}");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?,
-                total,
-                page,
-                per_page,
-            })),
-            Err(err) => {
-                eprintln!("list tokens error: {err}");
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
-            }
+    let filters = AdminTokenListFilters {
+        group,
+        no_group,
+        search: normalize_optional_text(q.q),
+        owner: parse_token_owner_filter(q.owner.as_deref()),
+        enabled: parse_token_enabled_filter(q.enabled.as_deref()),
+        quota_state: parse_token_quota_state(q.quota_state.as_deref()),
+    };
+
+    match state
+        .proxy
+        .list_access_tokens_filtered_paged(page, per_page, filters)
+        .await
+    {
+        Ok((items, total)) => Ok(Json(ListTokensResponse {
+            items: build_auth_token_views(&state, items).await.map_err(|err| {
+                eprintln!("list tokens owner resolution error: {err}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?,
+            total,
+            page,
+            per_page,
+        })),
+        Err(err) => {
+            eprintln!("list tokens error: {err}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 }
@@ -1253,6 +1277,58 @@ async fn update_token_status(
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|err| {
             eprintln!("update token status error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+async fn update_tokens_status_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<BatchTokenStatusRequest>,
+) -> Result<Json<BatchTokenMutationResponse>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = normalize_token_ids(payload.ids);
+    if ids.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    state
+        .proxy
+        .set_access_tokens_enabled(&ids, payload.enabled)
+        .await
+        .map(|result| Json(BatchTokenMutationResponse {
+            updated: result.updated,
+            missing: result.missing,
+        }))
+        .map_err(|err| {
+            eprintln!("batch update token status error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+}
+
+async fn delete_tokens_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<BatchTokenIdsRequest>,
+) -> Result<Json<BatchTokenMutationResponse>, StatusCode> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ids = normalize_token_ids(payload.ids);
+    if ids.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    state
+        .proxy
+        .delete_access_tokens(&ids)
+        .await
+        .map(|result| Json(BatchTokenMutationResponse {
+            updated: result.updated,
+            missing: result.missing,
+        }))
+        .map_err(|err| {
+            eprintln!("batch delete tokens error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
 }

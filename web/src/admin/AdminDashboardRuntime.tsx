@@ -123,9 +123,11 @@ import {
   type AdminUsersCollectionView,
   type AdminModuleId,
   type AdminPathRoute,
+  type AdminTokensListContext,
   type AlertsCenterView,
   alertsPath,
   buildAdminKeysPath,
+  buildAdminTokensPath,
   getAlertsViewFromSearch,
   isSameAdminRoute,
   keyDetailPath,
@@ -199,13 +201,18 @@ import {
   type Summary,
   type SummaryWindowsResponse,
   fetchTokens,
+  type AdminTokenEnabledFilter,
+  type AdminTokenOwnerFilter,
+  type AdminTokenQuotaStateFilter,
   type AuthToken,
   fetchTokenSecret,
   createToken,
   deleteToken,
+  deleteTokensBatch,
   createAdminUserToken,
   deleteAdminUserToken,
   setTokenEnabled,
+  setTokensEnabled,
   updateTokenNote,
   createTokensBatch,
   type Paginated,
@@ -224,7 +231,6 @@ import {
   fetchJobs,
   fetchTokenGroups,
   type AdminUsersSortField,
-  type TokenGroup,
   fetchAdminUsers,
   fetchAdminUserBrokenKeys,
   fetchAdminUnboundTokenUsage,
@@ -267,6 +273,7 @@ import {
   updateForwardProxySettingsWithProgress,
   validateForwardProxyCandidateWithProgress,
 } from '../api'
+import type { TokenGroup } from '../api/tokens'
 import {
   createDialogProgressState,
   type ForwardProxyDialogProgressState,
@@ -341,6 +348,8 @@ const DASHBOARD_RECENT_JOBS_PER_PAGE = 20
 const DASHBOARD_HOURLY_CHART_PERSISTENCE_KEY = 'admin.dashboard.hourly-request-charts.v1'
 const REQUESTS_HEADER_FILTERS_ID = 'admin-requests-header-filters'
 const DEFAULT_KEYS_PER_PAGE = 20
+const DEFAULT_TOKENS_PER_PAGE = 20
+const TOKEN_PER_PAGE_OPTIONS = [20, 50, 100, 200] as const
 const USERS_PER_PAGE = 20
 // Auto-collapse behavior for the API keys batch overlay (empty textarea only):
 // The user wants "delay + close animation" to total 500ms.
@@ -884,6 +893,46 @@ function getAdminUnboundTokenUsageSortDirectionFromLocation(): SortDirection | n
   if (getAdminUnboundTokenUsageSortFromLocation() == null) return null
   const rawOrder = new URLSearchParams(window.location.search).get('order')?.trim()
   return rawOrder === 'asc' ? 'asc' : 'desc'
+}
+
+function getAdminTokensQueryFromLocation(): string {
+  return new URLSearchParams(window.location.search).get('q')?.trim() ?? ''
+}
+
+function getAdminTokensPageFromLocation(): number {
+  const rawPage = new URLSearchParams(window.location.search).get('page')?.trim() ?? ''
+  const parsedPage = Number.parseInt(rawPage, 10)
+  return Number.isFinite(parsedPage) && parsedPage > 1 ? parsedPage : 1
+}
+
+function getAdminTokensPerPageFromLocation(): number {
+  const rawPerPage = new URLSearchParams(window.location.search).get('perPage')?.trim() ?? ''
+  const parsedPerPage = Number.parseInt(rawPerPage, 10)
+  return TOKEN_PER_PAGE_OPTIONS.includes(parsedPerPage as (typeof TOKEN_PER_PAGE_OPTIONS)[number])
+    ? parsedPerPage
+    : DEFAULT_TOKENS_PER_PAGE
+}
+
+function getAdminTokensGroupFromLocation(): { group: string | null; noGroup: boolean } {
+  const params = new URLSearchParams(window.location.search)
+  const noGroup = params.get('no_group') === 'true'
+  const group = params.get('group')?.trim() ?? ''
+  return { group: noGroup || group.length === 0 ? null : group, noGroup }
+}
+
+function getAdminTokensOwnerFromLocation(): AdminTokenOwnerFilter {
+  const raw = new URLSearchParams(window.location.search).get('owner')?.trim()
+  return raw === 'bound' || raw === 'unbound' ? raw : 'all'
+}
+
+function getAdminTokensEnabledFromLocation(): AdminTokenEnabledFilter {
+  const raw = new URLSearchParams(window.location.search).get('enabled')?.trim()
+  return raw === 'active' || raw === 'frozen' ? raw : 'all'
+}
+
+function getAdminTokensQuotaStateFromLocation(): AdminTokenQuotaStateFilter {
+  const raw = new URLSearchParams(window.location.search).get('quota_state')?.trim()
+  return raw === 'normal' || raw === 'hour' || raw === 'day' || raw === 'month' ? raw : 'all'
 }
 
 function getAdminTokensCollectionFromLocation(): 'tokens' | 'unbound-usage' {
@@ -1586,6 +1635,15 @@ interface ManualCopyBubbleState {
 
 type ManualCopyDialogState = Omit<ManualCopyBubbleState, 'anchorEl'>
 
+type AdminTokenFilterDraft = {
+  query: string
+  group: string | null
+  noGroup: boolean
+  owner: AdminTokenOwnerFilter
+  enabled: AdminTokenEnabledFilter
+  quotaState: AdminTokenQuotaStateFilter
+}
+
 function AdminDashboard(): JSX.Element {
   const [route, setRoute] = useState<AdminPathRoute>(() => parseAdminPath(window.location.pathname))
   const [locationSearch, setLocationSearch] = useState(() => window.location.search)
@@ -1627,6 +1685,8 @@ function AdminDashboard(): JSX.Element {
   const [tokens, setTokens] = useState<AuthToken[]>([])
   const [dashboardTokens, setDashboardTokens] = useState<AuthToken[]>([])
   const [dashboardTokenCoverage, setDashboardTokenCoverage] = useState<DashboardTokenCoverage>('ok')
+  const tokenPanelRef = useRef<HTMLElement | null>(null)
+  const [tokenBulkPanelLeft, setTokenBulkPanelLeft] = useState('50%')
   const [dashboardTrend, setDashboardTrend] = useState<DashboardTrendBuckets>(() => createEmptyDashboardTrend())
   const [dashboardHourlyRequestWindow, setDashboardHourlyRequestWindow] = useState<DashboardHourlyRequestWindow>(
     () => createEmptyDashboardHourlyRequestWindow(),
@@ -1639,15 +1699,36 @@ function AdminDashboard(): JSX.Element {
     topGroups: [],
   })
   const [dashboardOverviewLoaded, setDashboardOverviewLoaded] = useState(false)
-  const [tokensPage, setTokensPage] = useState(1)
-  const tokensPerPage = 10
+  const [tokensPage, setTokensPage] = useState(() => getAdminTokensPageFromLocation())
+  const [tokensPerPage, setTokensPerPage] = useState(() => getAdminTokensPerPageFromLocation())
   const [tokensTotal, setTokensTotal] = useState(0)
   const [tokensLoadState, setTokensLoadState] = useState<QueryLoadState>('initial_loading')
   const [tokenGroups, setTokenGroups] = useState<TokenGroup[]>([])
-  const [selectedTokenGroupName, setSelectedTokenGroupName] = useState<string | null>(null)
-  const [selectedTokenUngrouped, setSelectedTokenUngrouped] = useState(false)
-  const [tokenGroupsExpanded, setTokenGroupsExpanded] = useState(false)
-  const [tokenGroupsCollapsedOverflowing, setTokenGroupsCollapsedOverflowing] = useState(false)
+  const initialTokenGroup = getAdminTokensGroupFromLocation()
+  const [tokenQueryInput, setTokenQueryInput] = useState(() => getAdminTokensQueryFromLocation())
+  const [tokenQuery, setTokenQuery] = useState(() => getAdminTokensQueryFromLocation())
+  const [selectedTokenGroupName, setSelectedTokenGroupName] = useState<string | null>(() => initialTokenGroup.group)
+  const [selectedTokenUngrouped, setSelectedTokenUngrouped] = useState(() => initialTokenGroup.noGroup)
+  const [selectedTokenOwnerFilter, setSelectedTokenOwnerFilter] =
+    useState<AdminTokenOwnerFilter>(() => getAdminTokensOwnerFromLocation())
+  const [selectedTokenEnabledFilter, setSelectedTokenEnabledFilter] =
+    useState<AdminTokenEnabledFilter>(() => getAdminTokensEnabledFromLocation())
+  const [selectedTokenQuotaFilter, setSelectedTokenQuotaFilter] =
+    useState<AdminTokenQuotaStateFilter>(() => getAdminTokensQuotaStateFromLocation())
+  const tokenFilterDraftRef = useRef<AdminTokenFilterDraft>({
+    query: tokenQuery,
+    group: selectedTokenGroupName,
+    noGroup: selectedTokenUngrouped,
+    owner: selectedTokenOwnerFilter,
+    enabled: selectedTokenEnabledFilter,
+    quotaState: selectedTokenQuotaFilter,
+  })
+  const preserveTokenSelectionOnLocationSyncRef = useRef(false)
+  const [selectedTokenIds, setSelectedTokenIds] = useState<Set<string>>(() => new Set())
+  const [tokenBulkActionInFlight, setTokenBulkActionInFlight] =
+    useState<'activate' | 'freeze' | 'delete' | null>(null)
+  const [tokenBulkFeedback, setTokenBulkFeedback] = useState<string | null>(null)
+  const [pendingTokenBulkDelete, setPendingTokenBulkDelete] = useState(false)
   const [unboundTokenUsage, setUnboundTokenUsage] = useState<AdminUnboundTokenUsageSummary[]>([])
   const [unboundTokenUsageTotal, setUnboundTokenUsageTotal] = useState(0)
   const [unboundTokenUsagePage, setUnboundTokenUsagePage] = useState(() => getAdminUnboundTokenUsagePageFromLocation())
@@ -1808,7 +1889,6 @@ function AdminDashboard(): JSX.Element {
   const tokenSecretVersionRef = useRef<Map<string, number>>(new Map())
   const secretWarmTimerRef = useRef<Map<string, number>>(new Map())
   const secretWarmAbortRef = useRef<Map<string, AbortController>>(new Map())
-  const tokenGroupsListRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<Map<string, 'loading' | 'copied'>>(() => new Map())
   const [manualCopyBubble, setManualCopyBubble] = useState<ManualCopyBubbleState | null>(null)
   const [manualCopyDialog, setManualCopyDialog] = useState<ManualCopyDialogState | null>(null)
@@ -2492,7 +2572,14 @@ function AdminDashboard(): JSX.Element {
             ? fetchTokens(
                 tokensPage,
                 tokensPerPage,
-                { group: selectedTokenGroupName, ungrouped: selectedTokenUngrouped },
+                {
+                  group: selectedTokenGroupName,
+                  noGroup: selectedTokenUngrouped,
+                  q: tokenQuery,
+                  owner: selectedTokenOwnerFilter,
+                  enabled: selectedTokenEnabledFilter,
+                  quotaState: selectedTokenQuotaFilter,
+                },
                 request.signal,
               ).catch(
                 () =>
@@ -2539,7 +2626,18 @@ function AdminDashboard(): JSX.Element {
         request.cleanup()
       }
     },
-    [beginManagedRequest, route, tokensPage, selectedTokenGroupName, selectedTokenUngrouped],
+    [
+      beginManagedRequest,
+      route,
+      tokensPage,
+      tokensPerPage,
+      selectedTokenGroupName,
+      selectedTokenUngrouped,
+      tokenQuery,
+      selectedTokenOwnerFilter,
+      selectedTokenEnabledFilter,
+      selectedTokenQuotaFilter,
+    ],
   )
 
   const loadDashboardOverview = useCallback(
@@ -3707,6 +3805,38 @@ function AdminDashboard(): JSX.Element {
   }, [route, adminStrings.users.catalog.loadFailed])
 
   useEffect(() => {
+    if (!(route.name === 'module' && route.module === 'tokens')) return
+    const groupState = getAdminTokensGroupFromLocation()
+    const query = getAdminTokensQueryFromLocation()
+    const owner = getAdminTokensOwnerFromLocation()
+    const enabled = getAdminTokensEnabledFromLocation()
+    const quotaState = getAdminTokensQuotaStateFromLocation()
+    setTokensPage(getAdminTokensPageFromLocation())
+    setTokensPerPage(getAdminTokensPerPageFromLocation())
+    setTokenQueryInput(query)
+    setTokenQuery(query)
+    setSelectedTokenGroupName(groupState.group)
+    setSelectedTokenUngrouped(groupState.noGroup)
+    setSelectedTokenOwnerFilter(owner)
+    setSelectedTokenEnabledFilter(enabled)
+    setSelectedTokenQuotaFilter(quotaState)
+    tokenFilterDraftRef.current = {
+      query,
+      group: groupState.group,
+      noGroup: groupState.noGroup,
+      owner,
+      enabled,
+      quotaState,
+    }
+    if (preserveTokenSelectionOnLocationSyncRef.current) {
+      preserveTokenSelectionOnLocationSyncRef.current = false
+    } else {
+      setSelectedTokenIds(new Set())
+      setTokenBulkFeedback(null)
+    }
+  }, [locationSearch, route])
+
+  useEffect(() => {
     const registrationRouteActive = route.name === 'module' && route.module === 'system-settings'
     if (!registrationRouteActive) return
 
@@ -3936,25 +4066,6 @@ function AdminDashboard(): JSX.Element {
     }
   }, [sseConnected, sseFallbackActive, loadData, loadDashboardOverview, loadShellData, loadUnboundTokenUsage, route])
 
-  // Detect whether the collapsed token groups row overflows horizontally.
-  // If everything fits in a single line, we hide the "more" toggle button.
-  useEffect(() => {
-    if (!Array.isArray(tokenGroups) || tokenGroups.length === 0 || tokenGroupsExpanded) {
-      setTokenGroupsCollapsedOverflowing(false)
-      return
-    }
-    const el = tokenGroupsListRef.current
-    if (!el) return
-
-    const measure = () => {
-      const overflowing = el.scrollWidth > el.clientWidth
-      setTokenGroupsCollapsedOverflowing(overflowing)
-    }
-
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [tokenGroups, tokenGroupsExpanded, selectedTokenGroupName, selectedTokenUngrouped])
 
   // Establish SSE connection to receive live dashboard updates
   useEffect(() => {
@@ -4059,6 +4170,22 @@ function AdminDashboard(): JSX.Element {
 
   const navigateModule = useCallback(
     (target: AdminNavTarget) => {
+      if (target === 'tokens') {
+        const groupState = getAdminTokensGroupFromLocation()
+        navigateToPath(
+          buildAdminTokensPath({
+            query: getAdminTokensQueryFromLocation(),
+            page: getAdminTokensPageFromLocation(),
+            perPage: getAdminTokensPerPageFromLocation(),
+            group: groupState.group,
+            noGroup: groupState.noGroup,
+            owner: getAdminTokensOwnerFromLocation(),
+            enabled: getAdminTokensEnabledFromLocation(),
+            quotaState: getAdminTokensQuotaStateFromLocation(),
+          }),
+        )
+        return
+      }
       if (target === 'user-usage') {
         navigateToPath(
           userUsagePath(
@@ -4123,10 +4250,29 @@ function AdminDashboard(): JSX.Element {
         )
         return
       }
-      navigateToPath(tokenDetailPath(id))
+      navigateToPath(
+        tokenDetailPath(id, undefined, undefined, undefined, undefined, 'tokens', {
+          query: tokenQuery,
+          page: tokensPage,
+          perPage: tokensPerPage,
+          group: selectedTokenGroupName,
+          noGroup: selectedTokenUngrouped,
+          owner: selectedTokenOwnerFilter,
+          enabled: selectedTokenEnabledFilter,
+          quotaState: selectedTokenQuotaFilter,
+        }),
+      )
     },
     [
       navigateToPath,
+      tokenQuery,
+      tokensPage,
+      tokensPerPage,
+      selectedTokenGroupName,
+      selectedTokenUngrouped,
+      selectedTokenOwnerFilter,
+      selectedTokenEnabledFilter,
+      selectedTokenQuotaFilter,
       unboundTokenUsagePage,
       unboundTokenUsageQuery,
       unboundTokenUsageSort,
@@ -4146,7 +4292,17 @@ function AdminDashboard(): JSX.Element {
       )
       return
     }
-    navigateModule('tokens')
+    const groupState = getAdminTokensGroupFromLocation()
+    navigateToPath(buildAdminTokensPath({
+      query: getAdminTokensQueryFromLocation(),
+      page: getAdminTokensPageFromLocation(),
+      perPage: getAdminTokensPerPageFromLocation(),
+      group: groupState.group,
+      noGroup: groupState.noGroup,
+      owner: getAdminTokensOwnerFromLocation(),
+      enabled: getAdminTokensEnabledFromLocation(),
+      quotaState: getAdminTokensQuotaStateFromLocation(),
+    }))
   }, [navigateModule, navigateToPath])
 
   const openRequestKeyDrawer = useCallback((id: string) => {
@@ -4247,6 +4403,41 @@ function AdminDashboard(): JSX.Element {
       navigateToPath(unboundTokenUsagePath(normalized, normalizedPage, normalizedSort, normalizedOrder))
     },
     [navigateToPath, unboundTokenUsageSort, unboundTokenUsageSortOrder],
+  )
+
+  const navigateTokensList = useCallback(
+    (options?: AdminTokensListContext | null) => {
+      const page = options?.page != null ? Math.max(1, Math.trunc(options.page)) : 1
+      const query = options?.query?.trim() ?? ''
+      const group = options?.noGroup ? null : options?.group?.trim() || null
+      const noGroup = Boolean(options?.noGroup)
+      const owner = options?.owner ?? 'all'
+      const enabled = options?.enabled ?? 'all'
+      const quotaState = options?.quotaState ?? 'all'
+      const perPage = TOKEN_PER_PAGE_OPTIONS.includes(options?.perPage as (typeof TOKEN_PER_PAGE_OPTIONS)[number])
+        ? Math.trunc(options?.perPage as number)
+        : tokensPerPage
+
+      setTokensPage(page)
+      setTokensPerPage(perPage)
+      setTokenQueryInput(query)
+      setTokenQuery(query)
+      setSelectedTokenGroupName(group)
+      setSelectedTokenUngrouped(noGroup)
+      setSelectedTokenOwnerFilter(owner)
+      setSelectedTokenEnabledFilter(enabled)
+      setSelectedTokenQuotaFilter(quotaState)
+      tokenFilterDraftRef.current = { query, group, noGroup, owner, enabled, quotaState }
+      if (options?.resetSelection !== false) {
+        setSelectedTokenIds(new Set())
+        setTokenBulkFeedback(null)
+        preserveTokenSelectionOnLocationSyncRef.current = false
+      } else {
+        preserveTokenSelectionOnLocationSyncRef.current = true
+      }
+      navigateToPath(buildAdminTokensPath({ query, page, perPage, group, noGroup, owner, enabled, quotaState }))
+    },
+    [navigateToPath, tokensPerPage],
   )
 
   const navigateKeysList = useCallback(
@@ -4840,19 +5031,25 @@ function AdminDashboard(): JSX.Element {
     [keyRegionFacets],
   )
 
-  const ungroupedTokenGroup = tokenGroups.find((group) => group.name.trim().length === 0)
   const namedTokenGroups = tokenGroups.filter((group) => group.name.trim().length > 0)
-  const hasTokenGroups = tokenGroups.length > 0
 
-  const tokenList = useMemo(() => {
-    if (selectedTokenUngrouped) {
-      return tokens.filter((item) => (item.group ?? '').trim().length === 0)
-    }
-    if (selectedTokenGroupName != null) {
-      return tokens.filter((item) => (item.group ?? '').trim() === selectedTokenGroupName)
-    }
-    return tokens
-  }, [selectedTokenGroupName, selectedTokenUngrouped, tokens])
+  const tokenList = tokens
+  const selectedVisibleTokenIds = useMemo(
+    () => tokenList.filter((item) => selectedTokenIds.has(item.id)).map((item) => item.id),
+    [selectedTokenIds, tokenList],
+  )
+  const selectedVisibleTokenCount = selectedVisibleTokenIds.length
+  const allVisibleTokensSelected = tokenList.length > 0 && selectedVisibleTokenCount === tokenList.length
+  const someVisibleTokensSelected = selectedVisibleTokenCount > 0 && !allVisibleTokensSelected
+  const selectedTokenCount = selectedTokenIds.size
+  const tokenHasFilters = (
+    tokenQuery.length > 0
+    || selectedTokenGroupName != null
+    || selectedTokenUngrouped
+    || selectedTokenOwnerFilter !== 'all'
+    || selectedTokenEnabledFilter !== 'all'
+    || selectedTokenQuotaFilter !== 'all'
+  )
 
   const visibleKeys = keys
   const selectedVisibleKeyIds = useMemo(
@@ -5641,7 +5838,7 @@ function AdminDashboard(): JSX.Element {
     }
   }
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(tokensTotal / tokensPerPage)), [tokensTotal])
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(tokensTotal / tokensPerPage)), [tokensPerPage, tokensTotal])
   const keysTotalPages = useMemo(() => Math.max(1, Math.ceil(keysTotal / keysPerPage)), [keysPerPage, keysTotal])
   const keysHasFilters = (
     selectedKeyGroups.length > 0
@@ -5653,10 +5850,45 @@ function AdminDashboard(): JSX.Element {
   const keysRefreshing = isRefreshingLoadState(keysLoadState)
 
   const goPrevPage = () => {
-    setTokensPage((p) => Math.max(1, p - 1))
+    navigateTokensList({
+      query: tokenQuery,
+      page: Math.max(1, tokensPage - 1),
+      perPage: tokensPerPage,
+      group: selectedTokenGroupName,
+      noGroup: selectedTokenUngrouped,
+      owner: selectedTokenOwnerFilter,
+      enabled: selectedTokenEnabledFilter,
+      quotaState: selectedTokenQuotaFilter,
+      resetSelection: false,
+    })
   }
   const goNextPage = () => {
-    setTokensPage((p) => Math.min(totalPages, p + 1))
+    navigateTokensList({
+      query: tokenQuery,
+      page: Math.min(totalPages, tokensPage + 1),
+      perPage: tokensPerPage,
+      group: selectedTokenGroupName,
+      noGroup: selectedTokenUngrouped,
+      owner: selectedTokenOwnerFilter,
+      enabled: selectedTokenEnabledFilter,
+      quotaState: selectedTokenQuotaFilter,
+      resetSelection: false,
+    })
+  }
+  const changeTokensPerPage = (value: number) => {
+    const perPage = TOKEN_PER_PAGE_OPTIONS.includes(value as (typeof TOKEN_PER_PAGE_OPTIONS)[number])
+      ? value
+      : DEFAULT_TOKENS_PER_PAGE
+    navigateTokensList({
+      query: tokenQuery,
+      page: 1,
+      perPage,
+      group: selectedTokenGroupName,
+      noGroup: selectedTokenUngrouped,
+      owner: selectedTokenOwnerFilter,
+      enabled: selectedTokenEnabledFilter,
+      quotaState: selectedTokenQuotaFilter,
+    })
   }
 
   const usersTotalPages = useMemo(() => Math.max(1, Math.ceil(usersTotal / USERS_PER_PAGE)), [usersTotal])
@@ -6193,26 +6425,49 @@ function AdminDashboard(): JSX.Element {
     }
   }
 
-  const handleSelectTokenGroupAll = () => {
-    setSelectedTokenGroupName(null)
-    setSelectedTokenUngrouped(false)
-    setTokensPage(1)
+  const applyTokenFilters = () => {
+    const draft = tokenFilterDraftRef.current
+    navigateTokensList({
+      ...draft,
+      query: draft.query,
+      page: 1,
+    })
   }
 
-  const handleSelectTokenGroupUngrouped = () => {
-    setSelectedTokenGroupName(null)
-    setSelectedTokenUngrouped(true)
-    setTokensPage(1)
+  const resetTokenFilters = () => {
+    navigateTokensList({
+      query: '',
+      page: 1,
+      owner: 'all',
+      enabled: 'all',
+      quotaState: 'all',
+    })
   }
 
-  const handleSelectTokenGroupNamed = (group: string) => {
-    setSelectedTokenGroupName(group)
-    setSelectedTokenUngrouped(false)
-    setTokensPage(1)
+  const handleTokenGroupFilterChange = (value: string) => {
+    const group = value === '__all__' || value === '__ungrouped__' ? null : value
+    const noGroup = value === '__ungrouped__'
+    const draft = { ...tokenFilterDraftRef.current, group, noGroup }
+    tokenFilterDraftRef.current = draft
+    navigateTokensList({ ...draft, page: 1 })
   }
 
-  const toggleTokenGroupsExpanded = () => {
-    setTokenGroupsExpanded((previous) => !previous)
+  const handleTokenOwnerFilterChange = (owner: AdminTokenOwnerFilter) => {
+    const draft = { ...tokenFilterDraftRef.current, owner }
+    tokenFilterDraftRef.current = draft
+    navigateTokensList({ ...draft, page: 1 })
+  }
+
+  const handleTokenEnabledFilterChange = (enabled: AdminTokenEnabledFilter) => {
+    const draft = { ...tokenFilterDraftRef.current, enabled }
+    tokenFilterDraftRef.current = draft
+    navigateTokensList({ ...draft, page: 1 })
+  }
+
+  const handleTokenQuotaFilterChange = (quotaState: AdminTokenQuotaStateFilter) => {
+    const draft = { ...tokenFilterDraftRef.current, quotaState }
+    tokenFilterDraftRef.current = draft
+    navigateTokensList({ ...draft, page: 1 })
   }
 
   const handleToggleKeyGroupFilter = (group: string) => {
@@ -6410,6 +6665,95 @@ function AdminDashboard(): JSX.Element {
       setError(err instanceof Error ? err.message : errorStrings.toggleToken)
     } finally {
       setTogglingId(null)
+    }
+  }
+
+  const toggleTokenSelection = (id: string) => {
+    setSelectedTokenIds((previous) => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    setTokenBulkFeedback(null)
+  }
+
+  const toggleVisibleTokenSelection = () => {
+    setSelectedTokenIds((previous) => {
+      const next = new Set(previous)
+      if (allVisibleTokensSelected) {
+        for (const id of selectedVisibleTokenIds) next.delete(id)
+      } else {
+        for (const token of tokenList) next.add(token.id)
+      }
+      return next
+    })
+    setTokenBulkFeedback(null)
+  }
+
+  const clearSelectedTokens = () => {
+    setSelectedTokenIds(new Set())
+    setTokenBulkFeedback(null)
+  }
+
+  const formatTokenBatchResult = (updated: number, missing: string[]) => {
+    const parts = [
+      tokenStrings.bulk.result.replace('{updated}', String(updated)),
+    ]
+    if (missing.length > 0) {
+      parts.push(tokenStrings.bulk.missing.replace('{count}', String(missing.length)))
+    }
+    return parts.join(' ')
+  }
+
+  const refreshTokensAfterBatch = async () => {
+    const controller = new AbortController()
+    setLoading(true)
+    await loadData({ signal: controller.signal, reason: 'refresh', showGlobalLoading: true })
+    controller.abort()
+  }
+
+  const handleTokenBatchStatus = async (enabled: boolean) => {
+    const ids = Array.from(selectedTokenIds)
+    if (ids.length === 0) return
+    const action = enabled ? 'activate' : 'freeze'
+    setTokenBulkActionInFlight(action)
+    setTokenBulkFeedback(null)
+    try {
+      const result = await setTokensEnabled(ids, enabled)
+      setTokenBulkFeedback(formatTokenBatchResult(result.updated, result.missing))
+      await refreshTokensAfterBatch()
+    } catch (err) {
+      console.error(err)
+      setError(err instanceof Error ? err.message : errorStrings.toggleToken)
+    } finally {
+      setTokenBulkActionInFlight(null)
+    }
+  }
+
+  const confirmTokenBatchDelete = async () => {
+    const ids = Array.from(selectedTokenIds)
+    if (ids.length === 0) {
+      setPendingTokenBulkDelete(false)
+      return
+    }
+    setTokenBulkActionInFlight('delete')
+    setTokenBulkFeedback(null)
+    try {
+      const result = await deleteTokensBatch(ids)
+      setSelectedTokenIds((previous) => {
+        const next = new Set(previous)
+        for (const id of ids) next.delete(id)
+        return next
+      })
+      setTokenBulkFeedback(formatTokenBatchResult(result.updated, result.missing))
+      setPendingTokenBulkDelete(false)
+      await refreshTokensAfterBatch()
+    } catch (err) {
+      console.error(err)
+      setError(err instanceof Error ? err.message : errorStrings.deleteToken)
+    } finally {
+      setTokenBulkActionInFlight(null)
     }
   }
 
@@ -6821,16 +7165,40 @@ function AdminDashboard(): JSX.Element {
       ? route.module
       : route.name === 'key'
         ? 'keys'
-          : route.name === 'user'
-              || route.name === 'user-usage'
-              || route.name === 'user-tags'
-              || route.name === 'user-tag-editor'
-            ? 'users'
-            : route.name === 'announcement-editor'
-              ? 'announcements'
-            : route.name === 'not-found'
-              ? 'dashboard'
-              : 'tokens'
+        : route.name === 'user'
+            || route.name === 'user-usage'
+            || route.name === 'user-tags'
+            || route.name === 'user-tag-editor'
+          ? 'users'
+          : route.name === 'announcement-editor'
+            ? 'announcements'
+          : route.name === 'not-found'
+            ? 'dashboard'
+            : 'tokens'
+  const isTokensModule = activeModule === 'tokens'
+  useLayoutEffect(() => {
+    if (!isTokensModule || selectedTokenCount === 0) return
+    const updateTokenBulkPanelLeft = () => {
+      const rect = tokenPanelRef.current?.getBoundingClientRect()
+      if (!rect) {
+        setTokenBulkPanelLeft('50%')
+        return
+      }
+      setTokenBulkPanelLeft(`${Math.round((rect.left + rect.width / 2) * 10) / 10}px`)
+    }
+
+    updateTokenBulkPanelLeft()
+    const observer =
+      typeof ResizeObserver !== 'undefined' && tokenPanelRef.current
+        ? new ResizeObserver(updateTokenBulkPanelLeft)
+        : null
+    if (tokenPanelRef.current) observer?.observe(tokenPanelRef.current)
+    window.addEventListener('resize', updateTokenBulkPanelLeft)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateTokenBulkPanelLeft)
+    }
+  }, [isTokensModule, selectedTokenCount])
   const usersStrings = adminStrings.users
   const registrationStatusText = registrationSettingsLoading && !registrationSettingsLoaded
     ? usersStrings.registration.description
@@ -7786,6 +8154,31 @@ function AdminDashboard(): JSX.Element {
       </Button>
       <Button type="button" variant="destructive" onClick={() => void confirmTokenDelete()} disabled={!!deletingId}>
         {tokenStrings.dialogs.delete.confirm}
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+
+{/* Token Bulk Delete Confirmation */}
+<Dialog open={pendingTokenBulkDelete} onOpenChange={(open) => { if (!open) setPendingTokenBulkDelete(false) }}>
+  <DialogContent className="max-w-md">
+    <DialogHeader>
+      <DialogTitle>{tokenStrings.bulk.confirmTitle}</DialogTitle>
+      <DialogDescription>
+        {tokenStrings.bulk.confirmDescription.replace('{count}', String(selectedTokenCount))}
+      </DialogDescription>
+    </DialogHeader>
+    <DialogFooter className="modal-action">
+      <Button type="button" variant="outline" onClick={() => setPendingTokenBulkDelete(false)}>
+        {tokenStrings.bulk.cancel}
+      </Button>
+      <Button
+        type="button"
+        variant="destructive"
+        onClick={() => void confirmTokenBatchDelete()}
+        disabled={selectedTokenCount === 0 || tokenBulkActionInFlight != null}
+      >
+        {tokenStrings.bulk.confirmDelete}
       </Button>
     </DialogFooter>
   </DialogContent>
@@ -9409,6 +9802,103 @@ function AdminDashboard(): JSX.Element {
       )}
     </div>
   )
+  const currentTokenGroupValue = selectedTokenUngrouped
+    ? '__ungrouped__'
+    : selectedTokenGroupName ?? '__all__'
+  const tokenOwnerFilterOptions: Array<{ value: AdminTokenOwnerFilter; label: string }> = [
+    { value: 'all', label: tokenStrings.filters.ownerAll },
+    { value: 'bound', label: tokenStrings.filters.ownerBound },
+    { value: 'unbound', label: tokenStrings.filters.ownerUnbound },
+  ]
+  const tokenEnabledFilterOptions: Array<{ value: AdminTokenEnabledFilter; label: string }> = [
+    { value: 'all', label: tokenStrings.filters.statusAll },
+    { value: 'active', label: tokenStrings.filters.statusActive },
+    { value: 'frozen', label: tokenStrings.filters.statusFrozen },
+  ]
+  const tokenQuotaFilterOptions: Array<{ value: AdminTokenQuotaStateFilter; label: string }> = [
+    { value: 'all', label: tokenStrings.filters.quotaAll },
+    { value: 'normal', label: quotaLabels.normal },
+    { value: 'hour', label: quotaLabels.hour },
+    { value: 'day', label: quotaLabels.day },
+    { value: 'month', label: quotaLabels.month },
+  ]
+  const renderTokenFilters = () => (
+    <div className="token-filters-bar">
+      <div className="token-filter-search">
+        <Input
+          type="text"
+          name="token-search"
+          placeholder={tokenStrings.filters.searchPlaceholder}
+          value={tokenQueryInput}
+          disabled={tokensBlocking}
+          onChange={(event) => {
+            const query = event.target.value
+            tokenFilterDraftRef.current = { ...tokenFilterDraftRef.current, query }
+            setTokenQueryInput(query)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              applyTokenFilters()
+            }
+          }}
+        />
+        <Button type="button" variant="outline" size="sm" onClick={applyTokenFilters} disabled={tokensBlocking}>
+          <Icon icon="mdi:filter-outline" width={16} height={16} aria-hidden="true" />
+          <span>{tokenStrings.filters.search}</span>
+        </Button>
+      </div>
+      <Select value={currentTokenGroupValue} onValueChange={handleTokenGroupFilterChange} disabled={tokensBlocking}>
+        <SelectTrigger className="token-filter-select" aria-label={tokenStrings.groups.label}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__all__">{tokenStrings.groups.label}: {tokenStrings.groups.all}</SelectItem>
+          <SelectItem value="__ungrouped__">{tokenStrings.groups.label}: {tokenStrings.groups.ungrouped}</SelectItem>
+          {namedTokenGroups.map((group) => (
+            <SelectItem key={group.name} value={group.name}>
+              {tokenStrings.groups.label}: {group.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select value={selectedTokenOwnerFilter} onValueChange={(value) => handleTokenOwnerFilterChange(value as AdminTokenOwnerFilter)} disabled={tokensBlocking}>
+        <SelectTrigger className="token-filter-select" aria-label={tokenStrings.filters.owner}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {tokenOwnerFilterOptions.map((option) => (
+            <SelectItem key={option.value} value={option.value}>{tokenStrings.filters.owner}: {option.label}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select value={selectedTokenQuotaFilter} onValueChange={(value) => handleTokenQuotaFilterChange(value as AdminTokenQuotaStateFilter)} disabled={tokensBlocking}>
+        <SelectTrigger className="token-filter-select" aria-label={tokenStrings.filters.quota}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {tokenQuotaFilterOptions.map((option) => (
+            <SelectItem key={option.value} value={option.value}>{tokenStrings.filters.quota}: {option.label}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select value={selectedTokenEnabledFilter} onValueChange={(value) => handleTokenEnabledFilterChange(value as AdminTokenEnabledFilter)} disabled={tokensBlocking}>
+        <SelectTrigger className="token-filter-select" aria-label={tokenStrings.filters.status}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {tokenEnabledFilterOptions.map((option) => (
+            <SelectItem key={option.value} value={option.value}>{tokenStrings.filters.status}: {option.label}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {tokenHasFilters && (
+        <Button type="button" variant="ghost" size="sm" onClick={resetTokenFilters} disabled={tokensBlocking}>
+          {tokenStrings.filters.clear}
+        </Button>
+      )}
+    </div>
+  )
   const renderKeyQuickAddToolbar = () => (
     <div className="admin-module-toolbar admin-module-toolbar--keys">
       <div
@@ -9661,78 +10151,11 @@ function AdminDashboard(): JSX.Element {
       )}
 
       {showTokens && (
-      <section className="surface panel">
+      <section ref={tokenPanelRef} className="surface panel">
         <div className="admin-stacked-only">
           {renderTokenToolbar()}
         </div>
-        {hasTokenGroups && (
-          <div className="token-groups-container">
-            <div className="token-groups-label">
-              <span>{tokenStrings.groups.label}</span>
-            </div>
-            <div className="token-groups-row">
-              <div
-                ref={tokenGroupsListRef}
-                className={`token-groups-list${tokenGroupsExpanded ? ' token-groups-list-expanded' : ''}`}
-              >
-                <button
-                  type="button"
-                  className={`token-group-chip${
-                    !selectedTokenUngrouped && selectedTokenGroupName == null ? ' token-group-chip-active' : ''
-                  }`}
-                  onClick={handleSelectTokenGroupAll}
-                  disabled={tokensBlocking}
-                >
-                  <span className="token-group-name">{tokenStrings.groups.all}</span>
-                </button>
-                {ungroupedTokenGroup && (
-                  <button
-                    type="button"
-                    className={`token-group-chip${selectedTokenUngrouped ? ' token-group-chip-active' : ''}`}
-                    onClick={handleSelectTokenGroupUngrouped}
-                    disabled={tokensBlocking}
-                  >
-                    <span className="token-group-name">{tokenStrings.groups.ungrouped}</span>
-                    {tokenGroupsExpanded && (
-                      <span className="token-group-count">
-                        {ungroupedTokenGroup.tokenCount}
-                      </span>
-                    )}
-                  </button>
-                )}
-                {namedTokenGroups.map((group) => (
-                  <button
-                    key={group.name}
-                    type="button"
-                    className={`token-group-chip${
-                      !selectedTokenUngrouped && selectedTokenGroupName === group.name ? ' token-group-chip-active' : ''
-                    }`}
-                    onClick={() => handleSelectTokenGroupNamed(group.name)}
-                    disabled={tokensBlocking}
-                  >
-                    <span className="token-group-name">{group.name}</span>
-                    {tokenGroupsExpanded && (
-                      <span className="token-group-count">
-                        {group.tokenCount}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-              {(tokenGroupsCollapsedOverflowing || tokenGroupsExpanded) && (
-                <button
-                  type="button"
-                  className={`token-group-chip token-group-toggle${tokenGroupsExpanded ? ' token-group-toggle-active' : ''}`}
-                  onClick={toggleTokenGroupsExpanded}
-                  aria-label={tokenGroupsExpanded ? tokenStrings.groups.moreHide : tokenStrings.groups.moreShow}
-                  disabled={tokensBlocking}
-                >
-                  <Icon icon={tokenGroupsExpanded ? 'mdi:chevron-up' : 'mdi:chevron-down'} width={18} height={18} />
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+        {renderTokenFilters()}
         <AdminTableShell
           className="jobs-table-wrapper admin-responsive-up"
           tableClassName="jobs-table tokens-table"
@@ -9743,7 +10166,7 @@ function AdminDashboard(): JSX.Element {
           {tokenList.length === 0 ? (
             <tbody>
               <tr>
-                <td colSpan={isAdmin ? 7 : 6}>
+                <td colSpan={isAdmin ? 8 : 6}>
                   <div className="empty-state alert">{tokenStrings.empty.none}</div>
                 </td>
               </tr>
@@ -9752,7 +10175,26 @@ function AdminDashboard(): JSX.Element {
             <>
               <thead>
                 <tr>
-                  <th>{tokenStrings.table.id}</th>
+                  {isAdmin && (
+                    <th className="token-select-col">
+                      <label style={keySelectionCheckboxLabelStyle}>
+                        <input
+                          type="checkbox"
+                          className="token-selection-checkbox"
+                          checked={allVisibleTokensSelected}
+                          ref={(node) => {
+                            if (node) node.indeterminate = someVisibleTokensSelected
+                          }}
+                          onChange={toggleVisibleTokenSelection}
+                          disabled={tokensBlocking || tokenList.length === 0}
+                          aria-label={tokenStrings.bulk.pageSelected
+                            .replace('{count}', String(selectedVisibleTokenCount))
+                            .replace('{total}', String(tokenList.length))}
+                        />
+                      </label>
+                    </th>
+                  )}
+                  <th className="token-id-col">{tokenStrings.table.id}</th>
                   <th>{tokenStrings.table.owner}</th>
                   <th>{tokenStrings.table.note}</th>
                   <th>{tokenStrings.table.usage}</th>
@@ -9772,7 +10214,21 @@ function AdminDashboard(): JSX.Element {
                   const quotaTitle = `${t.quota_hourly_used}/${t.quota_hourly_limit} · ${t.quota_daily_used}/${t.quota_daily_limit} · ${t.quota_monthly_used}/${t.quota_monthly_limit}`
                   return (
                     <tr key={t.id}>
-                      <td>
+                      {isAdmin && (
+                        <td className="token-select-col">
+                          <label style={keySelectionCheckboxLabelStyle}>
+                            <input
+                              type="checkbox"
+                              className="token-selection-checkbox"
+                              checked={selectedTokenIds.has(t.id)}
+                              onChange={() => toggleTokenSelection(t.id)}
+                              disabled={tokenBulkActionInFlight != null}
+                              aria-label={`${tokenStrings.table.id} ${t.id}`}
+                            />
+                          </label>
+                        </td>
+                      )}
+                      <td className="token-id-col">
                         <div className="token-id-cell">
                           <button
                             type="button"
@@ -9929,6 +10385,21 @@ function AdminDashboard(): JSX.Element {
               const quotaLabel = quotaLabels[quotaStateKey] ?? quotaLabels.normal
               return (
                 <article key={t.id} className="admin-mobile-card">
+                  {isAdmin && (
+                    <div className="admin-mobile-kv token-mobile-select-row">
+                      <span>{tokenStrings.bulk.selected.replace('{count}', '1')}</span>
+                      <label style={keySelectionCheckboxLabelStyle}>
+                        <input
+                          type="checkbox"
+                          className="token-selection-checkbox"
+                          checked={selectedTokenIds.has(t.id)}
+                          onChange={() => toggleTokenSelection(t.id)}
+                          disabled={tokenBulkActionInFlight != null}
+                          aria-label={`${tokenStrings.table.id} ${t.id}`}
+                        />
+                      </label>
+                    </div>
+                  )}
                   <div className="admin-mobile-kv">
                     <span>{tokenStrings.table.id}</span>
                     <strong>
@@ -10004,7 +10475,7 @@ function AdminDashboard(): JSX.Element {
 </Button>
 <Button
   type="button"
-  variant="warning"
+  variant="destructive"
   size="sm"
   onClick={() => openTokenDeleteConfirm(t.id)}
   disabled={deletingId === t.id}
@@ -10018,6 +10489,76 @@ function AdminDashboard(): JSX.Element {
             })
           )}
         </AdminLoadingRegion>
+        {isAdmin && selectedTokenCount > 0 && typeof document !== 'undefined' && createPortal(
+          <div className="token-bulk-action-panel" role="region" aria-live="polite" style={{ left: tokenBulkPanelLeft }}>
+            <div className="token-bulk-action-summary">
+              <strong>{tokenStrings.bulk.selected.replace('{count}', String(selectedTokenCount))}</strong>
+              <span>
+                {tokenStrings.bulk.pageSelected
+                  .replace('{count}', String(selectedVisibleTokenCount))
+                  .replace('{total}', String(tokenList.length))}
+              </span>
+              {tokenBulkFeedback && <span className="token-bulk-feedback">{tokenBulkFeedback}</span>}
+            </div>
+            <div className="token-bulk-action-buttons">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="token-bulk-secondary-action"
+                onClick={() => void handleTokenBatchStatus(true)}
+                disabled={tokenBulkActionInFlight != null}
+              >
+                <Icon
+                  icon={tokenBulkActionInFlight === 'activate' ? 'mdi:loading' : 'mdi:play-circle-outline'}
+                  width={16}
+                  height={16}
+                  className={tokenBulkActionInFlight === 'activate' ? 'icon-spin' : undefined}
+                  aria-hidden="true"
+                />
+                <span>{tokenBulkActionInFlight === 'activate' ? tokenStrings.bulk.running : tokenStrings.bulk.activate}</span>
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="token-bulk-secondary-action"
+                onClick={() => void handleTokenBatchStatus(false)}
+                disabled={tokenBulkActionInFlight != null}
+              >
+                <Icon
+                  icon={tokenBulkActionInFlight === 'freeze' ? 'mdi:loading' : 'mdi:pause-circle-outline'}
+                  width={16}
+                  height={16}
+                  className={tokenBulkActionInFlight === 'freeze' ? 'icon-spin' : undefined}
+                  aria-hidden="true"
+                />
+                <span>{tokenBulkActionInFlight === 'freeze' ? tokenStrings.bulk.running : tokenStrings.bulk.freeze}</span>
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                className="token-bulk-delete-action"
+                onClick={() => setPendingTokenBulkDelete(true)}
+                disabled={tokenBulkActionInFlight != null}
+              >
+                <Icon
+                  icon={tokenBulkActionInFlight === 'delete' ? 'mdi:loading' : 'mdi:trash-outline'}
+                  width={16}
+                  height={16}
+                  className={tokenBulkActionInFlight === 'delete' ? 'icon-spin' : undefined}
+                  aria-hidden="true"
+                />
+                <span>{tokenBulkActionInFlight === 'delete' ? tokenStrings.bulk.running : tokenStrings.bulk.delete}</span>
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="token-bulk-clear-action" onClick={clearSelectedTokens} disabled={tokenBulkActionInFlight != null}>
+                {tokenStrings.bulk.clear}
+              </Button>
+            </div>
+          </div>,
+          document.body,
+        )}
         {tokensTotal > tokensPerPage && (
           <AdminTablePagination
             page={tokensPage}
@@ -10029,6 +10570,10 @@ function AdminDashboard(): JSX.Element {
                   .replace('{total}', String(totalPages))}
               </span>
             }
+            perPage={tokensPerPage}
+            perPageOptions={[...TOKEN_PER_PAGE_OPTIONS]}
+            perPageLabel={tokenStrings.pagination.perPage}
+            perPageAriaLabel={tokenStrings.pagination.perPage}
             previousLabel={tokenStrings.pagination.prev}
             nextLabel={tokenStrings.pagination.next}
             previousDisabled={tokensPage <= 1}
@@ -10036,6 +10581,7 @@ function AdminDashboard(): JSX.Element {
             disabled={tokensBlocking}
             onPrevious={goPrevPage}
             onNext={goNextPage}
+            onPerPageChange={changeTokensPerPage}
           />
         )}
       </section>

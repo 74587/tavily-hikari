@@ -751,6 +751,117 @@ struct UserDashboardView {
     daily_failure: i64,
     monthly_success: i64,
     last_activity: Option<i64>,
+    recharge: RechargeSummaryView,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RechargeSummaryView {
+    current_month_start: i64,
+    current_entitlement_credits: i64,
+    effective_until_month_start: Option<i64>,
+}
+
+impl From<tavily_hikari::LinuxDoCreditRechargeSummary> for RechargeSummaryView {
+    fn from(value: tavily_hikari::LinuxDoCreditRechargeSummary) -> Self {
+        Self {
+            current_month_start: value.current_month_start,
+            current_entitlement_credits: value.current_month_entitlement_credits,
+            effective_until_month_start: value.effective_until_month_start,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RechargeOrderView {
+    out_trade_no: String,
+    status: String,
+    credits: i64,
+    months: i64,
+    money: String,
+    trade_no: Option<String>,
+    payment_url: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    paid_at: Option<i64>,
+    last_notify_at: Option<i64>,
+    last_error: Option<String>,
+}
+
+impl From<tavily_hikari::LinuxDoCreditRechargeOrder> for RechargeOrderView {
+    fn from(value: tavily_hikari::LinuxDoCreditRechargeOrder) -> Self {
+        Self {
+            out_trade_no: value.out_trade_no,
+            status: value.status,
+            credits: value.credits,
+            months: value.months,
+            money: tavily_hikari::format_linuxdo_credit_money(value.money_cents),
+            trade_no: value.trade_no,
+            payment_url: value.payment_url,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            paid_at: value.paid_at,
+            last_notify_at: value.last_notify_at,
+            last_error: value.last_error,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RechargeConfigView {
+    visible: bool,
+    enabled: bool,
+    unit_credits: i64,
+    unit_price_ldc: i64,
+    min_credits: i64,
+    max_credits: i64,
+    credits_step: i64,
+    default_credits: i64,
+    min_months: i64,
+    max_months: i64,
+    quota_delta_base_credits: i64,
+    hourly_delta_per_quota_unit: i64,
+    daily_delta_per_quota_unit: i64,
+    monthly_delta_per_quota_unit: i64,
+    test_price_enabled: bool,
+    current_month_start: i64,
+    current_entitlement_credits: i64,
+    effective_until_month_start: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RechargeOrdersView {
+    items: Vec<RechargeOrderView>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRechargeOrderRequest {
+    credits: i64,
+    months: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRechargeOrderResponse {
+    order: RechargeOrderView,
+    payment_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinuxDoCreditNotifyQuery {
+    pid: Option<String>,
+    trade_no: Option<String>,
+    out_trade_no: Option<String>,
+    #[serde(rename = "type")]
+    payment_type: Option<String>,
+    name: Option<String>,
+    money: Option<String>,
+    trade_status: Option<String>,
+    sign: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -832,7 +943,479 @@ async fn get_user_dashboard(
         daily_failure: summary.daily_failure,
         monthly_success: summary.monthly_success,
         last_activity: summary.last_activity,
+        recharge: summary.recharge.into(),
     }))
+}
+
+fn linuxdo_credit_config_unavailable() -> (StatusCode, String) {
+    (StatusCode::SERVICE_UNAVAILABLE, "recharge not configured".to_string())
+}
+
+async fn user_recharge_gate_for_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(bool, bool), (StatusCode, String)> {
+    let settings = state
+        .proxy
+        .get_system_settings()
+        .await
+        .map_err(|err| map_recharge_error("load recharge gate settings", err))?;
+    let visible = settings.recharge_feature_enabled
+        && (settings.recharge_user_enabled || is_admin_request(state, headers));
+    Ok((visible, visible && state.linuxdo_credit.is_enabled_and_configured()))
+}
+
+fn map_recharge_error(stage: &'static str, err: impl std::fmt::Display) -> (StatusCode, String) {
+    eprintln!("{stage}: {err}");
+    (StatusCode::INTERNAL_SERVER_ERROR, "recharge failed".to_string())
+}
+
+fn linuxdo_credit_signature_payload(params: &[(&str, String)], secret: &str) -> String {
+    let mut pairs: Vec<(&str, &str)> = params
+        .iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    pairs.sort_by(|left, right| left.0.cmp(right.0));
+    let joined = pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{joined}{secret}")
+}
+
+fn decode_ed25519_private_key(raw: &str) -> Result<Vec<u8>, String> {
+    let trimmed = raw.trim();
+    let pem_body = if trimmed.contains("-----BEGIN") {
+        trimmed
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .map(str::trim)
+            .collect::<String>()
+    } else {
+        trimmed.to_string()
+    };
+    for engine in [
+        base64::engine::general_purpose::STANDARD,
+        base64::engine::general_purpose::STANDARD_NO_PAD,
+        base64::engine::general_purpose::URL_SAFE,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD,
+    ] {
+        if let Ok(decoded) = engine.decode(&pem_body)
+            && (decoded.len() == 32 || decoded.len() > 32)
+        {
+            if let Some(seed) = ed25519_seed_from_pkcs8_v1_der(&decoded) {
+                return Ok(seed);
+            }
+            return Ok(decoded);
+        }
+    }
+    if trimmed.len() == 64 && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        let mut bytes = Vec::with_capacity(32);
+        for index in (0..trimmed.len()).step_by(2) {
+            let byte = u8::from_str_radix(&trimmed[index..index + 2], 16)
+                .map_err(|err| format!("invalid hex private key: {err}"))?;
+            bytes.push(byte);
+        }
+        return Ok(bytes);
+    }
+    Err("private key must be base64/base64url/hex seed or PKCS#8 DER/PEM".to_string())
+}
+
+fn ed25519_seed_from_pkcs8_v1_der(decoded: &[u8]) -> Option<Vec<u8>> {
+    const PREFIX: [u8; 16] = [
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+        0x04, 0x20,
+    ];
+    decoded
+        .strip_prefix(&PREFIX)
+        .filter(|seed| seed.len() == 32)
+        .map(|seed| seed.to_vec())
+}
+
+fn sign_linuxdo_credit_ldc(params: &[(&str, String)], cfg: &LinuxDoCreditOptions) -> Result<String, String> {
+    let secret = cfg
+        .client_secret
+        .as_deref()
+        .ok_or_else(|| "missing client secret".to_string())?;
+    let private_key = cfg
+        .merchant_private_key
+        .as_deref()
+        .ok_or_else(|| "missing merchant private key".to_string())?;
+    let payload = linuxdo_credit_signature_payload(params, secret);
+    let key_bytes = decode_ed25519_private_key(private_key)?;
+    let signature = if key_bytes.len() == 32 {
+        let key_pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&key_bytes)
+            .map_err(|_| "invalid Ed25519 seed".to_string())?;
+        key_pair.sign(payload.as_bytes())
+    } else {
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(&key_bytes)
+            .map_err(|_| "invalid Ed25519 PKCS#8 private key".to_string())?;
+        key_pair.sign(payload.as_bytes())
+    };
+    Ok(base64::engine::general_purpose::STANDARD.encode(signature.as_ref()))
+}
+
+fn verify_linuxdo_credit_notify_sign(query: &LinuxDoCreditNotifyQuery, secret: &str) -> bool {
+    let Some(sign) = query.sign.as_deref().map(str::trim).filter(|it| !it.is_empty()) else {
+        return false;
+    };
+    let params = [
+        ("money", query.money.clone().unwrap_or_default()),
+        ("name", query.name.clone().unwrap_or_default()),
+        ("out_trade_no", query.out_trade_no.clone().unwrap_or_default()),
+        ("pid", query.pid.clone().unwrap_or_default()),
+        ("trade_no", query.trade_no.clone().unwrap_or_default()),
+        ("trade_status", query.trade_status.clone().unwrap_or_default()),
+        ("type", query.payment_type.clone().unwrap_or_default()),
+    ];
+    let payload = linuxdo_credit_signature_payload(&params, secret);
+    let digest = format!("{:x}", md5::compute(payload.as_bytes()));
+    digest.eq_ignore_ascii_case(sign)
+}
+
+fn linuxdo_credit_location_payment_url(
+    submit_url: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> Option<String> {
+    let raw = headers
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return Some(raw.to_string());
+    }
+    reqwest::Url::parse(submit_url)
+        .ok()
+        .and_then(|base| base.join(raw).ok())
+        .map(|url| url.to_string())
+}
+
+fn linuxdo_credit_payment_url_from_response(
+    submit_url: &str,
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> Result<String, &'static str> {
+    if status.is_redirection()
+        && let Some(payment_url) = linuxdo_credit_location_payment_url(submit_url, headers)
+    {
+        return Ok(payment_url);
+    }
+    let value: Value = serde_json::from_str(body).map_err(|_| "invalid payment response")?;
+    value
+        .get("url")
+        .or_else(|| value.get("payment_url"))
+        .or_else(|| value.get("pay_url"))
+        .and_then(|it| it.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("data")
+                .and_then(|data| {
+                    data.get("url")
+                        .or_else(|| data.get("payment_url"))
+                        .or_else(|| data.get("pay_url"))
+                })
+                .and_then(|it| it.as_str())
+                .map(str::to_string)
+        })
+        .filter(|url| !url.trim().is_empty())
+        .ok_or("payment url missing")
+}
+
+async fn get_user_recharge_config(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<RechargeConfigView>, (StatusCode, String)> {
+    if !state.linuxdo_oauth.is_enabled_and_configured() {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    let Some(user_session) = resolve_user_session(state.as_ref(), &headers).await else {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized".to_string()));
+    };
+    let summary = state
+        .proxy
+        .linuxdo_credit_recharge_summary(&user_session.user.user_id)
+        .await
+        .map_err(|err| map_recharge_error("load recharge summary", err))?;
+    let price = state.linuxdo_credit.price_config();
+    let quota_delta_base_credits = tavily_hikari::LINUXDO_CREDIT_RECHARGE_UNIT_CREDITS;
+    let quota_delta = tavily_hikari::linuxdo_credit_recharge_quota_delta(quota_delta_base_credits);
+    let (visible, enabled) = user_recharge_gate_for_request(state.as_ref(), &headers).await?;
+    Ok(Json(RechargeConfigView {
+        visible,
+        enabled,
+        unit_credits: price.unit_credits,
+        unit_price_ldc: price.unit_price_cents / 100,
+        min_credits: price.min_credits,
+        max_credits: price.max_credits,
+        credits_step: price.credits_step,
+        default_credits: price.default_credits,
+        min_months: price.min_months,
+        max_months: price.max_months,
+        quota_delta_base_credits,
+        hourly_delta_per_quota_unit: quota_delta.hourly_delta,
+        daily_delta_per_quota_unit: quota_delta.daily_delta,
+        monthly_delta_per_quota_unit: quota_delta.monthly_delta,
+        test_price_enabled: state.linuxdo_credit.test_price_enabled,
+        current_month_start: summary.current_month_start,
+        current_entitlement_credits: summary.current_month_entitlement_credits,
+        effective_until_month_start: summary.effective_until_month_start,
+    }))
+}
+
+async fn get_user_recharge_orders(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<RechargeOrdersView>, (StatusCode, String)> {
+    if !state.linuxdo_oauth.is_enabled_and_configured() {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    let Some(user_session) = resolve_user_session(state.as_ref(), &headers).await else {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized".to_string()));
+    };
+    let items = state
+        .proxy
+        .list_linuxdo_credit_recharge_orders(&user_session.user.user_id, 20)
+        .await
+        .map_err(|err| map_recharge_error("list recharge orders", err))?
+        .into_iter()
+        .map(RechargeOrderView::from)
+        .collect();
+    Ok(Json(RechargeOrdersView { items }))
+}
+
+async fn get_user_recharge_order(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(out_trade_no): Path<String>,
+) -> Result<Json<RechargeOrderView>, (StatusCode, String)> {
+    if !state.linuxdo_oauth.is_enabled_and_configured() {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    let Some(user_session) = resolve_user_session(state.as_ref(), &headers).await else {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized".to_string()));
+    };
+    let Some(order) = state
+        .proxy
+        .get_linuxdo_credit_recharge_order(&out_trade_no)
+        .await
+        .map_err(|err| map_recharge_error("get recharge order", err))?
+    else {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    };
+    if order.user_id != user_session.user.user_id {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    Ok(Json(RechargeOrderView::from(order)))
+}
+
+async fn post_user_recharge_order(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateRechargeOrderRequest>,
+) -> Result<Json<CreateRechargeOrderResponse>, (StatusCode, String)> {
+    if !state.linuxdo_oauth.is_enabled_and_configured() {
+        return Err((StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    let Some(user_session) = resolve_user_session(state.as_ref(), &headers).await else {
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized".to_string()));
+    };
+    let (_, recharge_enabled) = user_recharge_gate_for_request(state.as_ref(), &headers).await?;
+    if !recharge_enabled {
+        return Err(linuxdo_credit_config_unavailable());
+    }
+    let price = state.linuxdo_credit.price_config();
+    let Some(money_cents) =
+        tavily_hikari::linuxdo_credit_recharge_money_cents(payload.credits, payload.months, price)
+    else {
+        return Err((StatusCode::BAD_REQUEST, "invalid credits or months".to_string()));
+    };
+    let now = Utc::now().timestamp();
+    let out_trade_no = format!("ldc_{}", nanoid!(24));
+    let order_name = format!("Tavily Hikari {} credits x {} month(s)", payload.credits, payload.months);
+    let mut order = tavily_hikari::LinuxDoCreditRechargeOrder {
+        out_trade_no: out_trade_no.clone(),
+        user_id: user_session.user.user_id.clone(),
+        status: tavily_hikari::LINUXDO_CREDIT_RECHARGE_STATUS_PENDING.to_string(),
+        credits: payload.credits,
+        months: payload.months,
+        money_cents,
+        trade_no: None,
+        payment_url: None,
+        order_name: order_name.clone(),
+        notify_payload: None,
+        created_at: now,
+        updated_at: now,
+        paid_at: None,
+        last_notify_at: None,
+        last_error: None,
+    };
+
+    let client_id = state
+        .linuxdo_credit
+        .client_id
+        .as_deref()
+        .ok_or_else(linuxdo_credit_config_unavailable)?;
+    let money = tavily_hikari::format_linuxdo_credit_money(money_cents);
+    let mut submit_params = vec![
+        ("client_id", client_id.to_string()),
+        ("type", "ldcpay".to_string()),
+        ("out_trade_no", out_trade_no.clone()),
+        ("money", money),
+        ("order_name", order_name),
+    ];
+    if let Some(notify_url) = state.linuxdo_credit.notify_url.clone() {
+        submit_params.push(("notify_url", notify_url));
+    }
+    if let Some(return_url) = state.linuxdo_credit.return_url.clone() {
+        submit_params.push(("return_url", return_url));
+    }
+    let sign = sign_linuxdo_credit_ldc(&submit_params, &state.linuxdo_credit)
+        .map_err(|err| (StatusCode::SERVICE_UNAVAILABLE, err))?;
+    submit_params.push(("sign", sign));
+
+    let submit_url = state.linuxdo_credit.submit_url.clone();
+    state
+        .proxy
+        .create_linuxdo_credit_recharge_order(&order)
+        .await
+        .map_err(|err| map_recharge_error("persist recharge order", err))?;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|err| {
+            eprintln!("linuxdo credit client build error: {err}");
+            (StatusCode::BAD_GATEWAY, "failed to create payment order".to_string())
+        })?;
+    let resp = client
+        .post(&submit_url)
+        .form(&submit_params)
+        .send()
+        .await
+        .map_err(|err| {
+            eprintln!("linuxdo credit create order transport error: {err}");
+            let proxy = state.proxy.clone();
+            let out_trade_no = out_trade_no.clone();
+            tokio::spawn(async move {
+                let _ = proxy
+                    .fail_linuxdo_credit_recharge_order(
+                        &out_trade_no,
+                        "payment upstream transport error",
+                        Utc::now().timestamp(),
+                    )
+                    .await;
+            });
+            (StatusCode::BAD_GATEWAY, "failed to create payment order".to_string())
+        })?;
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() && !status.is_redirection() {
+        state
+            .proxy
+            .fail_linuxdo_credit_recharge_order(
+                &out_trade_no,
+                &format!("payment upstream returned {status}"),
+                Utc::now().timestamp(),
+            )
+            .await
+            .ok();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("payment upstream returned {status}"),
+        ));
+    }
+    let payment_url =
+        linuxdo_credit_payment_url_from_response(&submit_url, status, &headers, &body).map_err(
+            |message| {
+                let proxy = state.proxy.clone();
+                let out_trade_no = out_trade_no.clone();
+                let message = message.to_string();
+                let stored_message = message.clone();
+                tokio::spawn(async move {
+                    let _ = proxy
+                        .fail_linuxdo_credit_recharge_order(
+                            &out_trade_no,
+                            &stored_message,
+                            Utc::now().timestamp(),
+                        )
+                        .await;
+                });
+                (StatusCode::BAD_GATEWAY, message)
+            },
+        )?;
+    state
+        .proxy
+        .set_linuxdo_credit_recharge_payment_url(&out_trade_no, &payment_url, Utc::now().timestamp())
+        .await
+        .map_err(|err| map_recharge_error("persist recharge payment url", err))?;
+    order.payment_url = Some(payment_url.clone());
+    order.updated_at = Utc::now().timestamp();
+    Ok(Json(CreateRechargeOrderResponse {
+        order: RechargeOrderView::from(order),
+        payment_url,
+    }))
+}
+
+async fn get_linuxdo_credit_notify(
+    State(state): State<Arc<AppState>>,
+    RawQuery(raw_query): RawQuery,
+    Query(query): Query<LinuxDoCreditNotifyQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if !state.linuxdo_credit.is_enabled_and_configured() {
+        return Err(linuxdo_credit_config_unavailable());
+    }
+    let Some(out_trade_no) = query
+        .out_trade_no
+        .as_deref()
+        .map(str::trim)
+        .filter(|it| !it.is_empty())
+    else {
+        return Err((StatusCode::BAD_REQUEST, "missing out_trade_no".to_string()));
+    };
+    let Some(order) = state
+        .proxy
+        .get_linuxdo_credit_recharge_order(out_trade_no)
+        .await
+        .map_err(|err| map_recharge_error("load recharge notify order", err))?
+    else {
+        return Err((StatusCode::BAD_REQUEST, "order not found".to_string()));
+    };
+    let client_secret = state
+        .linuxdo_credit
+        .client_secret
+        .as_deref()
+        .ok_or_else(linuxdo_credit_config_unavailable)?;
+    if !verify_linuxdo_credit_notify_sign(&query, client_secret) {
+        return Err((StatusCode::BAD_REQUEST, "invalid sign".to_string()));
+    }
+    let paid = query.trade_status.as_deref() == Some("TRADE_SUCCESS")
+        || query.trade_status.as_deref() == Some("success");
+    if !paid {
+        return Err((StatusCode::BAD_REQUEST, "trade not successful".to_string()));
+    }
+    let expected_money = tavily_hikari::format_linuxdo_credit_money(order.money_cents);
+    if query.money.as_deref() != Some(expected_money.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, "money mismatch".to_string()));
+    }
+    let trade_no = query.trade_no.as_deref().unwrap_or_default();
+    let notify_payload = raw_query.unwrap_or_default();
+    state
+        .proxy
+        .apply_linuxdo_credit_recharge_payment(
+            out_trade_no,
+            trade_no,
+            &notify_payload,
+            Utc::now().timestamp(),
+        )
+        .await
+        .map_err(|err| map_recharge_error("apply recharge notify", err))?;
+    Ok((StatusCode::OK, "success"))
 }
 
 fn user_token_quota_values(token: &AuthToken) -> (i64, i64, i64, i64, i64, i64) {
@@ -1244,4 +1827,91 @@ async fn sse_user_token(
         }
     };
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("")))
+}
+
+#[cfg(test)]
+mod linuxdo_credit_key_tests {
+    use super::*;
+
+    #[test]
+    fn linuxdo_credit_accepts_minimal_ed25519_pkcs8_v1_der() {
+        const SEED: [u8; 32] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32,
+        ];
+        let mut der = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04,
+            0x22, 0x04, 0x20,
+        ];
+        der.extend_from_slice(&SEED);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&der);
+
+        let decoded = decode_ed25519_private_key(&encoded).expect("decode pkcs8 v1 der");
+        assert_eq!(decoded, SEED);
+    }
+
+    #[test]
+    fn linuxdo_credit_signs_with_minimal_ed25519_pkcs8_v1_der() {
+        const SEED: [u8; 32] = [
+            32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13,
+            12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+        ];
+        let mut der = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04,
+            0x22, 0x04, 0x20,
+        ];
+        der.extend_from_slice(&SEED);
+        let private_key = base64::engine::general_purpose::STANDARD.encode(&der);
+        let cfg = LinuxDoCreditOptions {
+            enabled: true,
+            client_id: Some("pid".to_string()),
+            client_secret: Some("secret".to_string()),
+            merchant_private_key: Some(private_key),
+            submit_url: "https://credit.linux.do/epay/pay/submit.php".to_string(),
+            notify_url: None,
+            return_url: None,
+            test_price_enabled: false,
+        };
+
+        let signature = sign_linuxdo_credit_ldc(&[("money", "50.00".to_string())], &cfg)
+            .expect("sign with pkcs8 v1 der");
+        assert!(!signature.is_empty());
+    }
+
+    #[test]
+    fn linuxdo_credit_submit_redirect_location_is_payment_url() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::LOCATION,
+            reqwest::header::HeaderValue::from_static("/epay/pay/checkout.php?trade_no=123"),
+        );
+
+        let payment_url = linuxdo_credit_payment_url_from_response(
+            "https://credit.linux.do/epay/pay/submit.php",
+            reqwest::StatusCode::FOUND,
+            &headers,
+            "",
+        )
+        .expect("redirect location should be accepted");
+
+        assert_eq!(
+            payment_url,
+            "https://credit.linux.do/epay/pay/checkout.php?trade_no=123"
+        );
+    }
+
+    #[test]
+    fn linuxdo_credit_submit_json_payment_url_is_still_supported() {
+        let headers = reqwest::header::HeaderMap::new();
+
+        let payment_url = linuxdo_credit_payment_url_from_response(
+            "https://credit.linux.do/epay/pay/submit.php",
+            reqwest::StatusCode::OK,
+            &headers,
+            r#"{"data":{"pay_url":"https://credit.linux.do/pay/123"}}"#,
+        )
+        .expect("json payment url should be accepted");
+
+        assert_eq!(payment_url, "https://credit.linux.do/pay/123");
+    }
 }

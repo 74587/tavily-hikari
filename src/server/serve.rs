@@ -9,6 +9,7 @@ pub async fn serve(
     usage_base: String,
     api_key_ip_geo_origin: String,
     linuxdo_oauth: LinuxDoOAuthOptions,
+    linuxdo_credit: LinuxDoCreditOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let AdminAuthOptions {
         forward_auth_enabled,
@@ -28,6 +29,7 @@ pub async fn serve(
         forward_auth_enabled,
         builtin_admin,
         linuxdo_oauth,
+        linuxdo_credit,
         dev_open_admin,
         usage_base: usage_base.clone(),
         api_key_ip_geo_origin,
@@ -75,6 +77,12 @@ pub async fn serve(
         linuxdo_user_sync_hour,
         linuxdo_user_sync_minute,
     );
+    println!(
+        "LinuxDo Credit: enabled={} configured={} submit_url={}",
+        state.linuxdo_credit.enabled,
+        state.linuxdo_credit.is_enabled_and_configured(),
+        state.linuxdo_credit.submit_url
+    );
 
     let mut router = Router::new()
         .route("/health", get(health_check))
@@ -99,6 +107,16 @@ pub async fn serve(
             "/api/user/announcements/history",
             get(get_user_announcement_history),
         )
+        .route("/api/user/recharge/config", get(get_user_recharge_config))
+        .route(
+            "/api/user/recharge/orders",
+            get(get_user_recharge_orders).post(post_user_recharge_order),
+        )
+        .route(
+            "/api/user/recharge/orders/:out_trade_no",
+            get(get_user_recharge_order),
+        )
+        .route("/api/linuxdo-credit/notify", get(get_linuxdo_credit_notify))
         .route("/api/user/tokens", get(get_user_tokens))
         .route("/api/user/tokens/:id", get(get_user_token_detail))
         .route("/api/user/tokens/:id/secret", get(get_user_token_secret))
@@ -237,6 +255,8 @@ pub async fn serve(
         .route("/api/tokens", post(create_token))
         .route("/api/tokens/groups", get(list_token_groups))
         .route("/api/tokens/batch", post(create_tokens_batch))
+        .route("/api/tokens/batch/status", patch(update_tokens_status_batch))
+        .route("/api/tokens/batch", delete(delete_tokens_batch))
         .route("/api/tokens/:id", delete(delete_token))
         .route("/api/tokens/:id/status", patch(update_token_status))
         .route("/api/tokens/:id/note", patch(update_token_note))

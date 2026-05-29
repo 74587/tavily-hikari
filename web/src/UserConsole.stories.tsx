@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 
-import type { Announcement, Profile, RequestRate, RequestRateScope, UserDashboard, UserTokenSummary } from './api'
+import type { Announcement, Profile, RechargeConfig, RechargeOrder, RequestRate, RequestRateScope, UserDashboard, UserTokenSummary } from './api'
 import UserConsole from './UserConsole'
 import {
   DropdownMenu,
@@ -18,6 +18,7 @@ type TokenListState = 'Single Token' | 'Multiple Tokens' | 'Empty'
 type TokenDetailPreview = 'Overview' | 'Token Revealed'
 type PushStatusPreview = 'Live' | 'Reconnecting' | 'Unsupported'
 type AnnouncementPreview = 'Active' | 'Ticker Bodyless' | 'Closed' | 'History Open' | 'None'
+type RechargePreview = 'normal' | 'test-price'
 
 type CopyRecoveryMode = 'none' | 'list-manual-bubble' | 'detail-inline'
 type GuideRevealMode = 'none' | 'landing-guide' | 'detail-guide'
@@ -33,11 +34,13 @@ interface UserConsoleStoryArgs {
   pushStatusBubbleOpen?: boolean
   autoOpenAccountMenu?: boolean
   announcementPreview?: AnnouncementPreview
+  rechargePreview?: RechargePreview
 }
 
 interface UserConsoleStoryState {
   autoRevealToken: boolean
   isAdmin: boolean
+  rechargePreview: RechargePreview
   routePath: string
   tokenListMode: 'single' | 'multiple' | 'empty'
   announcementPreview: AnnouncementPreview
@@ -82,7 +85,71 @@ const dashboardSample: UserDashboard = {
   dailyFailure: 17,
   monthlySuccess: 3478,
   lastActivity: 1_762_386_800,
+  recharge: {
+    currentMonthStart: 1_762_041_600,
+    currentEntitlementCredits: 3000,
+    effectiveUntilMonthStart: 1_767_225_600,
+  },
 }
+
+const rechargeConfigSample: RechargeConfig = {
+  visible: true,
+  enabled: true,
+  unitCredits: 1000,
+  unitPriceLdc: 50,
+  minCredits: 1000,
+  maxCredits: 20_000,
+  creditsStep: 1000,
+  defaultCredits: 1000,
+  minMonths: 1,
+  maxMonths: 12,
+  quotaDeltaBaseCredits: 1000,
+  hourlyDeltaPerQuotaUnit: 20,
+  dailyDeltaPerQuotaUnit: 100,
+  monthlyDeltaPerQuotaUnit: 1000,
+  testPriceEnabled: false,
+  currentMonthStart: 1_762_041_600,
+  currentEntitlementCredits: 3000,
+  effectiveUntilMonthStart: 1_767_225_600,
+}
+
+const rechargeTestPriceConfigSample: RechargeConfig = {
+  ...rechargeConfigSample,
+  defaultCredits: 1,
+  testPriceEnabled: true,
+  currentEntitlementCredits: 1,
+}
+
+const rechargeOrdersSample: RechargeOrder[] = [
+  {
+    outTradeNo: 'ldc_story_paid',
+    status: 'paid',
+    credits: 3000,
+    months: 2,
+    money: '300.00',
+    tradeNo: 'linuxdo-story-001',
+    paymentUrl: 'https://credit.linux.do/story-paid',
+    createdAt: 1_762_214_400,
+    updatedAt: 1_762_214_520,
+    paidAt: 1_762_214_520,
+    lastNotifyAt: 1_762_214_520,
+    lastError: null,
+  },
+  {
+    outTradeNo: 'ldc_story_pending',
+    status: 'pending',
+    credits: 1000,
+    months: 1,
+    money: '50.00',
+    tradeNo: null,
+    paymentUrl: 'https://credit.linux.do/story-pending',
+    createdAt: 1_762_386_200,
+    updatedAt: 1_762_386_200,
+    paidAt: null,
+    lastNotifyAt: null,
+    lastError: null,
+  },
+]
 
 const tokenSample: UserTokenSummary = {
   tokenId: 'a1b2',
@@ -297,6 +364,7 @@ function resolveStoryState(args: UserConsoleStoryArgs): UserConsoleStoryState {
   return {
     autoRevealToken: args.consoleView === 'Token Detail' && args.tokenDetailPreview === 'Token Revealed',
     isAdmin: args.isAdmin,
+    rechargePreview: args.rechargePreview ?? 'normal',
     routePath: routePathFromView(args.consoleView, args.landingFocus, args.routePathOverride),
     tokenListMode,
     announcementPreview: args.announcementPreview ?? 'Active',
@@ -406,6 +474,29 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
 
     if (url.pathname === '/api/user/dashboard') {
       return jsonResponse(dashboardSample)
+    }
+
+    if (url.pathname === '/api/user/recharge/config') {
+      return jsonResponse(state.rechargePreview === 'test-price'
+        ? rechargeTestPriceConfigSample
+        : rechargeConfigSample)
+    }
+
+    if (url.pathname === '/api/user/recharge/orders') {
+      if (request.method === 'POST') {
+        return jsonResponse({
+          order: rechargeOrdersSample[1],
+          paymentUrl: 'https://credit.linux.do/story-checkout',
+        })
+      }
+      return jsonResponse({ items: rechargeOrdersSample })
+    }
+
+    const rechargeOrderRoute = url.pathname.match(/^\/api\/user\/recharge\/orders\/([^/]+)$/)
+    if (rechargeOrderRoute) {
+      const outTradeNo = decodeURIComponent(rechargeOrderRoute[1])
+      const order = rechargeOrdersSample.find((item) => item.outTradeNo === outTradeNo)
+      return order ? jsonResponse(order) : jsonResponse({ message: 'Not Found' }, 404)
     }
 
     if (url.pathname === '/api/version') {
@@ -719,7 +810,15 @@ function UserConsoleStory(
   const [ready, setReady] = useState(false)
   const storyState = useMemo(
     () => resolveStoryState(args),
-    [args.consoleView, args.isAdmin, args.landingFocus, args.tokenListState, args.tokenDetailPreview, args.routePathOverride],
+    [
+      args.consoleView,
+      args.isAdmin,
+      args.landingFocus,
+      args.rechargePreview,
+      args.tokenDetailPreview,
+      args.tokenListState,
+      args.routePathOverride,
+    ],
   )
   const copyRecoveryMode = args.copyRecoveryMode ?? 'none'
   const guideRevealMode = args.guideRevealMode ?? 'none'
@@ -757,6 +856,7 @@ function UserConsoleStory(
     pushStatusPreview,
     storyState.announcementPreview,
     storyState.isAdmin,
+    storyState.rechargePreview,
     storyState.routePath,
     storyState.tokenListMode,
   ])
@@ -838,6 +938,7 @@ function UserConsoleStory(
     storyState.routePath,
     storyState.isAdmin ? 'admin' : 'user',
     storyState.tokenListMode,
+    storyState.rechargePreview,
     storyState.autoRevealToken ? 'revealed' : 'hidden',
     guideRevealMode,
     pushStatusPreview,
@@ -948,9 +1049,16 @@ export const ConsoleHome: Story = {
       '.user-console-header-inline-meta',
       '.user-console-account-trigger',
       '.user-console-landing-stack',
+      '.user-console-recharge-section',
     ]) {
       if (canvasElement.querySelector(selector) == null) {
         throw new Error(`Expected ConsoleHome to render ${selector}`)
+      }
+    }
+    const rechargeText = canvasElement.querySelector('.user-console-recharge-section')?.textContent ?? ''
+    for (const expected of ['50.00 LDC', '+20', '+100', '+1,000']) {
+      if (!rechargeText.includes(expected)) {
+        throw new Error(`Expected recharge section to include ${expected}`)
       }
     }
   },
@@ -977,6 +1085,19 @@ export const ConsoleHomeDark: Story = {
     },
   },
   play: ConsoleHome.play,
+}
+
+export const ConsoleHomeRechargeTestPrice: Story = {
+  name: 'Console Home Recharge Test Price',
+  args: {
+    consoleView: 'Console Home',
+    isAdmin: false,
+    landingFocus: 'Overview Focus',
+    rechargePreview: 'test-price',
+  },
+  globals: {
+    language: 'zh',
+  },
 }
 
 export const ConsoleHomeRoot: Story = {
