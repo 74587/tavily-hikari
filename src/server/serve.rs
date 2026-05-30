@@ -8,6 +8,7 @@ pub async fn serve(
     dev_open_admin: bool,
     usage_base: String,
     api_key_ip_geo_origin: String,
+    ha_config: tavily_hikari::HaConfig,
     linuxdo_oauth: LinuxDoOAuthOptions,
     linuxdo_credit: LinuxDoCreditOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -22,6 +23,10 @@ pub async fn serve(
         builtin_auth_password,
         builtin_auth_password_hash,
     );
+    let ha = tavily_hikari::HaRuntime::new(ha_config);
+    if let Err(err) = ha.refresh_startup_role().await {
+        eprintln!("HA startup role check warning: {err}");
+    }
     let state = Arc::new(AppState {
         proxy,
         static_dir: static_dir.clone(),
@@ -30,6 +35,7 @@ pub async fn serve(
         builtin_admin,
         linuxdo_oauth,
         linuxdo_credit,
+        ha,
         dev_open_admin,
         usage_base: usage_base.clone(),
         api_key_ip_geo_origin,
@@ -83,6 +89,15 @@ pub async fn serve(
         state.linuxdo_credit.is_enabled_and_configured(),
         state.linuxdo_credit.submit_url
     );
+    let ha_status = state.ha.status().await;
+    println!(
+        "HA: mode={:?} node={} role={:?} origin={:?} edgeone_domain={:?}",
+        ha_status.mode,
+        ha_status.node_id,
+        ha_status.role,
+        ha_status.edgeone_origin,
+        ha_status.edgeone_domain
+    );
 
     let mut router = Router::new()
         .route("/health", get(health_check))
@@ -93,6 +108,7 @@ pub async fn serve(
         .route("/api/public/events", get(sse_public))
         .route("/api/public/logs", get(get_public_logs))
         .route("/api/token/metrics", get(get_token_metrics_public))
+        .route("/api/ha/status", get(get_public_ha_status))
         .route("/api/events", get(sse_dashboard))
         .route("/api/version", get(get_versions))
         .route("/api/profile", get(get_profile))
@@ -133,6 +149,13 @@ pub async fn serve(
         )
         .route("/api/admin/login", post(post_admin_login))
         .route("/api/admin/logout", post(post_admin_logout))
+        .route("/api/admin/ha/status", get(get_admin_ha_status))
+        .route("/api/admin/ha/promote", post(post_admin_ha_promote))
+        .route("/api/admin/ha/finalize", post(post_admin_ha_finalize))
+        .route(
+            "/api/admin/ha/recovery/import",
+            post(post_admin_ha_recovery_import),
+        )
         .route("/api/tavily/search", post(tavily_http_search))
         .route("/api/tavily/extract", post(tavily_http_extract))
         .route("/api/tavily/crawl", post(tavily_http_crawl))

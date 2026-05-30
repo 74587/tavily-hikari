@@ -1,0 +1,90 @@
+.ha-status-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 14px 16px;
+  border: 1px solid hsl(38 92% 48% / 0.38);
+  border-radius: 8px;
+  background: hsl(42 92% 93% / 0.82);
+  color: hsl(30 35% 18%);
+}
+
+.ha-status-banner-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: hsl(38 92% 48% / 0.16);
+  color: hsl(32 92% 34%);
+}
+
+.ha-status-banner-copy {
+  min-width: 0;
+}
+
+.ha-status-banner-title {
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.ha-status-banner p {
+  margin: 4px 0 0;
+  color: hsl(30 26% 28%);
+}
+
+.ha-status-banner-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 14px;
+  margin: 12px 0 0;
+}
+
+.ha-status-banner-meta div {
+  min-width: 0;
+}
+
+.ha-status-banner-meta dt {
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: hsl(30 22% 36%);
+}
+
+.ha-status-banner-meta dd {
+  margin: 2px 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.ha-status-banner-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ha-status-banner-actions button {
+  min-height: 36px;
+  border: 1px solid hsl(32 88% 38% / 0.34);
+  border-radius: 8px;
+  background: hsl(32 88% 42%);
+  color: white;
+  padding: 0 12px;
+  font-weight: 700;
+}
+
+.ha-status-banner-actions button:disabled {
+  opacity: 0.62;
+}
+
+@media (max-width: 720px) {
+  .ha-status-banner {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .ha-status-banner-actions {
+    grid-column: 1 / -1;
+  }
+}

@@ -881,6 +881,7 @@ async fn create_user_token(
     if !is_admin_request(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
+    require_full_master_write(state.as_ref()).await?;
 
     match state.proxy.create_user_bound_access_token(&id, None).await {
         Ok(secret) => Ok((
@@ -907,6 +908,7 @@ async fn delete_user_token(
     if !is_admin_request(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
+    require_full_master_write(state.as_ref()).await?;
 
     match state
         .proxy
@@ -934,6 +936,7 @@ async fn update_user_quota(
     if !is_admin_request(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
+    require_full_master_write(state.as_ref()).await?;
     let _legacy_hourly_any_limit = payload.hourly_any_limit;
     if payload.hourly_limit < 0
         || payload.daily_limit < 0

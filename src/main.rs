@@ -9,7 +9,8 @@ use argon2::password_hash::PasswordHash;
 use clap::Parser;
 use dotenvy::dotenv;
 use tavily_hikari::{
-    DEFAULT_UPSTREAM, LOW_QUOTA_DEPLETION_THRESHOLD_DEFAULT, TavilyProxy, TavilyProxyOptions,
+    DEFAULT_UPSTREAM, HaConfig, HaMode, LOW_QUOTA_DEPLETION_THRESHOLD_DEFAULT, TavilyProxy,
+    TavilyProxyOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -223,6 +224,46 @@ struct Cli {
         default_value_t = false
     )]
     linuxdo_credit_test_price_enabled: bool,
+
+    /// HA mode: single or active_standby.
+    #[arg(long, env = "HA_MODE", default_value = "single")]
+    ha_mode: String,
+
+    /// Stable node id for HA state and audit messages.
+    #[arg(long, env = "NODE_ID", default_value = "single")]
+    node_id: String,
+
+    /// Public EdgeOne origin for this node, including port when required.
+    #[arg(long, env = "NODE_PUBLIC_ORIGIN")]
+    node_public_origin: Option<String>,
+
+    /// Tencent EdgeOne zone id.
+    #[arg(long, env = "EDGEONE_ZONE_ID")]
+    edgeone_zone_id: Option<String>,
+
+    /// Tencent EdgeOne acceleration domain.
+    #[arg(long, env = "EDGEONE_DOMAIN")]
+    edgeone_domain: Option<String>,
+
+    /// Expected previous EdgeOne origin before non-force promotion.
+    #[arg(long, env = "EDGEONE_EXPECTED_ORIGIN")]
+    edgeone_expected_origin: Option<String>,
+
+    /// Tencent Cloud secret id for EdgeOne API.
+    #[arg(long, env = "EDGEONE_SECRET_ID", hide_env_values = true)]
+    edgeone_secret_id: Option<String>,
+
+    /// Tencent Cloud secret key for EdgeOne API.
+    #[arg(long, env = "EDGEONE_SECRET_KEY", hide_env_values = true)]
+    edgeone_secret_key: Option<String>,
+
+    /// Tencent EdgeOne API endpoint.
+    #[arg(
+        long,
+        env = "EDGEONE_API_ENDPOINT",
+        default_value = "https://teo.intl.tencentcloudapi.com"
+    )]
+    edgeone_api_endpoint: String,
 }
 
 #[tokio::main]
@@ -409,6 +450,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|value| !value.is_empty()),
         test_price_enabled: cli.linuxdo_credit_test_price_enabled,
     };
+    let ha_config = HaConfig {
+        mode: HaMode::parse(&cli.ha_mode),
+        node_id: cli.node_id.trim().to_string(),
+        node_public_origin: trim_optional(cli.node_public_origin),
+        edgeone_zone_id: trim_optional(cli.edgeone_zone_id),
+        edgeone_domain: trim_optional(cli.edgeone_domain),
+        edgeone_expected_origin: trim_optional(cli.edgeone_expected_origin),
+        edgeone_secret_id: trim_optional(cli.edgeone_secret_id),
+        edgeone_secret_key: trim_optional(cli.edgeone_secret_key),
+        edgeone_api_endpoint: cli.edgeone_api_endpoint.trim().to_string(),
+    };
 
     let static_dir = cli.static_dir.or_else(|| {
         let default = PathBuf::from("web/dist");
@@ -428,12 +480,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.dev_open_admin,
         cli.usage_base,
         cli.api_key_ip_geo_origin,
+        ha_config,
         linuxdo_oauth,
         linuxdo_credit,
     )
     .await?;
 
     Ok(())
+}
+
+fn trim_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_header_name(

@@ -1319,6 +1319,7 @@ impl KeyStore {
 
         self.ensure_request_kind_canonical_migration_v1().await?;
         self.ensure_request_log_catalog_rollup_schema().await?;
+        self.ensure_ha_schema().await?;
 
         if self
             .get_meta_i64(META_KEY_API_KEY_CREATED_AT_BACKFILL_V1)
@@ -1521,6 +1522,89 @@ impl KeyStore {
                 Err(err) => return Err(err),
             }
         }
+
+        Ok(())
+    }
+
+    async fn ensure_ha_schema(&self) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_node_state (
+                id TEXT PRIMARY KEY CHECK (id = 'local'),
+                node_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                edgeone_origin TEXT,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_sync_watermarks (
+                name TEXT PRIMARY KEY,
+                source_node_id TEXT,
+                target_node_id TEXT,
+                watermark INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                detail TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_failover_operations (
+                id TEXT PRIMARY KEY,
+                operation_kind TEXT NOT NULL,
+                target_node_id TEXT,
+                from_origin TEXT,
+                to_origin TEXT,
+                status TEXT NOT NULL,
+                message TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_recovery_batches (
+                id TEXT PRIMARY KEY,
+                source_node_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                event_count INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                imported_at INTEGER,
+                checksum TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_edgeone_audit_logs (
+                id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                request_json TEXT,
+                response_json TEXT,
+                status TEXT NOT NULL,
+                message TEXT,
+                created_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

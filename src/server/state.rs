@@ -7,6 +7,7 @@ struct AppState {
     builtin_admin: BuiltinAdminAuth,
     linuxdo_oauth: LinuxDoOAuthOptions,
     linuxdo_credit: LinuxDoCreditOptions,
+    ha: tavily_hikari::HaRuntime,
     dev_open_admin: bool,
     usage_base: String,
     api_key_ip_geo_origin: String,
@@ -419,6 +420,13 @@ fn is_admin_request(state: &AppState, headers: &HeaderMap) -> bool {
         return true;
     }
     false
+}
+
+async fn require_full_master_write(state: &AppState) -> Result<(), (StatusCode, String)> {
+    if let Some(reason) = state.ha.block_full_write_reason().await {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, reason));
+    }
+    Ok(())
 }
 
 async fn resolve_user_session(

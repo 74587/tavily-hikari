@@ -1,6 +1,7 @@
 mod admin_token_filters;
 mod analysis;
 mod forward_proxy;
+mod ha;
 mod linuxdo_credit_recharge;
 mod models;
 mod store;
@@ -31,6 +32,7 @@ pub use forward_proxy::{
     ForwardProxyValidationProbeResult, ForwardProxyValidationResponse,
     ForwardProxyWeightHourlyBucketResponse,
 };
+pub use ha::*;
 pub use linuxdo_credit_recharge::*;
 pub use models::*;
 pub use tavily_proxy::*;

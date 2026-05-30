@@ -520,6 +520,9 @@ async fn get_linuxdo_auth(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
+    if require_full_master_write(state.as_ref()).await.is_err() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     start_linuxdo_auth(state, headers, None).await
 }
 
@@ -528,6 +531,9 @@ async fn post_linuxdo_auth(
     headers: HeaderMap,
     Form(payload): Form<LinuxDoAuthForm>,
 ) -> Result<Response<Body>, StatusCode> {
+    if require_full_master_write(state.as_ref()).await.is_err() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     start_linuxdo_auth(state, headers, payload.token).await
 }
 
@@ -1218,6 +1224,7 @@ async fn post_user_recharge_order(
     headers: HeaderMap,
     Json(payload): Json<CreateRechargeOrderRequest>,
 ) -> Result<Json<CreateRechargeOrderResponse>, (StatusCode, String)> {
+    require_full_master_write(state.as_ref()).await?;
     if !state.linuxdo_oauth.is_enabled_and_configured() {
         return Err((StatusCode::NOT_FOUND, "not found".to_string()));
     }
@@ -1370,6 +1377,7 @@ async fn get_linuxdo_credit_notify(
     RawQuery(raw_query): RawQuery,
     Query(query): Query<LinuxDoCreditNotifyQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_full_master_write(state.as_ref()).await?;
     if !state.linuxdo_credit.is_enabled_and_configured() {
         return Err(linuxdo_credit_config_unavailable());
     }

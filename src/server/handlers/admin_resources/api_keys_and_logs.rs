@@ -182,6 +182,9 @@ async fn create_api_key(
     if !is_admin_request(state.as_ref(), &headers) {
         return Err(StatusCode::FORBIDDEN);
     }
+    if require_full_master_write(state.as_ref()).await.is_err() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     let CreateKeyRequest {
         api_key,
@@ -236,6 +239,9 @@ async fn create_api_keys_batch(
 ) -> Result<Response<Body>, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers) {
         return Err(StatusCode::FORBIDDEN);
+    }
+    if require_full_master_write(state.as_ref()).await.is_err() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     let BatchCreateKeysRequest {

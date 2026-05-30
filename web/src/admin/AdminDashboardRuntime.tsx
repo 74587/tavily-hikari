@@ -24,6 +24,7 @@ import AdminPanelHeader from '../components/AdminPanelHeader'
 import AdminCompactIntro from '../components/AdminCompactIntro'
 import LanguageSwitcher from '../components/LanguageSwitcher'
 import NotFoundFallbackPreview from '../components/NotFoundFallbackPreview'
+import HaStatusBanner from '../components/HaStatusBanner'
 import { AdminSidebarUtilityCard, AdminSidebarUtilityStack } from '../components/AdminSidebarUtility'
 import { Button } from '../components/ui/button'
 import {
@@ -231,6 +232,9 @@ import {
   fetchAdminUserDetail,
   fetchAdminUserUsageSeries,
   fetchAdminRegistrationSettings,
+  fetchAdminHaStatus,
+  finalizeHaFailover,
+  promoteHaNode,
   fetchTokenBrokenKeys,
   updateAdminUserQuota,
   updateAdminRegistrationSettings,
@@ -258,6 +262,7 @@ import {
   type StickyNode,
   type StickyUserRow,
   type ForwardProxyProgressEvent,
+  type HaStatus,
   fetchForwardProxySettings,
   fetchSystemSettings,
   fetchForwardProxyErrorStats,
@@ -1878,6 +1883,8 @@ function AdminDashboard(): JSX.Element {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [haStatus, setHaStatus] = useState<HaStatus | null>(null)
+  const [haBusy, setHaBusy] = useState(false)
   const secretCacheRef = useRef<Map<string, string>>(new Map())
   const secretRequestCacheRef = useRef<Map<string, Promise<string>>>(new Map())
   const tokenSecretCacheRef = useRef<Map<string, string>>(new Map())
@@ -2511,9 +2518,10 @@ function AdminDashboard(): JSX.Element {
     } = {}) => {
       const request = beginManagedRequest(baseDataAbortRef, signal)
       try {
-        const [ver, profileData] = await Promise.all([
+        const [ver, profileData, haData] = await Promise.all([
           fetchVersion(request.signal).catch(() => null),
           fetchProfile(request.signal).catch(() => null),
+          fetchAdminHaStatus(request.signal).catch(() => null),
         ])
 
         if (request.signal.aborted) {
@@ -2521,6 +2529,7 @@ function AdminDashboard(): JSX.Element {
         }
 
         setProfile(profileData ?? null)
+        setHaStatus(haData ?? null)
         setVersion(ver ?? null)
         setLastUpdated(new Date())
         baseDataLoadedRef.current = true
@@ -2561,9 +2570,10 @@ function AdminDashboard(): JSX.Element {
       }
       try {
         const shouldLoadTokens = route.name === 'module' && route.module === 'tokens'
-        const [ver, profileData, tokenData, tokenGroupsData] = await Promise.all([
+        const [ver, profileData, haData, tokenData, tokenGroupsData] = await Promise.all([
           fetchVersion(request.signal).catch(() => null),
           fetchProfile(request.signal).catch(() => null),
+          fetchAdminHaStatus(request.signal).catch(() => null),
           shouldLoadTokens
             ? fetchTokens(
                 tokensPage,
@@ -2597,6 +2607,7 @@ function AdminDashboard(): JSX.Element {
         }
 
         setProfile(profileData ?? null)
+        setHaStatus(haData ?? null)
         if (tokenData) {
           setTokens(tokenData.items)
           setTokensTotal(tokenData.total)
@@ -8263,6 +8274,38 @@ function AdminDashboard(): JSX.Element {
     <AdminOverlayHost overlays={renderAdminGlobalOverlayHost()}>{pageShell}</AdminOverlayHost>
   )
 
+  const handlePromoteHaNode = useCallback(async () => {
+    setHaBusy(true)
+    try {
+      setHaStatus(await promoteHaNode(false))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'HA promote failed')
+    } finally {
+      setHaBusy(false)
+    }
+  }, [])
+
+  const handleFinalizeHaFailover = useCallback(async () => {
+    setHaBusy(true)
+    try {
+      setHaStatus(await finalizeHaFailover())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'HA finalize failed')
+    } finally {
+      setHaBusy(false)
+    }
+  }, [])
+
+  const adminHaBanner = (
+    <HaStatusBanner
+      status={haStatus}
+      audience="admin"
+      busy={haBusy}
+      onPromote={handlePromoteHaNode}
+      onFinalize={handleFinalizeHaFailover}
+    />
+  )
+
 
   if (route.name === 'key') {
     return renderAdminPageWithGlobalOverlays(
@@ -8272,6 +8315,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectItem={navigateModule}
       >
+        {adminHaBanner}
         <KeyDetails
           key={route.id}
           id={route.id}
@@ -8301,6 +8345,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectItem={navigateModule}
       >
+        {adminHaBanner}
         <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={360}>
           <LazyTokenDetail
             key={route.id}
@@ -8334,6 +8379,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectItem={navigateModule}
       >
+        {adminHaBanner}
         <section className="surface panel">
           <div className="panel-header">
             <div>
@@ -9988,6 +10034,7 @@ function AdminDashboard(): JSX.Element {
           onSelectItem={navigateModule}
         >
           {moduleDesktopUtility}
+          {adminHaBanner}
 
       {!showNotFound && (
         <div className="admin-stacked-only">

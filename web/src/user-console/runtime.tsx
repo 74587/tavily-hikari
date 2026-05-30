@@ -11,6 +11,7 @@ import ConnectivityChecksPanel, {
 import TokenSecretField, { type TokenSecretCopyState } from '../components/TokenSecretField'
 import ManualCopyBubble from '../components/ManualCopyBubble'
 import UserConsoleHeader from '../components/UserConsoleHeader'
+import HaStatusBanner from '../components/HaStatusBanner'
 import DashboardQuotaGrid from './DashboardQuotaGrid'
 import TokenListActions from './TokenListActions'
 import RechargePanel from './RechargePanel'
@@ -24,6 +25,7 @@ import {
   createBrowserTodayWindow,
   fetchVersion,
   fetchProfile,
+  fetchPublicHaStatus,
   millisecondsUntilNextBrowserDayBoundary,
   probeApiTavilyCrawl,
   probeApiTavilyExtract,
@@ -56,6 +58,7 @@ import {
   type UserDashboard,
   type UserTokenSummary,
   type VersionInfo,
+  type HaStatus,
 } from '../api'
 import RollingNumber from '../components/RollingNumber'
 import { StatusBadge, type StatusTone } from '../components/StatusBadge'
@@ -1148,6 +1151,7 @@ export default function UserConsole(): JSX.Element {
 
   const [profile, setProfile] = useState<Profile | null>(null)
   const [dashboard, setDashboard] = useState<UserDashboard | null>(null)
+  const [haStatus, setHaStatus] = useState<HaStatus | null>(null)
   const [tokens, setTokens] = useState<UserTokenSummary[]>([])
   const [rechargeConfig, setRechargeConfig] = useState<RechargeConfig | null>(null)
   const [rechargeOrders, setRechargeOrders] = useState<RechargeOrder[]>([])
@@ -1397,14 +1401,16 @@ export default function UserConsole(): JSX.Element {
         return
       }
 
-      const [nextDashboard, nextTokens, nextRechargeConfig, nextRechargeOrders] = await Promise.all([
+      const [nextDashboard, nextTokens, nextRechargeConfig, nextRechargeOrders, nextHaStatus] = await Promise.all([
         fetchUserDashboard(todayWindow, signal),
         fetchUserTokens(todayWindow, signal),
         fetchUserRechargeConfig(signal).catch(() => null),
         fetchUserRechargeOrders(signal).catch(() => []),
+        fetchPublicHaStatus(signal).catch(() => null),
       ])
       if (signal.aborted || baseLoadRunIdRef.current !== runId) return
       setDashboard(nextDashboard)
+      setHaStatus(nextHaStatus)
       setTokens(nextTokens)
       setRechargeConfig(nextRechargeConfig)
       setRechargeOrders(nextRechargeOrders)
@@ -2563,6 +2569,8 @@ export default function UserConsole(): JSX.Element {
       {consoleUnavailable && <AccessStatePanel state="unavailable" text={text} onHome={goHome} />}
       {consoleLoggedOut && <AccessStatePanel state="logged_out" text={text} onHome={goHome} />}
       {consoleNeedsLogin && <AccessStatePanel state="login_required" text={text} onHome={goHome} />}
+
+      <HaStatusBanner status={haStatus} audience="user" />
 
       {!consoleEmptyState && error && <section className="surface error-banner">{error}</section>}
 

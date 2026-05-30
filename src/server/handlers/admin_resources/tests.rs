@@ -99,6 +99,7 @@ mod admin_resources_tests {
                 login_state_ttl_secs: 600,
             },
             linuxdo_credit: LinuxDoCreditOptions::disabled(),
+            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
             dev_open_admin: false,
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),

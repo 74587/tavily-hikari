@@ -1159,6 +1159,9 @@ async fn patch_admin_registration_settings(
     if !is_admin_request(state.as_ref(), &headers) {
         return Err(StatusCode::FORBIDDEN);
     }
+    if require_full_master_write(state.as_ref()).await.is_err() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let Json(payload) = payload.map_err(|err| {
         eprintln!("patch admin registration settings payload error: {err}");
         StatusCode::BAD_REQUEST

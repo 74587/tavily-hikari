@@ -27,6 +27,7 @@ async fn put_system_settings(
     if !is_admin_request(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
+    require_full_master_write(state.as_ref()).await?;
 
     let current_settings = state.proxy.get_system_settings().await.map_err(|err| {
         eprintln!("get current system settings error: {err}");

@@ -5,9 +5,9 @@ import {
   handleAnnouncementsRoute,
 } from './demoAnnouncements'
 import { createDemoRechargeOrders, demoAdminUserRechargeAudit, handleDemoAdminRechargeAction, handleDemoAdminRecharges, type DemoRechargeOrder } from './demoAdminRecharge'
+import { createDemoHaStatus, handleDemoHaRoute } from './demoHa'
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 type DemoListener = EventListenerOrEventListenerObject
-
 declare global {
   interface Window {
     __tavilyHikariDemoInstalled?: boolean
@@ -15,7 +15,6 @@ declare global {
     __tavilyHikariDemoEventSource?: typeof EventSource
   }
 }
-
 const DEMO_STORAGE_KEY = 'tavily-hikari-demo-mode'
 const DEMO_TOKEN = 'th-dm01-demoaccesssecret'
 const DEMO_TOKEN_ID = 'dm01'
@@ -30,13 +29,11 @@ const DEMO_RECHARGE_UNIT_PRICE_LDC = 50
 const DEMO_TEST_RECHARGE_CREDITS = 1
 const DEMO_TEST_RECHARGE_MONTHS = 1
 const DEMO_TEST_RECHARGE_AMOUNT_LDC = 1
-
 function truthy(value: string | boolean | undefined | null): boolean {
   if (value === true) return true
   if (typeof value !== 'string') return false
   return ['1', 'true', 'yes', 'on', 'demo'].includes(value.trim().toLowerCase())
 }
-
 export function isDemoMode(): boolean {
   const env = (import.meta as unknown as { env?: { VITE_DEMO_MODE?: string } }).env
   if (truthy(env?.VITE_DEMO_MODE)) return true
@@ -210,6 +207,7 @@ function createDemoState() {
       userDisplayName: 'Hikari Demo Admin',
       userAvatarUrl: null,
     },
+    haStatus: createDemoHaStatus(nowSeconds),
     version: { backend: 'demo-web', frontend: '0.1.0-demo' },
     tokens,
     tokenSecrets: new Map(tokens.map((token) => [token.id, token.id === DEMO_TOKEN_ID ? DEMO_TOKEN : `th-${token.id}-demoaccesssecret`])),
@@ -1022,6 +1020,8 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
 
   if (path === '/api/version') return jsonResponse(demoState.version)
   if (path === '/api/profile') return jsonResponse(demoState.profile)
+  const haResponse = handleDemoHaRoute(path, method, demoState)
+  if (haResponse) return haResponse
   if (path === '/api/summary') return jsonResponse(demoSummary())
   if (path === '/api/summary/windows') return jsonResponse(demoSummaryWindows())
   if (path === '/api/dashboard/overview') return jsonResponse(demoDashboardOverview())

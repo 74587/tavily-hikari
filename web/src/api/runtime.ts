@@ -1175,6 +1175,48 @@ export function fetchDashboardOverview(signal?: AbortSignal): Promise<DashboardO
   return requestJson('/api/dashboard/overview', { signal })
 }
 
+export type HaMode = 'single' | 'active_standby'
+export type HaNodeRole = 'full_master' | 'provisional_master' | 'standby' | 'recovery'
+
+export interface HaStatus {
+  mode: HaMode
+  nodeId: string
+  nodePublicOrigin: string | null
+  role: HaNodeRole
+  degraded: boolean
+  allowsBasicBusiness: boolean
+  allowsFullWrites: boolean
+  edgeoneDomain: string | null
+  edgeoneOrigin: string | null
+  edgeoneExpectedOrigin: string | null
+  edgeoneApiConfigured: boolean
+  lastEdgeoneCheckAt: number | null
+  lastSyncAt: number | null
+  syncLagSeconds: number | null
+  recoveryStatus: string | null
+  message: string | null
+}
+
+export function fetchAdminHaStatus(signal?: AbortSignal): Promise<HaStatus> {
+  return requestJson('/api/admin/ha/status', { signal })
+}
+
+export function fetchPublicHaStatus(signal?: AbortSignal): Promise<HaStatus> {
+  return requestJson('/api/ha/status', { signal })
+}
+
+export function promoteHaNode(force = false): Promise<HaStatus> {
+  return requestJson('/api/admin/ha/promote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ force }),
+  })
+}
+
+export function finalizeHaFailover(): Promise<HaStatus> {
+  return requestJson('/api/admin/ha/finalize', { method: 'POST' })
+}
+
 export function fetchPublicMetrics(todayWindow?: TodayWindowRange, signal?: AbortSignal): Promise<PublicMetrics> {
   const params = new URLSearchParams()
   appendTodayWindowRange(params, todayWindow)
