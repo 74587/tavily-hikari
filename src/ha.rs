@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -34,6 +35,15 @@ pub enum HaNodeRole {
 }
 
 impl HaNodeRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FullMaster => "full_master",
+            Self::ProvisionalMaster => "provisional_master",
+            Self::Standby => "standby",
+            Self::Recovery => "recovery",
+        }
+    }
+
     pub fn allows_basic_business(self) -> bool {
         matches!(self, Self::FullMaster | Self::ProvisionalMaster)
     }
@@ -51,6 +61,7 @@ impl HaNodeRole {
 pub struct HaConfig {
     pub mode: HaMode,
     pub node_id: String,
+    pub database_path: Option<String>,
     pub node_public_origin: Option<String>,
     pub edgeone_zone_id: Option<String>,
     pub edgeone_domain: Option<String>,
@@ -65,6 +76,7 @@ impl Default for HaConfig {
         Self {
             mode: HaMode::Single,
             node_id: "single".to_string(),
+            database_path: None,
             node_public_origin: None,
             edgeone_zone_id: None,
             edgeone_domain: None,
@@ -120,6 +132,39 @@ pub struct HaStatusView {
     pub last_sync_at: Option<i64>,
     pub sync_lag_seconds: Option<i64>,
     pub recovery_status: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HaSnapshotManifest {
+    pub source_node_id: String,
+    pub generated_at: i64,
+    pub wal_checkpoint: bool,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HaRecoveryImportResult {
+    pub batch_id: String,
+    pub source_node_id: String,
+    pub imported: bool,
+    pub event_count: i64,
+    pub checksum: String,
+    pub message: String,
+    pub status: HaStatusView,
+}
+
+#[derive(Clone, Debug)]
+pub struct HaFailoverOperationRecord {
+    pub operation_id: String,
+    pub operation_kind: String,
+    pub target_node_id: Option<String>,
+    pub from_origin: Option<String>,
+    pub to_origin: Option<String>,
+    pub status: String,
     pub message: Option<String>,
 }
 
@@ -214,6 +259,14 @@ impl HaRuntime {
         }
     }
 
+    pub fn database_path(&self) -> Option<PathBuf> {
+        self.config
+            .database_path
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+
     pub async fn role(&self) -> HaNodeRole {
         self.state.read().await.role
     }
@@ -293,6 +346,10 @@ impl HaRuntime {
     }
 }
 
+pub fn sha256_hex_bytes(value: &[u8]) -> String {
+    hex_sha256(value)
+}
+
 #[derive(Clone)]
 struct EdgeOneClient {
     config: HaConfig,
@@ -320,22 +377,23 @@ impl EdgeOneClient {
             ]
         });
         let value = self.call("DescribeAccelerationDomains", payload).await?;
-        Ok(value
-            .pointer("/Response/AccelerationDomains/0/OriginDetail/Origin")
-            .and_then(Value::as_str)
-            .map(str::to_string))
+        let origin_detail = value.pointer("/Response/AccelerationDomains/0/OriginDetail");
+        Ok(origin_detail.and_then(origin_detail_to_authority))
     }
 
     async fn modify_origin(&self, target_origin: &str) -> Result<(), String> {
         if !self.config.active_standby_ready() {
             return Err("EdgeOne credentials and domain configuration are required".to_string());
         }
+        let (origin_host, origin_port) = split_origin_host_port(target_origin)?;
         let payload = json!({
             "ZoneId": self.config.edgeone_zone_id.as_deref().unwrap_or_default(),
             "DomainName": self.config.edgeone_domain.as_deref().unwrap_or_default(),
             "OriginInfo": {
                 "OriginType": "ip_domain",
-                "Origin": target_origin,
+                "Origin": origin_host,
+                "HttpOriginPort": origin_port,
+                "HttpsOriginPort": origin_port,
                 "BackupOrigin": ""
             }
         });
@@ -407,6 +465,22 @@ impl EdgeOneClient {
     }
 }
 
+fn origin_detail_to_authority(origin_detail: &Value) -> Option<String> {
+    let origin = origin_detail.get("Origin")?.as_str()?.trim();
+    if origin.is_empty() {
+        return None;
+    }
+    let port = origin_detail
+        .get("HttpsOriginPort")
+        .or_else(|| origin_detail.get("HttpOriginPort"))
+        .and_then(Value::as_i64)
+        .filter(|port| *port > 0 && *port <= 65535);
+    match port {
+        Some(port) => Some(format!("{origin}:{port}")),
+        None => Some(origin.to_string()),
+    }
+}
+
 fn tc3_authorization(
     secret_id: &str,
     secret_key: &str,
@@ -459,6 +533,23 @@ fn encode_hex(data: &[u8]) -> String {
     out
 }
 
+fn split_origin_host_port(origin: &str) -> Result<(String, i64), String> {
+    let trimmed = origin.trim();
+    let Some((host, port_raw)) = trimmed.rsplit_once(':') else {
+        return Ok((trimmed.to_string(), 80));
+    };
+    if host.is_empty() || port_raw.is_empty() || host.contains(']') {
+        return Ok((trimmed.to_string(), 80));
+    }
+    let port = port_raw
+        .parse::<i64>()
+        .map_err(|_| format!("invalid NODE_PUBLIC_ORIGIN port: {origin}"))?;
+    if !(1..=65535).contains(&port) {
+        return Err(format!("NODE_PUBLIC_ORIGIN port out of range: {origin}"));
+    }
+    Ok((host.to_string(), port))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +592,30 @@ mod tests {
         .expect("sign");
         assert!(auth.contains("Credential=sid/2023-11-14/teo/tc3_request"));
         assert!(auth.contains("SignedHeaders=content-type;host"));
+    }
+
+    #[test]
+    fn split_origin_host_port_moves_port_out_of_origin() {
+        assert_eq!(
+            split_origin_host_port("203.0.113.10:58087").expect("split"),
+            ("203.0.113.10".to_string(), 58087)
+        );
+        assert_eq!(
+            split_origin_host_port("origin.example.com").expect("split"),
+            ("origin.example.com".to_string(), 80)
+        );
+    }
+
+    #[test]
+    fn origin_detail_to_authority_restores_port() {
+        let detail = json!({
+            "Origin": "203.0.113.10",
+            "HttpOriginPort": 58087,
+            "HttpsOriginPort": 58087
+        });
+        assert_eq!(
+            origin_detail_to_authority(&detail).as_deref(),
+            Some("203.0.113.10:58087")
+        );
     }
 }

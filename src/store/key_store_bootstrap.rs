@@ -1534,12 +1534,18 @@ impl KeyStore {
                 node_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 edgeone_origin TEXT,
+                message TEXT,
                 updated_at INTEGER NOT NULL
             )
             "#,
         )
         .execute(&self.pool)
         .await?;
+        if !self.table_column_exists("ha_node_state", "message").await? {
+            sqlx::query("ALTER TABLE ha_node_state ADD COLUMN message TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
 
         sqlx::query(
             r#"

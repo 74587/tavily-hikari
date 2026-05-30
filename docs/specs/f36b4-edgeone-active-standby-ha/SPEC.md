@@ -44,6 +44,8 @@ Tavily Hikari 的高可用方案采用单活主备热备，而不是一主多从
 
 - `GET /api/admin/ha/status` 返回当前节点状态、EdgeOne 源站、同步水位、recovery 状态。
 - `GET /api/ha/status` 返回可公开给用户控制台的降级摘要，不包含 secret 或 expected origin。
+- `GET /api/admin/ha/snapshot` 导出经过 WAL checkpoint 的 SQLite 快照，并返回 manifest。
+- `PUT /api/admin/ha/snapshot` 仅 standby 可调用，通过 `ATTACH` 快照库在线恢复业务表，并记录同步水位。
 - `POST /api/admin/ha/promote` 将当前 standby 切为 `provisional_master`，可带 `force` 用于强制接管。
 - `POST /api/admin/ha/finalize` 管理员确认后进入 `full_master`。
 - `POST /api/admin/ha/recovery/import` 导入旧主 recovery 批次，仅允许内部或管理员认证调用。

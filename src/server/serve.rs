@@ -150,6 +150,10 @@ pub async fn serve(
         .route("/api/admin/login", post(post_admin_login))
         .route("/api/admin/logout", post(post_admin_logout))
         .route("/api/admin/ha/status", get(get_admin_ha_status))
+        .route(
+            "/api/admin/ha/snapshot",
+            get(get_admin_ha_snapshot).put(put_admin_ha_snapshot),
+        )
         .route("/api/admin/ha/promote", post(post_admin_ha_promote))
         .route("/api/admin/ha/finalize", post(post_admin_ha_finalize))
         .route(

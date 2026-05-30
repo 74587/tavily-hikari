@@ -460,6 +460,190 @@ async fn alerts_endpoints_and_dashboard_recent_alerts_share_default_window() {
 }
 
 #[tokio::test]
+async fn ha_snapshot_export_records_sync_watermark() {
+    let db_path = temp_db_path("ha-snapshot-export");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-snapshot-export".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        node_id: "node-a".to_string(),
+        database_path: Some(db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let addr = spawn_ha_admin_server(proxy, ha, true).await;
+
+    let response = Client::new()
+        .get(format!("http://{addr}/api/admin/ha/snapshot"))
+        .send()
+        .await
+        .expect("snapshot request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let manifest = response
+        .headers()
+        .get("x-ha-snapshot-manifest")
+        .and_then(|value| value.to_str().ok())
+        .expect("snapshot manifest header")
+        .to_string();
+    assert!(manifest.contains("node-a"));
+    let bytes = response.bytes().await.expect("snapshot bytes");
+    assert!(bytes.len() > 1024, "snapshot should contain sqlite bytes");
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let watermark: Option<String> =
+        sqlx::query_scalar("SELECT detail FROM ha_sync_watermarks WHERE name = 'snapshot_export'")
+            .fetch_optional(&pool)
+            .await
+            .expect("fetch sync watermark");
+    assert!(
+        watermark
+            .as_deref()
+            .is_some_and(|detail| detail.contains("node-a"))
+    );
+    pool.close().await;
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn ha_snapshot_import_restores_standby_business_tables() {
+    let active_db = temp_db_path("ha-snapshot-active");
+    let active_db_str = active_db.to_string_lossy().to_string();
+    let active_proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-active-snapshot-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &active_db_str,
+    )
+    .await
+    .expect("active proxy created");
+    let active_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        node_id: "node-active".to_string(),
+        database_path: Some(active_db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let active_addr = spawn_ha_admin_server(active_proxy, active_ha, true).await;
+    let snapshot = Client::new()
+        .get(format!("http://{active_addr}/api/admin/ha/snapshot"))
+        .send()
+        .await
+        .expect("snapshot request")
+        .bytes()
+        .await
+        .expect("snapshot bytes");
+
+    let standby_db = temp_db_path("ha-snapshot-standby");
+    let standby_db_str = standby_db.to_string_lossy().to_string();
+    let standby_proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-standby-old-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &standby_db_str,
+    )
+    .await
+    .expect("standby proxy created");
+    let standby_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        mode: tavily_hikari::HaMode::ActiveStandby,
+        node_id: "node-standby".to_string(),
+        database_path: Some(standby_db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let standby_addr = spawn_ha_admin_server(standby_proxy, standby_ha, true).await;
+
+    let import_response = Client::new()
+        .put(format!(
+            "http://{standby_addr}/api/admin/ha/snapshot?sourceNodeId=node-active"
+        ))
+        .body(snapshot)
+        .send()
+        .await
+        .expect("snapshot import request");
+    assert_eq!(import_response.status(), reqwest::StatusCode::OK);
+
+    let pool = connect_sqlite_test_pool(&standby_db_str).await;
+    let keys: Vec<String> = sqlx::query_scalar("SELECT api_key FROM api_keys ORDER BY api_key")
+        .fetch_all(&pool)
+        .await
+        .expect("fetch restored keys");
+    assert!(keys.contains(&"tvly-ha-active-snapshot-key".to_string()));
+    assert!(!keys.contains(&"tvly-ha-standby-old-key".to_string()));
+    let detail: Option<String> =
+        sqlx::query_scalar("SELECT detail FROM ha_sync_watermarks WHERE name = 'snapshot_import'")
+            .fetch_optional(&pool)
+            .await
+            .expect("fetch import watermark");
+    assert!(
+        detail
+            .as_deref()
+            .is_some_and(|value| value.contains("restoredTables"))
+    );
+    pool.close().await;
+    let _ = std::fs::remove_file(active_db);
+    let _ = std::fs::remove_file(standby_db);
+}
+
+#[tokio::test]
+async fn ha_recovery_import_is_idempotent_and_marks_recovery() {
+    let db_path = temp_db_path("ha-recovery-idempotent");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-recovery-idempotent".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        node_id: "node-new".to_string(),
+        database_path: Some(db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let addr = spawn_ha_admin_server(proxy, ha, true).await;
+    let client = Client::new();
+    let payload = serde_json::json!({
+        "batchId": "old-master-batch-1",
+        "sourceNodeId": "node-old",
+        "message": "usage/log/event recovery batch imported"
+    });
+
+    let first: Value = client
+        .post(format!("http://{addr}/api/admin/ha/recovery/import"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("first recovery import")
+        .json()
+        .await
+        .expect("first recovery response");
+    assert_eq!(first["imported"], true);
+    assert_eq!(first["status"]["role"], "recovery");
+
+    let second: Value = client
+        .post(format!("http://{addr}/api/admin/ha/recovery/import"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("second recovery import")
+        .json()
+        .await
+        .expect("second recovery response");
+    assert_eq!(second["imported"], false);
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let row: (String, i64) = sqlx::query_as(
+        "SELECT status, event_count FROM ha_recovery_batches WHERE id = 'old-master-batch-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch recovery batch");
+    assert_eq!(row.0, "imported");
+    assert_eq!(row.1, 1);
+    pool.close().await;
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn compute_signatures_tracks_recent_alert_summary_changes() {
     let db_path = temp_db_path("summary-signatures-recent-alerts");
     let db_str = db_path.to_string_lossy().to_string();

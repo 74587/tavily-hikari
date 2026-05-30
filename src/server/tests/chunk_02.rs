@@ -1631,6 +1631,44 @@ async fn spawn_keys_admin_server_with_usage_and_geo(
     addr
 }
 
+async fn spawn_ha_admin_server(
+    proxy: TavilyProxy,
+    ha: tavily_hikari::HaRuntime,
+    dev_open_admin: bool,
+) -> SocketAddr {
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha,
+        dev_open_admin,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+    });
+
+    let app = Router::new()
+        .route("/api/admin/ha/status", get(get_admin_ha_status))
+        .route(
+            "/api/admin/ha/snapshot",
+            get(get_admin_ha_snapshot).put(put_admin_ha_snapshot),
+        )
+        .route("/api/admin/ha/recovery/import", post(post_admin_ha_recovery_import))
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+    addr
+}
+
 async fn spawn_usage_mock_server() -> SocketAddr {
     let app = Router::new().route(
         "/usage",

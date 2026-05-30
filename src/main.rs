@@ -453,6 +453,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ha_config = HaConfig {
         mode: HaMode::parse(&cli.ha_mode),
         node_id: cli.node_id.trim().to_string(),
+        database_path: Some(cli.db_path.clone()),
         node_public_origin: trim_optional(cli.node_public_origin),
         edgeone_zone_id: trim_optional(cli.edgeone_zone_id),
         edgeone_domain: trim_optional(cli.edgeone_domain),
