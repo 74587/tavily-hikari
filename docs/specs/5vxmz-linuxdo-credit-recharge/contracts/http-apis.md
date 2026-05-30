@@ -59,6 +59,10 @@
 - Response:
   - `200 text/plain` body `success` when accepted or already applied.
   - `400` when signature, order, status, or amount does not match.
+- Behavior:
+  - Moves payable orders to `paid` and creates monthly entitlements from the payment month.
+  - Replayed callbacks update notify audit fields only and must not move `refunding`,
+    `refunded`, or `refundOnly` orders back to `paid`.
 
 ## GET /api/users/:id
 
@@ -69,10 +73,87 @@
   - `orders`: recent `RechargeOrder[]`
   - `entitlements`: recent entitlement rows
 
+## GET /api/admin/recharges
+
+- Auth: admin request.
+- Query:
+  - `user`: optional search across user id/display name/username/order/trade number.
+  - `status`: optional `pending|paid|failed|refunding|refunded|refundOnly|all`.
+  - `startAt`, `endAt`: optional Unix timestamps matched against order creation time.
+  - `sort`: `createdAt|paidAt|refundedAt|status`; default `createdAt`.
+  - `order`: `asc|desc`; default `desc`.
+  - `view`: `flat|user`; `user` additionally returns user aggregation rows.
+  - `page`, `perPage`: flat list pagination.
+- Response `200`:
+  - `hasRechargeOrders`: boolean controlling admin navigation visibility.
+  - `items`: flat `AdminRechargeOrder[]`.
+  - `groups`: user aggregation rows when `view=user`.
+  - `total`, `page`, `perPage`.
+
+## POST /api/admin/recharges/:out_trade_no/refund
+
+- Auth: admin request.
+- Request JSON: `{ "totpCode": "123456" }`.
+- Behavior:
+  - Rejects `DEV_OPEN_ADMIN`, missing TOTP binding, invalid/locked TOTP, and non-`paid` orders.
+  - Calls Linux.do Credit `POST /epay/api.php` with `act=refund`, `pid`, `key`, `trade_no`, `out_trade_no`, `money`.
+  - Before the platform call, atomically moves the order from `paid` to `refunding` so duplicate admin requests cannot issue duplicate external refunds.
+  - After platform success, persists an external-success marker before final local settlement; a retry of a matching `refunding` order with that marker completes only local settlement and does not call the platform again.
+  - On platform success, marks order `refunded`, sets `refundedAt/refundActor/refundPayload`, deletes order entitlements, invalidates quota and records a quota snapshot.
+  - On platform failure before completion, moves the order back to `paid` and records the refund error in `lastError`.
+- Response `200`: updated `AdminRechargeOrder`.
+
+## POST /api/admin/recharges/:out_trade_no/refund-only
+
+- Auth: admin request.
+- Request JSON: `{ "totpCode": "123456" }`.
+- Behavior:
+  - Same Linux.do Credit full-refund call and TOTP checks as `refund`.
+  - On platform success, marks order `refundOnly`, keeps entitlements, records refund fields.
+- Response `200`: updated `AdminRechargeOrder`.
+
+## GET /api/admin/totp
+
+- Auth: admin request.
+- Response `200`:
+  - `enabled`: whether a global admin TOTP secret is bound.
+  - `available`: false when recharge is disabled, crypt key is missing, or `DEV_OPEN_ADMIN` is active.
+  - `rechargeFeatureEnabled`, `missingCryptoKey`, `lockedUntil`, `issuer`, `accountName`.
+
+## POST /api/admin/totp/setup
+
+- Auth: admin request.
+- Preconditions: recharge feature enabled, crypt key present, not `DEV_OPEN_ADMIN`.
+- Response `200`: `{ "secret", "otpAuthUrl", "qrPngBase64" }`.
+- The setup secret is not persisted until `confirm` succeeds.
+
+## POST /api/admin/totp/confirm
+
+- Auth: admin request.
+- Request JSON: `{ "secret": "...", "code": "123456" }`.
+- Behavior: verifies the code for the supplied secret, encrypts the secret with
+  `LINUXDO_OAUTH_REFRESH_TOKEN_CRYPT_KEY`, and stores it globally.
+- Response `200`: TOTP status.
+
+## POST /api/admin/totp/reset
+
+- Auth: admin request.
+- Request JSON: `{ "currentCode": "123456", "secret": "...", "code": "654321" }`.
+- Behavior: verifies current bound TOTP, verifies the new secret/code pair, then replaces the
+  encrypted global secret.
+- Response `200`: TOTP status.
+
+## POST /api/admin/totp/disable
+
+- Auth: admin request.
+- Request JSON: `{ "totpCode": "123456" }`.
+- Behavior: verifies current bound TOTP, then clears the global secret and failure state.
+- Response `200`: TOTP status.
+
 ## RechargeOrder
 
 - `outTradeNo`
-- `status`: `pending|paid|failed`
+- `status`: `pending|paid|failed|refunding|refunded|refundOnly`
 - `credits`
 - `months`
 - `money`
@@ -81,5 +162,7 @@
 - `createdAt`
 - `updatedAt`
 - `paidAt`
+- `refundedAt`
+- `refundActor`
 - `lastNotifyAt`
 - `lastError`
