@@ -61,6 +61,8 @@
 - 管理端系统设置应提供充值总开关与“开放非管理员充值”调试开关；总开关关闭时用户控制台不展示充值入口，创建订单接口拒绝新订单；非管理员开关关闭时仅管理员请求可看到并创建充值订单。
 - 管理端系统设置在充值总开关开启时提供全局管理端 TOTP 绑定；首次绑定需确认当前验证码，重置/解绑需当前 TOTP。
 - 退单与仅退款必须先验证全局管理端 TOTP，输入框必须使用 `autocomplete="one-time-code"`、`inputmode="numeric"`、数字 `pattern` 和稳定 `name/id`，且不能是密码框。
+- 管理端充值记录页应读取全局管理端 TOTP 状态；未绑定时点击退单或仅退款应提示先绑定并引导到系统设置，不展示验证码输入框。
+- 管理端充值记录页提交退单或仅退款失败时，应在确认弹窗内展示明确错误反馈并恢复可操作状态，不能只停留在无反馈的确认状态。
 - 管理端充值记录支持按用户、时间范围、状态搜索，支持按下单时间、成交时间、退款时间、状态排序，并支持平铺与按用户聚合视图。
 - 管理端充值记录在没有任何充值订单时不显示导航模块；直达 `/admin/recharges` 时只显示轻量占位。
 - `DEV_OPEN_ADMIN` 下禁止修改充值总开关，禁止执行退单/仅退款，避免免鉴权环境进入真实退款链路。
@@ -91,6 +93,7 @@
 - 重复成功通知不重复插入权益，仍返回 `success`。
 - 过期月份权益不参与当前 quota 解析。
 - 未绑定 TOTP、TOTP 错误或失败次数锁定时，退款操作返回错误且不会调用 Linux.do Credit。
+- 前端已知 TOTP 未绑定时不应提交退款请求；若后端仍返回未绑定、验证码错误或锁定错误，确认弹窗必须保持打开并显示可理解的失败提示。
 - 已退款、失败或 pending 订单不能重复退款；重复操作明确拒绝。
 
 ## 接口契约（Interfaces & Contracts）
@@ -165,6 +168,14 @@
   When 管理员输入当前 TOTP 后执行仅退款
   Then 服务先调用 Linux.do Credit 全额退款，成功后订单状态为 `refundOnly`，该订单权益保留。
 
+- Given 管理员尚未绑定 TOTP 且订单为 paid
+  When 管理员点击退单或仅退款
+  Then 管理端展示先绑定 TOTP 的提示和系统设置入口，不展示验证码输入框，也不提交退款请求。
+
+- Given 管理员已绑定 TOTP 且退款请求失败
+  When 管理员在确认弹窗中提交退款操作
+  Then 管理端保持确认弹窗打开，展示失败原因，并恢复确认按钮可再次操作。
+
 - Given 服务运行在 `DEV_OPEN_ADMIN`
   When 管理员尝试开启充值功能或执行退款
   Then 请求被拒绝，不进入真实退款链路。
@@ -186,9 +197,9 @@
 
 ### UI / Storybook (if applicable)
 
-- Stories to add/update: `UserConsole` 充值默认、调档、处理中、成功、回调延迟、错误态；`AdminRechargeRecordsModule` 平铺、聚合、空记录；`SystemSettingsModule` TOTP 绑定态。
-- Docs pages / state galleries to add/update: 用户控制台充值状态 gallery。
-- `play` / interaction coverage to add/update: stepper 调整与创建订单成功/失败路径。
+- Stories to add/update: `UserConsole` 充值默认、调档、处理中、成功、回调延迟、错误态；`AdminRechargeRecordsModule` 平铺、聚合、未绑定 TOTP、退款失败反馈、空记录；`SystemSettingsModule` TOTP 绑定态。
+- Docs pages / state galleries to add/update: 用户控制台充值状态 gallery；管理端充值记录 TOTP 与退款反馈状态。
+- `play` / interaction coverage to add/update: stepper 调整、创建订单成功/失败路径、管理端未绑定 TOTP 提示与退款失败反馈。
 - Visual regression baseline changes (if any): 充值卡片桌面与移动布局。
 
 ### Quality checks
@@ -205,6 +216,9 @@
 ![Recharge burst price and quota controls](./assets/recharge-burst-price-story.png)
 ![Admin recharge records flat desktop view](./assets/admin-recharge-records-flat.png)
 ![Admin recharge refund TOTP confirmation](./assets/admin-recharge-refund-totp.png)
+![Admin recharge bound TOTP confirmation](./assets/admin-recharge-bound-totp-confirmation.png)
+![Admin recharge unbound TOTP prompt](./assets/admin-recharge-unbound-totp-prompt.png)
+![Admin recharge refund failure feedback](./assets/admin-recharge-refund-failure-feedback.png)
 ![Admin recharge user detail quota calendar](./assets/admin-recharge-user-detail-calendar.png)
 
 ## Related PRs

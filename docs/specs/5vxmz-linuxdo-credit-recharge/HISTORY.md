@@ -14,6 +14,7 @@
 - 2026-05-28: 增加管理端充值记录和退款能力。退款按 Linux.do Credit `POST /epay/api.php`
   全额退回接口实现，并通过全局管理端 TOTP 二次确认保护真实资金链路；`DEV_OPEN_ADMIN`
   继续只能用于只读/本地调试，不能开启充值或退款。
+- 2026-05-31: 线上验证发现未绑定管理端 TOTP 时后端已正确返回 `403 admin TOTP is not bound`，但充值记录页仍展示验证码输入并吞掉退款失败反馈；管理端 UI 改为先读取 TOTP 状态，未绑定时引导到系统设置，退款失败时在确认弹窗内显示错误。
 
 ## Key Reasons / Replacements
 

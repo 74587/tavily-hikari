@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 
 import {
   fetchAdminRecharges,
+  fetchAdminTotpStatus,
   refundAdminRecharge,
   refundOnlyAdminRecharge,
+  type AdminTotpStatus,
   type AdminRechargeListResponse,
   type AdminRechargeOrder,
   type AdminRechargeSort,
@@ -19,11 +21,13 @@ import type { QueryLoadState } from './queryLoadState'
 
 interface AdminRechargeRecordsModuleProps {
   initialData?: AdminRechargeListResponse
+  initialTotpStatus?: AdminTotpStatus | null
   disableAutoLoad?: boolean
   onOpenUser?: (id: string) => void
+  onOpenSystemSettings?: () => void
 }
 
-type RefundKind = 'refund' | 'refundOnly'
+export type RefundKind = 'refund' | 'refundOnly'
 
 const STATUS_OPTIONS: Array<AdminRechargeStatus | 'all'> = ['all', 'pending', 'paid', 'failed', 'refunding', 'refunded', 'refundOnly']
 const SORT_OPTIONS: AdminRechargeSort[] = ['createdAt', 'paidAt', 'refundedAt', 'status']
@@ -49,11 +53,19 @@ function dateEndSeconds(value: string): number | undefined {
   return Number.isNaN(date.getTime()) ? undefined : Math.floor(date.getTime() / 1000)
 }
 
-export default function AdminRechargeRecordsModule({ initialData, disableAutoLoad = false, onOpenUser }: AdminRechargeRecordsModuleProps): JSX.Element {
+export default function AdminRechargeRecordsModule({
+  initialData,
+  initialTotpStatus,
+  disableAutoLoad = false,
+  onOpenUser,
+  onOpenSystemSettings,
+}: AdminRechargeRecordsModuleProps): JSX.Element {
   const strings = useTranslate().admin.recharges
   const [data, setData] = useState<AdminRechargeListResponse | null>(initialData ?? null)
   const [loadState, setLoadState] = useState<QueryLoadState>(initialData ? 'ready' : 'initial_loading')
   const [error, setError] = useState<string | null>(null)
+  const [totpStatus, setTotpStatus] = useState<AdminTotpStatus | null>(initialTotpStatus ?? null)
+  const [totpStatusError, setTotpStatusError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<AdminRechargeStatus | 'all'>('all')
   const [startDate, setStartDate] = useState('')
@@ -65,6 +77,7 @@ export default function AdminRechargeRecordsModule({ initialData, disableAutoLoa
   const [refundTarget, setRefundTarget] = useState<{ order: AdminRechargeOrder; kind: RefundKind } | null>(null)
   const [totpCode, setTotpCode] = useState('')
   const [refundBusy, setRefundBusy] = useState(false)
+  const [refundError, setRefundError] = useState<string | null>(null)
 
   const load = () => {
     const controller = new AbortController()
@@ -107,10 +120,47 @@ export default function AdminRechargeRecordsModule({ initialData, disableAutoLoa
     }
   }
 
+  const openSystemSettings = () => {
+    if (onOpenSystemSettings) {
+      onOpenSystemSettings()
+      return
+    }
+    if (typeof window !== 'undefined') {
+      window.location.assign('/admin/system-settings')
+    }
+  }
+
+  const openRefundDialog = (order: AdminRechargeOrder, kind: RefundKind) => {
+    setRefundTarget({ order, kind })
+    setTotpCode('')
+    setRefundError(null)
+  }
+
+  const closeRefundDialog = () => {
+    if (refundBusy) return
+    setRefundTarget(null)
+    setTotpCode('')
+    setRefundError(null)
+  }
+
   useEffect(() => {
     if (disableAutoLoad) return
     return load()
   }, [disableAutoLoad, query, status, startDate, endDate, sort, order, view, page])
+
+  useEffect(() => {
+    if (disableAutoLoad) return
+    const controller = new AbortController()
+    setTotpStatusError(null)
+    fetchAdminTotpStatus(controller.signal)
+      .then(setTotpStatus)
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) {
+          setTotpStatusError(err instanceof Error ? err.message : String(err))
+        }
+      })
+    return () => controller.abort()
+  }, [disableAutoLoad])
 
   const summary = useMemo(() => {
     const items = data?.items ?? []
@@ -123,21 +173,29 @@ export default function AdminRechargeRecordsModule({ initialData, disableAutoLoa
   const executeRefund = async () => {
     if (!refundTarget) return
     setRefundBusy(true)
-    setError(null)
+    setRefundError(null)
     try {
       await (refundTarget.kind === 'refund'
         ? refundAdminRecharge(refundTarget.order.outTradeNo, totpCode)
         : refundOnlyAdminRecharge(refundTarget.order.outTradeNo, totpCode))
       setRefundTarget(null)
       setTotpCode('')
+      setRefundError(null)
       load()
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setRefundError(refundErrorMessage(err instanceof Error ? err.message : String(err), strings))
     } finally {
       setRefundBusy(false)
     }
   }
 
+  const totpSummaryText = totpStatus == null
+    ? strings.summary.totpRequired
+    : totpStatus.enabled
+      ? strings.summary.totpRequired
+      : totpStatus.available === false
+        ? strings.summary.totpUnavailable
+        : strings.summary.totpSetupRequired
   if (data && !data.hasRechargeOrders) {
     return (
       <section className="admin-recharge-module admin-recharge-module--empty" aria-label={strings.title}>
@@ -151,8 +209,13 @@ export default function AdminRechargeRecordsModule({ initialData, disableAutoLoa
       <div className="admin-recharge-summary" aria-label={strings.title}>
         <span>{formatTemplate(strings.summary.orders, { total: summary.total })}</span>
         <span>{formatTemplate(strings.summary.actionable, { count: summary.actionable })}</span>
-        <span>{strings.summary.totpRequired}</span>
+        <span>{totpSummaryText}</span>
       </div>
+      {totpStatusError && (
+        <p className="admin-recharge-inline-status" role="status" aria-live="polite">
+          {formatTemplate(strings.totpStatusLoadFailed, { message: totpStatusError })}
+        </p>
+      )}
 
       <div className="admin-recharge-toolbar">
         <div className="admin-recharge-toolbar-primary">
@@ -260,8 +323,8 @@ export default function AdminRechargeRecordsModule({ initialData, disableAutoLoa
                     <td>
                       {item.status === 'paid' ? (
                         <div className="admin-recharge-actions">
-                          <Button type="button" size="sm" variant="outline" className="admin-recharge-action-button" onClick={() => setRefundTarget({ order: item, kind: 'refund' })}>{strings.actions.refund}</Button>
-                          <Button type="button" size="sm" variant="outline" className="admin-recharge-action-button" onClick={() => setRefundTarget({ order: item, kind: 'refundOnly' })}>{strings.actions.refundOnly}</Button>
+                          <Button type="button" size="sm" variant="outline" className="admin-recharge-action-button" onClick={() => openRefundDialog(item, 'refund')}>{strings.actions.refund}</Button>
+                          <Button type="button" size="sm" variant="outline" className="admin-recharge-action-button" onClick={() => openRefundDialog(item, 'refundOnly')}>{strings.actions.refundOnly}</Button>
                         </div>
                       ) : (
                         <span className="admin-recharge-action-state">{statusActionLabel(item.status, strings)}</span>
@@ -281,37 +344,146 @@ export default function AdminRechargeRecordsModule({ initialData, disableAutoLoa
         <Button type="button" variant="outline" disabled={!data || page * data.perPage >= data.total} onClick={() => setPage((value) => value + 1)}>{strings.actions.nextPage}</Button>
       </div>
 
-      <Dialog open={refundTarget != null} onOpenChange={(open) => { if (!open) setRefundTarget(null) }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{refundTarget?.kind === 'refund' ? strings.confirm.refundTitle : strings.confirm.refundOnlyTitle}</DialogTitle>
-            <DialogDescription>
-              {strings.confirm.description}
-            </DialogDescription>
-          </DialogHeader>
-          <label className="admin-recharge-totp-field" htmlFor="admin-recharge-refund-totp">
-            <span>{strings.confirm.totpLabel}</span>
-            <Input
-              id="admin-recharge-refund-totp"
-              name="admin_recharge_refund_totp"
-              type="text"
-              className="admin-recharge-totp-input"
-              value={totpCode}
-              onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
-              placeholder={strings.confirm.totpPlaceholder}
-              autoComplete="one-time-code"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              maxLength={6}
-            />
-          </label>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setRefundTarget(null)}>{strings.actions.cancel}</Button>
-            <Button type="button" disabled={refundBusy || totpCode.length !== 6} onClick={() => void executeRefund()}>{strings.actions.confirm}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <AdminRechargeRefundDialog
+        refundTarget={refundTarget}
+        totpStatus={totpStatus}
+        totpCode={totpCode}
+        refundBusy={refundBusy}
+        refundError={refundError}
+        onTotpCodeChange={(value) => {
+          setTotpCode(value)
+          setRefundError(null)
+        }}
+        onClose={closeRefundDialog}
+        onExecuteRefund={() => void executeRefund()}
+        onOpenSystemSettings={openSystemSettings}
+      />
     </section>
+  )
+}
+
+interface AdminRechargeRefundDialogProps {
+  refundTarget: { order: AdminRechargeOrder; kind: RefundKind } | null
+  totpStatus: AdminTotpStatus | null
+  totpCode: string
+  refundBusy: boolean
+  refundError: string | null
+  onTotpCodeChange: (value: string) => void
+  onClose: () => void
+  onExecuteRefund: () => void
+  onOpenSystemSettings: () => void
+  chrome?: 'dialog' | 'plain'
+}
+
+export function AdminRechargeRefundDialog({
+  refundTarget,
+  totpStatus,
+  totpCode,
+  refundBusy,
+  refundError,
+  onTotpCodeChange,
+  onClose,
+  onExecuteRefund,
+  onOpenSystemSettings,
+}: AdminRechargeRefundDialogProps): JSX.Element {
+  return (
+    <Dialog open={refundTarget != null} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent>
+        <AdminRechargeRefundDialogBody
+          refundTarget={refundTarget}
+          totpStatus={totpStatus}
+          totpCode={totpCode}
+          refundBusy={refundBusy}
+          refundError={refundError}
+          onTotpCodeChange={onTotpCodeChange}
+          onClose={onClose}
+          onExecuteRefund={onExecuteRefund}
+          onOpenSystemSettings={onOpenSystemSettings}
+        />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+export function AdminRechargeRefundDialogBody({
+  refundTarget,
+  totpStatus,
+  totpCode,
+  refundBusy,
+  refundError,
+  onTotpCodeChange,
+  onClose,
+  onExecuteRefund,
+  onOpenSystemSettings,
+  chrome = 'dialog',
+}: AdminRechargeRefundDialogProps): JSX.Element {
+  const strings = useTranslate().admin.recharges
+  const refundDialogBlocked = totpStatus?.enabled === false
+  const refundDialogStatus = refundError ?? (refundBusy ? strings.confirm.processing : null)
+  const title = refundDialogBlocked
+    ? strings.confirm.totpSetupTitle
+    : refundTarget?.kind === 'refund' ? strings.confirm.refundTitle : strings.confirm.refundOnlyTitle
+  const description = refundDialogBlocked ? strings.confirm.totpSetupDescription : strings.confirm.description
+  const header = chrome === 'dialog' ? (
+    <DialogHeader>
+      <DialogTitle>{title}</DialogTitle>
+      <DialogDescription>{description}</DialogDescription>
+    </DialogHeader>
+  ) : (
+    <div>
+      <h2>{title}</h2>
+      <p>{description}</p>
+    </div>
+  )
+  const footerContent = (
+    <>
+      <Button type="button" variant="outline" disabled={refundBusy} onClick={onClose}>{strings.actions.cancel}</Button>
+      {refundDialogBlocked ? (
+        <Button type="button" onClick={onOpenSystemSettings}>{strings.actions.openTotpSettings}</Button>
+      ) : (
+        <Button type="button" disabled={refundBusy || totpCode.length !== 6} onClick={onExecuteRefund}>
+          {refundBusy ? strings.actions.processing : strings.actions.confirm}
+        </Button>
+      )}
+    </>
+  )
+  return (
+    <>
+      {header}
+      {refundDialogBlocked ? (
+        <div className="admin-recharge-setup-callout" role="status" aria-live="polite">
+          {strings.confirm.totpSetupCallout}
+        </div>
+      ) : (
+        <label className="admin-recharge-totp-field" htmlFor="admin-recharge-refund-totp">
+          <span>{strings.confirm.totpLabel}</span>
+          <Input
+            id="admin-recharge-refund-totp"
+            name="admin_recharge_refund_totp"
+            type="text"
+            className="admin-recharge-totp-input"
+            value={totpCode}
+            onChange={(event) => onTotpCodeChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
+            placeholder={strings.confirm.totpPlaceholder}
+            autoComplete="one-time-code"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={6}
+            disabled={refundBusy}
+          />
+        </label>
+      )}
+      {refundDialogStatus && (
+        <p
+          className={refundError ? 'admin-recharge-dialog-error' : 'admin-recharge-dialog-status'}
+          role="status"
+          aria-live="polite"
+        >
+          {refundDialogStatus}
+        </p>
+      )}
+      {chrome === 'dialog' ? <DialogFooter>{footerContent}</DialogFooter> : <div>{footerContent}</div>}
+    </>
   )
 }
 
@@ -326,6 +498,15 @@ function statusLabel(status: AdminRechargeStatus, strings: AdminTranslations['re
 function statusActionLabel(status: AdminRechargeStatus, strings: AdminTranslations['recharges']): string {
   if (status === 'paid') return strings.actions.refund
   return strings.statusAction[status]
+}
+
+export function refundErrorMessage(message: string, strings: AdminTranslations['recharges']): string {
+  const normalized = message.trim()
+  if (/admin TOTP is not bound/i.test(normalized)) return strings.errors.totpNotBound
+  if (/invalid TOTP code/i.test(normalized)) return strings.errors.invalidTotp
+  if (/TOTP is temporarily locked/i.test(normalized)) return strings.errors.totpLocked
+  if (/DEV_OPEN_ADMIN/i.test(normalized)) return strings.errors.devOpenAdmin
+  return normalized || strings.errors.refundFailed
 }
 
 function formatTemplate(template: string, values: Record<string, string | number>): string {

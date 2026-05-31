@@ -11802,7 +11802,14 @@ function AdminDashboard(): JSX.Element {
         </AdminLazyBoundary>
       )}
 
-      {showRecharges && <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={320}><LazyAdminRechargeRecordsModule onOpenUser={navigateUser} /></AdminLazyBoundary>}
+      {showRecharges && (
+        <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={320}>
+          <LazyAdminRechargeRecordsModule
+            onOpenUser={navigateUser}
+            onOpenSystemSettings={() => navigateModule('system-settings')}
+          />
+        </AdminLazyBoundary>
+      )}
 
       {showProxySettings && (
         <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={320}>

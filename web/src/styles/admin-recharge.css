@@ -12,6 +12,30 @@
     font-weight: 800;
     padding: 0.38rem 0.68rem;
   }
+  .admin-recharge-inline-status,
+  .admin-recharge-dialog-status,
+  .admin-recharge-dialog-error,
+  .admin-recharge-setup-callout {
+    border-radius: 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    line-height: 1.5;
+    margin: 0;
+  }
+  .admin-recharge-inline-status,
+  .admin-recharge-dialog-status {
+    color: hsl(var(--muted-foreground));
+  }
+  .admin-recharge-dialog-error {
+    color: hsl(var(--destructive));
+    text-align: center;
+  }
+  .admin-recharge-setup-callout {
+    background: hsl(var(--muted) / 0.26);
+    border: 1px solid hsl(var(--border) / 0.55);
+    color: hsl(var(--foreground));
+    padding: 0.85rem;
+  }
   .admin-recharge-toolbar { display: grid; gap: 0.7rem; }
   .admin-recharge-toolbar-primary,
   .admin-recharge-filter-row { align-items: end; display: grid; gap: 0.65rem; }
