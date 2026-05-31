@@ -66,6 +66,15 @@ source when a usable persisted runtime already exists.
   their configured subscription ownership is unambiguous. When at least one restored subscription
   endpoint exists, startup must not block on remote refresh before xray sync/runtime persistence;
   without safely restorable endpoints, startup continues to wait for subscription readiness.
+- `request_logs_gc` must not hold the SQLite write slot for an unbounded full-retention cleanup
+  pass. It must delete old `request_logs` and `request_log_catalog_rollups` in bounded batches,
+  yield between batches, report partial progress, and continue catch-up after a delay when more
+  rows remain.
+- A one-shot request-log GC CLI must reuse the same bounded cleanup path so production database
+  samples can be validated deterministically without waiting for the daily scheduler.
+- Request-log GC must avoid high-resource catch-up strategies such as rebuilding the whole
+  `request_logs` table or generating a large WAL. Large backlogs are expected to catch up over
+  repeated bounded windows.
 - Retry logs may include operation, attempt, backoff, and final error context.
 
 ## Acceptance
@@ -80,6 +89,12 @@ source when a usable persisted runtime already exists.
   restores the local runtime and completes without waiting for the slow remote refresh.
 - Without persisted subscription runtime, startup remains strict and waits for subscription
   readiness instead of reporting healthy from an empty proxy graph.
+- With a large backlog of old request logs, one scheduler pass records bounded progress instead of
+  running indefinitely; later catch-up passes eventually remove all rows older than the retention
+  threshold.
+- `request_logs_gc_once --run-until-complete --json` removes old request logs and catalog rollups
+  from a production-derived validation sample and reports `completed=true` when no old rows remain,
+  while keeping WAL growth and CPU time bounded.
 - Existing billing tests continue to prove locked billing subject stability, pending billing
   replay, and account/token quota attribution.
 - Existing MCP/API routing behavior remains unchanged, including research result GET key pinning.

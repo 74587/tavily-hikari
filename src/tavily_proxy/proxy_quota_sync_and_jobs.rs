@@ -321,9 +321,35 @@ impl TavilyProxy {
     /// Time-based garbage collection for request_logs (online recent logs only).
     /// Retention is defined by local-day boundaries and enforced via environment variables.
     pub async fn gc_request_logs(&self) -> Result<i64, ProxyError> {
+        let report = self
+            .gc_request_logs_with_options(RequestLogsGcOptions {
+                batch_size: 5_000,
+                max_batches: i64::MAX,
+                max_runtime_secs: 24 * 60 * 60,
+                inter_batch_sleep_ms: 0,
+            })
+            .await?;
+        if !report.completed {
+            return Err(ProxyError::Other(format!(
+                "request_logs_gc incomplete after legacy full pass: deleted_rows={} rollup_deleted={} batches={} retention_days={}",
+                report.deleted_request_logs,
+                report.deleted_rollups,
+                report.batches,
+                report.retention_days
+            )));
+        }
+        Ok(report.deleted_request_logs)
+    }
+
+    pub async fn gc_request_logs_with_options(
+        &self,
+        options: RequestLogsGcOptions,
+    ) -> Result<RequestLogsGcReport, ProxyError> {
         let retention_days = effective_request_logs_retention_days();
         let threshold = request_logs_retention_threshold_utc_ts(retention_days);
-        self.key_store.delete_old_request_logs(threshold).await
+        self.key_store
+            .delete_old_request_logs_bounded(threshold, options, retention_days)
+            .await
     }
 
     pub async fn gc_mcp_sessions(&self) -> Result<i64, ProxyError> {

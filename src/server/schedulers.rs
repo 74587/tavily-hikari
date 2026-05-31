@@ -350,6 +350,7 @@ fn spawn_mcp_session_init_backoffs_gc_scheduler(state: Arc<AppState>) {
 
 fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
+        const CATCHUP_RECHECK_SECS: u64 = 300;
         // Schedule: daily at configured local time.
         loop {
             let (hour, minute) = effective_request_logs_gc_at();
@@ -359,7 +360,6 @@ fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
             // After we reach the scheduled time, keep retrying until we either run the job
             // successfully or record an error for this run window.
             loop {
-                let retention_days = effective_request_logs_retention_days();
                 let job_id = match state
                     .proxy
                     .scheduled_job_start("request_logs_gc", None, 1)
@@ -373,14 +373,29 @@ fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
                     }
                 };
 
-                match state.proxy.gc_request_logs().await {
-                    Ok(deleted) => {
-                        let msg = format!("deleted_rows={deleted} retention_days={retention_days}");
+                match state
+                    .proxy
+                    .gc_request_logs_with_options(Default::default())
+                    .await
+                {
+                    Ok(report) => {
+                        let msg = format!(
+                            "deleted_rows={} rollup_deleted={} completed={} retention_days={} batches={} elapsed_ms={}",
+                            report.deleted_request_logs,
+                            report.deleted_rollups,
+                            report.completed,
+                            report.retention_days,
+                            report.batches,
+                            report.elapsed_ms
+                        );
                         let _ = state
                             .proxy
                             .scheduled_job_finish(job_id, "success", Some(&msg))
                             .await;
-                        break;
+                        if report.completed {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(CATCHUP_RECHECK_SECS)).await;
                     }
                     Err(err) => {
                         let _ = state

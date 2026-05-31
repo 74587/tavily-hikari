@@ -54,6 +54,15 @@ brief contention visible as HTTP 500s or failed background bookkeeping.
 - Restore safely attributable persisted subscription-backed proxy nodes from `forward_proxy_runtime`
   before attempting remote subscription refresh. If that restored graph exists, use it for startup
   readiness and leave remote subscription calibration to the maintenance scheduler.
+- Keep retention cleanup bounded. Large `request_logs` backlogs should be deleted in small batches
+  with a runtime/batch budget and a catch-up delay, rather than one daily job holding or repeatedly
+  contesting the writer until the whole backlog is gone.
+- Provide a one-shot operational CLI for retention cleanup so production-derived database samples
+  can be tested deterministically. Do not rely only on the daily scheduler when validating cleanup
+  behavior.
+- Avoid high-resource retention catch-up tactics such as rebuilding large log tables or producing a
+  large WAL. If the backlog is very large, run repeated bounded cleanup windows and verify progress
+  with row counts and resource telemetry.
 - Prefer bounded retries and narrower write windows before increasing SQLite pool size.
 
 ## Guardrails / Reuse Notes
@@ -65,10 +74,13 @@ brief contention visible as HTTP 500s or failed background bookkeeping.
 - Keep request-path quota semantics stable: locked billing subject, pending replay, quota precheck,
   and settlement must remain one coherent subject.
 - For WAL growth, inspect active readers and checkpoint behavior before running live maintenance.
+- Deleting rows does not shrink the SQLite file by itself. Treat VACUUM or database replacement as
+  a separate maintenance-window decision after retention cleanup has completed.
 
 ## References
 
 - `src/store/mod.rs`
+- `src/bin/request_logs_gc_once.rs`
 - `src/store/key_store_users_and_oauth.rs`
 - `src/store/key_store_request_logs_and_dashboard.rs`
 - `src/tavily_proxy/proxy_auth_and_oauth.rs`

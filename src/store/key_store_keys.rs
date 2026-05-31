@@ -1002,6 +1002,12 @@ impl KeyStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_transient_backoffs_source_request_log
+               ON api_key_transient_backoffs(source_request_log_id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

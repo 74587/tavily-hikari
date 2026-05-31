@@ -186,6 +186,52 @@ pub struct RequestUserIdBackfillReport {
     pub rows_updated: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RequestLogsGcOptions {
+    pub batch_size: i64,
+    pub max_batches: i64,
+    pub max_runtime_secs: u64,
+    pub inter_batch_sleep_ms: u64,
+}
+
+impl Default for RequestLogsGcOptions {
+    fn default() -> Self {
+        Self {
+            batch_size: 100,
+            max_batches: 30,
+            max_runtime_secs: 300,
+            inter_batch_sleep_ms: 1_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogsGcReport {
+    pub retention_days: i64,
+    pub threshold: i64,
+    pub batch_size: i64,
+    pub max_batches: i64,
+    pub deleted_request_logs: i64,
+    pub deleted_rollups: i64,
+    pub batches: i64,
+    pub completed: bool,
+    pub has_more: bool,
+    pub elapsed_ms: u128,
+}
+
+pub async fn run_request_logs_gc_once(
+    database_path: &str,
+    options: RequestLogsGcOptions,
+) -> Result<RequestLogsGcReport, ProxyError> {
+    let key_store = crate::store::KeyStore::open_for_request_logs_gc(database_path).await?;
+    let retention_days = effective_request_logs_retention_days();
+    let threshold = request_logs_retention_threshold_utc_ts(retention_days);
+    key_store
+        .delete_old_request_logs_bounded(threshold, options, retention_days)
+        .await
+}
+
 impl ForwardProxyProgressEvent {
     pub fn phase(operation: &'static str, phase_key: &'static str, label: &'static str) -> Self {
         Self::Phase {

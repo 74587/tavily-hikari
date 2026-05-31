@@ -1963,15 +1963,87 @@ impl KeyStore {
         Ok(result.rows_affected() as i64)
     }
 
-    pub(crate) async fn delete_old_request_logs(&self, threshold: i64) -> Result<i64, ProxyError> {
-        // Batched deletes reduce long-running write locks on large tables.
-        const BATCH_SIZE: i64 = 5_000;
-        let mut total_deleted = 0_i64;
+    pub(crate) async fn ensure_request_logs_gc_support_indexes(&self) -> Result<(), ProxyError> {
+        for sql in [
+            r#"CREATE INDEX IF NOT EXISTS idx_token_logs_request_log_id
+               ON auth_token_logs(request_log_id)"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_maintenance_records_request_log
+               ON api_key_maintenance_records(request_log_id)"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_transient_backoffs_source_request_log
+               ON api_key_transient_backoffs(source_request_log_id)"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_request_logs_time
+               ON request_logs(created_at DESC, id DESC)"#,
+        ] {
+            sqlx::query(sql).execute(&self.pool).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn delete_old_request_logs_batch(
+        &self,
+        threshold: i64,
+        batch_size: i64,
+    ) -> Result<i64, ProxyError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut retry_attempt = 0usize;
         loop {
-            let result = sqlx::query(
+            let mut conn = self.pool.acquire().await?;
+            let result = async {
+                sqlx::query("PRAGMA secure_delete = OFF")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query(
+                    r#"
+                    DELETE FROM request_logs
+                    WHERE id IN (
+                        SELECT id
+                        FROM request_logs
+                        WHERE created_at < ?
+                        ORDER BY created_at ASC, id ASC
+                        LIMIT ?
+                    )
+                    "#,
+                )
+                .bind(threshold)
+                .bind(batch_size)
+                .execute(&mut *conn)
+                .await
+            }
+            .await;
+            match result {
+                Ok(result) => return Ok(result.rows_affected() as i64),
+                Err(err) => {
+                    let err = ProxyError::Database(err);
+                    if sleep_before_sqlite_transient_write_retry(
+                        "request logs gc batch delete",
+                        retry_attempt,
+                        deadline,
+                        &err,
+                    )
+                    .await
+                    {
+                        retry_attempt += 1;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    async fn unlink_old_request_log_references_batch(
+        &self,
+        threshold: i64,
+        batch_size: i64,
+    ) -> Result<(), ProxyError> {
+        for (operation, sql) in [
+            (
+                "auth token request log unlink",
                 r#"
-                DELETE FROM request_logs
-                WHERE id IN (
+                UPDATE auth_token_logs
+                SET request_log_id = NULL
+                WHERE request_log_id IN (
                     SELECT id
                     FROM request_logs
                     WHERE created_at < ?
@@ -1979,28 +2051,184 @@ impl KeyStore {
                     LIMIT ?
                 )
                 "#,
-            )
-            .bind(threshold)
-            .bind(BATCH_SIZE)
-            .execute(&self.pool)
-            .await?;
-            let deleted = result.rows_affected() as i64;
-            total_deleted += deleted;
-            if deleted == 0 {
-                break;
+            ),
+            (
+                "maintenance request log unlink",
+                r#"
+                UPDATE api_key_maintenance_records
+                SET request_log_id = NULL
+                WHERE request_log_id IN (
+                    SELECT id
+                    FROM request_logs
+                    WHERE created_at < ?
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
+                )
+                "#,
+            ),
+            (
+                "transient backoff request log unlink",
+                r#"
+                UPDATE api_key_transient_backoffs
+                SET source_request_log_id = NULL
+                WHERE source_request_log_id IN (
+                    SELECT id
+                    FROM request_logs
+                    WHERE created_at < ?
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
+                )
+                "#,
+            ),
+        ] {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut retry_attempt = 0usize;
+            loop {
+                match sqlx::query(sql)
+                    .bind(threshold)
+                    .bind(batch_size)
+                    .execute(&self.pool)
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(err) => {
+                        let err = ProxyError::Database(err);
+                        if sleep_before_sqlite_transient_write_retry(
+                            operation,
+                            retry_attempt,
+                            deadline,
+                            &err,
+                        )
+                        .await
+                        {
+                            retry_attempt += 1;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
             }
         }
-        sqlx::query(
-            r#"
-            DELETE FROM request_log_catalog_rollups
-            WHERE bucket_start < ?
-            "#,
+
+        Ok(())
+    }
+
+    async fn delete_old_request_log_rollups_batch(
+        &self,
+        threshold: i64,
+        batch_size: i64,
+    ) -> Result<i64, ProxyError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut retry_attempt = 0usize;
+        loop {
+            match sqlx::query(
+                r#"
+                DELETE FROM request_log_catalog_rollups
+                WHERE rowid IN (
+                    SELECT rowid
+                    FROM request_log_catalog_rollups
+                    WHERE bucket_start < ?
+                    ORDER BY bucket_start ASC
+                    LIMIT ?
+                )
+                "#,
+            )
+            .bind(threshold)
+            .bind(batch_size)
+            .execute(&self.pool)
+            .await
+            {
+                Ok(result) => return Ok(result.rows_affected() as i64),
+                Err(err) => {
+                    let err = ProxyError::Database(err);
+                    if sleep_before_sqlite_transient_write_retry(
+                        "request log rollups gc batch delete",
+                        retry_attempt,
+                        deadline,
+                        &err,
+                    )
+                    .await
+                    {
+                        retry_attempt += 1;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    async fn has_old_request_log_rows(&self, threshold: i64) -> Result<bool, ProxyError> {
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM request_logs WHERE created_at < ? LIMIT 1",
         )
         .bind(threshold)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
+        Ok(exists.is_some())
+    }
+
+    async fn has_old_request_log_rollup_rows(&self, threshold: i64) -> Result<bool, ProxyError> {
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM request_log_catalog_rollups WHERE bucket_start < ? LIMIT 1",
+        )
+        .bind(threshold)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(exists.is_some())
+    }
+
+    pub(crate) async fn delete_old_request_logs_bounded(
+        &self,
+        threshold: i64,
+        options: RequestLogsGcOptions,
+        retention_days: i64,
+    ) -> Result<RequestLogsGcReport, ProxyError> {
+        let batch_size = options.batch_size.max(1);
+        let max_batches = options.max_batches.max(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(options.max_runtime_secs);
+        let started = std::time::Instant::now();
+        let mut deleted_request_logs = 0_i64;
+        let mut deleted_rollups = 0_i64;
+        let mut batches = 0_i64;
+
+        while batches < max_batches && std::time::Instant::now() < deadline {
+            self.unlink_old_request_log_references_batch(threshold, batch_size)
+                .await?;
+            let request_deleted = self
+                .delete_old_request_logs_batch(threshold, batch_size)
+                .await?;
+            let rollup_deleted = self
+                .delete_old_request_log_rollups_batch(threshold, batch_size)
+                .await?;
+            deleted_request_logs += request_deleted;
+            deleted_rollups += rollup_deleted;
+            batches += 1;
+
+            if request_deleted == 0 && rollup_deleted == 0 {
+                break;
+            }
+
+            if batches < max_batches && options.inter_batch_sleep_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(options.inter_batch_sleep_ms)).await;
+            }
+        }
+
+        let has_more = self.has_old_request_log_rows(threshold).await?
+            || self.has_old_request_log_rollup_rows(threshold).await?;
         self.invalidate_request_logs_catalog_cache().await;
-        Ok(total_deleted)
+        Ok(RequestLogsGcReport {
+            retention_days,
+            threshold,
+            batch_size,
+            max_batches,
+            deleted_request_logs,
+            deleted_rollups,
+            batches,
+            completed: !has_more,
+            has_more,
+            elapsed_ms: started.elapsed().as_millis(),
+        })
     }
 
     /// Aggregate per-token usage logs into hourly buckets in token_usage_stats.

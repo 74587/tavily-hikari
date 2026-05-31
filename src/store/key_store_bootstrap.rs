@@ -14,6 +14,23 @@ impl KeyStore {
         Ok(store)
     }
 
+    pub(crate) async fn open_for_request_logs_gc(
+        database_path: &str,
+    ) -> Result<Self, ProxyError> {
+        let store = Self {
+            pool: open_sqlite_pool(database_path, true, false).await?,
+            token_binding_cache: RwLock::new(HashMap::new()),
+            account_quota_resolution_cache: RwLock::new(HashMap::new()),
+            request_logs_catalog_cache: RwLock::new(HashMap::new()),
+            admin_heavy_read_semaphore: Semaphore::new(ADMIN_HEAVY_READ_CONCURRENCY),
+            #[cfg(test)]
+            forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
+            forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
+        };
+        store.ensure_request_logs_gc_support_indexes().await?;
+        Ok(store)
+    }
+
     pub(crate) async fn initialize_schema(&self) -> Result<(), ProxyError> {
         sqlx::query(
             r#"
