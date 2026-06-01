@@ -7,9 +7,15 @@ impl TavilyProxy {
     }
 
     pub async fn ha_wal_checkpoint(&self) -> Result<(), ProxyError> {
-        sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-            .execute(&self.key_store.pool)
-            .await?;
+        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) =
+            sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&self.key_store.pool)
+                .await?;
+        if busy != 0 || checkpointed_frames < log_frames {
+            return Err(ProxyError::Other(format!(
+                "HA WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+            )));
+        }
         Ok(())
     }
 

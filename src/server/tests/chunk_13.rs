@@ -586,6 +586,141 @@ async fn ha_snapshot_import_restores_standby_business_tables() {
 }
 
 #[tokio::test]
+async fn ha_snapshot_import_accepts_large_sqlite_snapshot_after_checkpoint() {
+    let active_db = temp_db_path("ha-snapshot-large-active");
+    let active_db_str = active_db.to_string_lossy().to_string();
+    let active_proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-large-active-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &active_db_str,
+    )
+    .await
+    .expect("active proxy created");
+    let active_pool = connect_sqlite_test_pool(&active_db_str).await;
+    let large_body = vec![b'x'; 3 * 1024 * 1024];
+    sqlx::query(
+        r#"
+        INSERT INTO request_logs (
+            method, path, result_status, request_body, visibility, created_at
+        ) VALUES ('POST', '/ha/large-snapshot', 'success', ?, 'visible', ?)
+        "#,
+    )
+    .bind(&large_body)
+    .bind(Utc::now().timestamp())
+    .execute(&active_pool)
+    .await
+    .expect("insert large WAL-backed request log");
+
+    let active_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        node_id: "node-active-large".to_string(),
+        database_path: Some(active_db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let active_addr = spawn_ha_admin_server(active_proxy, active_ha, true).await;
+    let snapshot = Client::new()
+        .get(format!("http://{active_addr}/api/admin/ha/snapshot"))
+        .send()
+        .await
+        .expect("large snapshot request")
+        .bytes()
+        .await
+        .expect("large snapshot bytes");
+    assert!(
+        snapshot.len() > 2 * 1024 * 1024,
+        "snapshot should exceed axum's default body limit"
+    );
+
+    let standby_db = temp_db_path("ha-snapshot-large-standby");
+    let standby_db_str = standby_db.to_string_lossy().to_string();
+    let standby_proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-large-standby-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &standby_db_str,
+    )
+    .await
+    .expect("standby proxy created");
+    let standby_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        mode: tavily_hikari::HaMode::ActiveStandby,
+        node_id: "node-standby-large".to_string(),
+        database_path: Some(standby_db_str.clone()),
+        internal_token: Some("test-ha-large-internal-token".to_string()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let standby_addr = spawn_ha_admin_server(standby_proxy, standby_ha, false).await;
+    let import_response = Client::new()
+        .put(format!(
+            "http://{standby_addr}/api/admin/ha/snapshot?sourceNodeId=node-active-large"
+        ))
+        .header("x-ha-internal-token", "test-ha-large-internal-token")
+        .body(snapshot)
+        .send()
+        .await
+        .expect("large snapshot import request");
+    assert_eq!(import_response.status(), reqwest::StatusCode::OK);
+
+    let standby_pool = connect_sqlite_test_pool(&standby_db_str).await;
+    let restored_len: i64 = sqlx::query_scalar(
+        "SELECT length(request_body) FROM request_logs WHERE path = '/ha/large-snapshot'",
+    )
+    .fetch_one(&standby_pool)
+    .await
+    .expect("fetch restored large request body length");
+    assert_eq!(restored_len, large_body.len() as i64);
+
+    active_pool.close().await;
+    standby_pool.close().await;
+    let _ = std::fs::remove_file(active_db);
+    let _ = std::fs::remove_file(standby_db);
+}
+
+#[tokio::test]
+async fn ha_startup_role_check_failure_does_not_recover_previous_active() {
+    let edgeone_app = Router::new().fallback(post(|| async {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "Response": {
+                    "Error": {
+                        "Code": "InternalError",
+                        "Message": "temporary EdgeOne failure"
+                    },
+                    "RequestId": "edgeone-startup-failure"
+                }
+            })),
+        )
+    }));
+    let edgeone_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let edgeone_addr = edgeone_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(edgeone_listener, edgeone_app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        mode: tavily_hikari::HaMode::ActiveStandby,
+        node_id: "node-previous-active".to_string(),
+        node_public_origin: Some("127.0.0.1:58102".to_string()),
+        edgeone_zone_id: Some("zone-test".to_string()),
+        edgeone_domain: Some("hikari.example.test".to_string()),
+        edgeone_secret_id: Some("secret-id".to_string()),
+        edgeone_secret_key: Some("secret-key".to_string()),
+        edgeone_api_endpoint: format!("http://{edgeone_addr}"),
+        ..tavily_hikari::HaConfig::default()
+    });
+
+    let status =
+        reconcile_ha_startup_role(&ha, Some(tavily_hikari::HaNodeRole::FullMaster)).await;
+    assert_eq!(status.role, tavily_hikari::HaNodeRole::Standby);
+    assert!(
+        status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("EdgeOne startup role check failed"))
+    );
+}
+
+#[tokio::test]
 async fn ha_promote_records_edgeone_request_response_audit() {
     let edgeone_app = Router::new().fallback(post(|| async {
         Json(serde_json::json!({

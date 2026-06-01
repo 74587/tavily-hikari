@@ -28,21 +28,7 @@ pub async fn serve(
         eprintln!("HA persisted role lookup warning: {err}");
         None
     });
-    if let Err(err) = ha.refresh_startup_role().await {
-        eprintln!("HA startup role check warning: {err}");
-    }
-    if matches!(
-        previous_ha_role,
-        Some(tavily_hikari::HaNodeRole::FullMaster | tavily_hikari::HaNodeRole::ProvisionalMaster)
-    ) && ha.role().await == tavily_hikari::HaNodeRole::Standby
-    {
-        ha.enter_recovery(
-            "previous active node restarted after EdgeOne origin moved; recovery import required"
-                .to_string(),
-        )
-        .await;
-    }
-    let startup_ha_status = ha.status().await;
+    let startup_ha_status = reconcile_ha_startup_role(&ha, previous_ha_role).await;
     if let Err(err) = proxy
         .persist_ha_node_state(
             &startup_ha_status.node_id,
@@ -180,7 +166,11 @@ pub async fn serve(
         .route("/api/admin/ha/status", get(get_admin_ha_status))
         .route(
             "/api/admin/ha/snapshot",
-            get(get_admin_ha_snapshot).put(put_admin_ha_snapshot),
+            get(get_admin_ha_snapshot)
+                .put(put_admin_ha_snapshot)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    HA_SNAPSHOT_BODY_LIMIT_BYTES,
+                )),
         )
         .route("/api/admin/ha/promote", post(post_admin_ha_promote))
         .route("/api/admin/ha/finalize", post(post_admin_ha_finalize))
@@ -450,6 +440,41 @@ pub async fn serve(
     .await?;
     println!("Server shut down gracefully.");
     Ok(())
+}
+
+const HA_SNAPSHOT_BODY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
+
+async fn reconcile_ha_startup_role(
+    ha: &tavily_hikari::HaRuntime,
+    previous_ha_role: Option<tavily_hikari::HaNodeRole>,
+) -> tavily_hikari::HaStatusView {
+    let startup_role_checked = match ha.refresh_startup_role().await {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("HA startup role check warning: {err}");
+            false
+        }
+    };
+    let mut status = ha.status().await;
+    if startup_role_checked
+        && status.edgeone_api_configured
+        && matches!(
+            previous_ha_role,
+            Some(
+                tavily_hikari::HaNodeRole::FullMaster
+                    | tavily_hikari::HaNodeRole::ProvisionalMaster
+            )
+        )
+        && status.role == tavily_hikari::HaNodeRole::Standby
+    {
+        status = ha
+            .enter_recovery(
+                "previous active node restarted after EdgeOne origin moved; recovery import required"
+                    .to_string(),
+            )
+            .await;
+    }
+    status
 }
 
 fn spawn_ha_snapshot_sync_task(state: Arc<AppState>) {
