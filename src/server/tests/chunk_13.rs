@@ -488,11 +488,19 @@ async fn ha_snapshot_endpoint_is_gone() {
 
     let response = Client::new()
         .put(format!("http://{addr}/api/admin/ha/snapshot"))
-        .body(vec![b'x'; 3 * 1024 * 1024])
+        .body("deprecated snapshot body")
         .send()
         .await
         .expect("snapshot put request");
     assert_eq!(response.status(), reqwest::StatusCode::GONE);
+
+    let response = Client::new()
+        .put(format!("http://{addr}/api/admin/ha/snapshot"))
+        .body(vec![b'x'; 128 * 1024])
+        .send()
+        .await
+        .expect("oversized snapshot put request");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
     let _ = std::fs::remove_file(db_path);
 }
 
@@ -732,11 +740,54 @@ async fn ha_events_storage_allows_nonzero_cursor_when_outbox_is_empty() {
         .execute(&pool)
         .await
         .expect("clear retained outbox");
+    let current_seq = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'ha_outbox'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("read retained outbox sequence")
+    .flatten()
+    .unwrap_or(0);
     pool.close().await;
     let events = proxy
-        .list_ha_outbox_events_after(5, 10)
+        .list_ha_outbox_events_after(current_seq, 10)
         .await
         .expect("empty retained outbox should not force baseline");
+    assert!(events.is_empty());
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let first_seq = sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'meta', 'request_rate_limit_v1', 'upsert', ?, 0, NULL)
+        "#,
+    )
+    .bind(serde_json::json!({"key":"request_rate_limit_v1","value":"55"}).to_string())
+    .execute(&pool)
+    .await
+    .expect("insert retained event")
+    .last_insert_rowid();
+    let second_seq = sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'meta', 'api_rebalance_enabled_v1', 'upsert', ?, 0, NULL)
+        "#,
+    )
+    .bind(serde_json::json!({"key":"api_rebalance_enabled_v1","value":"true"}).to_string())
+        .execute(&pool)
+        .await
+        .expect("insert retained event")
+        .last_insert_rowid();
+    pool.close().await;
+    let err = proxy
+        .list_ha_outbox_events_after(first_seq, 10)
+        .await
+        .expect_err("pruned cursor should require baseline");
+    assert!(err.to_string().contains("retention window"));
+    let events = proxy
+        .list_ha_outbox_events_after(second_seq, 10)
+        .await
+        .expect("current cursor can poll empty pruned outbox");
     assert!(events.is_empty());
     let _ = std::fs::remove_file(db_path);
 }

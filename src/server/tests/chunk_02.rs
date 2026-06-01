@@ -1672,7 +1672,7 @@ async fn spawn_ha_admin_server(
             "/api/admin/ha/snapshot",
             get(get_admin_ha_snapshot)
                 .put(put_admin_ha_snapshot)
-                .layer(DefaultBodyLimit::disable()),
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/admin/ha/baseline", get(get_admin_ha_baseline))
         .route("/api/admin/ha/events", get(get_admin_ha_events))
