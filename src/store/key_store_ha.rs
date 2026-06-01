@@ -297,55 +297,54 @@ impl KeyStore {
             ));
         }
 
-        self.with_ha_outbox_suppressed(async {
-            let mut conn = self.pool.acquire().await?;
-            sqlx::query("PRAGMA foreign_keys = OFF")
-                .execute(&mut *conn)
-                .await?;
-            sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-            let result = async {
-                for table in HA_BASELINE_TABLES {
-                    if self.table_exists(table).await? {
-                        let sql = if *table == "meta" {
-                            format!(
-                                "DELETE FROM {} WHERE key IN ({})",
-                                quote_sqlite_identifier(table),
-                                ha_meta_key_list_sql()
-                            )
-                        } else {
-                            format!("DELETE FROM {}", quote_sqlite_identifier(table))
-                        };
-                        sqlx::query(&sql).execute(&mut *conn).await?;
-                    }
-                }
-                for (resource, data) in &resources {
-                    insert_json_row_on_conn(&mut conn, resource, data).await?;
-                    row_count += 1;
-                }
-                Ok::<(), ProxyError>(())
-            }
-            .await;
-            match result {
-                Ok(()) => {
-                    sqlx::query("COMMIT").execute(&mut *conn).await?;
-                    sqlx::query("PRAGMA foreign_keys = ON")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(HaApplyResult {
-                        high_watermark,
-                        row_count,
-                    })
-                }
-                Err(err) => {
-                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                    let _ = sqlx::query("PRAGMA foreign_keys = ON")
-                        .execute(&mut *conn)
-                        .await;
-                    Err(err)
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result = async {
+            insert_ha_outbox_suppression_on_conn(&mut conn).await?;
+            for table in HA_BASELINE_TABLES {
+                if self.table_exists(table).await? {
+                    let sql = if *table == "meta" {
+                        format!(
+                            "DELETE FROM {} WHERE key IN ({})",
+                            quote_sqlite_identifier(table),
+                            ha_meta_key_list_sql()
+                        )
+                    } else {
+                        format!("DELETE FROM {}", quote_sqlite_identifier(table))
+                    };
+                    sqlx::query(&sql).execute(&mut *conn).await?;
                 }
             }
-        })
-        .await
+            for (resource, data) in &resources {
+                insert_json_row_on_conn(&mut conn, resource, data).await?;
+                row_count += 1;
+            }
+            clear_ha_outbox_suppression_on_conn(&mut conn).await?;
+            Ok::<(), ProxyError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(HaApplyResult {
+                    high_watermark,
+                    row_count,
+                })
+            }
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *conn)
+                    .await;
+                Err(err)
+            }
+        }
     }
 
     pub(crate) async fn apply_ha_events_ndjson(
@@ -399,43 +398,41 @@ impl KeyStore {
             }
         }
 
-        self.with_ha_outbox_suppressed(async {
-            let mut conn = self.pool.acquire().await?;
-            sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-            let result = async {
-                for (resource, resource_id, op, payload) in &events {
-                    match op.as_str() {
-                        "delete" => {
-                            delete_json_row_on_conn(&mut conn, resource, resource_id, payload)
-                                .await?
-                        }
-                        "upsert" => insert_json_row_on_conn(&mut conn, resource, payload).await?,
-                        other => {
-                            return Err(ProxyError::Other(format!(
-                                "unsupported HA event operation: {other}"
-                            )));
-                        }
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let result = async {
+            insert_ha_outbox_suppression_on_conn(&mut conn).await?;
+            for (resource, resource_id, op, payload) in &events {
+                match op.as_str() {
+                    "delete" => {
+                        delete_json_row_on_conn(&mut conn, resource, resource_id, payload).await?
                     }
-                    row_count += 1;
+                    "upsert" => insert_json_row_on_conn(&mut conn, resource, payload).await?,
+                    other => {
+                        return Err(ProxyError::Other(format!(
+                            "unsupported HA event operation: {other}"
+                        )));
+                    }
                 }
-                Ok::<(), ProxyError>(())
+                row_count += 1;
             }
-            .await;
-            match result {
-                Ok(()) => {
-                    sqlx::query("COMMIT").execute(&mut *conn).await?;
-                    Ok(HaApplyResult {
-                        high_watermark: last_seq,
-                        row_count,
-                    })
-                }
-                Err(err) => {
-                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                    Err(err)
-                }
+            clear_ha_outbox_suppression_on_conn(&mut conn).await?;
+            Ok::<(), ProxyError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(HaApplyResult {
+                    high_watermark: last_seq,
+                    row_count,
+                })
             }
-        })
-        .await
+            Err(err) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Err(err)
+            }
+        }
     }
 
     pub(crate) async fn list_ha_outbox_events_after(
@@ -801,23 +798,24 @@ impl KeyStore {
         Ok(())
     }
 
-    async fn with_ha_outbox_suppressed<F, T>(&self, future: F) -> Result<T, ProxyError>
-    where
-        F: std::future::Future<Output = Result<T, ProxyError>>,
-    {
-        sqlx::query("INSERT OR IGNORE INTO ha_outbox_suppression (id) VALUES ('local')")
-            .execute(&self.pool)
-            .await?;
-        let result = future.await;
-        let clear_result = sqlx::query("DELETE FROM ha_outbox_suppression WHERE id = 'local'")
-            .execute(&self.pool)
-            .await;
-        match (result, clear_result) {
-            (Ok(value), Ok(_)) => Ok(value),
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(ProxyError::from(err)),
-        }
-    }
+}
+
+async fn insert_ha_outbox_suppression_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+) -> Result<(), ProxyError> {
+    sqlx::query("INSERT OR IGNORE INTO ha_outbox_suppression (id) VALUES ('local')")
+        .execute(&mut **conn)
+        .await?;
+    Ok(())
+}
+
+async fn clear_ha_outbox_suppression_on_conn(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+) -> Result<(), ProxyError> {
+    sqlx::query("DELETE FROM ha_outbox_suppression WHERE id = 'local'")
+        .execute(&mut **conn)
+        .await?;
+    Ok(())
 }
 
 fn quote_sqlite_identifier(value: &str) -> String {
