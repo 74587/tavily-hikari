@@ -281,15 +281,15 @@ struct Cli {
     )]
     edgeone_api_endpoint: String,
 
-    /// Direct standby/admin peer URL for HA snapshot sync.
-    #[arg(long, env = "HA_SYNC_PEER_URL")]
-    ha_sync_peer_url: Option<String>,
+    /// Direct active/admin source URL used by standby pull-based HA sync.
+    #[arg(long, env = "HA_SYNC_SOURCE_URL")]
+    ha_sync_source_url: Option<String>,
 
     /// Shared internal token for node-to-node HA sync calls.
     #[arg(long, env = "HA_INTERNAL_TOKEN", hide_env_values = true)]
     ha_internal_token: Option<String>,
 
-    /// HA snapshot sync interval in seconds, clamped to 5-15.
+    /// HA standby pull sync interval in seconds, clamped to 5-15.
     #[arg(long, env = "HA_SYNC_INTERVAL_SECS", default_value_t = 15)]
     ha_sync_interval_secs: u64,
 }
@@ -494,7 +494,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         edgeone_secret_id: trim_optional(cli.edgeone_secret_id),
         edgeone_secret_key: trim_optional(cli.edgeone_secret_key),
         edgeone_api_endpoint: cli.edgeone_api_endpoint.trim().to_string(),
-        sync_peer_url: trim_optional(cli.ha_sync_peer_url),
+        sync_source_url: trim_optional(cli.ha_sync_source_url),
         internal_token: trim_optional(cli.ha_internal_token),
         sync_interval_secs: cli.ha_sync_interval_secs,
     };
@@ -533,7 +533,11 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 }
 
 fn reject_legacy_ha_origin_env_vars() -> Result<(), Box<dyn std::error::Error>> {
-    let legacy_vars = ["NODE_PUBLIC_ORIGIN", "EDGEONE_EXPECTED_ORIGIN"];
+    let legacy_vars = [
+        "NODE_PUBLIC_ORIGIN",
+        "EDGEONE_EXPECTED_ORIGIN",
+        "HA_SYNC_PEER_URL",
+    ];
     let configured = legacy_vars
         .into_iter()
         .filter(|name| {
@@ -548,7 +552,7 @@ fn reject_legacy_ha_origin_env_vars() -> Result<(), Box<dyn std::error::Error>> 
     }
 
     Err(format!(
-        "{} are no longer supported; use NODE_PUBLIC_SCHEME, NODE_PUBLIC_HOST, NODE_PUBLIC_PORT, EDGEONE_EXPECTED_ORIGIN_SCHEME, EDGEONE_EXPECTED_ORIGIN_HOST, and EDGEONE_EXPECTED_ORIGIN_PORT",
+        "{} are no longer supported; use NODE_PUBLIC_SCHEME, NODE_PUBLIC_HOST, NODE_PUBLIC_PORT, EDGEONE_EXPECTED_ORIGIN_SCHEME, EDGEONE_EXPECTED_ORIGIN_HOST, EDGEONE_EXPECTED_ORIGIN_PORT, and HA_SYNC_SOURCE_URL",
         configured.join(", ")
     )
     .into())

@@ -20,7 +20,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::{
     Router,
     body::{self, Body, Bytes},
-    extract::{ConnectInfo, Form, Path, Query, RawQuery, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Form, Path, Query, RawQuery, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode},
     response::{Json, Redirect},
     routing::{any, delete, get, patch, post, put},

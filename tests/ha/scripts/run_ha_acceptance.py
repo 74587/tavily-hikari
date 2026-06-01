@@ -131,7 +131,7 @@ def stage_pre():
         status, raw = request("GET", f"{NODE_B}/api/keys/{sentinel_id}/secret")
         return status == 200 and raw.get("api_key") == sentinel
 
-    wait_json(f"{NODE_B}/api/admin/ha/status", has_sentinel, "standby snapshot import", timeout=30)
+    wait_json(f"{NODE_B}/api/admin/ha/status", has_sentinel, "standby state sync", timeout=30)
     write_state(token=token, sentinel=sentinel)
     print(json.dumps({"stage": "pre", "token": token, "sentinel": sentinel}))
 
@@ -185,10 +185,10 @@ def stage_recovery():
     assert node_a["recoveryStatus"], node_a
     before_status, before_settings = request("GET", f"{NODE_B}/api/settings")
     assert_status("read settings before recovery", before_status, 200)
-    payload = {
+    forbidden_payload = {
         "batchId": "old-node-a-batch-1",
         "sourceNodeId": "node-a",
-        "message": "node-a mergeable recovery batch",
+        "message": "node-a forbidden log recovery batch",
         "requestLogs": [
             {
                 "authTokenId": "old-node-a-token",
@@ -225,9 +225,19 @@ def stage_recovery():
             }
         ],
     }
+    status, body = request("POST", f"{NODE_B}/api/admin/ha/recovery/import", forbidden_payload)
+    assert_status("recovery log import rejected", status, 400)
+    assert "request_logs" in str(body) and "auth_token_logs" in str(body), body
+
+    payload = {
+        "batchId": "old-node-a-batch-1",
+        "sourceNodeId": "node-a",
+        "message": "node-a ledger recovery batch",
+    }
     status, body = request("POST", f"{NODE_B}/api/admin/ha/recovery/import", payload)
     assert_status("recovery import first", status, 200)
     assert body["imported"] is True, body
+    assert body["eventCount"] == 0, body
     assert body["status"]["role"] == "full_master", body
     status, body = request("POST", f"{NODE_B}/api/admin/ha/recovery/import", payload)
     assert_status("recovery import duplicate", status, 200)

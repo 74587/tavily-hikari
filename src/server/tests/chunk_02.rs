@@ -1672,10 +1672,11 @@ async fn spawn_ha_admin_server(
             "/api/admin/ha/snapshot",
             get(get_admin_ha_snapshot)
                 .put(put_admin_ha_snapshot)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    HA_SNAPSHOT_BODY_LIMIT_BYTES,
-                )),
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route("/api/admin/ha/baseline", get(get_admin_ha_baseline))
+        .route("/api/admin/ha/events", get(get_admin_ha_events))
+        .route("/api/admin/ha/events/ack", post(post_admin_ha_events_ack))
         .route("/api/admin/ha/promote", post(post_admin_ha_promote))
         .route("/api/admin/ha/recovery/import", post(post_admin_ha_recovery_import))
         .with_state(state);

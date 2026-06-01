@@ -460,11 +460,11 @@ async fn alerts_endpoints_and_dashboard_recent_alerts_share_default_window() {
 }
 
 #[tokio::test]
-async fn ha_snapshot_export_records_sync_watermark() {
-    let db_path = temp_db_path("ha-snapshot-export");
+async fn ha_snapshot_endpoint_is_gone() {
+    let db_path = temp_db_path("ha-snapshot-gone");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-snapshot-export".to_string()],
+        vec!["tvly-ha-snapshot-gone".to_string()],
         DEFAULT_UPSTREAM,
         &db_str,
     )
@@ -482,195 +482,783 @@ async fn ha_snapshot_export_records_sync_watermark() {
         .send()
         .await
         .expect("snapshot request");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let manifest = response
-        .headers()
-        .get("x-ha-snapshot-manifest")
-        .and_then(|value| value.to_str().ok())
-        .expect("snapshot manifest header")
-        .to_string();
-    assert!(manifest.contains("node-a"));
-    let bytes = response.bytes().await.expect("snapshot bytes");
-    assert!(bytes.len() > 1024, "snapshot should contain sqlite bytes");
+    assert_eq!(response.status(), reqwest::StatusCode::GONE);
+    let body = response.text().await.expect("gone body");
+    assert!(body.contains("ha_snapshot_removed"));
+
+    let response = Client::new()
+        .put(format!("http://{addr}/api/admin/ha/snapshot"))
+        .body("deprecated snapshot body")
+        .send()
+        .await
+        .expect("snapshot put request");
+    assert_eq!(response.status(), reqwest::StatusCode::GONE);
+
+    let response = Client::new()
+        .put(format!("http://{addr}/api/admin/ha/snapshot"))
+        .body(vec![b'x'; 128 * 1024])
+        .send()
+        .await
+        .expect("oversized snapshot put request");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn ha_startup_clears_stale_outbox_suppression_marker() {
+    let db_path = temp_db_path("ha-stale-outbox-suppression");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-suppression-marker".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    drop(proxy);
 
     let pool = connect_sqlite_test_pool(&db_str).await;
-    let watermark: Option<String> =
-        sqlx::query_scalar("SELECT detail FROM ha_sync_watermarks WHERE name = 'snapshot_export'")
-            .fetch_optional(&pool)
+    sqlx::query("INSERT OR IGNORE INTO ha_outbox_suppression (id) VALUES ('local')")
+        .execute(&pool)
+        .await
+        .expect("insert stale suppression marker");
+    pool.close().await;
+
+    let restarted = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-suppression-marker".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("restarted proxy created");
+    drop(restarted);
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let suppression_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ha_outbox_suppression WHERE id = 'local'")
+            .fetch_one(&pool)
             .await
-            .expect("fetch sync watermark");
-    assert!(
-        watermark
-            .as_deref()
-            .is_some_and(|detail| detail.contains("node-a"))
-    );
+            .expect("count suppression markers");
+    assert_eq!(suppression_count, 0);
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('request_rate_limit_v1', '99')",
+    )
+    .execute(&pool)
+    .await
+    .expect("write whitelisted meta");
+    let event_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ha_outbox WHERE resource = 'meta'")
+            .fetch_one(&pool)
+            .await
+            .expect("count emitted events");
+    assert_eq!(event_count, 1);
     pool.close().await;
     let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
-async fn ha_snapshot_import_restores_standby_business_tables() {
-    let active_db = temp_db_path("ha-snapshot-active");
+async fn ha_baseline_uses_zstd_and_excludes_call_records() {
+    let active_db = temp_db_path("ha-baseline-active");
     let active_db_str = active_db.to_string_lossy().to_string();
     let active_proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-active-snapshot-key".to_string()],
+        vec!["tvly-ha-baseline-key".to_string()],
         DEFAULT_UPSTREAM,
         &active_db_str,
     )
     .await
     .expect("active proxy created");
+    let pool = connect_sqlite_test_pool(&active_db_str).await;
+    let large_body = vec![b'x'; 3 * 1024 * 1024];
+    sqlx::query(
+        r#"
+        INSERT INTO request_logs (
+            method, path, result_status, request_body, response_body, visibility, created_at
+        ) VALUES ('POST', '/ha/large-snapshot', 'success', ?, ?, 'visible', ?)
+        "#,
+    )
+    .bind(&large_body)
+    .bind(&large_body)
+    .bind(Utc::now().timestamp())
+    .execute(&pool)
+    .await
+    .expect("insert large request log");
+    pool.close().await;
     let active_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
         node_id: "node-active".to_string(),
         database_path: Some(active_db_str.clone()),
         ..tavily_hikari::HaConfig::default()
     });
     let active_addr = spawn_ha_admin_server(active_proxy, active_ha, true).await;
-    let snapshot = Client::new()
-        .get(format!("http://{active_addr}/api/admin/ha/snapshot"))
+    let response = Client::new()
+        .get(format!("http://{active_addr}/api/admin/ha/baseline"))
         .send()
         .await
-        .expect("snapshot request")
-        .bytes()
-        .await
-        .expect("snapshot bytes");
-
-    let standby_db = temp_db_path("ha-snapshot-standby");
-    let standby_db_str = standby_db.to_string_lossy().to_string();
-    let standby_proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-standby-old-key".to_string()],
-        DEFAULT_UPSTREAM,
-        &standby_db_str,
-    )
-    .await
-    .expect("standby proxy created");
-    let standby_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
-        mode: tavily_hikari::HaMode::ActiveStandby,
-        node_id: "node-standby".to_string(),
-        database_path: Some(standby_db_str.clone()),
-        internal_token: Some("test-ha-internal-token".to_string()),
-        ..tavily_hikari::HaConfig::default()
-    });
-    let standby_addr = spawn_ha_admin_server(standby_proxy, standby_ha, false).await;
-
-    let import_response = Client::new()
-        .put(format!(
-            "http://{standby_addr}/api/admin/ha/snapshot?sourceNodeId=node-active"
-        ))
-        .header("x-ha-internal-token", "test-ha-internal-token")
-        .body(snapshot)
-        .send()
-        .await
-        .expect("snapshot import request");
-    assert_eq!(import_response.status(), reqwest::StatusCode::OK);
-
-    let pool = connect_sqlite_test_pool(&standby_db_str).await;
-    let keys: Vec<String> = sqlx::query_scalar("SELECT api_key FROM api_keys ORDER BY api_key")
-        .fetch_all(&pool)
-        .await
-        .expect("fetch restored keys");
-    assert!(keys.contains(&"tvly-ha-active-snapshot-key".to_string()));
-    assert!(!keys.contains(&"tvly-ha-standby-old-key".to_string()));
-    let detail: Option<String> =
-        sqlx::query_scalar("SELECT detail FROM ha_sync_watermarks WHERE name = 'snapshot_import'")
-            .fetch_optional(&pool)
-            .await
-            .expect("fetch import watermark");
-    assert!(
-        detail
-            .as_deref()
-            .is_some_and(|value| value.contains("restoredTables"))
+        .expect("baseline request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("zstd")
     );
-    pool.close().await;
+    assert!(
+        response.headers().get("x-ha-high-watermark").is_some(),
+        "baseline should report high watermark"
+    );
+    let compressed = response.bytes().await.expect("baseline bytes");
+    assert!(
+        compressed.len() < 1024 * 1024,
+        "baseline should stay small when request logs are large"
+    );
+    let decoded = zstd::stream::decode_all(compressed.as_ref()).expect("decode zstd baseline");
+    let text = String::from_utf8(decoded).expect("baseline utf8");
+    assert!(text.contains("\"kind\":\"baseline_start\""));
+    assert!(text.contains("\"resource\":\"api_keys\""));
+    assert!(text.contains("tvly-ha-baseline-key"));
+    assert!(!text.contains("request_logs"));
+    assert!(!text.contains("auth_token_logs"));
+    assert!(!text.contains("/ha/large-snapshot"));
+    assert!(!text.contains(&"x".repeat(1024)));
+
     let _ = std::fs::remove_file(active_db);
-    let _ = std::fs::remove_file(standby_db);
 }
 
 #[tokio::test]
-async fn ha_snapshot_import_accepts_large_sqlite_snapshot_after_checkpoint() {
-    let active_db = temp_db_path("ha-snapshot-large-active");
+async fn ha_events_endpoint_returns_zstd_ndjson() {
+    let db_path = temp_db_path("ha-events");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-events-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (
+            kind, resource, resource_id, op, payload_json, created_at, checksum
+        ) VALUES ('state', 'api_keys', 'key-1', 'upsert', '{"id":"key-1"}', ?, 'checksum')
+        "#,
+    )
+    .bind(Utc::now().timestamp())
+    .execute(&pool)
+    .await
+    .expect("insert outbox event");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (
+            kind, resource, resource_id, op, payload_json, created_at, checksum
+        ) VALUES ('state', 'request_logs', 'log-1', 'upsert', '{"path":"/secret"}', ?, 'bad')
+        "#,
+    )
+    .bind(Utc::now().timestamp())
+    .execute(&pool)
+    .await
+    .expect("insert forbidden outbox event");
+    pool.close().await;
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        node_id: "node-events".to_string(),
+        database_path: Some(db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let addr = spawn_ha_admin_server(proxy, ha, true).await;
+    let response = Client::new()
+        .get(format!("http://{addr}/api/admin/ha/events?after=0&limit=10"))
+        .send()
+        .await
+        .expect("events request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("zstd")
+    );
+    let compressed = response.bytes().await.expect("events bytes");
+    let decoded = zstd::stream::decode_all(compressed.as_ref()).expect("decode zstd events");
+    let text = String::from_utf8(decoded).expect("events utf8");
+    assert!(text.contains("\"kind\":\"event\""));
+    assert!(text.contains("\"resource\":\"api_keys\""));
+    assert!(!text.contains("request_logs"));
+    assert!(!text.contains("/secret"));
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn ha_events_encoder_chunks_oversized_batches() {
+    let events = (1..=4)
+        .map(|seq| HaEventResponseItem {
+            seq,
+            value: serde_json::json!({
+                "schemaVersion": 1,
+                "kind": "event",
+                "event": {
+                    "seq": seq,
+                    "kind": "state",
+                    "resource": "meta",
+                    "resourceId": format!("request_rate_limit_v1-{seq}"),
+                    "op": "upsert",
+                    "payload": {
+                        "key": "request_rate_limit_v1",
+                        "value": format!("{}-{}", seq, nanoid!(512))
+                    },
+                    "createdAt": seq,
+                    "checksum": null
+                }
+            }),
+        })
+        .collect::<Vec<_>>();
+    let single = encode_ha_events_limited(0, 4, &events[..1], usize::MAX)
+        .expect("encode single event");
+    let full = encode_ha_events_limited(0, 4, &events, usize::MAX).expect("encode full batch");
+    assert!(full.compressed.len() > single.compressed.len());
+
+    let chunked = encode_ha_events_limited(0, 4, &events, single.compressed.len())
+        .expect("chunk oversized batch");
+    assert_eq!(chunked.event_count, 1);
+    assert_eq!(chunked.last_seq, 1);
+}
+
+#[tokio::test]
+async fn ha_events_storage_allows_nonzero_cursor_when_outbox_is_empty() {
+    let db_path = temp_db_path("ha-events-empty-retention");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-events-empty-retention-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query("DELETE FROM ha_outbox")
+        .execute(&pool)
+        .await
+        .expect("clear retained outbox");
+    let current_seq = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'ha_outbox'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("read retained outbox sequence")
+    .flatten()
+    .unwrap_or(0);
+    pool.close().await;
+    let events = proxy
+        .list_ha_outbox_events_after(current_seq, 10)
+        .await
+        .expect("empty retained outbox should not force baseline");
+    assert!(events.is_empty());
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let first_seq = sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'meta', 'request_rate_limit_v1', 'upsert', ?, 0, NULL)
+        "#,
+    )
+    .bind(serde_json::json!({"key":"request_rate_limit_v1","value":"55"}).to_string())
+    .execute(&pool)
+    .await
+    .expect("insert retained event")
+    .last_insert_rowid();
+    let second_seq = sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'meta', 'api_rebalance_enabled_v1', 'upsert', ?, 0, NULL)
+        "#,
+    )
+    .bind(serde_json::json!({"key":"api_rebalance_enabled_v1","value":"true"}).to_string())
+        .execute(&pool)
+        .await
+        .expect("insert retained event")
+        .last_insert_rowid();
+    pool.close().await;
+    let err = proxy
+        .list_ha_outbox_events_after(first_seq, 10)
+        .await
+        .expect_err("pruned cursor should require baseline");
+    assert!(err.to_string().contains("retention window"));
+    let events = proxy
+        .list_ha_outbox_events_after(second_seq, 10)
+        .await
+        .expect("current cursor can poll empty pruned outbox");
+    assert!(events.is_empty());
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn ha_sync_transports_system_settings_meta_only() {
+    let active_db = temp_db_path("ha-meta-active");
+    let standby_db = temp_db_path("ha-meta-standby");
     let active_db_str = active_db.to_string_lossy().to_string();
-    let active_proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-large-active-key".to_string()],
+    let standby_db_str = standby_db.to_string_lossy().to_string();
+    let active = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-meta-active-key".to_string()],
         DEFAULT_UPSTREAM,
         &active_db_str,
     )
     .await
     .expect("active proxy created");
-    let active_pool = connect_sqlite_test_pool(&active_db_str).await;
-    let large_body = vec![b'x'; 3 * 1024 * 1024];
-    sqlx::query(
-        r#"
-        INSERT INTO request_logs (
-            method, path, result_status, request_body, visibility, created_at
-        ) VALUES ('POST', '/ha/large-snapshot', 'success', ?, 'visible', ?)
-        "#,
-    )
-    .bind(&large_body)
-    .bind(Utc::now().timestamp())
-    .execute(&active_pool)
-    .await
-    .expect("insert large WAL-backed request log");
-
-    let active_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
-        node_id: "node-active-large".to_string(),
-        database_path: Some(active_db_str.clone()),
-        ..tavily_hikari::HaConfig::default()
-    });
-    let active_addr = spawn_ha_admin_server(active_proxy, active_ha, true).await;
-    let snapshot = Client::new()
-        .get(format!("http://{active_addr}/api/admin/ha/snapshot"))
-        .send()
-        .await
-        .expect("large snapshot request")
-        .bytes()
-        .await
-        .expect("large snapshot bytes");
-    assert!(
-        snapshot.len() > 2 * 1024 * 1024,
-        "snapshot should exceed axum's default body limit"
-    );
-
-    let standby_db = temp_db_path("ha-snapshot-large-standby");
-    let standby_db_str = standby_db.to_string_lossy().to_string();
-    let standby_proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-large-standby-key".to_string()],
+    let standby = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-meta-standby-key".to_string()],
         DEFAULT_UPSTREAM,
         &standby_db_str,
     )
     .await
     .expect("standby proxy created");
-    let standby_ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
-        mode: tavily_hikari::HaMode::ActiveStandby,
-        node_id: "node-standby-large".to_string(),
-        database_path: Some(standby_db_str.clone()),
-        internal_token: Some("test-ha-large-internal-token".to_string()),
-        ..tavily_hikari::HaConfig::default()
-    });
-    let standby_addr = spawn_ha_admin_server(standby_proxy, standby_ha, false).await;
-    let import_response = Client::new()
-        .put(format!(
-            "http://{standby_addr}/api/admin/ha/snapshot?sourceNodeId=node-active-large"
-        ))
-        .header("x-ha-internal-token", "test-ha-large-internal-token")
-        .body(snapshot)
-        .send()
-        .await
-        .expect("large snapshot import request");
-    assert_eq!(import_response.status(), reqwest::StatusCode::OK);
 
-    let standby_pool = connect_sqlite_test_pool(&standby_db_str).await;
-    let restored_len: i64 = sqlx::query_scalar(
-        "SELECT length(request_body) FROM request_logs WHERE path = '/ha/large-snapshot'",
+    let active_pool = connect_sqlite_test_pool(&active_db_str).await;
+    sqlx::query(
+        r#"
+        INSERT INTO meta (key, value) VALUES
+            ('request_rate_limit_v1', '42'),
+            ('trusted_proxy_cidrs_v1', '["10.0.0.0/8"]'),
+            ('ha_unsynced_local_marker', 'local-only')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
     )
-    .fetch_one(&standby_pool)
+    .execute(&active_pool)
     .await
-    .expect("fetch restored large request body length");
-    assert_eq!(restored_len, large_body.len() as i64);
-
+    .expect("seed active meta");
     active_pool.close().await;
+
+    let baseline = active
+        .export_ha_baseline_ndjson("active-meta")
+        .await
+        .expect("export baseline");
+    assert!(baseline.ndjson.contains("request_rate_limit_v1"));
+    assert!(baseline.ndjson.contains("trusted_proxy_cidrs_v1"));
+    assert!(!baseline.ndjson.contains("ha_unsynced_local_marker"));
+
+    standby
+        .apply_ha_baseline_ndjson(&baseline.ndjson)
+        .await
+        .expect("apply baseline");
+    let standby_pool = connect_sqlite_test_pool(&standby_db_str).await;
+    let request_rate_limit: Option<String> =
+        sqlx::query_scalar("SELECT value FROM meta WHERE key = 'request_rate_limit_v1'")
+            .fetch_optional(&standby_pool)
+            .await
+            .expect("read synced meta");
+    let local_only: Option<String> =
+        sqlx::query_scalar("SELECT value FROM meta WHERE key = 'ha_unsynced_local_marker'")
+            .fetch_optional(&standby_pool)
+            .await
+            .expect("read unsynced meta");
+    assert_eq!(request_rate_limit.as_deref(), Some("42"));
+    assert!(local_only.is_none());
     standby_pool.close().await;
+
+    let active_pool = connect_sqlite_test_pool(&active_db_str).await;
+    sqlx::query("DELETE FROM ha_outbox")
+        .execute(&active_pool)
+        .await
+        .expect("clear outbox");
+    sqlx::query(
+        r#"
+        INSERT INTO meta (key, value) VALUES
+            ('request_rate_limit_v1', '55'),
+            ('ha_unsynced_local_marker', 'still-local-only')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        "#,
+    )
+    .execute(&active_pool)
+    .await
+    .expect("update active meta");
+    active_pool.close().await;
+
+    let events = active
+        .list_ha_outbox_events_after(0, 10)
+        .await
+        .expect("list meta events");
+    assert_eq!(events.len(), 1, "only whitelisted meta should emit events");
+    assert_eq!(events[0].resource, "meta");
+    assert_eq!(events[0].payload["key"].as_str(), Some("request_rate_limit_v1"));
+    let events_ndjson = [
+        serde_json::json!({"schemaVersion":1,"kind":"events_start","after":0,"limit":10})
+            .to_string(),
+        serde_json::json!({"schemaVersion":1,"kind":"event","event":events[0]}).to_string(),
+        serde_json::json!({"schemaVersion":1,"kind":"events_end","lastSeq":events[0].seq,"eventCount":1})
+            .to_string(),
+    ]
+    .join("\n");
+    standby
+        .apply_ha_events_ndjson(&events_ndjson)
+        .await
+        .expect("apply meta event");
+    let standby_pool = connect_sqlite_test_pool(&standby_db_str).await;
+    let request_rate_limit: Option<String> =
+        sqlx::query_scalar("SELECT value FROM meta WHERE key = 'request_rate_limit_v1'")
+            .fetch_optional(&standby_pool)
+            .await
+            .expect("read updated meta");
+    let local_only: Option<String> =
+        sqlx::query_scalar("SELECT value FROM meta WHERE key = 'ha_unsynced_local_marker'")
+            .fetch_optional(&standby_pool)
+            .await
+            .expect("read unsynced updated meta");
+    assert_eq!(request_rate_limit.as_deref(), Some("55"));
+    assert!(local_only.is_none());
+    standby_pool.close().await;
+
     let _ = std::fs::remove_file(active_db);
     let _ = std::fs::remove_file(standby_db);
+}
+
+#[tokio::test]
+async fn ha_standby_sync_does_not_repeat_zero_watermark_baseline() {
+    let baseline_count = Arc::new(AtomicUsize::new(0));
+    let events_count = Arc::new(AtomicUsize::new(0));
+    let baseline_ndjson = [
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "baseline_start",
+            "nodeId": "active-empty",
+            "generatedAt": Utc::now().timestamp(),
+            "highWatermark": 0,
+            "encoding": "zstd-ndjson"
+        })
+        .to_string(),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "baseline_end",
+            "nodeId": "active-empty",
+            "highWatermark": 0,
+            "rowCount": 0
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let events_ndjson = [
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "events_start",
+            "after": 0,
+            "limit": 1000
+        })
+        .to_string(),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "events_end",
+            "lastSeq": 0,
+            "eventCount": 0
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let baseline_body = zstd::stream::encode_all(baseline_ndjson.as_bytes(), 0)
+        .expect("encode empty baseline");
+    let events_body =
+        zstd::stream::encode_all(events_ndjson.as_bytes(), 0).expect("encode empty events");
+    let baseline_count_for_route = baseline_count.clone();
+    let events_count_for_route = events_count.clone();
+    let app = Router::new()
+        .route(
+            "/api/admin/ha/baseline",
+            get(move || {
+                let baseline_body = baseline_body.clone();
+                let baseline_count = baseline_count_for_route.clone();
+                async move {
+                    baseline_count.fetch_add(1, Ordering::SeqCst);
+                    Response::builder()
+                        .header("content-encoding", "zstd")
+                        .body(Body::from(baseline_body))
+                        .expect("baseline response")
+                }
+            }),
+        )
+        .route(
+            "/api/admin/ha/events",
+            get(move || {
+                let events_body = events_body.clone();
+                let events_count = events_count_for_route.clone();
+                async move {
+                    events_count.fetch_add(1, Ordering::SeqCst);
+                    Response::builder()
+                        .header("content-encoding", "zstd")
+                        .body(Body::from(events_body))
+                        .expect("events response")
+                }
+            }),
+        )
+        .route("/api/admin/ha/events/ack", post(|| async { StatusCode::OK }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+
+    let db_path = temp_db_path("ha-zero-watermark-standby");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-zero-watermark-standby-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("standby proxy created");
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        mode: tavily_hikari::HaMode::ActiveStandby,
+        node_id: "standby-zero-watermark".to_string(),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let state = Arc::new(AppState {
+        proxy: proxy.clone(),
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha,
+        dev_open_admin: true,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+    });
+    let source_url = format!("http://{source_addr}");
+    let client = Client::new();
+
+    run_ha_standby_sync_once(&state, &client, &source_url, "test-token")
+        .await
+        .expect("first standby sync");
+    run_ha_standby_sync_once(&state, &client, &source_url, "test-token")
+        .await
+        .expect("second standby sync");
+
+    assert_eq!(baseline_count.load(Ordering::SeqCst), 1);
+    assert_eq!(events_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        proxy
+            .get_ha_sync_watermark("standby_applied_seq")
+            .await
+            .expect("read applied seq"),
+        Some(0)
+    );
+    assert_eq!(
+        proxy
+            .get_ha_sync_watermark("standby_baseline_applied")
+            .await
+            .expect("read baseline marker"),
+        Some(1)
+    );
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn ha_events_ack_records_peer_watermark() {
+    let db_path = temp_db_path("ha-events-ack");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-events-ack-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        node_id: "node-events-ack".to_string(),
+        database_path: Some(db_str.clone()),
+        ..tavily_hikari::HaConfig::default()
+    });
+    let addr = spawn_ha_admin_server(proxy, ha, true).await;
+    let response = Client::new()
+        .post(format!("http://{addr}/api/admin/ha/events/ack"))
+        .json(&serde_json::json!({"peerNodeId":"standby-a","ackedSeq":42}))
+        .send()
+        .await
+        .expect("ack request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let acked: i64 =
+        sqlx::query_scalar("SELECT acked_seq FROM ha_peer_watermarks WHERE peer_node_id = 'standby-a'")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch peer watermark");
+    assert_eq!(acked, 42);
+    pool.close().await;
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn ha_event_apply_preserves_foreign_keys_and_composite_deletes() {
+    let db_path = temp_db_path("ha-event-apply-keys");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-event-apply-seed".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query(
+        r#"
+        INSERT INTO users (id, display_name, username, active, created_at, updated_at)
+        VALUES ('user-ha-apply', 'HA Apply', 'ha_apply', 1, 1, 1)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert user");
+    sqlx::query(
+        r#"
+        INSERT INTO api_keys (id, api_key, status, created_at, last_used_at)
+        VALUES ('key-ha-apply', 'tvly-ha-event-apply', 'active', 1, 0)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert key");
+    sqlx::query(
+        r#"
+        INSERT INTO auth_tokens (id, secret, enabled, created_at)
+        VALUES ('tok-ha-apply', 'secret-ha-apply', 1, 1)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert token");
+    sqlx::query(
+        r#"
+        INSERT INTO user_api_key_bindings (
+            user_id, api_key_id, created_at, updated_at, last_success_at
+        ) VALUES ('user-ha-apply', 'key-ha-apply', 1, 1, 1)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert user key binding");
+    sqlx::query(
+        r#"
+        INSERT INTO token_api_key_bindings (
+            token_id, api_key_id, created_at, updated_at, last_success_at
+        ) VALUES ('tok-ha-apply', 'key-ha-apply', 1, 1, 1)
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert token key binding");
+    pool.close().await;
+
+    let events = serde_json::json!([
+        {"schemaVersion":1,"kind":"events_start","after":0,"limit":10},
+        {
+            "schemaVersion":1,
+            "kind":"event",
+            "event":{
+                "seq":1,
+                "kind":"state",
+                "resource":"api_keys",
+                "resourceId":"key-ha-apply",
+                "op":"upsert",
+                "payload":{
+                    "id":"key-ha-apply",
+                    "api_key":"tvly-ha-event-apply",
+                    "status":"inactive",
+                    "created_at":1,
+                    "last_used_at":0
+                },
+                "createdAt":1,
+                "checksum":null
+            }
+        },
+        {
+            "schemaVersion":1,
+            "kind":"event",
+            "event":{
+                "seq":2,
+                "kind":"state",
+                "resource":"token_api_key_bindings",
+                "resourceId":"not-the-standby-rowid",
+                "op":"delete",
+                "payload":{
+                    "token_id":"tok-ha-apply",
+                    "api_key_id":"key-ha-apply"
+                },
+                "createdAt":2,
+                "checksum":null
+            }
+        },
+        {
+            "schemaVersion":1,
+            "kind":"event",
+            "event":{
+                "seq":3,
+                "kind":"state",
+                "resource":"api_key_maintenance_records",
+                "resourceId":"maint-ha-apply",
+                "op":"upsert",
+                "payload":{
+                    "id":"maint-ha-apply",
+                    "key_id":"key-ha-apply",
+                    "source":"ha-test",
+                    "operation_code":"disable",
+                    "operation_summary":"disabled by test",
+                    "request_log_id":999001,
+                    "auth_token_log_id":999002,
+                    "auth_token_id":"tok-ha-apply",
+                    "created_at":3
+                },
+                "createdAt":3,
+                "checksum":null
+            }
+        },
+        {"schemaVersion":1,"kind":"events_end","lastSeq":3,"eventCount":3}
+    ]);
+    let ndjson = events
+        .as_array()
+        .expect("events array")
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let result = proxy
+        .apply_ha_events_ndjson(&ndjson)
+        .await
+        .expect("apply ha events");
+    assert_eq!(result.high_watermark, 3);
+    assert_eq!(result.row_count, 3);
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM api_keys WHERE id = 'key-ha-apply'")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch key status");
+    assert_eq!(status, "inactive");
+    let user_binding_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_api_key_bindings WHERE api_key_id = 'key-ha-apply'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count user key bindings");
+    assert_eq!(user_binding_count, 1);
+    let token_binding_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM token_api_key_bindings WHERE token_id = 'tok-ha-apply' AND api_key_id = 'key-ha-apply'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count token key bindings");
+    assert_eq!(token_binding_count, 0);
+    let log_refs: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT request_log_id, auth_token_log_id FROM api_key_maintenance_records WHERE id = 'maint-ha-apply'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("fetch sanitized maintenance record");
+    assert_eq!(log_refs, (None, None));
+    pool.close().await;
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -861,28 +1449,47 @@ async fn ha_recovery_import_is_idempotent_and_keeps_importer_active() {
         }]
     });
 
-    let first: Value = client
+    let rejected = client
         .post(format!("http://{addr}/api/admin/ha/recovery/import"))
         .json(&payload)
         .send()
         .await
-        .expect("first recovery import")
+        .expect("rejected recovery import");
+    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
+    let rejected_body = rejected.text().await.expect("rejected recovery body");
+    assert!(
+        rejected_body.contains("request_logs") && rejected_body.contains("auth_token_logs"),
+        "legacy log recovery payload should be explicitly rejected: {rejected_body}"
+    );
+
+    let ledger_payload = serde_json::json!({
+        "batchId": "old-master-batch-1",
+        "sourceNodeId": "node-old",
+        "message": "ledger recovery batch imported"
+    });
+
+    let first: Value = client
+        .post(format!("http://{addr}/api/admin/ha/recovery/import"))
+        .json(&ledger_payload)
+        .send()
+        .await
+        .expect("first ledger recovery import")
         .json()
         .await
-        .expect("first recovery response");
+        .expect("first ledger recovery response");
     assert_eq!(first["imported"], true);
-    assert_eq!(first["eventCount"], 2);
+    assert_eq!(first["eventCount"], 0);
     assert_eq!(first["status"]["role"], "full_master");
 
     let second: Value = client
         .post(format!("http://{addr}/api/admin/ha/recovery/import"))
-        .json(&payload)
+        .json(&ledger_payload)
         .send()
         .await
-        .expect("second recovery import")
+        .expect("second ledger recovery import")
         .json()
         .await
-        .expect("second recovery response");
+        .expect("second ledger recovery response");
     assert_eq!(second["imported"], false);
 
     let pool = connect_sqlite_test_pool(&db_str).await;
@@ -893,19 +1500,19 @@ async fn ha_recovery_import_is_idempotent_and_keeps_importer_active() {
     .await
     .expect("fetch recovery batch");
     assert_eq!(row.0, "imported");
-    assert_eq!(row.1, 2);
+    assert_eq!(row.1, 0);
     let request_log_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM request_logs WHERE auth_token_id = 'old-token'")
             .fetch_one(&pool)
             .await
-            .expect("fetch imported request logs");
-    assert_eq!(request_log_count, 1);
+            .expect("fetch rejected request logs");
+    assert_eq!(request_log_count, 0);
     let token_log_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM auth_token_logs WHERE token_id = 'old-token'")
             .fetch_one(&pool)
             .await
-            .expect("fetch imported auth token logs");
-    assert_eq!(token_log_count, 1);
+            .expect("fetch rejected auth token logs");
+    assert_eq!(token_log_count, 0);
     pool.close().await;
     let _ = std::fs::remove_file(db_path);
 }

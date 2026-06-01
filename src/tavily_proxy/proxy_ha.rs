@@ -1,24 +1,4 @@
 impl TavilyProxy {
-    pub async fn restore_ha_snapshot_file(
-        &self,
-        snapshot_path: &std::path::Path,
-    ) -> Result<usize, ProxyError> {
-        self.key_store.restore_ha_snapshot_file(snapshot_path).await
-    }
-
-    pub async fn ha_wal_checkpoint(&self) -> Result<(), ProxyError> {
-        let (busy, log_frames, checkpointed_frames): (i64, i64, i64) =
-            sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
-                .fetch_one(&self.key_store.pool)
-                .await?;
-        if busy != 0 || checkpointed_frames < log_frames {
-            return Err(ProxyError::Other(format!(
-                "HA WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
-            )));
-        }
-        Ok(())
-    }
-
     pub async fn persist_ha_node_state(
         &self,
         node_id: &str,
@@ -45,6 +25,51 @@ impl TavilyProxy {
     ) -> Result<(), ProxyError> {
         self.key_store
             .persist_ha_sync_watermark(name, source_node_id, target_node_id, watermark, detail)
+            .await
+    }
+
+    pub async fn get_ha_sync_watermark(&self, name: &str) -> Result<Option<i64>, ProxyError> {
+        self.key_store.get_ha_sync_watermark(name).await
+    }
+
+    pub async fn export_ha_baseline_ndjson(
+        &self,
+        node_id: &str,
+    ) -> Result<HaBaselineExport, ProxyError> {
+        self.key_store.export_ha_baseline_ndjson(node_id).await
+    }
+
+    pub async fn apply_ha_baseline_ndjson(
+        &self,
+        ndjson: &str,
+    ) -> Result<HaApplyResult, ProxyError> {
+        self.key_store.apply_ha_baseline_ndjson(ndjson).await
+    }
+
+    pub async fn apply_ha_events_ndjson(
+        &self,
+        ndjson: &str,
+    ) -> Result<HaApplyResult, ProxyError> {
+        self.key_store.apply_ha_events_ndjson(ndjson).await
+    }
+
+    pub async fn list_ha_outbox_events_after(
+        &self,
+        after_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<HaOutboxEventRecord>, ProxyError> {
+        self.key_store
+            .list_ha_outbox_events_after(after_seq, limit)
+            .await
+    }
+
+    pub async fn ack_ha_peer_watermark(
+        &self,
+        peer_node_id: &str,
+        acked_seq: i64,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .ack_ha_peer_watermark(peer_node_id, acked_seq)
             .await
     }
 
@@ -101,14 +126,8 @@ impl TavilyProxy {
             .await
     }
 
-    pub async fn import_ha_recovery_events(
-        &self,
-        request_logs: &[serde_json::Value],
-        auth_token_logs: &[serde_json::Value],
-    ) -> Result<i64, ProxyError> {
-        self.key_store
-            .import_ha_recovery_events(request_logs, auth_token_logs)
-            .await
+    pub async fn import_ha_recovery_events(&self) -> Result<i64, ProxyError> {
+        self.key_store.import_ha_recovery_events().await
     }
 
     pub async fn rebuild_ha_recovery_rollups(&self) -> Result<(), ProxyError> {

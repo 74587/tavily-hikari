@@ -55,7 +55,6 @@ services:
       EDGEONE_SECRET_ID: secret-id
       EDGEONE_SECRET_KEY: secret-key
       EDGEONE_API_ENDPOINT: http://edgeone-mock:9000
-      HA_SYNC_PEER_URL: http://node-b:8787
       HA_INTERNAL_TOKEN: ha-internal-token
       HA_SYNC_INTERVAL_SECS: 5
     volumes:
@@ -89,6 +88,7 @@ services:
       EDGEONE_SECRET_ID: secret-id
       EDGEONE_SECRET_KEY: secret-key
       EDGEONE_API_ENDPOINT: http://edgeone-mock:9000
+      HA_SYNC_SOURCE_URL: http://node-a:8787
       HA_INTERNAL_TOKEN: ha-internal-token
       HA_SYNC_INTERVAL_SECS: 5
     volumes:

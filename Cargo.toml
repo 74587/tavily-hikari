@@ -34,3 +34,4 @@ ring = "0.17"
 md5 = "0.7"
 data-encoding = "2"
 totp-rs = { version = "5.7", features = ["qr", "zeroize"] }
+zstd = "0.13"

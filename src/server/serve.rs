@@ -53,8 +53,7 @@ pub async fn serve(
         usage_base: usage_base.clone(),
         api_key_ip_geo_origin,
     });
-    spawn_ha_snapshot_sync_task(state.clone());
-
+    spawn_ha_standby_sync_task(state.clone());
     println!(
         "Admin auth modes: forward_enabled={} builtin_enabled={} dev_open_admin={}",
         state.forward_auth_enabled,
@@ -168,10 +167,11 @@ pub async fn serve(
             "/api/admin/ha/snapshot",
             get(get_admin_ha_snapshot)
                 .put(put_admin_ha_snapshot)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    HA_SNAPSHOT_BODY_LIMIT_BYTES,
-                )),
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route("/api/admin/ha/baseline", get(get_admin_ha_baseline))
+        .route("/api/admin/ha/events", get(get_admin_ha_events))
+        .route("/api/admin/ha/events/ack", post(post_admin_ha_events_ack))
         .route("/api/admin/ha/promote", post(post_admin_ha_promote))
         .route("/api/admin/ha/finalize", post(post_admin_ha_finalize))
         .route(
@@ -442,8 +442,6 @@ pub async fn serve(
     Ok(())
 }
 
-const HA_SNAPSHOT_BODY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
-
 async fn reconcile_ha_startup_role(
     ha: &tavily_hikari::HaRuntime,
     previous_ha_role: Option<tavily_hikari::HaNodeRole>,
@@ -477,82 +475,172 @@ async fn reconcile_ha_startup_role(
     status
 }
 
-fn spawn_ha_snapshot_sync_task(state: Arc<AppState>) {
-    let Some(peer_url) = state.ha.sync_peer_url() else {
+fn spawn_ha_standby_sync_task(state: Arc<AppState>) {
+    let Some(source_url) = state.ha.sync_source_url() else {
         return;
     };
     let Some(internal_token) = state.ha.internal_token() else {
         eprintln!(
-            "HA snapshot sync disabled: HA_INTERNAL_TOKEN is required when HA_SYNC_PEER_URL is set"
+            "HA standby sync disabled: HA_INTERNAL_TOKEN is required when HA_SYNC_SOURCE_URL is set"
         );
         return;
     };
-    let interval = std::time::Duration::from_secs(state.ha.sync_interval_secs());
+    let interval = std::time::Duration::from_secs(state.ha.sync_interval_secs().max(1));
     tokio::spawn(async move {
         let client = reqwest::Client::new();
         loop {
-            tokio::time::sleep(interval).await;
-            if !state.ha.role().await.allows_basic_business() {
-                continue;
-            }
-            let Some(db_path) = state.ha.database_path() else {
-                eprintln!("HA snapshot sync skipped: database path is not configured");
-                continue;
-            };
-            if let Err(err) = state.proxy.ha_wal_checkpoint().await {
-                eprintln!("HA snapshot sync checkpoint failed: {err}");
-                continue;
-            }
-            let bytes = match tokio::fs::read(&db_path).await {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    eprintln!("HA snapshot sync read failed: {err}");
-                    continue;
-                }
-            };
-            let status = state.ha.status().await;
-            let generated_at = Utc::now().timestamp();
-            let target = format!(
-                "{}/api/admin/ha/snapshot?sourceNodeId={}&generatedAt={}",
-                peer_url,
-                urlencoding::encode(&status.node_id),
-                generated_at
-            );
-            match client
-                .put(target)
-                .header("x-ha-internal-token", &internal_token)
-                .body(bytes)
-                .send()
-                .await
+            if state.ha.role().await == tavily_hikari::HaNodeRole::Standby
+                && let Err(err) =
+                    run_ha_standby_sync_once(&state, &client, &source_url, &internal_token).await
             {
-                Ok(response) if response.status().is_success() => {
-                    let detail = format!("snapshot pushed to {peer_url}");
-                    if let Err(err) = state
-                        .proxy
-                        .persist_ha_sync_watermark(
-                            "snapshot_push",
-                            Some(&status.node_id),
-                            None,
-                            generated_at,
-                            Some(&detail),
-                        )
-                        .await
-                    {
-                        eprintln!("HA snapshot sync watermark failed: {err}");
-                    }
-                }
-                Ok(response) => {
-                    eprintln!(
-                        "HA snapshot sync push failed with status {}",
-                        response.status()
-                    );
-                }
-                Err(err) => {
-                    eprintln!("HA snapshot sync push failed: {err}");
-                }
+                eprintln!("HA standby sync failed: {err}");
             }
+            tokio::time::sleep(interval).await;
         }
     });
+}
+
+async fn run_ha_standby_sync_once(
+    state: &Arc<AppState>,
+    client: &reqwest::Client,
+    source_url: &str,
+    internal_token: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let local_node_id = state.ha.status().await.node_id;
+    let applied_seq = state
+        .proxy
+        .get_ha_sync_watermark("standby_applied_seq")
+        .await?
+        .unwrap_or(0);
+    let baseline_applied = state
+        .proxy
+        .get_ha_sync_watermark("standby_baseline_applied")
+        .await?
+        .unwrap_or(0)
+        > 0;
+    let mut next_seq = applied_seq;
+    if !baseline_applied {
+        let target = format!("{}/api/admin/ha/baseline", source_url.trim_end_matches('/'));
+        let response = client
+            .get(target)
+            .header("x-ha-internal-token", internal_token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(format!("baseline request failed with {}", response.status()).into());
+        }
+        let compressed = response.bytes().await?;
+        let decoded = zstd::stream::decode_all(compressed.as_ref())?;
+        let ndjson = String::from_utf8(decoded)?;
+        let result = state.proxy.apply_ha_baseline_ndjson(&ndjson).await?;
+        next_seq = result.high_watermark;
+        state
+            .proxy
+            .persist_ha_sync_watermark(
+                "standby_baseline",
+                Some(source_url),
+                Some(&local_node_id),
+                result.high_watermark,
+                Some(&format!("rows={}", result.row_count)),
+            )
+            .await?;
+        state
+            .proxy
+            .persist_ha_sync_watermark(
+                "standby_applied_seq",
+                Some(source_url),
+                Some(&local_node_id),
+                result.high_watermark,
+                Some("baseline"),
+            )
+            .await?;
+        state
+            .proxy
+            .persist_ha_sync_watermark(
+                "standby_baseline_applied",
+                Some(source_url),
+                Some(&local_node_id),
+                1,
+                Some("baseline applied"),
+            )
+            .await?;
+    }
+
+    let target = format!(
+        "{}/api/admin/ha/events?after={}&limit=1000",
+        source_url.trim_end_matches('/'),
+        next_seq
+    );
+    let response = client
+        .get(target)
+        .header("x-ha-internal-token", internal_token)
+        .send()
+        .await?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::GONE | reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    ) {
+        let reset_detail = if response.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+            "events batch too large; baseline required"
+        } else {
+            "retention window missed; baseline required"
+        };
+        state
+            .proxy
+            .persist_ha_sync_watermark(
+                "standby_applied_seq",
+                Some(source_url),
+                Some(&local_node_id),
+                0,
+                Some(reset_detail),
+            )
+            .await?;
+        state
+            .proxy
+            .persist_ha_sync_watermark(
+                "standby_baseline_applied",
+                Some(source_url),
+                Some(&local_node_id),
+                0,
+                Some(reset_detail),
+            )
+            .await?;
+        return Ok(());
+    }
+    if !response.status().is_success() {
+        return Err(format!("events request failed with {}", response.status()).into());
+    }
+    let compressed = response.bytes().await?;
+    let decoded = zstd::stream::decode_all(compressed.as_ref())?;
+    let ndjson = String::from_utf8(decoded)?;
+    let result = state.proxy.apply_ha_events_ndjson(&ndjson).await?;
+    if result.high_watermark > next_seq {
+        next_seq = result.high_watermark;
+        state
+            .proxy
+            .persist_ha_sync_watermark(
+                "standby_applied_seq",
+                Some(source_url),
+                Some(&local_node_id),
+                next_seq,
+                Some(&format!("events={}", result.row_count)),
+            )
+            .await?;
+    }
+    let ack_target = format!(
+        "{}/api/admin/ha/events/ack",
+        source_url.trim_end_matches('/')
+    );
+    let _ = client
+        .post(ack_target)
+        .header("x-ha-internal-token", internal_token)
+        .json(&serde_json::json!({
+            "peerNodeId": local_node_id,
+            "ackedSeq": next_seq
+        }))
+        .send()
+        .await?;
+    Ok(())
 }
 
 fn spawn_ha_edgeone_authority_task(state: Arc<AppState>) {

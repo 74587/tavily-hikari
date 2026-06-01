@@ -35,20 +35,27 @@ Tavily Hikari 的高可用方案采用单活主备热备，而不是一主多从
 
 ## Data Sync And Recovery
 
-- active 每 5-15 秒向 standby 同步 SQLite 一致性备份或变更包，目标 RPO `<=15s`。
-- recovery 只允许导入 usage/log/event/payment notify 等可幂等合并数据。
-- recovery 不覆盖系统设置、用户额度配置、token/key 当前状态、管理员配置写入、rebalance 权威状态。
-- recovery 完成后 dashboard、quota、usage rollup 必须可重算。
+- HA 同步的目标是保活服务，不复制完整历史分析库。
+- standby 每 5-15 秒从 active 拉取状态基线或 outbox 增量事件，目标 RPO `<=15s`。
+- 禁止通过 HA 同步传输全量 SQLite 数据库文件。
+- 状态基线与事件流使用 versioned zstd NDJSON，基线压缩后上限 `64MiB`，事件批次压缩后上限 `4MiB`。
+- active 持久化 `ha_outbox` 事件，standby 按递增 seq 幂等应用并回报 peer watermark；outbox 保留窗口为 72 小时，超过窗口必须重新拉状态基线。
+- 基线和事件只允许同步接管基础 API/MCP 所需状态：API keys、auth tokens、用户身份、token/key/user 绑定、MCP 当前会话必要状态、quota 当前状态与聚合 bucket、控制面配置、公告、LinuxDo 充值订单/权益、账本历史、forward proxy 配置、代理节点 override、上游 key 与代理节点绑定/亲和关系。
+- 禁止同步 `request_logs`、`auth_token_logs`、请求体、响应体、path/query/IP/header 明细、dashboard recent logs、OAuth login 临时态、Web session、forward proxy runtime/attempts/hourly weight 和节点本地观测噪声。
+- recovery 只允许导入幂等账本事件，不导入调用记录，不覆盖新主当前权威状态。
+- recovery 完成后 quota 与 usage 聚合必须可继续滚动更新。
 
 ## API Contract
 
 - `GET /api/admin/ha/status` 返回当前节点状态、EdgeOne 源站、同步水位、recovery 状态。
 - `GET /api/ha/status` 返回可公开给用户控制台的降级摘要，不包含 secret 或 expected origin。
-- `GET /api/admin/ha/snapshot` 导出经过 WAL checkpoint 的 SQLite 快照，并返回 manifest。
-- `PUT /api/admin/ha/snapshot` 仅 standby 可调用，通过 `ATTACH` 快照库在线恢复业务表，并记录同步水位。
+- `GET`/`PUT /api/admin/ha/snapshot` 是废弃接口，必须返回 `410 Gone`，不得读写 SQLite 数据库文件。
+- `GET /api/admin/ha/baseline` 仅内部或管理员认证可调用，在 active/provisional 节点输出 zstd NDJSON 状态基线，并在响应头返回 high watermark。
+- `GET /api/admin/ha/events?after=<seq>&limit=<n>` 仅内部或管理员认证可调用，输出 `after` 之后的 zstd NDJSON outbox 事件。
+- `POST /api/admin/ha/events/ack` 仅内部或管理员认证可调用，记录 standby 已应用的 outbox seq。
 - `POST /api/admin/ha/promote` 将当前 standby 切为 `provisional_master`，可带 `force` 用于强制接管。
 - `POST /api/admin/ha/finalize` 管理员确认后进入 `full_master`。
-- `POST /api/admin/ha/recovery/import` 导入旧主 recovery 批次，仅允许内部或管理员认证调用。
+- `POST /api/admin/ha/recovery/import` 导入旧主 recovery 账本批次，仅允许内部或管理员认证调用；调用记录字段必须被拒绝。
 
 ## Runtime Configuration
 
@@ -64,7 +71,7 @@ Tavily Hikari 的高可用方案采用单活主备热备，而不是一主多从
 - `EDGEONE_EXPECTED_ORIGIN_PORT`
 - `EDGEONE_SECRET_ID`
 - `EDGEONE_SECRET_KEY`
-- `HA_SYNC_PEER_URL`
+- `HA_SYNC_SOURCE_URL`（standby 拉取 active 的内部 URL）
 - `HA_INTERNAL_TOKEN`
 - `HA_SYNC_INTERVAL_SECS`
 
@@ -89,5 +96,6 @@ PR: include
 - EdgeOne API 失败、源站不匹配、并发 operation 不产生双 active。
 - 旧主 recovery batch 重复导入幂等。
 - 双节点 mock EdgeOne 验收必须覆盖 `pre -> failover -> recovery`：单入口业务流量、standby
-  fencing、热备同步、standby promote、provisional gating、finalize 后 full write、旧主 recovery
-  mergeable-only 导入和重复导入幂等。
+  fencing、状态基线、outbox 增量 catch-up、standby promote、provisional gating、finalize 后 full
+  write、旧主账本 recovery 和重复导入幂等。
+- 大量调用记录和大请求/响应正文不得进入 HA baseline、events 或 recovery payload。

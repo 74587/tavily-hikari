@@ -16,10 +16,26 @@ struct HaRecoveryImportRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct HaSnapshotUploadQuery {
-    source_node_id: Option<String>,
-    generated_at: Option<i64>,
+struct HaEventsQuery {
+    after: Option<i64>,
+    limit: Option<i64>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HaEventsAckRequest {
+    peer_node_id: String,
+    acked_seq: i64,
+}
+
+#[derive(Debug)]
+struct HaEventResponseItem {
+    seq: i64,
+    value: Value,
+}
+
+const HA_BASELINE_MAX_COMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+const HA_EVENTS_MAX_COMPRESSED_BYTES: usize = 4 * 1024 * 1024;
 
 fn is_ha_admin_or_internal(state: &AppState, headers: &HeaderMap) -> bool {
     if is_admin_request(state, headers) {
@@ -48,112 +64,234 @@ async fn get_admin_ha_snapshot(
     if !is_ha_admin_or_internal(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
-    let Some(db_path) = state.ha.database_path() else {
-        return Err((
-            StatusCode::PRECONDITION_FAILED,
-            "HA database path is not configured".to_string(),
-        ));
-    };
-
-    state
-        .proxy
-        .ha_wal_checkpoint()
-        .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let bytes = tokio::fs::read(&db_path)
-        .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let status = state.ha.status().await;
-    let manifest = tavily_hikari::HaSnapshotManifest {
-        source_node_id: status.node_id,
-        generated_at: Utc::now().timestamp(),
-        wal_checkpoint: true,
-        size_bytes: bytes.len() as u64,
-        sha256: tavily_hikari::sha256_hex_bytes(&bytes),
-    };
-    let manifest_json = serde_json::to_string(&manifest)
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    state
-        .proxy
-        .persist_ha_sync_watermark(
-            "snapshot_export",
-            Some(&manifest.source_node_id),
-            None,
-            manifest.generated_at,
-            Some(&manifest_json),
-        )
-        .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "application/octet-stream")
-        .header("x-ha-snapshot-manifest", manifest_json)
-        .body(Body::from(bytes))
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+    gone_ha_snapshot_response()
 }
 
 async fn put_admin_ha_snapshot(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(query): Query<HaSnapshotUploadQuery>,
-    body: Bytes,
-) -> Result<Json<tavily_hikari::HaSnapshotManifest>, (StatusCode, String)> {
+    _body: Bytes,
+) -> Result<Response<Body>, (StatusCode, String)> {
     if !is_ha_admin_or_internal(state.as_ref(), &headers) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
-    let role = state.ha.role().await;
-    if role != tavily_hikari::HaNodeRole::Standby {
+    gone_ha_snapshot_response()
+}
+
+fn gone_ha_snapshot_response() -> Result<Response<Body>, (StatusCode, String)> {
+    Response::builder()
+        .status(StatusCode::GONE)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "error": "ha_snapshot_removed",
+                "message": "Full SQLite HA snapshots are disabled; use /api/admin/ha/baseline and /api/admin/ha/events."
+            })
+            .to_string(),
+        ))
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+async fn get_admin_ha_baseline(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    if !is_ha_admin_or_internal(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let status = state.ha.status().await;
+    if !status.allows_basic_business {
         return Err((
             StatusCode::CONFLICT,
-            format!("snapshot import requires standby role, current role is {role:?}"),
+            format!(
+                "HA baseline export requires active/provisional role, current role is {:?}",
+                status.role
+            ),
         ));
     }
-    let Some(db_path) = state.ha.database_path() else {
-        return Err((
-            StatusCode::PRECONDITION_FAILED,
-            "HA database path is not configured".to_string(),
-        ));
-    };
-    let tmp_path = db_path.with_extension("db.ha-import");
-    tokio::fs::write(&tmp_path, &body)
-        .await
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let restored_tables = state
+    let export = state
         .proxy
-        .restore_ha_snapshot_file(&tmp_path)
+        .export_ha_baseline_ndjson(&status.node_id)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    let _ = tokio::fs::remove_file(&tmp_path).await;
+    let compressed = encode_zstd_limited(&export.ndjson, HA_BASELINE_MAX_COMPRESSED_BYTES)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/x-ndjson")
+        .header("content-encoding", "zstd")
+        .header("x-ha-schema-version", "1")
+        .header("x-ha-high-watermark", export.high_watermark.to_string())
+        .header("x-ha-row-count", export.row_count.to_string())
+        .body(Body::from(compressed))
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
 
-    let source_node_id = query
-        .source_node_id
-        .unwrap_or_else(|| "active".to_string());
-    let generated_at = query.generated_at.unwrap_or_else(|| Utc::now().timestamp());
-    let manifest = tavily_hikari::HaSnapshotManifest {
-        source_node_id,
-        generated_at,
-        wal_checkpoint: false,
-        size_bytes: body.len() as u64,
-        sha256: tavily_hikari::sha256_hex_bytes(&body),
-    };
-    let manifest_json = serde_json::to_string(&manifest)
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+async fn get_admin_ha_events(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<HaEventsQuery>,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    if !is_ha_admin_or_internal(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    let status = state.ha.status().await;
+    if !status.allows_basic_business {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "HA events export requires active/provisional role, current role is {:?}",
+                status.role
+            ),
+        ));
+    }
+    let after = query.after.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let events = state
+        .proxy
+        .list_ha_outbox_events_after(after, limit)
+        .await
+        .map_err(|err| {
+            let message = err.to_string();
+            if message.contains("retention window") {
+                (StatusCode::GONE, message)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        })?;
+    let event_items = events
+        .iter()
+        .map(|event| HaEventResponseItem {
+            seq: event.seq,
+            value: json!({
+                "schemaVersion": 1,
+                "kind": "event",
+                "event": event
+            }),
+        })
+        .collect::<Vec<_>>();
+    let encoded = encode_ha_events_limited(after, limit, &event_items, HA_EVENTS_MAX_COMPRESSED_BYTES)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/x-ndjson")
+        .header("content-encoding", "zstd")
+        .header("x-ha-schema-version", "1")
+        .header("x-ha-last-seq", encoded.last_seq.to_string())
+        .header("x-ha-event-count", encoded.event_count.to_string())
+        .body(Body::from(encoded.compressed))
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+struct EncodedHaEvents {
+    compressed: Vec<u8>,
+    last_seq: i64,
+    event_count: usize,
+}
+
+fn encode_ha_events_limited(
+    after: i64,
+    limit: i64,
+    events: &[HaEventResponseItem],
+    max_compressed_bytes: usize,
+) -> Result<EncodedHaEvents, (StatusCode, String)> {
+    let mut event_count = events.len();
+    loop {
+        let selected = &events[..event_count];
+        let mut ndjson = String::new();
+        let mut last_seq = after;
+        append_ha_events_ndjson(&mut ndjson, after, limit, selected, &mut last_seq)?;
+        let compressed = zstd::stream::encode_all(ndjson.as_bytes(), 3)
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+        if compressed.len() <= max_compressed_bytes {
+            return Ok(EncodedHaEvents {
+                compressed,
+                last_seq,
+                event_count,
+            });
+        }
+        if event_count <= 1 {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "HA events payload exceeds compressed limit: {} > {max_compressed_bytes}",
+                    compressed.len()
+                ),
+            ));
+        }
+        event_count = event_count.div_ceil(2);
+    }
+}
+
+fn append_ha_events_ndjson(
+    ndjson: &mut String,
+    after: i64,
+    limit: i64,
+    events: &[HaEventResponseItem],
+    last_seq: &mut i64,
+) -> Result<(), (StatusCode, String)> {
+    ndjson.push_str(
+        &serde_json::to_string(&json!({
+            "schemaVersion": 1,
+            "kind": "events_start",
+            "after": after,
+            "limit": limit
+        }))
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?,
+    );
+    ndjson.push('\n');
+    for event in events {
+        *last_seq = event.seq;
+        ndjson.push_str(
+            &serde_json::to_string(&event.value)
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?,
+        );
+        ndjson.push('\n');
+    }
+    ndjson.push_str(
+        &serde_json::to_string(&json!({
+            "schemaVersion": 1,
+            "kind": "events_end",
+            "lastSeq": *last_seq,
+            "eventCount": events.len()
+        }))
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?,
+    );
+    ndjson.push('\n');
+    Ok(())
+}
+
+async fn post_admin_ha_events_ack(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<HaEventsAckRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if !is_ha_admin_or_internal(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
     state
         .proxy
-        .persist_ha_sync_watermark(
-            "snapshot_import",
-            Some(&manifest.source_node_id),
-            Some(&state.ha.status().await.node_id),
-            generated_at,
-            Some(&format!(
-                "{{\"restoredTables\":{restored_tables},\"manifest\":{manifest_json}}}"
-            )),
-        )
+        .ack_ha_peer_watermark(&payload.peer_node_id, payload.acked_seq)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({
+        "ok": true,
+        "peerNodeId": payload.peer_node_id,
+        "ackedSeq": payload.acked_seq.max(0)
+    })))
+}
 
-    Ok(Json(manifest))
+fn encode_zstd_limited(value: &str, limit: usize) -> Result<Vec<u8>, (StatusCode, String)> {
+    let compressed = zstd::stream::encode_all(value.as_bytes(), 3)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    if compressed.len() > limit {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "HA payload exceeds compressed limit: {} > {limit}",
+                compressed.len()
+            ),
+        ));
+    }
+    Ok(compressed)
 }
 
 async fn get_public_ha_status(
@@ -263,14 +401,16 @@ async fn post_admin_ha_recovery_import(
         .unwrap_or_else(|| format!("recovery batch {batch} imported from {source}"));
     let request_logs = payload.request_logs.unwrap_or_default();
     let auth_token_logs = payload.auth_token_logs.unwrap_or_default();
-    let requested_event_count = request_logs
-        .len()
-        .saturating_add(auth_token_logs.len())
-        .max(usize::from(request_logs.is_empty() && auth_token_logs.is_empty()));
+    if !request_logs.is_empty() || !auth_token_logs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "HA recovery no longer accepts request_logs or auth_token_logs".to_string(),
+        ));
+    }
+    let requested_event_count = 0_usize;
     let checksum_payload = serde_json::json!({
         "message": &message,
-        "requestLogs": &request_logs,
-        "authTokenLogs": &auth_token_logs,
+        "ledgerEvents": [],
     });
     let checksum = tavily_hikari::sha256_hex_bytes(checksum_payload.to_string().as_bytes());
     let imported = state
@@ -287,12 +427,9 @@ async fn post_admin_ha_recovery_import(
     if imported {
         imported_event_count = state
             .proxy
-            .import_ha_recovery_events(&request_logs, &auth_token_logs)
+            .import_ha_recovery_events()
             .await
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-        if imported_event_count == 0 {
-            imported_event_count = 1;
-        }
         state
             .proxy
             .rebuild_ha_recovery_rollups()

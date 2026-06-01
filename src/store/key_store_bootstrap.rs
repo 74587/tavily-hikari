@@ -1612,6 +1612,61 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_outbox (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                op TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                checksum TEXT
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_outbox_suppression (
+                id TEXT PRIMARY KEY CHECK (id = 'local')
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("DELETE FROM ha_outbox_suppression WHERE id = 'local'")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_ha_outbox_resource
+               ON ha_outbox(resource, resource_id, seq)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_ha_outbox_created
+               ON ha_outbox(created_at, seq)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ha_peer_watermarks (
+                peer_node_id TEXT PRIMARY KEY,
+                acked_seq INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.ensure_ha_outbox_triggers().await?;
+
         Ok(())
     }
 

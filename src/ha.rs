@@ -73,7 +73,7 @@ pub struct HaConfig {
     pub edgeone_secret_id: Option<String>,
     pub edgeone_secret_key: Option<String>,
     pub edgeone_api_endpoint: String,
-    pub sync_peer_url: Option<String>,
+    pub sync_source_url: Option<String>,
     pub internal_token: Option<String>,
     pub sync_interval_secs: u64,
 }
@@ -95,7 +95,7 @@ impl Default for HaConfig {
             edgeone_secret_id: None,
             edgeone_secret_key: None,
             edgeone_api_endpoint: "https://teo.intl.tencentcloudapi.com".to_string(),
-            sync_peer_url: None,
+            sync_source_url: None,
             internal_token: None,
             sync_interval_secs: 15,
         }
@@ -350,9 +350,9 @@ impl HaRuntime {
             .map(PathBuf::from)
     }
 
-    pub fn sync_peer_url(&self) -> Option<String> {
+    pub fn sync_source_url(&self) -> Option<String> {
         self.config
-            .sync_peer_url
+            .sync_source_url
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())

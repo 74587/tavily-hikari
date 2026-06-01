@@ -13,5 +13,9 @@ Single-active reduces quota, rebalance, conversation remapping, and upstream key
 - EdgeOne current origin is the active-master authority, including while nodes are already running.
 - A node that was active and later observes EdgeOne pointing elsewhere must enter `recovery` and stop external business service.
 - A standby that observes EdgeOne pointing at itself is not silently trusted as `full_master`; it becomes `provisional_master` until an administrator finalizes.
-- Recovery import is mergeable-only. It may import request and auth-token log rows and rebuild derived rollups, but it must not overwrite settings, current quota/token/key state, or rebalance authority state.
+- Recovery import is mergeable-only. It must not import request or auth-token log rows, and it must not overwrite settings, current quota/token/key state, or rebalance authority state.
 - Non-force promote is a standby operation. Active-node promote attempts are rejected so operator error cannot produce a local double-active state.
+
+## Small-State Sync Revision
+
+Production validation showed that full SQLite snapshot sync is unsafe for the current data shape because request logs and response bodies can make the database tens of GiB. The accepted replacement is standby-pulled, zstd-compressed NDJSON state sync over explicit whitelisted resources plus a 72-hour `ha_outbox` event stream. HA sync is now forbidden from transporting full database files or raw request/auth-token log records.
