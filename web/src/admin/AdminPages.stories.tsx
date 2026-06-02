@@ -1,5 +1,6 @@
 import type { Meta } from '@storybook/react-vite'
 
+import * as HaStories from './storySupport/AdminPagesHaStories'
 import * as RuntimeStories from './storySupport/AdminPagesStoryRuntime'
 
 const meta = {
@@ -83,4 +84,8 @@ export const UserDetailIpUsage = { ...RuntimeStories.UserDetailIpUsage }
 export const Alerts = { ...RuntimeStories.Alerts }
 export const Announcements = { ...RuntimeStories.Announcements }
 export const SystemSettings = { ...RuntimeStories.SystemSettings }
+export const SystemSettingsHa = { ...HaStories.SystemSettingsHa }
+export const DashboardHaAttention = { ...HaStories.DashboardHaAttention }
+export const SystemSettingsHaMobile = { ...HaStories.SystemSettingsHaMobile }
+export const DashboardHaAttentionMobile = { ...HaStories.DashboardHaAttentionMobile }
 export const ProxySettings = { ...RuntimeStories.ProxySettings }

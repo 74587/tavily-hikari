@@ -159,6 +159,27 @@ export const RecoveryAdmin: Story = {
   },
 }
 
+export const CompactAdminAttention: Story = {
+  args: {
+    adminVariant: 'compact',
+    compactHref: '/admin/system-settings/ha',
+    compactTitle: 'High availability needs attention',
+    compactDescription: 'This node is in failover, recovery, or write-limited state. Open HA settings for details.',
+    compactActionLabel: 'View HA settings',
+  },
+  play: async ({ canvasElement }) => {
+    const text = canvasElement.textContent ?? ''
+    for (const expected of ['High availability needs attention', 'View HA settings']) {
+      if (!text.includes(expected)) {
+        throw new Error(`Expected compact HA alert to contain: ${expected}`)
+      }
+    }
+    if (text.includes('Node inventory') || text.includes('Promote to master')) {
+      throw new Error('Expected compact HA alert to omit node inventory and operations.')
+    }
+  },
+}
+
 export const UserDegraded: Story = {
   args: {
     audience: 'user',

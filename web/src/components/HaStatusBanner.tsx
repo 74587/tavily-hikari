@@ -1,4 +1,4 @@
-import { CircleAlert, Crown, RotateCcw, Server, ShieldCheck } from 'lucide-react'
+import { ArrowRight, CircleAlert, Crown, RotateCcw, Server, ShieldCheck } from 'lucide-react'
 
 import type { HaStatus } from '../api'
 import { Button } from './ui/button'
@@ -7,9 +7,15 @@ import { StatusBadge, type StatusTone } from './StatusBadge'
 interface HaStatusBannerProps {
   status: HaStatus | null
   audience: 'admin' | 'user'
+  adminVariant?: 'panel' | 'compact'
   onPromote?: () => void
   onFinalize?: () => void
   busy?: boolean
+  compactHref?: string
+  compactTitle?: string
+  compactDescription?: string
+  compactActionLabel?: string
+  onCompactClick?: () => void
 }
 
 function roleLabel(role: HaStatus['role']): string {
@@ -115,12 +121,23 @@ function buildNodeRows(status: HaStatus): HaNodeRow[] {
   return rows
 }
 
+function adminNeedsAttention(status: HaStatus): boolean {
+  return status.mode !== 'single'
+    && (status.degraded || status.role !== 'full_master' || !status.allowsFullWrites)
+}
+
 export default function HaStatusBanner({
   status,
   audience,
+  adminVariant = 'panel',
   onPromote,
   onFinalize,
   busy = false,
+  compactHref,
+  compactTitle,
+  compactDescription,
+  compactActionLabel,
+  onCompactClick,
 }: HaStatusBannerProps): JSX.Element | null {
   const admin = audience === 'admin'
   if (!status || status.mode === 'single' || (!admin && !status.degraded)) return null
@@ -143,6 +160,38 @@ export default function HaStatusBanner({
   const rows = buildNodeRows(status)
   const authorityLabel = status.allowsFullWrites ? 'Full writes' : status.allowsBasicBusiness ? 'Basic traffic' : 'Writes blocked'
   const authorityTone: StatusTone = status.allowsFullWrites ? 'success' : status.allowsBasicBusiness ? 'warning' : 'neutral'
+
+  if (admin && adminVariant === 'compact') {
+    if (!adminNeedsAttention(status)) return null
+    return (
+      <section className="ha-status-banner ha-status-banner-compact" role="status" aria-live="polite">
+        <div className="ha-status-banner-head">
+          <div className="ha-status-banner-icon" aria-hidden="true">
+            <CircleAlert size={20} strokeWidth={2.4} />
+          </div>
+          <div className="ha-status-banner-copy">
+            <div className="ha-status-banner-title">{compactTitle ?? title}</div>
+            <p>{compactDescription ?? detail}</p>
+          </div>
+          {compactHref && compactActionLabel && (
+            <Button asChild size="sm" variant="outline" className="ha-status-banner-action">
+              <a
+                href={compactHref}
+                onClick={(event) => {
+                  if (!onCompactClick) return
+                  event.preventDefault()
+                  onCompactClick()
+                }}
+              >
+                <span>{compactActionLabel}</span>
+                <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </a>
+            </Button>
+          )}
+        </div>
+      </section>
+    )
+  }
 
   if (admin) {
     return (

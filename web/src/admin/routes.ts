@@ -10,6 +10,7 @@ import type {
 export type AdminUsersCollectionView = 'users' | 'usage'
 export type AdminTokensCollectionView = 'tokens' | 'unbound-usage'
 export type AlertsCenterView = 'events' | 'groups'
+export type AdminSystemSettingsView = 'general' | 'ha'
 
 export interface AdminTokensListContext {
   query?: string | null
@@ -37,7 +38,7 @@ export type AdminModuleId =
   | 'proxy-settings'
 
 export type AdminPathRoute =
-  | { name: 'module'; module: AdminModuleId }
+  | { name: 'module'; module: AdminModuleId; systemSettingsView?: AdminSystemSettingsView }
   | { name: 'not-found'; path: string }
   | { name: 'token'; id: string }
   | { name: 'unbound-token-usage' }
@@ -149,7 +150,10 @@ export function parseAdminPath(pathname: string): AdminPathRoute {
     return { name: 'module', module: 'announcements' }
   }
   if (path === `${ADMIN_BASE}/system-settings` || path === `${ADMIN_BASE}/settings`) {
-    return { name: 'module', module: 'system-settings' }
+    return { name: 'module', module: 'system-settings', systemSettingsView: 'general' }
+  }
+  if (path === `${ADMIN_BASE}/system-settings/ha`) {
+    return { name: 'module', module: 'system-settings', systemSettingsView: 'ha' }
   }
   if (path === `${ADMIN_BASE}/proxy-settings`) {
     return { name: 'module', module: 'proxy-settings' }
@@ -161,6 +165,10 @@ export function parseAdminPath(pathname: string): AdminPathRoute {
 export function isSameAdminRoute(left: AdminPathRoute, right: AdminPathRoute): boolean {
   if (left.name !== right.name) return false
   if (left.name === 'module' && right.name === 'module') {
+    if (left.module === 'system-settings' || right.module === 'system-settings') {
+      return left.module === right.module
+        && (left.systemSettingsView ?? 'general') === (right.systemSettingsView ?? 'general')
+    }
     return left.module === right.module
   }
   if (left.name === 'not-found' && right.name === 'not-found') {
@@ -197,6 +205,10 @@ export function isSameAdminRoute(left: AdminPathRoute, right: AdminPathRoute): b
 export function modulePath(module: AdminModuleId): string {
   if (module === 'dashboard') return `${ADMIN_BASE}/dashboard`
   return `${ADMIN_BASE}/${module}`
+}
+
+export function systemSettingsHaPath(): string {
+  return `${ADMIN_BASE}/system-settings/ha`
 }
 
 export function announcementListPath(): string {

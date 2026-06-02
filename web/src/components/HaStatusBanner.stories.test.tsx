@@ -35,4 +35,30 @@ describe('HaStatusBanner Storybook proofs', () => {
     expect(markup).toContain('configured-peer')
     expect(markup).toContain('Promote to master')
   })
+
+  it('renders compact admin attention without node inventory actions', () => {
+    const renderStory = meta.render as ((args: typeof stories.StandbyAdmin.args) => JSX.Element) | undefined
+    expect(renderStory).toBeDefined()
+
+    const markup = renderToStaticMarkup(
+      createElement(
+        ThemeProvider,
+        null,
+        renderStory?.({
+          ...(meta.args ?? {}),
+          ...(stories.StandbyAdmin.args ?? {}),
+          adminVariant: 'compact',
+          compactHref: '/admin/system-settings/ha',
+          compactTitle: 'High availability needs attention',
+          compactDescription: 'Open HA settings for details.',
+          compactActionLabel: 'View HA settings',
+        }),
+      ),
+    )
+
+    expect(markup).toContain('High availability needs attention')
+    expect(markup).toContain('View HA settings')
+    expect(markup).not.toContain('Node inventory')
+    expect(markup).not.toContain('Promote to master')
+  })
 })

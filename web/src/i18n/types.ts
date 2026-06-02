@@ -562,6 +562,8 @@ export interface AdminTranslationsShape {
     title: string
     description: string
     helpLabel: string
+    subnav: { general: string; highAvailability: string }
+    ha: { title: string; description: string; compactTitle: string; compactDescription: string; viewSettings: string }
     form: {
       title: string
       description: string

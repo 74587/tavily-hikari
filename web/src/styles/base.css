@@ -921,6 +921,61 @@ body.not-found-page-body,
 
 .admin-nav-item-active:hover { border-color: hsl(var(--primary) / 0.34); background: hsl(var(--primary) / 0.12); box-shadow: inset 0 1px 0 hsl(var(--card) / 0.74), 0 1px 0 hsl(var(--foreground) / 0.025); }
 
+.admin-nav-group {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-nav-item-parent-active {
+  border-color: hsl(var(--primary) / 0.26);
+  background: hsl(var(--primary) / 0.07);
+}
+
+.admin-nav-subitems {
+  display: grid;
+  gap: 3px;
+  padding-left: 18px;
+}
+
+.admin-nav-subitem {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 760;
+  line-height: 1.2;
+  padding: 7px 10px;
+  text-align: left;
+}
+
+.admin-nav-subitem:hover {
+  border-color: hsl(var(--border) / 0.6);
+  background: hsl(var(--card) / 0.56);
+  color: hsl(var(--foreground));
+}
+
+.admin-nav-subitem-active {
+  border-color: hsl(var(--primary) / 0.24);
+  background: hsl(var(--primary) / 0.1);
+  color: hsl(var(--primary));
+  box-shadow: inset 0 1px 0 hsl(var(--card) / 0.62);
+}
+
+.admin-nav-subitem-marker {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.52;
+}
+
 .admin-main-content {
   min-width: 0;
 }

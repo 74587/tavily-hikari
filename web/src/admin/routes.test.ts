@@ -9,6 +9,7 @@ import {
   isSameAdminRoute,
   keyDetailPath,
   parseAdminPath,
+  systemSettingsHaPath,
   tokenDetailPath,
   unboundTokenUsagePath,
   userDetailPath,
@@ -32,7 +33,24 @@ describe('admin user tag routes', () => {
   })
 
   it('parses the system settings module route', () => {
-    expect(parseAdminPath('/admin/system-settings')).toEqual({ name: 'module', module: 'system-settings' })
+    expect(parseAdminPath('/admin/system-settings')).toEqual({
+      name: 'module',
+      module: 'system-settings',
+      systemSettingsView: 'general',
+    })
+    expect(parseAdminPath('/admin/settings')).toEqual({
+      name: 'module',
+      module: 'system-settings',
+      systemSettingsView: 'general',
+    })
+  })
+
+  it('parses the system settings HA subpage route', () => {
+    expect(parseAdminPath('/admin/system-settings/ha')).toEqual({
+      name: 'module',
+      module: 'system-settings',
+      systemSettingsView: 'ha',
+    })
   })
 
   it('parses dedicated announcement editor routes before module fallback', () => {
@@ -83,6 +101,7 @@ describe('admin user tag routes', () => {
     expect(announcementListPath()).toBe('/admin/announcements')
     expect(announcementCreatePath()).toBe('/admin/announcements/new')
     expect(announcementEditPath('ann 42')).toBe('/admin/announcements/ann%2042/edit')
+    expect(systemSettingsHaPath()).toBe('/admin/system-settings/ha')
   })
 
   it('preserves full users list context when building cross-page routes', () => {

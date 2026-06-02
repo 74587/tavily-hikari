@@ -568,8 +568,9 @@ export const EN: TranslationShape = {
         },
       },
       systemSettings: {
-        title: 'System Settings', description: 'Adjust the global request-rate threshold, MCP session affinity, Rebalance behavior, and blocked-key base limit without restarting.',
-        helpLabel: 'Show system settings help', form: {
+        title: 'System Settings', description: 'Adjust the global request-rate threshold, MCP session affinity, Rebalance behavior, and blocked-key base limit without restarting.', helpLabel: 'Show system settings help',
+        subnav: { general: 'General', highAvailability: 'High Availability' }, ha: { title: 'High Availability', description: 'Review EdgeOne failover, node sync, and write authority state, then perform failover operations from this controlled page.', compactTitle: 'High availability needs attention', compactDescription: 'This node is in failover, recovery, or write-limited state. Open HA settings for details.', viewSettings: 'View HA settings' },
+        form: {
           title: 'MCP gateway controls', description: 'Manage the global request-rate threshold, the MCP session affinity pool, the Rebalance MCP rollout ratio, and the blocked-key base limit in one place.',
           displayDensityTitle: 'List density', displayDensityDescription: 'Unifies admin list row height, type size, and cell spacing.',
           displayDensityComfortable: 'Comfortable', displayDensityCompact: 'Compact', displayDensityStoredHint: 'Saved only in this browser and applied immediately.',

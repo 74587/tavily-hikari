@@ -567,9 +567,9 @@ export const ZH: TranslationShape = {
         },
       },
       systemSettings: {
-        title: '系统设置',
-        description: '调整系统级 request-rate、MCP session 亲和、Rebalance 策略与封禁数基础值，并且无需重启即可生效。',
-        helpLabel: '显示系统设置说明', form: {
+        title: '系统设置', description: '调整系统级 request-rate、MCP session 亲和、Rebalance 策略与封禁数基础值，并且无需重启即可生效。', helpLabel: '显示系统设置说明',
+        subnav: { general: '常规设置', highAvailability: '高可用' }, ha: { title: '高可用', description: '查看 EdgeOne 主备切换、节点同步与写入权限状态，并在受控页面内执行故障切换操作。', compactTitle: '高可用状态需要关注', compactDescription: '当前节点处于主备切换、恢复或写入受限状态。请进入高可用设置查看详情。', viewSettings: '查看 HA 设置' },
+        form: {
           title: 'MCP 网关控制', description: '这里统一管理全局 request-rate 阈值、MCP session 亲和池、Rebalance MCP 灰度比例与封禁数基础值。',
           displayDensityTitle: '列表密度', displayDensityDescription: '统一管理端列表的行高、字号和单元格间距。',
           displayDensityComfortable: '一般', displayDensityCompact: '紧凑', displayDensityStoredHint: '仅保存在当前浏览器，切换后立即应用。',

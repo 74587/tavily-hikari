@@ -6,12 +6,18 @@ import { ADMIN_SIDEBAR_STACK_MAX, useResponsiveModes } from '../lib/responsive'
 import AdminNavButton from './AdminNavButton'
 import type { AdminModuleId } from './routes'
 
-export type AdminNavTarget = AdminModuleId | 'user-usage'
+export type AdminNavTarget = AdminModuleId | 'user-usage' | 'system-settings-ha'
+
+export interface AdminNavSubItem {
+  target: AdminNavTarget
+  label: string
+}
 
 export interface AdminNavItem {
   target: AdminNavTarget
   label: string
   icon: ReactNode
+  children?: AdminNavSubItem[]
 }
 
 interface AdminShellProps extends PropsWithChildren {
@@ -116,15 +122,34 @@ export default function AdminShell({
             <nav id="admin-sidebar-nav" className="admin-sidebar-nav">
               {navItems.map((item) => {
                 const active = item.target === activeItem
+                const childActive = item.children?.some((child) => child.target === activeItem) ?? false
                 return (
-                  <AdminNavButton
-                    key={item.target}
-                    icon={item.icon}
-                    active={active}
-                    onClick={() => onSelectItem(item.target)}
-                  >
-                    <span>{item.label}</span>
-                  </AdminNavButton>
+                  <div key={item.target} className="admin-nav-group">
+                    <AdminNavButton
+                      icon={item.icon}
+                      active={active}
+                      className={childActive ? 'admin-nav-item-parent-active' : undefined}
+                      onClick={() => onSelectItem(item.target)}
+                    >
+                      <span>{item.label}</span>
+                    </AdminNavButton>
+                    {item.children && item.children.length > 0 && (
+                      <div className="admin-nav-subitems" aria-label={item.label}>
+                        {item.children.map((child) => (
+                          <button
+                            key={child.target}
+                            type="button"
+                            className={`admin-nav-subitem${child.target === activeItem ? ' admin-nav-subitem-active' : ''}`}
+                            aria-current={child.target === activeItem ? 'page' : undefined}
+                            onClick={() => onSelectItem(child.target)}
+                          >
+                            <span className="admin-nav-subitem-marker" aria-hidden="true" />
+                            <span>{child.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )
               })}
             </nav>

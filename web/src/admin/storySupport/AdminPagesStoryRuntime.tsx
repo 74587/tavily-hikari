@@ -3212,7 +3212,15 @@ function buildNavItems(strings: AdminTranslations): AdminNavItem[] {
     { target: 'users', label: strings.nav.users, icon: <Icon icon="mdi:account-group-outline" width={18} height={18} /> },
     { target: 'announcements', label: strings.nav.announcements, icon: <Icon icon="mdi:bullhorn-outline" width={18} height={18} /> },
     { target: 'alerts', label: strings.nav.alerts, icon: <Icon icon="mdi:bell-ring-outline" width={18} height={18} /> },
-    { target: 'system-settings', label: strings.nav.systemSettings, icon: <Icon icon="mdi:cog-outline" width={18} height={18} /> },
+    {
+      target: 'system-settings',
+      label: strings.nav.systemSettings,
+      icon: <Icon icon="mdi:cog-outline" width={18} height={18} />,
+      children: [
+        { target: 'system-settings', label: strings.systemSettings.subnav.general },
+        { target: 'system-settings-ha', label: strings.systemSettings.subnav.highAvailability },
+      ],
+    },
     { target: 'proxy-settings', label: strings.nav.proxySettings, icon: <Icon icon="mdi:tune-variant" width={18} height={18} /> },
   ]
 }
@@ -3222,14 +3230,16 @@ interface AdminPageFrameProps {
   children: ReactNode
   introActions?: ReactNode
   overlays?: ReactNode
+  beforeIntro?: ReactNode
   showDefaultShellChrome?: boolean
   actions?: ReactNode
 }
 
-function AdminPageFrame({
+export function AdminPageFrame({
   activeModule,
   children,
   overlays,
+  beforeIntro,
   showDefaultShellChrome = true,
   actions,
   introActions,
@@ -3282,6 +3292,11 @@ function AdminPageFrame({
         return {
           title: admin.systemSettings.title,
           description: admin.systemSettings.description,
+        }
+      case 'system-settings-ha':
+        return {
+          title: admin.systemSettings.ha.title,
+          description: admin.systemSettings.ha.description,
         }
       case 'proxy-settings':
         return {
@@ -3341,10 +3356,12 @@ function AdminPageFrame({
               </AdminSidebarUtilityStack>
             </AdminShellSidebarUtility>
 
+            {beforeIntro}
+
             <div className="admin-stacked-only">
               <AdminPanelHeader
-                title={admin.header.title}
-                subtitle={admin.header.subtitle}
+                title={intro.title}
+                subtitle={intro.description}
                 displayName="Ops Admin"
                 isAdmin
                 updatedPrefix={admin.header.updatedPrefix}
@@ -3368,7 +3385,7 @@ function AdminPageFrame({
   )
 }
 
-function DashboardPageCanvas(): JSX.Element {
+export function DashboardPageCanvas({ beforeIntro }: { beforeIntro?: ReactNode } = {}): JSX.Element {
   const admin = useTranslate().admin
 
   const totalRequests = MOCK_KEYS.reduce((sum, item) => sum + item.total_requests, 0)
@@ -3572,7 +3589,7 @@ function DashboardPageCanvas(): JSX.Element {
   ]
 
   return (
-    <AdminPageFrame activeModule="dashboard">
+    <AdminPageFrame activeModule="dashboard" beforeIntro={beforeIntro}>
       <DashboardOverview
         strings={admin.dashboard}
         overviewReady

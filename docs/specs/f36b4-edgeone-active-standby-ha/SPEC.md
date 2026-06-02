@@ -78,14 +78,35 @@ Tavily Hikari 的高可用方案采用单活主备热备，而不是一主多从
 ## UI Contract
 
 - 用户控制台在 failover、provisional、recovery、同步滞后时显示降级警告。
-- 管理员控制台显示 HA 服务节点管理面板，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。
+- 管理员控制台的完整 HA 服务节点管理面板只出现在系统设置的高可用二级界面，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。
+- 管理员业务页面在 `full_master` 正常态不得显示 HA 面板；在 failover、standby、recovery 或写入受限时，只显示紧凑异常提示并链接到系统设置的高可用界面，不直接执行 promote/finalize。
 - `provisional_master` 阶段必须明确提示注册、充值和配置写入仍被禁用。
 
 ## Visual Evidence
 
 PR: include
 
-![HA service nodes admin panel](./assets/ha-service-nodes-panel.png)
+![Normal admin dashboard without HA panel on desktop](./assets/ha-normal-dashboard-desktop.png)
+
+PR: include
+
+![Normal admin dashboard without HA panel on mobile](./assets/ha-normal-dashboard-mobile.png)
+
+PR: include
+
+![Abnormal HA compact alert on dashboard desktop](./assets/ha-compact-alert-desktop.png)
+
+PR: include
+
+![Abnormal HA compact alert on dashboard mobile](./assets/ha-compact-alert-mobile.png)
+
+PR: include
+
+![System settings HA service-node page on desktop](./assets/ha-settings-page-desktop.png)
+
+PR: include
+
+![System settings HA service-node page on mobile](./assets/ha-settings-page-mobile.png)
 
 ## Acceptance
 

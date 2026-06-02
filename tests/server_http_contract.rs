@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Json, Path as AxumPath, Query};
 use axum::http::HeaderMap;
@@ -105,7 +105,8 @@ async fn spawn_mock_upstream(
 
 async fn wait_for_health_ready(port: u16) -> bool {
     let client = Client::new();
-    for _ in 0..80 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
         if let Ok(resp) = client
             .get(format!("http://127.0.0.1:{port}/health"))
             .timeout(Duration::from_millis(300))

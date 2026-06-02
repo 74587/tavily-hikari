@@ -127,6 +127,7 @@ import {
   keyDetailPath,
   modulePath,
   parseAdminPath,
+  systemSettingsHaPath,
   buildAdminUsersPath,
   tokenDetailPath,
   unboundTokenUsagePath,
@@ -4219,6 +4220,10 @@ function AdminDashboard(): JSX.Element {
         navigateToPath(alertsPath())
         return
       }
+      if (target === 'system-settings-ha') {
+        navigateToPath(systemSettingsHaPath())
+        return
+      }
       navigateToPath(modulePath(target))
     },
     [navigateToPath],
@@ -7159,14 +7164,24 @@ function AdminDashboard(): JSX.Element {
     { target: 'announcements', label: adminStrings.nav.announcements, icon: <Icon icon="mdi:bullhorn-outline" width={18} height={18} /> },
     ...(rechargeRecordsMeta?.hasRechargeOrders ? [{ target: 'recharges' as const, label: adminStrings.nav.recharges, icon: <Icon icon="mdi:credit-card-clock-outline" width={18} height={18} /> }] : []),
     { target: 'alerts', label: adminStrings.nav.alerts, icon: <Icon icon="mdi:bell-ring-outline" width={18} height={18} /> },
-    { target: 'system-settings', label: adminStrings.nav.systemSettings, icon: <Icon icon="mdi:cog-outline" width={18} height={18} /> },
+    {
+      target: 'system-settings',
+      label: adminStrings.nav.systemSettings,
+      icon: <Icon icon="mdi:cog-outline" width={18} height={18} />,
+      children: [
+        { target: 'system-settings', label: systemSettingsStrings.subnav.general },
+        { target: 'system-settings-ha', label: systemSettingsStrings.subnav.highAvailability },
+      ],
+    },
     { target: 'proxy-settings', label: adminStrings.nav.proxySettings, icon: <Icon icon="mdi:tune-variant" width={18} height={18} /> },
   ]
   const activeNavItem: AdminNavTarget =
     route.name === 'user-usage'
       ? 'user-usage'
       : route.name === 'module'
-        ? route.module
+        ? route.module === 'system-settings' && (route.systemSettingsView ?? 'general') === 'ha'
+          ? 'system-settings-ha'
+          : route.module
         : route.name === 'key'
           ? 'keys'
           : route.name === 'user'
@@ -8296,10 +8311,26 @@ function AdminDashboard(): JSX.Element {
     }
   }, [])
 
-  const adminHaBanner = (
+  const isSystemSettingsHaRoute =
+    route.name === 'module' && route.module === 'system-settings' && (route.systemSettingsView ?? 'general') === 'ha'
+  const adminHaCompactAlert = isSystemSettingsHaRoute ? null : (
     <HaStatusBanner
       status={haStatus}
       audience="admin"
+      adminVariant="compact"
+      compactHref={systemSettingsHaPath()}
+      compactTitle={systemSettingsStrings.ha.compactTitle}
+      compactDescription={systemSettingsStrings.ha.compactDescription}
+      compactActionLabel={systemSettingsStrings.ha.viewSettings}
+      onCompactClick={() => navigateToPath(systemSettingsHaPath())}
+    />
+  )
+
+  const adminHaPanel = (
+    <HaStatusBanner
+      status={haStatus}
+      audience="admin"
+      adminVariant="panel"
       busy={haBusy}
       onPromote={handlePromoteHaNode}
       onFinalize={handleFinalizeHaFailover}
@@ -8315,7 +8346,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectItem={navigateModule}
       >
-        {adminHaBanner}
+        {adminHaCompactAlert}
         <KeyDetails
           key={route.id}
           id={route.id}
@@ -8345,7 +8376,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectItem={navigateModule}
       >
-        {adminHaBanner}
+        {adminHaCompactAlert}
         <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={360}>
           <LazyTokenDetail
             key={route.id}
@@ -8379,7 +8410,7 @@ function AdminDashboard(): JSX.Element {
         skipToContentLabel={adminStrings.accessibility.skipToContent}
         onSelectItem={navigateModule}
       >
-        {adminHaBanner}
+        {adminHaCompactAlert}
         <section className="surface panel">
           <div className="panel-header">
             <div>
@@ -9501,6 +9532,11 @@ function AdminDashboard(): JSX.Element {
   const showRecharges = activeModule === 'recharges'
   const showAlerts = activeModule === 'alerts'
   const showSystemSettings = activeModule === 'system-settings'
+  const systemSettingsView = showSystemSettings && route.name === 'module'
+    ? route.systemSettingsView ?? 'general'
+    : 'general'
+  const showSystemSettingsGeneral = showSystemSettings && systemSettingsView === 'general'
+  const showSystemSettingsHa = showSystemSettings && systemSettingsView === 'ha'
   const showProxySettings = activeModule === 'proxy-settings'
   const headerUpdatedTime = lastUpdated ? timeOnlyFormatter.format(lastUpdated) : null
 
@@ -9609,10 +9645,15 @@ function AdminDashboard(): JSX.Element {
           description: adminStrings.modules.announcements.description,
         }
       case 'system-settings':
-        return {
-          title: systemSettingsStrings.title,
-          description: systemSettingsStrings.description,
-        }
+        return systemSettingsView === 'ha'
+          ? {
+              title: systemSettingsStrings.ha.title,
+              description: systemSettingsStrings.ha.description,
+            }
+          : {
+              title: systemSettingsStrings.title,
+              description: systemSettingsStrings.description,
+            }
       case 'proxy-settings':
         return {
           title: proxySettingsStrings.title,
@@ -10034,7 +10075,7 @@ function AdminDashboard(): JSX.Element {
           onSelectItem={navigateModule}
         >
           {moduleDesktopUtility}
-          {adminHaBanner}
+          {adminHaCompactAlert}
 
       {!showNotFound && (
         <div className="admin-stacked-only">
@@ -11826,7 +11867,7 @@ function AdminDashboard(): JSX.Element {
         </AdminLazyBoundary>
       )}
 
-      {showSystemSettings && (
+      {showSystemSettingsGeneral && (
         <AdminLazyBoundary loadingLabel={loadingStateStrings.switching} minHeight={260}>
           <LazySystemSettingsModule
             strings={systemSettingsStrings}
@@ -11847,6 +11888,12 @@ function AdminDashboard(): JSX.Element {
             onApply={saveSystemSettings}
           />
         </AdminLazyBoundary>
+      )}
+
+      {showSystemSettingsHa && (
+        <section className="admin-settings-ha-page">
+          {adminHaPanel}
+        </section>
       )}
 
       {showRecharges && (

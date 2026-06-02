@@ -113,7 +113,7 @@ describe('AdminPages Storybook proofs', () => {
     const panelAccessTokenHeadings = markup.match(/<h2[^>]*>Access Tokens<\/h2>/g) ?? []
     const tokenToolbars = markup.match(/admin-module-toolbar admin-module-toolbar--tokens/g) ?? []
 
-    expect(accessTokenHeadings).toHaveLength(1)
+    expect(accessTokenHeadings).toHaveLength(2)
     expect(panelAccessTokenHeadings).toHaveLength(0)
     expect(tokenToolbars).toHaveLength(2)
     expect(markup).toContain('View unbound token usage')
@@ -159,9 +159,49 @@ describe('AdminPages Storybook proofs', () => {
     )
 
     expect(markup).toContain('系统设置')
+    expect(markup).toContain('常规设置')
+    expect(markup).toContain('高可用')
     expect(markup).toContain('admin-nav-item-active')
     expect(markup).toContain('admin-nav-item-icon')
     expect(markup).toContain('<svg')
+    expect(markup).not.toContain('HA service nodes')
+  })
+
+  it('renders the system settings HA page with node inventory and active child nav', () => {
+    const renderStory = adminPageStories.SystemSettingsHa.render as (() => JSX.Element) | undefined
+    expect(renderStory).toBeDefined()
+
+    const markup = renderToStaticMarkup(
+      createElement(
+        LanguageProvider,
+        { initialLanguage: 'zh' },
+        createElement(ThemeProvider, null, createElement(TooltipProvider, null, createElement(renderStory!))),
+      ),
+    )
+
+    expect(markup).toContain('高可用')
+    expect(markup).toContain('admin-nav-subitem-active')
+    expect(markup).toContain('HA service nodes')
+    expect(markup).toContain('Node inventory')
+    expect(markup).toContain('Promote to master')
+  })
+
+  it('renders abnormal HA attention on dashboard without the full node panel', () => {
+    const renderStory = adminPageStories.DashboardHaAttention.render as (() => JSX.Element) | undefined
+    expect(renderStory).toBeDefined()
+
+    const markup = renderToStaticMarkup(
+      createElement(
+        LanguageProvider,
+        { initialLanguage: 'zh' },
+        createElement(ThemeProvider, null, createElement(TooltipProvider, null, createElement(renderStory!))),
+      ),
+    )
+
+    expect(markup).toContain('高可用状态需要关注')
+    expect(markup).toContain('查看 HA 设置')
+    expect(markup).not.toContain('Node inventory')
+    expect(markup).not.toContain('Promote to master')
   })
 
   it('renders the user detail story with compact card fallbacks for tokens and quota breakdown', () => {
