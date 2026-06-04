@@ -1244,9 +1244,7 @@ export interface AdminTranslationsShape {
       loading: string
       none: string
     }
-    actions: {
-      trigger: string
-    }
+    actions: { trigger: string }
     table: {
       id: string
       type: string

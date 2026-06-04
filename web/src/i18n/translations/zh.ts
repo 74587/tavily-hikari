@@ -1338,9 +1338,7 @@ export const ZH: TranslationShape = {
           loading: '正在加载任务…',
           none: '暂无任务记录。',
         },
-        actions: {
-          trigger: '运行',
-        },
+        actions: { trigger: '运行' },
         table: {
           id: 'ID',
           type: '类型',
@@ -1355,11 +1353,7 @@ export const ZH: TranslationShape = {
           show: '展开任务详情',
           hide: '收起任务详情',
         },
-        sources: {
-          scheduler: '定时',
-          manual: '手动',
-          auto: '自动',
-        },
+        sources: { scheduler: '定时', manual: '手动', auto: '自动' },
         types: {
           quota_sync: '同步额度',
           'quota_sync/hot': '热 Key 同步',

@@ -122,8 +122,7 @@ async fn scheduled_job_claim_serializes_concurrent_duplicate_triggers() {
     .await;
     let claimed: Vec<i64> = results
         .into_iter()
-        .map(|result| result.expect("claim should not error"))
-        .flatten()
+        .filter_map(|result| result.expect("claim should not error"))
         .collect();
     assert_eq!(claimed.len(), 1);
 

@@ -8,6 +8,17 @@ export interface AdminJobFilterOption {
 }
 
 const JOB_GROUP_VALUES = ['all', 'quota', 'usage', 'logs', 'db', 'geo', 'linuxdo'] as const
+export const MANUAL_JOB_ACTIONS = [
+  'token_usage_rollup',
+  'auth_token_logs_gc',
+  'request_logs_gc',
+  'mcp_sessions_gc',
+  'mcp_session_init_backoffs_gc',
+  'linuxdo_user_status_sync',
+  'linuxdo_user_tag_binding_refresh',
+  'forward_proxy_geo_refresh',
+  'db_compaction',
+] as const
 
 const QUOTA_JOB_TYPES = new Set(['quota_sync', 'quota_sync/manual', 'quota_sync/hot'])
 const USAGE_JOB_TYPES = new Set(['token_usage_rollup', 'usage_aggregation'])
@@ -67,6 +78,11 @@ export function jobFilterLabel(group: JobGroup, strings: AdminTranslations['jobs
     default:
       return strings.filters.all
   }
+}
+
+export function jobSourceLabel(source: string | null | undefined, strings: AdminTranslations['jobs']): string {
+  const normalized = String(source ?? '').trim().toLowerCase()
+  return normalized ? strings.sources?.[normalized] ?? normalized : '—'
 }
 
 export function buildAdminJobFilterOptions(

@@ -66,6 +66,7 @@ import { AdminUserDetailQuotaWorkspace } from './AdminUserDetailQuotaWorkspace'
 import AdminShell, { AdminShellSidebarUtility, type AdminNavItem, type AdminNavTarget } from './AdminShell'
 import AdminOverlayHost from './AdminOverlayHost'
 import DashboardOverview, { type DashboardQuotaChargeCardData } from './DashboardOverview'
+import AdminJobTriggerMenu from './AdminJobTriggerMenu'
 import { AnchoredApiKeyBulkSyncProgressBubble } from './ApiKeyBulkSyncProgressBubble'
 import {
   createDashboardMonthMetrics,
@@ -74,6 +75,7 @@ import {
 import {
   buildAdminJobFilterOptions,
   emptyAdminJobGroupCounts,
+  jobSourceLabel,
   summarizeAdminJobFilter,
 } from './jobFilters'
 import {
@@ -1450,12 +1452,6 @@ function jobTypeLabel(jobType: string, strings: AdminTranslations['jobs']): stri
     .replace(/[\/_]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-}
-
-function jobSourceLabel(source: string | null | undefined, strings: AdminTranslations['jobs']): string {
-  const normalized = String(source ?? '').trim().toLowerCase()
-  if (!normalized) return '—'
-  return strings.sources?.[normalized] ?? normalized
 }
 
 function jobStatusLabel(status: string): string {
@@ -5210,21 +5206,6 @@ function AdminDashboard(): JSX.Element {
     setJobFilter(value)
     setJobsPage(1)
   }, [])
-
-  const manualJobActions = useMemo(
-    () => [
-      'token_usage_rollup',
-      'auth_token_logs_gc',
-      'request_logs_gc',
-      'mcp_sessions_gc',
-      'mcp_session_init_backoffs_gc',
-      'linuxdo_user_status_sync',
-      'linuxdo_user_tag_binding_refresh',
-      'forward_proxy_geo_refresh',
-      'db_compaction',
-    ],
-    [],
-  )
 
   const handleManualJobTrigger = useCallback(
     (jobType: string) => {
@@ -9768,32 +9749,13 @@ function AdminDashboard(): JSX.Element {
   const renderJobFilterToolbar = (className?: string) => (
     <div className={['admin-module-toolbar admin-module-toolbar--end', className].filter(Boolean).join(' ')}>
       <div className="panel-actions">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="outline" size="sm" disabled={jobsBlocking || jobTriggering != null}>
-              <Icon icon="mdi:play-circle-outline" width={16} height={16} aria-hidden="true" />
-              <span style={{ whiteSpace: 'nowrap' }}>
-                {jobTriggering ? jobTypeLabel(jobTriggering, jobsStrings) : jobsStrings.actions.trigger}
-              </span>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-80">
-            <DropdownMenuLabel>{jobsStrings.title}</DropdownMenuLabel>
-            {manualJobActions.map((jobType) => (
-              <DropdownMenuItem
-                key={jobType}
-                disabled={jobTriggering != null}
-                onSelect={(event) => {
-                  event.preventDefault()
-                  handleManualJobTrigger(jobType)
-                }}
-              >
-                <Icon icon="mdi:play-outline" width={16} height={16} aria-hidden="true" />
-                <span>{jobTypeLabel(jobType, jobsStrings)}</span>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <AdminJobTriggerMenu
+          disabled={jobsBlocking}
+          triggeringJobType={jobTriggering}
+          strings={jobsStrings}
+          labelForJobType={(jobType) => jobTypeLabel(jobType, jobsStrings)}
+          onTrigger={handleManualJobTrigger}
+        />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button

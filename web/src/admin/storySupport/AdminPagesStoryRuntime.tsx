@@ -84,6 +84,7 @@ import {
 } from '../../tokenLogRequestKinds'
 
 import AdminShell, { AdminShellSidebarUtility, type AdminNavItem, type AdminNavTarget } from '../AdminShell'
+import AdminJobTriggerMenu from '../AdminJobTriggerMenu'
 import AlertsCenter from '../AlertsCenter'
 import DashboardOverview, { type DashboardMetricCard } from '../DashboardOverview'
 import { UserDetailQuotaBreakdown } from '../UserDetailQuotaBreakdown'
@@ -97,6 +98,7 @@ import {
 import {
   buildAdminJobFilterOptions,
   countAdminJobGroups,
+  jobSourceLabel,
   jobMatchesGroup,
   summarizeAdminJobFilter,
 } from '../jobFilters'
@@ -4563,13 +4565,6 @@ function JobsPageCanvas(): JSX.Element {
     () => MOCK_JOBS.filter((job) => jobMatchesGroup(job.job_type, jobFilter)),
     [jobFilter],
   )
-  const manualJobActions = [
-    'token_usage_rollup',
-    'request_logs_gc',
-    'forward_proxy_geo_refresh',
-    'db_compaction',
-  ]
-
   const runStoryJob = (jobType: string) => {
     setJobTriggering(jobType)
     setJobTriggerNotice(
@@ -4601,32 +4596,13 @@ function JobsPageCanvas(): JSX.Element {
             <p className="panel-description">{jobsStrings.description}</p>
           </div>
           <div className="panel-actions">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="outline" size="sm" disabled={jobTriggering != null}>
-                  <Icon icon="mdi:play-circle-outline" width={16} height={16} aria-hidden="true" />
-                  <span style={{ whiteSpace: 'nowrap' }}>
-                    {jobTriggering ? jobsStrings.types?.[jobTriggering] ?? jobTriggering : jobsStrings.actions.trigger}
-                  </span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-80">
-                <DropdownMenuLabel>{jobsStrings.title}</DropdownMenuLabel>
-                {manualJobActions.map((jobType) => (
-                  <DropdownMenuItem
-                    key={jobType}
-                    disabled={jobTriggering != null}
-                    onSelect={(event) => {
-                      event.preventDefault()
-                      runStoryJob(jobType)
-                    }}
-                  >
-                    <Icon icon="mdi:play-outline" width={16} height={16} aria-hidden="true" />
-                    <span>{jobsStrings.types?.[jobType] ?? jobType}</span>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <AdminJobTriggerMenu
+              disabled={false}
+              triggeringJobType={jobTriggering}
+              strings={jobsStrings}
+              labelForJobType={(jobType) => jobsStrings.types?.[jobType] ?? jobType}
+              onTrigger={runStoryJob}
+            />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -4700,7 +4676,7 @@ function JobsPageCanvas(): JSX.Element {
                       <td>
                         <StatusBadge tone={keyStatusTone(job.status)}>{admin.statuses[job.status] ?? job.status}</StatusBadge>
                       </td>
-                      <td>{jobsStrings.sources?.[job.trigger_source] ?? job.trigger_source}</td>
+                      <td>{jobSourceLabel(job.trigger_source, jobsStrings)}</td>
                       <td>{job.attempt}</td>
                       <td>{formatTimestamp(job.started_at)}</td>
                       <td className="jobs-message-cell">
@@ -4757,7 +4733,7 @@ function JobsPageCanvas(): JSX.Element {
                               <div>
                                 <div className="log-details-label">{jobsStrings.table.source}</div>
                                 <div className="log-details-value">
-                                  {jobsStrings.sources?.[job.trigger_source] ?? job.trigger_source}
+                                  {jobSourceLabel(job.trigger_source, jobsStrings)}
                                 </div>
                               </div>
                             </div>

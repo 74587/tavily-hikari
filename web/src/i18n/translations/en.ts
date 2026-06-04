@@ -1339,9 +1339,7 @@ export const EN: TranslationShape = {
           loading: 'Loading jobs…',
           none: 'No jobs yet.',
         },
-        actions: {
-          trigger: 'Run',
-        },
+        actions: { trigger: 'Run' },
         table: {
           id: 'ID',
           type: 'Type',
@@ -1356,11 +1354,7 @@ export const EN: TranslationShape = {
           show: 'Show job details',
           hide: 'Hide job details',
         },
-        sources: {
-          scheduler: 'Scheduled',
-          manual: 'Manual',
-          auto: 'Auto',
-        },
+        sources: { scheduler: 'Scheduled', manual: 'Manual', auto: 'Auto' },
         types: {
           quota_sync: 'Sync quota',
           'quota_sync/hot': 'Hot quota sync',
