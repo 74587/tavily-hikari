@@ -8,6 +8,12 @@ fn detect_versions(static_dir: Option<&FsPath>) -> (String, String) {
         backend_base
     };
 
+    let frontend_from_embedded = tavily_hikari::web_assets::embedded_bytes("version.json").and_then(|bytes| {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    });
+
     // Try reading version.json produced by front-end build
     let frontend_from_dist = static_dir.and_then(|dir| {
         let path = dir.join("version.json");
@@ -28,7 +34,8 @@ fn detect_versions(static_dir: Option<&FsPath>) -> (String, String) {
     });
 
     // Fallback to web/package.json for dev setups
-    let frontend = frontend_from_dist
+    let frontend = frontend_from_embedded
+        .or(frontend_from_dist)
         .or_else(|| {
             let path = FsPath::new("web").join("package.json");
             fs::File::open(&path).ok().and_then(|mut f| {
