@@ -7,3 +7,4 @@
 - 每个平台资产同时发布 SHA256 校验文件，便于运维审计与下载校验。
 - 外部静态目录继续保留为运行时覆盖入口；内嵌 Web 资产只作为默认发布兜底。
 - `xray` 不随主程序 binary 打包，继续由宿主环境单独安装或配置。
+- GitHub Release job 不 checkout 仓库时，`gh` CLI 必须显式指定 repository，不能依赖本地 `.git` 上下文。

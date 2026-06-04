@@ -636,7 +636,7 @@ jobs:
             exit 1
           fi
 
-          gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber
+          gh release upload "${RELEASE_TAG}" "${assets[@]}" --clobber --repo "${GITHUB_REPOSITORY}"
 
       - name: Upsert PR release comment
         uses: actions/github-script@v9

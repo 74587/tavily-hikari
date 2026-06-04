@@ -8,7 +8,8 @@
 - 版本检测同样保持外部静态目录优先，避免 `--static-dir` 覆盖部署时版本信息与实际服务的前端不一致。
 - `Dockerfile` 在 builder 阶段复制 `build.rs`，保证新增 Cargo build script 后容器构建路径仍可用；容器运行时继续通过 `WEB_STATIC_DIR=/srv/app/web` 使用镜像内静态目录。
 - release workflow 新增 `binary-native` matrix，在 `ubuntu-24.04` 与 `ubuntu-24.04-arm` 上构建 Web、构建 release binary、打包 `tar.gz`、生成 `.sha256` 并 smoke 解包后的 binary。
-- GitHub Release job 下载 binary artifacts 后用 `gh release upload --clobber` 上传资产，同时 PR release comment 列出 binary 资产名称。
+- GitHub Release job 下载 binary artifacts 后用 `gh release upload --clobber --repo "${GITHUB_REPOSITORY}"` 上传资产；该 job 没有 checkout，不能依赖本地 `.git` 推断仓库。PR release comment 列出 binary
+  资产名称。
 - CI workflow 增加 embedded asset contract coverage，避免无外部静态目录的 binary 路径回归。
 
 ## 验证
