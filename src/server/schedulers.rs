@@ -981,7 +981,6 @@ async fn run_forward_proxy_geo_refresh_job_with_source(
         return;
     };
 
-    drop(_job_execution_gate);
     let _maintenance = acquire_db_maintenance_read_gate().await;
     match state
         .proxy
@@ -1102,7 +1101,6 @@ async fn run_manual_claimed_job(
             }
         },
         "forward_proxy_geo_refresh" => {
-            drop(_job_execution_gate);
             let _maintenance = acquire_db_maintenance_read_gate().await;
             match state
                 .proxy
