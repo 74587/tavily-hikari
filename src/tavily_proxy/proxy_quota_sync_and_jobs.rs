@@ -56,6 +56,55 @@ impl TavilyProxy {
         Ok((limit, remaining))
     }
 
+    pub async fn quota_sync_api_key_secret(&self, key_id: &str) -> Result<String, ProxyError> {
+        self.key_store
+            .fetch_api_key_secret(key_id)
+            .await?
+            .ok_or_else(|| ProxyError::Database(sqlx::Error::RowNotFound))
+    }
+
+    pub async fn fetch_usage_quota_for_sync_secret(
+        &self,
+        secret: &str,
+        usage_base: &str,
+        key_id: &str,
+    ) -> Result<(i64, i64), ProxyError> {
+        self.fetch_usage_quota_for_secret(
+            secret,
+            usage_base,
+            None,
+            Some(key_id),
+            None,
+            "quota_sync",
+        )
+        .await
+    }
+
+    pub async fn record_quota_sync_usage_error(
+        &self,
+        key_id: &str,
+        err: &ProxyError,
+    ) -> Result<(), ProxyError> {
+        self.maybe_quarantine_usage_error(key_id, "/api/tavily/usage", err)
+            .await
+    }
+
+    pub async fn record_quota_sync_result(
+        &self,
+        key_id: &str,
+        limit: i64,
+        remaining: i64,
+        source: &str,
+    ) -> Result<(), ProxyError> {
+        let now = Utc::now().timestamp();
+        self.key_store
+            .record_quota_sync_sample(key_id, limit, remaining, now, source)
+            .await?;
+        self.clear_transient_backoffs_after_success(key_id, source, None)
+            .await?;
+        Ok(())
+    }
+
     /// Probe usage/quota for an API key secret via Tavily Usage API base (e.g., https://api.tavily.com).
     /// This performs *no* database mutation and is safe to use for admin validation flows.
     pub async fn probe_api_key_quota(

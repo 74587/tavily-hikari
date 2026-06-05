@@ -378,12 +378,9 @@ async fn run_manual_key_quota_sync(
     };
     let job_id = claimed_job.job_id;
     let _job_execution_gate = claimed_job._job_execution_gate;
+    drop(_job_execution_gate);
 
-    match state
-        .proxy
-        .sync_key_quota(key_id, &state.usage_base, "quota_sync/manual")
-        .await
-    {
+    match sync_key_quota_with_db_job_gate(state.as_ref(), key_id, "quota_sync/manual").await {
         Ok((limit, remaining)) => {
             let msg = format!("limit={limit} remaining={remaining}");
             let _ = state

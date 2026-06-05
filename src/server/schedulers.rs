@@ -98,6 +98,43 @@ async fn claim_scheduled_job(
     }
 }
 
+async fn sync_key_quota_with_db_job_gate(
+    state: &AppState,
+    key_id: &str,
+    source: &str,
+) -> Result<(i64, i64), ProxyError> {
+    let secret = {
+        let _job_execution_gate = acquire_db_job_execution_gate_for_state(state).await;
+        let _maintenance = acquire_db_maintenance_read_gate().await;
+        state.proxy.quota_sync_api_key_secret(key_id).await?
+    };
+
+    let (limit, remaining) = match state
+        .proxy
+        .fetch_usage_quota_for_sync_secret(&secret, &state.usage_base, key_id)
+        .await
+    {
+        Ok(quota) => quota,
+        Err(err) => {
+            let _job_execution_gate = acquire_db_job_execution_gate_for_state(state).await;
+            let _maintenance = acquire_db_maintenance_read_gate().await;
+            state.proxy.record_quota_sync_usage_error(key_id, &err).await?;
+            return Err(err);
+        }
+    };
+
+    {
+        let _job_execution_gate = acquire_db_job_execution_gate_for_state(state).await;
+        let _maintenance = acquire_db_maintenance_read_gate().await;
+        state
+            .proxy
+            .record_quota_sync_result(key_id, limit, remaining, source)
+            .await?;
+    }
+
+    Ok((limit, remaining))
+}
+
 fn next_local_daily_run_after(now: DateTime<Local>, hour: u32, minute: u32) -> DateTime<Local> {
     let today = now.date_naive();
     let scheduled_naive = today
@@ -169,10 +206,8 @@ fn spawn_quota_sync_scheduler(state: Arc<AppState>) {
                 else {
                     continue;
                 };
-                let _maintenance = acquire_db_maintenance_read_gate().await;
-                match cold_state
-                    .proxy
-                    .sync_key_quota(&key_id, &cold_state.usage_base, "quota_sync")
+                drop(_job_execution_gate);
+                match sync_key_quota_with_db_job_gate(cold_state.as_ref(), &key_id, "quota_sync")
                     .await
                 {
                     Ok((limit, remaining)) => {
@@ -244,10 +279,8 @@ fn spawn_quota_sync_scheduler(state: Arc<AppState>) {
                 else {
                     continue;
                 };
-                let _maintenance = acquire_db_maintenance_read_gate().await;
-                match hot_state
-                    .proxy
-                    .sync_key_quota(&key_id, &hot_state.usage_base, "quota_sync/hot")
+                drop(_job_execution_gate);
+                match sync_key_quota_with_db_job_gate(hot_state.as_ref(), &key_id, "quota_sync/hot")
                     .await
                 {
                     Ok((limit, remaining)) => {
@@ -1039,10 +1072,8 @@ async fn run_manual_claimed_job(
             let Some(key_id) = key_id else {
                 return finish(state, "error", "missing key_id".to_string()).await;
             };
-            let _maintenance = acquire_db_maintenance_read_gate().await;
-            match state
-                .proxy
-                .sync_key_quota(&key_id, &state.usage_base, "quota_sync/manual")
+            drop(_job_execution_gate);
+            match sync_key_quota_with_db_job_gate(state.as_ref(), &key_id, "quota_sync/manual")
                 .await
             {
                 Ok((limit, remaining)) => {
