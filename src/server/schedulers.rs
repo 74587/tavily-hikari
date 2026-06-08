@@ -21,15 +21,15 @@ fn forward_proxy_geo_refresh_recheck_secs() -> i64 {
 }
 
 fn request_logs_gc_catchup_recheck_secs() -> u64 {
-    900
+    300
 }
 
 fn scheduled_request_logs_gc_options() -> RequestLogsGcOptions {
     RequestLogsGcOptions {
-        batch_size: 25,
-        max_batches: 20,
-        max_runtime_secs: 60,
-        inter_batch_sleep_ms: 2_000,
+        batch_size: 100,
+        max_batches: 5,
+        max_runtime_secs: 20,
+        inter_batch_sleep_ms: 0,
     }
 }
 
@@ -499,8 +499,9 @@ fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
             tokio::time::sleep(duration_until_next_local_daily_run(Local::now(), hour, minute))
                 .await;
 
-            // After we reach the scheduled time, keep retrying until we either run the job
-            // successfully or record an error for this run window.
+            // After we reach the scheduled time, keep running bounded passes until the backlog
+            // is cleared or a pass errors out. Each pass is a separate scheduled_jobs row so
+            // operators can aggregate daily cleanup throughput from job history directly.
             loop {
                 let Some(claimed_job) = claim_scheduled_job(
                     state.as_ref(),
@@ -515,8 +516,16 @@ fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
                     continue;
                 };
 
-                let _ = run_request_logs_gc_catchup_claimed_job(state.clone(), claimed_job).await;
-                break;
+                let completed =
+                    run_request_logs_gc_catchup_claimed_job(state.clone(), claimed_job).await;
+                if completed {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(
+                    request_logs_gc_catchup_recheck_secs(),
+                ))
+                .await;
             }
         }
     });
@@ -531,62 +540,34 @@ async fn run_request_logs_gc_catchup_claimed_job(
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
-    let mut cleaned_request_log_bodies = 0i64;
-    let mut deleted_request_logs = 0i64;
-    let mut deleted_rollups = 0i64;
-    let mut total_batches = 0i64;
-    let mut total_elapsed_ms = 0u128;
-    let mut passes = 0usize;
+    let _job_execution_gate = acquire_db_job_execution_gate_for_state(state.as_ref()).await;
+    let _maintenance = acquire_db_maintenance_read_gate().await;
+    let result = state
+        .proxy
+        .gc_request_logs_with_options(scheduled_request_logs_gc_options())
+        .await;
+    drop(_maintenance);
+    drop(_job_execution_gate);
 
-    loop {
-        let _job_execution_gate = acquire_db_job_execution_gate_for_state(state.as_ref()).await;
-        let _maintenance = acquire_db_maintenance_read_gate().await;
-        let result = state
-            .proxy
-            .gc_request_logs_with_options(scheduled_request_logs_gc_options())
-            .await;
-        drop(_maintenance);
-
-        match result {
-            Ok(report) => {
-                passes += 1;
-                cleaned_request_log_bodies += report.cleaned_request_log_bodies;
-                deleted_request_logs += report.deleted_request_logs;
-                deleted_rollups += report.deleted_rollups;
-                total_batches += report.batches;
-                total_elapsed_ms += report.elapsed_ms;
-
-                if report.completed {
-                    let msg = format!(
-                        "cleaned_bodies={} deleted_rows={} rollup_deleted={} completed=true retention_days={} batches={} passes={} elapsed_ms={}",
-                        cleaned_request_log_bodies,
-                        deleted_request_logs,
-                        deleted_rollups,
-                        report.retention_days,
-                        total_batches,
-                        passes,
-                        total_elapsed_ms
-                    );
-                    let _ = state
-                        .proxy
-                        .scheduled_job_finish(job_id, "success", Some(&msg))
-                        .await;
-                    return true;
-                }
-
-                drop(_job_execution_gate);
-                tokio::time::sleep(Duration::from_secs(
-                    request_logs_gc_catchup_recheck_secs(),
-                ))
+    match result {
+        Ok(report) => {
+            let msg = format_request_logs_gc_report_message(&report, 1);
+            let _ = state
+                .proxy
+                .scheduled_job_update_message(job_id, Some(&msg))
                 .await;
-            }
-            Err(err) => {
-                let _ = state
-                    .proxy
-                    .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
-                    .await;
-                return false;
-            }
+            let _ = state
+                .proxy
+                .scheduled_job_finish(job_id, "success", Some(&msg))
+                .await;
+            report.completed
+        }
+        Err(err) => {
+            let _ = state
+                .proxy
+                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .await;
+            false
         }
     }
 }

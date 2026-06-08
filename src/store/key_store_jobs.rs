@@ -244,4 +244,39 @@ impl KeyStore {
         }
         Ok(())
     }
+
+    pub(crate) async fn scheduled_job_update_message(
+        &self,
+        job_id: i64,
+        message: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut retry_attempt = 0usize;
+        loop {
+            match sqlx::query(r#"UPDATE scheduled_jobs SET message = ? WHERE id = ?"#)
+                .bind(message)
+                .bind(job_id)
+                .execute(&self.pool)
+                .await
+            {
+                Ok(_) => break,
+                Err(err) => {
+                    let err = ProxyError::Database(err);
+                    if sleep_before_sqlite_transient_write_retry(
+                        "scheduled job update message",
+                        retry_attempt,
+                        deadline,
+                        &err,
+                    )
+                    .await
+                    {
+                        retry_attempt += 1;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(())
+    }
 }

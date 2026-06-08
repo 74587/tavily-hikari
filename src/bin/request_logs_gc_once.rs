@@ -3,7 +3,10 @@ use std::io::{self, Write};
 use clap::Parser;
 use dotenvy::dotenv;
 use serde::Serialize;
-use tavily_hikari::{RequestLogsGcOptions, RequestLogsGcReport, run_request_logs_gc_once};
+use tavily_hikari::{
+    RequestLogsGcOptions, RequestLogsGcReport, format_request_logs_gc_report_message,
+    run_request_logs_gc_once,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -119,18 +122,23 @@ fn write_json_report(mut writer: impl Write, report: &CliReport) -> io::Result<(
 }
 
 fn write_plain_report(mut writer: impl Write, report: &CliReport) -> io::Result<()> {
+    let aggregate = RequestLogsGcReport {
+        retention_days: report.retention_days,
+        threshold: report.threshold,
+        batch_size: report.batch_size,
+        max_batches: report.max_batches,
+        cleaned_request_log_bodies: report.cleaned_request_log_bodies,
+        deleted_request_logs: report.deleted_request_logs,
+        deleted_rollups: report.deleted_rollups,
+        batches: report.batches,
+        completed: report.completed,
+        has_more: report.has_more,
+        elapsed_ms: report.elapsed_ms,
+    };
     writeln!(
         writer,
-        "request_logs_gc: completed={} has_more={} passes={} cleaned_request_log_bodies={} deleted_request_logs={} deleted_rollups={} batches={} elapsed_ms={} retention_days={}",
-        report.completed,
-        report.has_more,
-        report.passes,
-        report.cleaned_request_log_bodies,
-        report.deleted_request_logs,
-        report.deleted_rollups,
-        report.batches,
-        report.elapsed_ms,
-        report.retention_days
+        "request_logs_gc: {}",
+        format_request_logs_gc_report_message(&aggregate, report.passes)
     )?;
     writer.flush()
 }

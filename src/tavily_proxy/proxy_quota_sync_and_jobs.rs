@@ -512,6 +512,16 @@ impl TavilyProxy {
             .await
     }
 
+    pub async fn scheduled_job_update_message(
+        &self,
+        job_id: i64,
+        message: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .scheduled_job_update_message(job_id, message)
+            .await
+    }
+
     pub async fn list_recent_jobs(&self, limit: usize) -> Result<Vec<JobLog>, ProxyError> {
         self.key_store.list_recent_jobs(limit).await
     }

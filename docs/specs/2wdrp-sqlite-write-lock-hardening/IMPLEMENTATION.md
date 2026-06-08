@@ -31,12 +31,14 @@
   batch transaction. The old rollup buckets are deleted separately in bounded batches, avoiding a
   per-row trigger update for expired request payloads while keeping normal request log writes and
   updates covered by the trigger set.
-- The daily `request_logs_gc` scheduler records partial progress in `scheduled_jobs` and waits
-  before continuing catch-up instead of keeping one long-running cleanup job open.
+- The daily `request_logs_gc` scheduler now runs one bounded cleanup pass per
+  `scheduled_jobs` row. If backlog remains, the scheduler sleeps for the catch-up interval and
+  claims a fresh job for the next pass instead of keeping one long-running `running` row open.
 - Scheduled jobs now distinguish `trigger_source` from `job_type`, use an atomic claim path to avoid
   duplicate active work, and expose manual trigger entrypoints for maintenance/admin jobs.
-- Request-log GC catch-up now uses smaller scheduler windows and slower retry cadence so a large
-  body-cleanup backlog does not repeatedly consume the SQLite writer slot.
+- Request-log GC catch-up now uses smaller scheduler windows with a faster recheck cadence so a
+  large body-cleanup backlog can make daily progress without one pass holding the SQLite writer
+  slot for long.
 - DB maintenance now records size/freelist telemetry and can compact the SQLite file through a
   dedicated job, with automatic threshold-based triggering and manual admin triggering.
 - DB-backed scheduled and manual jobs now pass through a process-wide execution gate before their
@@ -48,6 +50,8 @@
 - Added `request_logs_gc_once` as a one-shot operational binary. It supports JSON output and
   `--run-until-complete` for deterministic low-resource validation against production-derived
   database samples.
+- Added `request_logs_gc_stats` as a read-only operational binary for daily growth vs
+  `cleaned_bodies` analysis directly from SQLite.
 - Added local contention tests for quota subject lock acquisition and scheduled job start.
 - Added local contention coverage for forward-proxy startup subscription refresh and runtime
   snapshot persistence.
