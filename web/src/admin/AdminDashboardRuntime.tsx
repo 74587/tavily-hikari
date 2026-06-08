@@ -8813,6 +8813,40 @@ function AdminDashboard(): JSX.Element {
     )
   }
 
+  const renderUsagePageIntro = ({
+    title,
+    description,
+    searchControls,
+    filterStatusText,
+    filterStatusTestId,
+  }: {
+    title: string
+    description: string
+    searchControls: JSX.Element
+    filterStatusText?: string | null
+    filterStatusTestId?: string
+  }) => (
+    <>
+      <div className="admin-desktop-only">
+        <AdminCompactIntro title={title} description={description} actions={searchControls} />
+      </div>
+      <div className="admin-stacked-only">
+        <section className="surface app-header admin-usage-stacked-intro">
+          <div className="admin-usage-stacked-intro-main">
+            <h1>{title}</h1>
+            <p className="admin-compact-intro-description">{description}</p>
+          </div>
+          <div className="admin-usage-stacked-intro-actions">{searchControls}</div>
+        </section>
+      </div>
+      {filterStatusText ? (
+        <p className="panel-description admin-usage-filter-status" data-testid={filterStatusTestId}>
+          {filterStatusText}
+        </p>
+      ) : null}
+    </>
+  )
+
   if (route.name === 'user-usage') {
     const backSort = isAdminUsersOverviewSortField(usersSort) ? usersSort : null
     const backOrder = backSort ? usersSortOrder : null
@@ -8875,15 +8909,6 @@ function AdminDashboard(): JSX.Element {
                 />
                 <span>{loading ? headerStrings.refreshing : headerStrings.refreshNow}</span>
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                className="admin-sidebar-utility-action"
-                onClick={() => navigateToPath(buildAdminUsersPath(usersQuery, usersTagFilterId, usersPage, backSort, backOrder))}
-              >
-                <Icon icon="mdi:arrow-left" width={16} height={16} aria-hidden="true" />
-                <span>{usersStrings.usage.back}</span>
-              </Button>
             </div>
           </AdminSidebarUtilityCard>
         </AdminSidebarUtilityStack>
@@ -8899,61 +8924,43 @@ function AdminDashboard(): JSX.Element {
       >
         {userUsageDesktopUtility}
 
-        <div className="admin-desktop-only">
-          <AdminCompactIntro
-            title={usersStrings.usage.title}
-            description={usersStrings.usage.description}
-          />
-        </div>
+        {renderUsagePageIntro({
+          title: usersStrings.usage.title,
+          description: usersStrings.usage.description,
+          searchControls: (
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div className="users-search-controls users-search-controls--header">
+                <Input
+                  type="text"
+                  name="user-usage-search"
+                  className="users-search-input"
+                  placeholder={usersStrings.searchPlaceholder}
+                  value={usersQueryInput}
+                  disabled={usersBlocking}
+                  onChange={(event) => setUsersQueryInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      applyUserSearch()
+                    }
+                  }}
+                />
+                <Button type="button" variant="outline" onClick={applyUserSearch} disabled={usersBlocking}>
+                  {usersStrings.search}
+                </Button>
+                {(usersQueryInput.length > 0 || usersQuery.length > 0 || usersTagFilterId != null) && (
+                  <Button type="button" variant="ghost" onClick={resetUserSearch} disabled={usersBlocking}>
+                    {usersStrings.clear}
+                  </Button>
+                )}
+              </div>
+            </div>
+          ),
+          filterStatusText: usersFilterStatusText,
+          filterStatusTestId: 'users-filter-status',
+        })}
 
         <section className="surface panel">
-          <div className="panel-header admin-list-toolbar" style={{ gap: 12, flexWrap: 'wrap' }}>
-            <div className="admin-stacked-only" style={{ flex: '1 1 340px', minWidth: 260 }}>
-              <h2>{usersStrings.usage.title}</h2>
-              <p className="panel-description">{usersStrings.usage.description}</p>
-            </div>
-            <div className="admin-inline-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <div className="admin-desktop-only">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => navigateToPath(buildAdminUsersPath(usersQuery, usersTagFilterId, usersPage, backSort, backOrder))}
-                >
-                  <Icon icon="mdi:arrow-left" width={16} height={16} aria-hidden="true" />
-                  {usersStrings.usage.back}
-                </Button>
-              </div>
-              <div style={{ display: 'grid', gap: 6 }}>
-                <div className="users-search-controls">
-                  <Input
-                    type="text"
-                    name="user-usage-search"
-                    className="users-search-input"
-                    placeholder={usersStrings.searchPlaceholder}
-                    value={usersQueryInput}
-                    disabled={usersBlocking}
-                    onChange={(event) => setUsersQueryInput(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        applyUserSearch()
-                      }
-                    }}
-                  />
-                  <Button type="button" variant="outline" onClick={applyUserSearch} disabled={usersBlocking}>
-                    {usersStrings.search}
-                  </Button>
-                  {(usersQueryInput.length > 0 || usersQuery.length > 0 || usersTagFilterId != null) && (
-                    <Button type="button" variant="ghost" onClick={resetUserSearch} disabled={usersBlocking}>
-                      {usersStrings.clear}
-                    </Button>
-                  )}
-                </div>
-                {usersFilterStatusText && <p className="panel-description">{usersFilterStatusText}</p>}
-              </div>
-            </div>
-          </div>
-
           <AdminTableShell
             className="jobs-table-wrapper admin-users-usage-table-wrapper admin-responsive-up"
             tableClassName="jobs-table admin-users-table admin-users-usage-table"
@@ -9257,77 +9264,54 @@ function AdminDashboard(): JSX.Element {
                   href={userConsoleHref}
                   className="admin-sidebar-utility-action"
                 />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="token-usage-back-button admin-sidebar-utility-action"
-                  onClick={() => navigateModule('tokens')}
-                >
-                  <Icon icon="mdi:arrow-left" width={16} height={16} aria-hidden="true" />
-                  <span>{unboundTokenUsageStrings.back}</span>
-                </Button>
               </div>
             </AdminSidebarUtilityCard>
           </AdminSidebarUtilityStack>
         </AdminShellSidebarUtility>
 
-        <div className="admin-desktop-only">
-          <AdminCompactIntro
-            title={unboundTokenUsageStrings.title}
-            description={unboundTokenUsageStrings.description}
-          />
-        </div>
-
-        <section className="surface panel">
-          <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
-            <div className="admin-stacked-only" style={{ flex: '1 1 340px', minWidth: 260 }}>
-              <h2>{unboundTokenUsageStrings.title}</h2>
-              <p className="panel-description">{unboundTokenUsageStrings.description}</p>
-            </div>
-            <div className="admin-inline-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <div className="admin-stacked-only">
-                <Button type="button" variant="outline" onClick={() => navigateModule('tokens')}>
-                  {unboundTokenUsageStrings.back}
-                </Button>
-              </div>
-              <div className="users-search-controls">
-                <Input
-                  type="text"
-                  name="unbound-token-usage-search"
-                  className="users-search-input"
-                  placeholder={unboundTokenUsageStrings.searchPlaceholder}
-                  value={unboundTokenUsageQueryInput}
-                  disabled={unboundTokenUsageBlocking}
-                  onChange={(event) => setUnboundTokenUsageQueryInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault()
-                      applyUnboundTokenUsageSearch()
-                    }
-                  }}
-                />
+        {renderUsagePageIntro({
+          title: unboundTokenUsageStrings.title,
+          description: unboundTokenUsageStrings.description,
+          searchControls: (
+            <div className="users-search-controls users-search-controls--header">
+              <Input
+                type="text"
+                name="unbound-token-usage-search"
+                className="users-search-input"
+                placeholder={unboundTokenUsageStrings.searchPlaceholder}
+                value={unboundTokenUsageQueryInput}
+                disabled={unboundTokenUsageBlocking}
+                onChange={(event) => setUnboundTokenUsageQueryInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    applyUnboundTokenUsageSearch()
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={applyUnboundTokenUsageSearch}
+                disabled={unboundTokenUsageBlocking}
+              >
+                {usersStrings.search}
+              </Button>
+              {(unboundTokenUsageQueryInput.length > 0 || unboundTokenUsageQuery.length > 0) && (
                 <Button
                   type="button"
-                  variant="outline"
-                  onClick={applyUnboundTokenUsageSearch}
+                  variant="ghost"
+                  onClick={resetUnboundTokenUsageSearch}
                   disabled={unboundTokenUsageBlocking}
                 >
-                  {usersStrings.search}
+                  {usersStrings.clear}
                 </Button>
-                {(unboundTokenUsageQueryInput.length > 0 || unboundTokenUsageQuery.length > 0) && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={resetUnboundTokenUsageSearch}
-                    disabled={unboundTokenUsageBlocking}
-                  >
-                    {usersStrings.clear}
-                  </Button>
-                )}
-              </div>
+              )}
             </div>
-          </div>
+          ),
+        })}
 
+        <section className="surface panel">
           <AdminTableShell
             className="jobs-table-wrapper admin-users-usage-table-wrapper admin-responsive-up"
             tableClassName="jobs-table admin-users-table admin-users-usage-table"

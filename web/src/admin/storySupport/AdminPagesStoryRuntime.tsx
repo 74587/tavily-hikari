@@ -3250,6 +3250,7 @@ interface AdminPageFrameProps {
   activeModule: AdminNavTarget
   children: ReactNode
   introActions?: ReactNode
+  introOverride?: { title: string; description?: string }
   overlays?: ReactNode
   beforeIntro?: ReactNode
   showDefaultShellChrome?: boolean
@@ -3264,10 +3265,11 @@ export function AdminPageFrame({
   showDefaultShellChrome = true,
   actions,
   introActions,
+  introOverride,
 }: AdminPageFrameProps): JSX.Element {
   const admin = useTranslate().admin
   const headerActions = actions ?? introActions
-  const intro = (() => {
+  const intro = introOverride ?? (() => {
     switch (activeModule) {
       case 'dashboard':
         return {
@@ -3380,20 +3382,24 @@ export function AdminPageFrame({
             {beforeIntro}
 
             <div className="admin-stacked-only">
-              <AdminPanelHeader
-                title={intro.title}
-                subtitle={intro.description}
-                displayName="Ops Admin"
-                isAdmin
-                updatedPrefix={admin.header.updatedPrefix}
-                updatedTime="11:42:10"
-                isRefreshing={false}
-                refreshLabel={admin.header.refreshNow}
-                refreshingLabel={admin.header.refreshing}
-                userConsoleLabel={admin.header.returnToConsole}
-                userConsoleHref="/console"
-                onRefresh={() => {}}
-              />
+              {introOverride && headerActions ? (
+                <section className="surface app-header admin-usage-stacked-intro"><div className="admin-usage-stacked-intro-main"><h1>{intro.title}</h1><p className="admin-compact-intro-description">{intro.description}</p></div><div className="admin-usage-stacked-intro-actions">{headerActions}</div></section>
+              ) : (
+                <AdminPanelHeader
+                  title={intro.title}
+                  subtitle={intro.description ?? ''}
+                  displayName="Ops Admin"
+                  isAdmin
+                  updatedPrefix={admin.header.updatedPrefix}
+                  updatedTime="11:42:10"
+                  isRefreshing={false}
+                  refreshLabel={admin.header.refreshNow}
+                  refreshingLabel={admin.header.refreshing}
+                  userConsoleLabel={admin.header.returnToConsole}
+                  userConsoleHref="/console"
+                  onRefresh={() => {}}
+                />
+              )}
             </div>
             <div className="admin-desktop-only">
               <AdminCompactIntro title={intro.title} description={intro.description} actions={headerActions} />
@@ -5101,6 +5107,29 @@ function UsersUsagePageCanvas({
     setSortField(nextSort)
     setSortOrder(nextOrder)
   }
+  const usageHeaderActions = (
+    <div style={{ display: 'grid', gap: 6 }}>
+      <div className="users-search-controls users-search-controls--header">
+        <Input
+          type="text"
+          name="user-usage-search"
+          className="users-search-input"
+          placeholder={users.searchPlaceholder}
+          value={queryInput}
+          onChange={(event) => handleQueryInputChange(event.target.value)}
+          onKeyDown={handleQueryInputKeyDown}
+        />
+        <Button type="button" variant="outline" onClick={applySearch}>
+          {users.search}
+        </Button>
+        {(queryInput.length > 0 || query.length > 0) && (
+          <Button type="button" variant="ghost" onClick={resetSearch}>
+            {users.clear}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
 
   return (
     <AdminPageFrame
@@ -5147,15 +5176,6 @@ function UsersUsagePageCanvas({
                 <Icon icon="mdi:refresh" width={16} height={16} aria-hidden="true" />
                 <span>{admin.header.refreshNow}</span>
               </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                className="admin-sidebar-utility-action"
-                onClick={() => openAdminStory('admin-pages--users')}
-              >
-                <Icon icon="mdi:arrow-left" width={16} height={16} aria-hidden="true" />
-                <span>{users.usage.back}</span>
-              </Button>
             </div>
           </AdminSidebarUtilityCard>
         </AdminSidebarUtilityStack>
@@ -5165,44 +5185,22 @@ function UsersUsagePageCanvas({
         <AdminCompactIntro
           title={users.usage.title}
           description={users.usage.description}
+          actions={usageHeaderActions}
         />
+      </div>
+      <div className="admin-stacked-only">
+        <section className="surface app-header admin-usage-stacked-intro">
+          <div className="admin-usage-stacked-intro-main">
+            <h1>{users.usage.title}</h1>
+            <p className="admin-compact-intro-description">{users.usage.description}</p>
+          </div>
+          <div className="admin-usage-stacked-intro-actions">{usageHeaderActions}</div>
+        </section>
       </div>
 
       <section className="surface panel">
-        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <div className="admin-stacked-only" style={{ flex: '1 1 340px', minWidth: 260 }}>
-            <h2>{users.usage.title}</h2>
-            <p className="panel-description">{users.usage.description}</p>
-          </div>
-          <div className="admin-inline-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <div className="admin-stacked-only">
-              <Button type="button" variant="outline" onClick={() => openAdminStory('admin-pages--users')}>
-                {users.usage.back}
-              </Button>
-            </div>
-            <div className="users-search-controls">
-              <Input
-                type="text"
-                name="user-usage-search"
-                className="users-search-input"
-                placeholder={users.searchPlaceholder}
-                value={queryInput}
-                onChange={(event) => handleQueryInputChange(event.target.value)}
-                onKeyDown={handleQueryInputKeyDown}
-              />
-              <Button type="button" variant="outline" onClick={applySearch}>
-                {users.search}
-              </Button>
-              {(queryInput.length > 0 || query.length > 0) && (
-                <Button type="button" variant="ghost" onClick={resetSearch}>
-                  {users.clear}
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
         {usersFilterStatusText && (
-          <p className="panel-description" data-testid="users-filter-status">
+          <p className="panel-description admin-usage-filter-status" data-testid="users-filter-status">
             {usersFilterStatusText}
           </p>
         )}
@@ -5461,10 +5459,44 @@ function UnboundTokenUsagePageCanvas({
     setSortOrder(nextOrder)
     setPage(1)
   }
+  const [searchDraft, setSearchDraft] = useState('')
+  const applySearch = () => { setQuery(searchDraft); setPage(1) }
+  const resetSearch = () => { setSearchDraft(''); setQuery(''); setPage(1) }
+  const unboundHeaderActions = (
+    <div className="users-search-controls users-search-controls--header">
+      <Input
+        type="text"
+        name="unbound-token-usage-search"
+        className="users-search-input"
+        placeholder={strings.searchPlaceholder}
+        value={searchDraft}
+        onChange={(event) => setSearchDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            applySearch()
+          }
+        }}
+      />
+      <Button type="button" variant="outline" onClick={applySearch}>
+        {users.search}
+      </Button>
+      {(searchDraft.length > 0 || query.length > 0) && (
+        <Button type="button" variant="ghost" onClick={resetSearch}>
+          {users.clear}
+        </Button>
+      )}
+    </div>
+  )
 
   return (
     <AdminPageFrame
       activeModule="tokens"
+      introActions={unboundHeaderActions}
+      introOverride={{
+        title: strings.title,
+        description: strings.description,
+      }}
       overlays={
         <StoryMonthlyBrokenDrawer
           open={monthlyBrokenDrawer != null}
@@ -5477,50 +5509,8 @@ function UnboundTokenUsagePageCanvas({
       }
     >
       <section className="surface panel">
-        <div className="panel-header" style={{ gap: 12, flexWrap: 'wrap' }}>
-          <div className="admin-stacked-only" style={{ flex: '1 1 340px', minWidth: 260 }}>
-            <h2>{strings.title}</h2>
-            <p className="panel-description">{strings.description}</p>
-            <p className="panel-description" data-selected-token>{selectedTokenId ? `Opened ${selectedTokenId}` : 'No token opened yet'}</p>
-          </div>
-          <div className="admin-inline-actions" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <div className="admin-stacked-only">
-              <button type="button" className="btn btn-outline" onClick={() => openAdminStory('admin-pages--tokens')}>
-                {strings.back}
-              </button>
-            </div>
-            <div className="users-search-controls">
-              <input
-                type="text"
-                className="input input-bordered users-search-input"
-                placeholder={strings.searchPlaceholder}
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value)
-                  setPage(1)
-                }}
-              />
-              <button type="button" className="btn btn-outline">
-                {users.search}
-              </button>
-              {query.length > 0 && (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => {
-                    setQuery('')
-                    setPage(1)
-                  }}
-                >
-                  {users.clear}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
         <div className="admin-desktop-only">
-          <p className="panel-description" data-selected-token>{selectedTokenId ? `Opened ${selectedTokenId}` : 'No token opened yet'}</p>
+          <p className="panel-description admin-usage-filter-status" data-selected-token>{selectedTokenId ? `Opened ${selectedTokenId}` : 'No token opened yet'}</p>
         </div>
 
         <div className="table-wrapper jobs-table-wrapper admin-users-usage-table-wrapper admin-responsive-up">
@@ -6786,7 +6776,17 @@ export const UsersUsage: Story = {
     if (!intro || !intro.textContent?.includes('用量')) {
       throw new Error('Expected user usage page to render a compact intro with the page title.')
     }
-
+    const introSearch = intro.querySelector<HTMLInputElement>('input[name="user-usage-search"]')
+    if (!introSearch) {
+      throw new Error('Expected user usage page intro to host the usage search input.')
+    }
+    const panelHeader = canvasElement.querySelector<HTMLElement>('.surface.panel .panel-header')
+    if (panelHeader) {
+      throw new Error('Expected user usage page panel to drop the duplicated header block.')
+    }
+    if (Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button')).some((button) => button.textContent?.includes('返回用户管理'))) {
+      throw new Error('Expected user usage page to remove every return-to-users button.')
+    }
     const searchInput = canvasElement.querySelector<HTMLInputElement>('input[name="user-usage-search"]')
     if (!searchInput) {
       throw new Error('Expected users usage story to render the usage search input.')
@@ -6857,6 +6857,22 @@ export const UnboundTokenUsage: Story = {
     viewport: { defaultViewport: '1440-device-desktop' },
   },
   play: async ({ canvasElement }) => {
+    await waitForStoryUi()
+    const intro = canvasElement.querySelector<HTMLElement>('.admin-compact-intro')
+    if (!intro || !intro.textContent?.includes('未关联')) {
+      throw new Error('Expected unbound token usage page to render a compact intro with the page title.')
+    }
+    const introSearch = intro.querySelector<HTMLInputElement>('input[name="unbound-token-usage-search"]')
+    if (!introSearch) {
+      throw new Error('Expected unbound token usage page intro to host the usage search input.')
+    }
+    const panelHeader = canvasElement.querySelector<HTMLElement>('.surface.panel .panel-header')
+    if (panelHeader) {
+      throw new Error('Expected unbound token usage page panel to drop the duplicated header block.')
+    }
+    if (Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button')).some((button) => button.textContent?.includes('返回'))) {
+      throw new Error('Expected unbound token usage page to remove return buttons from the page shell.')
+    }
     await new Promise((resolve) => window.setTimeout(resolve, 80))
     const sortButton = canvasElement.querySelector<HTMLButtonElement>('[data-sort-field="dailySuccessRate"]')
     sortButton?.click()

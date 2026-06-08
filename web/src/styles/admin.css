@@ -25,23 +25,19 @@
   margin-left: auto;
   max-width: min(100%, 640px);
 }
-
-.admin-compact-intro-actions .users-search-controls {
-  justify-content: flex-end;
-}
-
+.admin-compact-intro-actions .users-search-controls { justify-content: flex-end; width: min(100%, 520px); }
 .admin-header-filter-slot {
   display: flex;
   min-width: 0;
   width: 100%;
   justify-content: flex-end;
 }
-
-.users-search-controls--header {
-  width: min(100%, 520px);
-  max-width: 520px;
-  margin-left: 0;
-}
+.users-search-controls--header { width: min(100%, 520px); max-width: 520px; margin-left: 0; }
+.admin-usage-stacked-intro { gap: 12px; }
+.admin-usage-stacked-intro-main { display: grid; gap: 6px; width: 100%; min-width: 0; }
+.admin-usage-stacked-intro-actions { width: 100%; min-width: 0; }
+.admin-usage-stacked-intro-actions .users-search-controls { width: 100%; max-width: none; justify-content: flex-start; }
+.admin-usage-filter-status { margin: -6px 0 10px; }
 
 .users-search-input {
   flex: 1 1 340px;
@@ -657,6 +653,10 @@
     margin-left: 0;
     flex-wrap: wrap;
   }
+
+  .admin-compact-intro-actions .users-search-controls { width: 100%; }
+
+  .admin-usage-stacked-intro-actions .users-search-controls { justify-content: flex-start; }
 
   .users-search-input {
     min-width: 220px;

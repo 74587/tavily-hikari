@@ -149,8 +149,8 @@
   sensitive_exclusion: N/A
   submission_gate: approved
   story_id_or_title: Admin/Pages/UsersUsage
-  state: desktop usage table baseline after shared column-width and label alignment fixes
-  evidence_note: 证明 `/admin/users/usage` 的共用用量表已经完成同一轮列宽回收、状态徽标完整显示与表头文案对齐，并保留英文 locale 下的本地化日期显示，可作为未关联 token 页面同构布局的对照基线。
+  state: desktop header row with right-aligned search and no in-panel return button
+  evidence_note: 证明 `/admin/users/usage` 已改成页面级标题左侧、搜索控件右侧的紧凑头部，panel 内不再重复渲染标题说明或返回按钮，并继续保留共用用量表作为未关联 token 页面同构布局的对照基线。
   PR: include
   image:
   ![User usage desktop](./assets/user-usage-desktop.png)
@@ -161,8 +161,8 @@
   sensitive_exclusion: N/A
   submission_gate: approved
   story_id_or_title: Admin/Pages/UnboundTokenUsage
-  state: desktop table with aligned usage headers, balanced column widths, and no status truncation
-  evidence_note: 证明 `/admin/tokens/leaderboard` 已替换成未关联 token 用量表格，且桌面表头、状态徽标与列宽分配已经与用户用量页完成同构对齐，没有额外省略号或尾部留白。
+  state: desktop header row with right-aligned search, no return button, and aligned usage table
+  evidence_note: 证明 `/admin/tokens/leaderboard` 已替换成未关联 token 用量表格，且桌面头部已经压缩为标题左侧、搜索右置、无返回按钮的同构布局，表头与列宽仍与用户用量页保持一致。
   PR: include
   image:
   ![Unbound token usage desktop](./assets/unbound-token-usage-desktop.png)
@@ -173,8 +173,8 @@
   sensitive_exclusion: N/A
   submission_gate: approved
   story_id_or_title: Admin/Pages/UnboundTokenUsageMobile
-  state: mobile cards with tightened shell spacing, dedicated identity header, and compact pagination footer
-  evidence_note: 证明移动端已同步切换为未关联 token 用量卡片，并完成窄视口外层留白收紧、身份块重排和分页器移动布局优化，不再出现身份信息横向挤压或孤立的 per-page 占位。
+  state: mobile cards with stacked title-plus-search header and no return button
+  evidence_note: 证明窄视口下未关联 token 用量页会把搜索下移到标题说明下方整行，同时移除返回按钮，并继续保持移动卡片、身份块与分页器的紧凑布局。
   PR: include
   image:
   ![Unbound token usage mobile](./assets/unbound-token-usage-mobile.png)
@@ -203,6 +203,7 @@
 - 2026-03-28: review-loop 补齐 token detail 返回未关联 token 用量页的上下文保留，确保从 `/admin/tokens/leaderboard` 进入详情后可带着搜索、排序与分页返回原列表。
 - 2026-03-28: review-loop 继续修复全局 refresh 未刷新未关联 token 列表、`Last Used` 升序对 never-used token 的排序方向，以及英文 admin 页 stacked timestamp 本地化日期回归，并据此重拍最新 Storybook 证据图等待主人重新确认。
 - 2026-03-29: 根据主人验收继续收紧 390px 窄视口的 admin shell / panel 横向留白，补齐未关联 token 移动卡片的身份头部布局与分页器移动端两行结构，并同步更新最终移动端证据图。
+- 2026-06-09: 根据主人验收继续压缩用户用量与未关联 token 用量页头部，移除返回按钮、将搜索放到标题行最右侧，并为窄视口补齐标题下方整行搜索的最终 Storybook 证据图。
 
 ## 参考（References）
 
