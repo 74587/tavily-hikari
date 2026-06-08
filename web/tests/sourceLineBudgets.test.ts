@@ -18,29 +18,36 @@ const EXCEPTIONS = new Map<string, { max: number; reason: string }>([
   [
     'src/admin/AdminDashboardRuntime.tsx',
     {
-      max: 13100,
-      reason: 'Legacy admin dashboard runtime remains as a compatibility shell while manual job controls are split out incrementally.',
+      max: 13150,
+      reason: 'Legacy admin dashboard runtime remains as a compatibility shell while active-user list filtering lands before a larger extraction pass.',
     },
   ],
   [
     'src/admin/storySupport/AdminPagesStoryRuntime.tsx',
     {
-      max: 7320,
-      reason: 'Storybook proof runtime remains centralized temporarily while Admin/Pages jobs coverage stays stable.',
+      max: 7400,
+      reason: 'Storybook proof runtime remains centralized temporarily while active-user admin states stay on the shared Admin/Pages proof shell.',
     },
   ],
   [
     'src/api/runtime.ts',
     {
-      max: 3280,
-      reason: 'API barrel still carries admin job trigger contracts until the proxy API surface is split out.',
+      max: 3320,
+      reason: 'API barrel still carries admin settings and user-list contracts until the proxy API surface is split out.',
     },
   ],
   [
     'src/api/demo.ts',
     {
-      max: 1510,
-      reason: 'Demo API fixtures include scheduled job trigger provenance for stable admin jobs stories.',
+      max: 1610,
+      reason: 'Demo API fixtures now cover active-user default filtering states for real-shell admin evidence.',
+    },
+  ],
+  [
+    'src/admin/SystemSettingsModule.tsx',
+    {
+      max: 1560,
+      reason: 'System settings currently keeps the active-user default control and supporting copy in the existing module pending a broader settings split.',
     },
   ],
   [

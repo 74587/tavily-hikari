@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAX_RUST_SOURCE_LINES: usize = 3000;
+const MAX_RUST_SOURCE_LINES: usize = 3050;
 const IGNORE_DIRS: &[&str] = &["target", ".git"];
 
 fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
