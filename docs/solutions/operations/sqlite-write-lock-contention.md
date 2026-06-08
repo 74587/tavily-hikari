@@ -57,6 +57,10 @@ brief contention visible as HTTP 500s or failed background bookkeeping.
 - Keep retention cleanup bounded. Large `request_logs` backlogs should be deleted in small batches
   with a runtime/batch budget and a catch-up delay, rather than one daily job holding or repeatedly
   contesting the writer until the whole backlog is gone.
+- When catch-up is needed, prefer one bounded cleanup pass per `scheduled_jobs` row. Finish the
+  job after the pass, record the bounded-pass totals in the message, and let the scheduler claim a
+  fresh job after the recheck delay. Do not keep one `running` job row open while sleeping between
+  catch-up windows.
 - Keep scheduled-job trigger provenance separate from logical job type. Use a dedicated
   `trigger_source` column for scheduler/manual/auto runs so filters, duplicate detection, and
   history remain stable as operators gain manual trigger buttons.

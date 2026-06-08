@@ -224,6 +224,24 @@ pub struct RequestLogsGcReport {
     pub elapsed_ms: u128,
 }
 
+pub fn format_request_logs_gc_report_message(
+    report: &RequestLogsGcReport,
+    passes: usize,
+) -> String {
+    format!(
+        "cleaned_bodies={} deleted_rows={} rollup_deleted={} completed={} has_more={} retention_days={} batches={} passes={} elapsed_ms={}",
+        report.cleaned_request_log_bodies,
+        report.deleted_request_logs,
+        report.deleted_rollups,
+        report.completed,
+        report.has_more,
+        report.retention_days,
+        report.batches,
+        passes,
+        report.elapsed_ms
+    )
+}
+
 pub async fn run_request_logs_gc_once(
     database_path: &str,
     options: RequestLogsGcOptions,
