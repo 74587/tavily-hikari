@@ -130,7 +130,7 @@
 
 - Storybook 证据画布：`Admin/Components/DashboardOverview/ZhDarkEvidence`
 - 证据目标源：`storybook_canvas`
-- 证据绑定sha=`865c043017077c013555b770eb5beffbcbd0d7be`
+- 证据绑定sha=`e89a4fe37d45af77e9bec3ea6f172542799ade69`
 - 证据绑定说明：证据图已按本次实现重新截取；Storybook 证据画布与真实 `/admin` 页面均已复核顶部 hero 缺失、页头后直接进入风险面板。
 - 证据资产：`docs/specs/ud3ru-admin-dashboard-overview-chrome-simplify/assets/dashboard-overview-zh-dark-evidence.png`
 
