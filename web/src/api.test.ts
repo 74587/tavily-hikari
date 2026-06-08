@@ -19,6 +19,7 @@ import {
   fetchAnnouncements,
   fetchApiKeys,
   fetchDashboardOverview,
+  fetchForwardProxySettings,
   fetchJobs,
   fetchKeyLogsCatalog,
   fetchKeyLogDetails,
@@ -1294,6 +1295,29 @@ describe('admin user tag api helpers', () => {
       },
     })
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/settings')
+  })
+
+  it('fetches forward proxy settings from the dedicated endpoint', async () => {
+    const payload = {
+      proxyUrls: ['https://example.com/sub.txt'],
+      subscriptionServerSideEnabled: true,
+      sourceSubscriptionUrl: 'https://example.com/sub.txt',
+      validationSummary: null,
+      validationNodes: [],
+      runtime: null,
+    }
+    const fetchMock = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+    globalThis.fetch = fetchMock as typeof fetch
+
+    await expect(fetchForwardProxySettings()).resolves.toEqual(payload)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/settings/forward-proxy')
   })
 
   it('updates system settings with requestRateLimit in the payload body', async () => {

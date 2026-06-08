@@ -3189,8 +3189,8 @@ export async function fetchSystemSettingsEnvelope(signal?: AbortSignal): Promise
 }
 
 export async function fetchForwardProxySettings(signal?: AbortSignal): Promise<ForwardProxySettings> {
-  const response = await fetchSystemSettingsEnvelope(signal)
-  return response.forwardProxy ?? createEmptyForwardProxySettings()
+  const response = await requestJson<ForwardProxySettings>('/api/settings/forward-proxy', { signal })
+  return response ?? createEmptyForwardProxySettings()
 }
 
 export async function fetchSystemSettings(signal?: AbortSignal): Promise<SystemSettings> {

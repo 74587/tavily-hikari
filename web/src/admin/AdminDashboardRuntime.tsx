@@ -1868,6 +1868,10 @@ function AdminDashboard(): JSX.Element {
   const systemSettingsLoadedRef = useRef(false)
   const forwardProxyStatsLoadedRef = useRef(false)
   const forwardProxyErrorStatsLoadedRef = useRef(false)
+  const needsSystemSettingsForUsers =
+    (isUsersCollectionRoute || route.name === 'user') && usersQuery.trim().length === 0
+  const waitingForUsersSystemSettings =
+    needsSystemSettingsForUsers && !systemSettingsLoadedRef.current && systemSettingsLoadState !== 'error'
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
@@ -3724,6 +3728,7 @@ function AdminDashboard(): JSX.Element {
     const usersRouteActive =
       isUsersCollectionRoute || route.name === 'user'
     if (!usersRouteActive) return
+    if (waitingForUsersSystemSettings) return
 
     const request = beginManagedRequest(usersAbortRef)
     const nextQueryKey = [
@@ -3780,6 +3785,7 @@ function AdminDashboard(): JSX.Element {
     beginManagedRequest,
     isUsersCollectionRoute,
     route,
+    waitingForUsersSystemSettings,
     usersPage,
     usersQuery,
     systemSettings?.adminDefaultActiveUsersOnly,
