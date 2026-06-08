@@ -173,6 +173,7 @@
         "tests::abandoned_",
         "tests::begin_",
         "tests::billing_",
+        "tests::db_",
         "tests::monthly_",
         "tests::quarantine_",
         "tests::quarantined_",
