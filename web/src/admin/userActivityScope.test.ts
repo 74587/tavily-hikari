@@ -3,7 +3,6 @@ import { describe, expect, it } from 'bun:test'
 import {
   resolveAdminUserActivityScope,
   resolveAdminUserActivityScopeFromSettings,
-  resolveAdminUserActivityScopeFromSettingsOrThrow,
 } from './userActivityScope'
 
 describe('resolveAdminUserActivityScope', () => {
@@ -42,15 +41,5 @@ describe('resolveAdminUserActivityScope', () => {
         { adminDefaultActiveUsersOnly: true },
       ),
     ).toBe('active90d')
-  })
-
-  it('throws when the empty-query scope still has no settings to resolve from', () => {
-    expect(() => resolveAdminUserActivityScopeFromSettingsOrThrow('', null, null)).toThrow(
-      'Missing system settings for admin user activity scope.',
-    )
-  })
-
-  it('still allows search to expand to all users without settings', () => {
-    expect(resolveAdminUserActivityScopeFromSettingsOrThrow('charlie', null, null)).toBe('all')
   })
 })

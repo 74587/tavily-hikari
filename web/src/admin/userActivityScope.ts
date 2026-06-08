@@ -22,17 +22,3 @@ export function resolveAdminUserActivityScopeFromSettings(
     primarySettings?.adminDefaultActiveUsersOnly ?? fallbackSettings?.adminDefaultActiveUsersOnly,
   )
 }
-
-export function resolveAdminUserActivityScopeFromSettingsOrThrow(
-  query: string,
-  primarySettings: AdminUserActivityScopeSettingsLike | null | undefined,
-  fallbackSettings?: AdminUserActivityScopeSettingsLike | null,
-): AdminUserActivityScope {
-  if (query.trim().length > 0) return 'all'
-  const adminDefaultActiveUsersOnly =
-    primarySettings?.adminDefaultActiveUsersOnly ?? fallbackSettings?.adminDefaultActiveUsersOnly
-  if (adminDefaultActiveUsersOnly == null) {
-    throw new Error('Missing system settings for admin user activity scope.')
-  }
-  return adminDefaultActiveUsersOnly ? 'active90d' : 'all'
-}

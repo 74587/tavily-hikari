@@ -221,7 +221,10 @@ pub async fn serve(
             "/api/settings/client-ip/observed-headers",
             get(get_observed_client_ip_requests),
         )
-        .route("/api/settings/forward-proxy", put(put_forward_proxy_settings))
+        .route(
+            "/api/settings/forward-proxy",
+            get(get_forward_proxy_settings).put(put_forward_proxy_settings),
+        )
         .route(
             "/api/settings/forward-proxy/validate",
             post(post_forward_proxy_candidate_validation),

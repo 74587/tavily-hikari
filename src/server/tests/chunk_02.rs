@@ -2233,7 +2233,7 @@ async fn spawn_admin_forward_proxy_server_with_geo_origin(
         .route("/api/settings/system", put(put_system_settings))
         .route(
             "/api/settings/forward-proxy",
-            put(put_forward_proxy_settings),
+            get(get_forward_proxy_settings).put(put_forward_proxy_settings),
         )
         .route(
             "/api/settings/forward-proxy/validate",

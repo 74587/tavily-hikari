@@ -118,7 +118,7 @@ import {
 } from './quotaSlider'
 import {
   resolveAdminUserActivityScope,
-  resolveAdminUserActivityScopeFromSettingsOrThrow,
+  resolveAdminUserActivityScopeFromSettings,
 } from './userActivityScope'
 import { formatRequestRateScope, formatRequestRateSummary, resolveRequestRate } from '../requestRate'
 import {
@@ -3771,10 +3771,9 @@ function AdminDashboard(): JSX.Element {
         USERS_PER_PAGE,
         usersQuery,
         usersTagFilterId,
-        resolveAdminUserActivityScopeFromSettingsOrThrow(
+        resolveAdminUserActivityScope(
           usersQuery,
-          systemSettings,
-          systemSettings,
+          systemSettings?.adminDefaultActiveUsersOnly,
         ),
         usersSort,
         usersSortOrder,
@@ -4737,7 +4736,7 @@ function AdminDashboard(): JSX.Element {
               USERS_PER_PAGE,
               usersQuery,
               usersTagFilterId,
-              resolveAdminUserActivityScopeFromSettingsOrThrow(
+              resolveAdminUserActivityScopeFromSettings(
                 usersQuery,
                 loadedSystemSettings,
                 systemSettings,
@@ -6231,7 +6230,7 @@ function AdminDashboard(): JSX.Element {
       USERS_PER_PAGE,
       usersQuery,
       usersTagFilterId,
-      resolveAdminUserActivityScopeFromSettingsOrThrow(
+      resolveAdminUserActivityScopeFromSettings(
         usersQuery,
         settingsForUsers,
         systemSettings,
@@ -7316,8 +7315,6 @@ function AdminDashboard(): JSX.Element {
       : allowRegistration
         ? usersStrings.registration.enabled
         : usersStrings.registration.disabled
-  const effectiveUserActivityScope: 'all' | 'active90d' =
-    resolveAdminUserActivityScope(usersQuery, systemSettings?.adminDefaultActiveUsersOnly)
   const usersFilterStatusText =
     systemSettings?.adminDefaultActiveUsersOnly
       ? usersQuery.trim().length > 0

@@ -24,6 +24,24 @@ async fn get_settings(
     }))
 }
 
+async fn get_forward_proxy_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<tavily_hikari::ForwardProxySettingsResponse>, (StatusCode, String)> {
+    if !is_admin_request(state.as_ref(), &headers) {
+        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+    }
+    state
+        .proxy
+        .get_forward_proxy_settings()
+        .await
+        .map(Json)
+        .map_err(|err| {
+            eprintln!("get forward proxy settings error: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        })
+}
+
 async fn put_system_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

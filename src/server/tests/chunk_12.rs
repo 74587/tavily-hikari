@@ -84,6 +84,27 @@
         assert_eq!(admin_user_list_stats["activeUsers90d"].as_i64(), Some(0));
         assert_eq!(admin_user_list_stats["totalUsers"].as_i64(), Some(0));
 
+        let forward_proxy = client
+            .get(format!("http://{addr}/api/settings/forward-proxy"))
+            .send()
+            .await
+            .expect("get forward proxy settings");
+        assert_eq!(forward_proxy.status(), StatusCode::OK);
+        let forward_proxy_body = forward_proxy
+            .json::<serde_json::Value>()
+            .await
+            .expect("decode forward proxy settings");
+        assert_eq!(
+            forward_proxy_body["proxyUrls"].as_array().map(std::vec::Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            forward_proxy_body["subscriptionUrls"]
+                .as_array()
+                .map(std::vec::Vec::len),
+            Some(0)
+        );
+
         let _ = std::fs::remove_file(db_path);
     }
 
