@@ -96,8 +96,6 @@ export interface DashboardQuotaChargeCardData {
 }
 
 export interface DashboardOverviewStrings {
-  title: string
-  description: string
   loading: string
   summaryUnavailable: string
   statusUnavailable: string
@@ -1212,18 +1210,6 @@ export default function DashboardOverview({
 
   return (
     <div className="dashboard-overview-stack">
-      <section className="surface panel dashboard-hero-panel">
-        <div className="panel-header">
-          <div>
-            <h2>{strings.title}</h2>
-            <p className="panel-description">{strings.description}</p>
-          </div>
-          <button type="button" className="btn btn-outline" onClick={() => onOpenModule('tokens')}>
-            {strings.openModule}
-          </button>
-        </div>
-      </section>
-
       <section className="surface panel dashboard-priority-panel" aria-label={strings.riskTitle}>
         <div className="dashboard-priority-copy">
           <span className={`dashboard-priority-kicker${priorityCount > 0 ? ' dashboard-priority-kicker-warn' : ''}`}>

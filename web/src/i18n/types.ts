@@ -213,8 +213,6 @@ export interface AdminTranslationsShape {
     alerts: string; systemSettings: string; proxySettings: string
   }
   dashboard: {
-    title: string
-    description: string
     loading: string
     summaryUnavailable: string
     statusUnavailable: string

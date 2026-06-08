@@ -19,6 +19,9 @@ describe('DashboardOverview Storybook coverage', () => {
     const args = dashboardStories.HiddenSeriesEmpty.args
     expect(args).toBeDefined()
     const markup = renderToStaticMarkup(createElement(meta.component, args as never))
+    expect(markup).not.toContain('dashboard-hero-panel')
+    expect(markup).not.toContain('Operations Dashboard')
+    expect(markup).not.toContain('Global health, risk signals, and actionable activity in one place.')
     expect(markup).toContain('No visible chart series for the current selection.')
     expect(markup).toContain('Traffic Trends')
     expect(markup).toContain('Local time axis · Fixed range')

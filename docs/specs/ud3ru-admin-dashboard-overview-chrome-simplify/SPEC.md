@@ -4,13 +4,14 @@
 
 - Status: 已完成（merge-ready）
 - Created: 2026-03-30
-- Last: 2026-03-30
+- Last: 2026-06-08
 
 ## 背景 / 问题陈述
 
 - `/admin/dashboard` 顶部总览已经完成“今日 / 本月 / 当前状态”的信息分层，但当前实现仍保留一层额外 summary 外壳，视觉上重复包裹。
 - `DashboardOverview` 内部的 hero、summary block、summary metric card 和今日对比托盘仍叠加了渐变/光晕背景，和现有 dashboard 其余区域相比显得过重。
 - “较昨日同刻”胶囊在暗色主题下使用固定红绿文字配半透明底色，对比度不足，读数不够稳定。
+- 页头下方仍额外保留一条 dashboard hero 横幅，重复展示“运营仪表盘”标题、说明文案和令牌入口，和已存在的 `AdminPanelHeader` 形成冗余 chrome。
 
 ## 目标 / 非目标
 
@@ -19,6 +20,7 @@
 - 去掉 summary aggregate 的冗余外层卡片壳，只保留三块真正承载信息的总览结构。
 - 去掉 `DashboardOverview` 内自定义的渐变背景，让总览和当前 admin 面板语言更统一。
 - 将 delta 胶囊改为基于现有 theme token 的高对比度样式，修正暗色主题下的可读性。
+- 删除 `DashboardOverview` 顶部 hero 横幅，让 dashboard 内容从风险面板直接开始，不再重复页级标题与说明。
 - 补一条稳定的 Storybook 中文暗色证据 story，专门覆盖这次视觉收口。
 
 ### Non-goals
@@ -33,6 +35,7 @@
 
 - `web/src/admin/DashboardOverview.tsx`
   - 移除 summary 区外层 `surface/panel` 包裹。
+  - 移除顶部 `dashboard-hero-panel` 渲染与对应文案/按钮。
 - `web/src/index.css`
   - 收掉 `DashboardOverview` 范围内的渐变/radial 背景。
   - 提升 `metric-delta-*` 的明度与边框对比。
@@ -51,6 +54,7 @@
 - 总览主区域不再出现额外的外层 summary 卡片壳。
 - `DashboardOverview` 内部不再保留当前自定义渐变背景。
 - 正向、负向、中性 delta 胶囊在暗色主题下都能清楚读出 label 和 value。
+- dashboard 页头下方不再出现额外 hero 横幅，风险面板成为页头后的首个内容块。
 
 ### SHOULD
 
@@ -65,6 +69,7 @@
 ### Core flows
 
 - 管理员打开 `/admin/dashboard` 时，顶部总览直接呈现三块主内容层级，而不是先进入一层大卡片再看内部块。
+- 管理员打开 `/admin/dashboard` 时，`AdminPanelHeader` 继续承担页级标题语义；`DashboardOverview` 本身不再重复渲染“运营仪表盘”标题、说明文案或顶部令牌入口。
 - 今日对比条目的胶囊仍保留 `positive / negative / neutral` 语义，但主要通过 theme token 的底色、边框与高对比正文表达，而不是靠低对比彩色文字硬撑。
 - Storybook 的中文暗色画布能同时展示正向、负向、中性三类胶囊，并验证 summary 外层壳已经被移除。
 
@@ -82,6 +87,10 @@
 - Given 管理员进入 `/admin/dashboard`
   When 顶部总览渲染
   Then `今日 / 本月 / 站点当前状态` 直接作为主视觉层级展示，不再出现额外外层 summary 壳。
+
+- Given 管理员进入 `/admin/dashboard`
+  When 页头之后的首屏内容渲染
+  Then 不再出现额外 `dashboard-hero-panel`、重复的“运营仪表盘”文案或顶部“查看令牌”按钮，风险面板直接跟在页头之后。
 
 - Given 仪表盘运行在亮色或暗色主题
   When 查看 `DashboardOverview`
@@ -110,6 +119,7 @@
 ## 文档更新（Docs to Update）
 
 - `docs/specs/README.md`: 新增该 spec 索引，并在交付收口时同步状态与备注。
+- 本次不新增 project doc / solution 文档；沿用既有 topic spec 更新。
 
 ## 计划资产（Plan assets）
 
@@ -120,13 +130,14 @@
 
 - Storybook 证据画布：`Admin/Components/DashboardOverview/ZhDarkEvidence`
 - 证据目标源：`storybook_canvas`
-- 证据绑定 SHA：`9d52eafa9e91b5551f5768bb0f15a79a0575279b`
-- 证据绑定说明：证据图已在聊天回图完成验收；本次与 `main` 的同步未改动 `DashboardOverview.tsx`、`DashboardOverview.stories.tsx` 或 dashboard-overview 相关样式选择器，因此沿用已审阅的 spec 证据资产并重新绑定到当前快车道收口版本。
+- 证据绑定版本：`2026-06-08 dashboard hero removal worktree`
+- 证据绑定说明：证据图已按本次实现重新截取；Storybook 证据画布与真实 `/admin` 页面均已复核顶部 hero 缺失、页头后直接进入风险面板。
 - 证据资产：`docs/specs/ud3ru-admin-dashboard-overview-chrome-simplify/assets/dashboard-overview-zh-dark-evidence.png`
 
 ![Admin Dashboard 总览 ZhDarkEvidence](./assets/dashboard-overview-zh-dark-evidence.png)
 
 - 浏览器复核：
+  - `dashboard-hero-panel` 不再存在，且页面文本中不再出现该 hero 的标题/说明文案。
   - `dashboard-summary-panel` 已不再携带 `surface` / `panel` 类名。
   - summary block、summary card、today comparison tray 的 `background-image` 均为 `none`。
   - 实际 `/admin` 页面桌面断点无横向滚动：`body/doc scrollWidth = 1425`，`viewportWidth = 1440`。
@@ -158,6 +169,7 @@
 - 2026-03-30: review-loop follow-up 补回 summary 区在 admin shell 窄屏断点下的共享 gutter，并清理 specs index 的重复 `yc6pp` 行。
 - 2026-03-30: 按快车道收口要求将最终 Storybook 证据图落盘到 spec `assets/`，移除该 spec 的 PR-only 证据块表述，并补上 `.codex-artifacts/` 忽略规则。
 - 2026-03-30: 与 `main` 完成 base sync 后，移除仓库内已追踪的 `.codex-artifacts/*` 遗留文件，并确认 `DashboardOverview` 渲染输入未变，因此将已审阅的 spec 证据图重新绑定到同步后的最新 head。
+- 2026-06-08: 删除 `DashboardOverview` 顶部 hero 横幅，同步清理前端翻译/类型/Storybook 残留字段，并以既有 `ZhDarkEvidence` 证据画布补充“hero 已移除”的断言与浏览器复核说明。
 
 ## 参考（References）
 

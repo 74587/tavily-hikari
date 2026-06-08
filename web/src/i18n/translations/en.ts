@@ -226,8 +226,6 @@ export const EN: TranslationShape = {
         proxySettings: 'Proxy Settings',
       },
       dashboard: {
-        title: 'Operations Dashboard',
-        description: 'Global health, risk signals, and actionable activity in one place.',
         loading: 'Loading dashboard data…',
         summaryUnavailable: 'Unable to load the summary windows right now.',
         statusUnavailable: 'Unable to load the current site status right now.',

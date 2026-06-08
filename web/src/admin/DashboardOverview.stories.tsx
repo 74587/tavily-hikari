@@ -44,8 +44,6 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 const strings = {
-  title: 'Operations Dashboard',
-  description: 'Global health, risk signals, and actionable activity in one place.',
   loading: 'Loading dashboard data…',
   summaryUnavailable: 'Unable to load the summary windows right now.',
   statusUnavailable: 'Unable to load the current site status right now.',
@@ -436,8 +434,6 @@ const statusMetrics = [
 ]
 
 const zhStrings = {
-  title: '管理总览',
-  description: '把全站运行、风险信号和可执行动作收在同一个面板里。',
   loading: '正在加载仪表盘数据…',
   summaryUnavailable: '暂时无法加载期间摘要。',
   statusUnavailable: '暂时无法加载站点当前状态。',
@@ -988,6 +984,10 @@ export const ZhDarkEvidence: Story = {
   play: async ({ canvasElement }) => {
     await new Promise((resolve) => window.setTimeout(resolve, 50))
 
+    if (canvasElement.querySelector('.dashboard-hero-panel') != null) {
+      throw new Error('Expected dashboard hero panel to be removed')
+    }
+
     const summaryPanel = canvasElement.querySelector<HTMLElement>('.dashboard-summary-panel')
     if (summaryPanel == null) {
       throw new Error('Expected dashboard summary panel to render')
@@ -1028,6 +1028,11 @@ export const ZhDarkEvidence: Story = {
     }
 
     const text = canvasElement.ownerDocument.body.textContent ?? ''
+    for (const forbidden of ['管理总览', '把全站运行、风险信号和可执行动作收在同一个面板里。']) {
+      if (text.includes(forbidden)) {
+        throw new Error(`Expected dashboard overview evidence story to exclude removed hero copy: ${forbidden}`)
+      }
+    }
     for (const expected of ['今日', '本月', '站点当前状态', '较昨日同刻', '未知调用', '主要', '次要']) {
       if (!text.includes(expected)) {
         throw new Error(`Expected dashboard overview evidence story to contain: ${expected}`)

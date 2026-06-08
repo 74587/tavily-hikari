@@ -241,7 +241,6 @@
   .card,
   .token-access-modal,
   .user-console-mobile-card,
-  .dashboard-hero-panel,
   .forward-proxy-summary-panel,
   .table-wrapper,
   .guide-panel,
@@ -317,7 +316,6 @@
     gap: 14px;
   }
 
-  .admin-main-content .dashboard-hero-panel,
   .admin-main-content .dashboard-priority-panel,
   .admin-main-content .dashboard-summary-block,
   .admin-main-content .dashboard-trend-panel,
@@ -568,15 +566,6 @@
       background: transparent;
       box-shadow: none;
     }
-  }
-
-  .admin-main-content .dashboard-hero-panel {
-    padding: 0 0 6px;
-    border: 0;
-    border-bottom: 1px solid hsl(var(--border) / 0.6);
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
   }
 
   .admin-main-content .dashboard-priority-panel {

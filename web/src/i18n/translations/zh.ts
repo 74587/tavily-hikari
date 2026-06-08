@@ -225,8 +225,6 @@ export const ZH: TranslationShape = {
         proxySettings: '代理设置',
       },
       dashboard: {
-        title: '运营仪表盘',
-        description: '在一个页面查看全局健康度、风险与可执行动作。',
         loading: '正在加载仪表盘数据…',
         summaryUnavailable: '暂时无法加载期间摘要。',
         statusUnavailable: '暂时无法加载站点当前状态。',

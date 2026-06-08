@@ -90,7 +90,6 @@
   .dark .card,
   .dark .token-access-modal,
   .dark .user-console-mobile-card,
-  .dark .dashboard-hero-panel,
   .dark .forward-proxy-summary-panel,
   .dark .table-wrapper,
   .dark .guide-panel,
@@ -143,7 +142,6 @@
     box-shadow: var(--shadow-clay-card);
   }
 
-  .dark .admin-main-content .dashboard-hero-panel,
   .dark .admin-main-content .dashboard-priority-panel,
   .dark .admin-main-content .dashboard-summary-block,
   .dark .admin-main-content .dashboard-trend-panel,
@@ -154,11 +152,6 @@
     border-color: hsl(var(--border) / 0.58);
     background: oklch(0.238 0.025 305 / 0.92);
     box-shadow: var(--shadow-clay-card);
-  }
-
-  .dark .admin-main-content .dashboard-hero-panel {
-    background: transparent;
-    box-shadow: none;
   }
 
   .dark .admin-main-content .dashboard-summary-metrics {
