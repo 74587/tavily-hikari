@@ -1,5 +1,5 @@
 import { Icon } from '../lib/icons'
-import { createContext, type PropsWithChildren, type ReactNode, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, type PropsWithChildren, type ReactNode, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ADMIN_SIDEBAR_STACK_MAX, useResponsiveModes } from '../lib/responsive'
 
@@ -81,6 +81,11 @@ export default function AdminShell({
     }
   }, [isMenuOpen, isStackedSidebar])
 
+  const handleSelectItem = useCallback((target: AdminNavTarget) => {
+    if (isStackedSidebar) setIsMenuOpen(false)
+    onSelectItem(target)
+  }, [isStackedSidebar, onSelectItem])
+
   return (
     <AdminSidebarUtilityContext.Provider value={sidebarUtilityHost}>
       <div
@@ -129,7 +134,7 @@ export default function AdminShell({
                       icon={item.icon}
                       active={active}
                       className={childActive ? 'admin-nav-item-parent-active' : undefined}
-                      onClick={() => onSelectItem(item.target)}
+                      onClick={() => handleSelectItem(item.target)}
                     >
                       <span>{item.label}</span>
                     </AdminNavButton>
@@ -141,7 +146,7 @@ export default function AdminShell({
                             type="button"
                             className={`admin-nav-subitem${child.target === activeItem ? ' admin-nav-subitem-active' : ''}`}
                             aria-current={child.target === activeItem ? 'page' : undefined}
-                            onClick={() => onSelectItem(child.target)}
+                            onClick={() => handleSelectItem(child.target)}
                           >
                             <span className="admin-nav-subitem-marker" aria-hidden="true" />
                             <span>{child.label}</span>

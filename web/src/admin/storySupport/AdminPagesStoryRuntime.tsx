@@ -5198,13 +5198,13 @@ function UsersUsagePageCanvas({
         </section>
       </div>
 
-      <section className="surface panel">
-        {usersFilterStatusText && (
-          <p className="panel-description admin-usage-filter-status" data-testid="users-filter-status">
-            {usersFilterStatusText}
-          </p>
-        )}
+      {usersFilterStatusText && (
+        <p className="panel-description admin-usage-filter-status" data-testid="users-filter-status">
+          {usersFilterStatusText}
+        </p>
+      )}
 
+      <section className="surface panel">
         <div className="table-wrapper jobs-table-wrapper">
           {filteredUsers.length === 0 ? (
             <div className="empty-state alert">{users.empty.none}</div>
