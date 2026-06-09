@@ -1457,6 +1457,7 @@ include!("key_store_request_log_body_retention.rs");
 include!("key_store_token_logs.rs");
 include!("key_store_alerts.rs");
 include!("key_store_announcements.rs");
+include!("key_store_dashboard_window_metrics.rs");
 include!("key_store_request_logs_and_dashboard.rs");
 include!("key_store_token_success_metrics.rs");
 include!("key_store_jobs.rs");
