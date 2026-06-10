@@ -2,11 +2,9 @@
     async fn api_keys_batch_does_not_override_existing_group() {
         let db_path = temp_db_path("keys-batch-group-no-override");
         let db_str = db_path.to_string_lossy().to_string();
-
         let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
             .await
             .expect("proxy created");
-
         // Existing key already belongs to a group.
         proxy
             .add_or_undelete_key_in_group("tvly-existing", Some("old"))
@@ -24,7 +22,6 @@
             .connect_with(options)
             .await
             .expect("open db pool");
-
         let forward_auth = ForwardAuthConfig::new(
             Some(HeaderName::from_static("x-forward-user")),
             Some("admin".to_string()),
@@ -32,7 +29,6 @@
             None,
         );
         let addr = spawn_keys_admin_server(proxy, forward_auth, false).await;
-
         let client = Client::new();
         let url = format!("http://{}/api/keys/batch", addr);
         let resp = client
@@ -42,13 +38,10 @@
             .send()
             .await
             .expect("request succeeds");
-
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
         let body: serde_json::Value = resp.json().await.expect("parse json body");
         let summary = body.get("summary").expect("summary exists");
         assert_eq!(summary.get("existed").and_then(|v| v.as_u64()), Some(1));
-
         let group_name: Option<String> =
             sqlx::query_scalar("SELECT group_name FROM api_keys WHERE api_key = ?")
                 .bind("tvly-existing")
@@ -60,7 +53,6 @@
             Some("old"),
             "group_name should not be overridden for existing keys"
         );
-
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -1336,28 +1328,67 @@ colo=LAX
             .await
             .expect("create user session");
         let pool = connect_sqlite_test_pool(&db_str).await;
-        sqlx::query(
-            r#"
-            INSERT INTO auth_token_logs (
-                token_id,
-                method,
+        let now = Utc::now().timestamp();
+        for offset in 0..55 {
+            let billable = offset % 2 == 0;
+            let (
                 path,
-                query,
-                http_status,
-                mcp_status,
                 business_credits,
                 billing_state,
-                result_status,
-                error_message,
-                created_at
-            ) VALUES (?, 'POST', '/mcp', NULL, 200, 200, 7, 'charged', 'success', NULL, ?)
-            "#,
-        )
-        .bind(&bound_token.id)
-        .bind(Utc::now().timestamp())
-        .execute(&pool)
-        .await
-        .expect("insert user token charged log");
+                request_kind_key,
+                request_kind_label,
+                counts_business_quota,
+            ) = if billable {
+                (
+                    "/api/tavily/search",
+                    Some(7),
+                    "charged",
+                    "api:search",
+                    "API | search",
+                    1,
+                )
+            } else {
+                (
+                    "/api/tavily/usage",
+                    None,
+                    "none",
+                    "api:usage",
+                    "API | usage",
+                    0,
+                )
+            };
+            sqlx::query(
+                r#"
+                INSERT INTO auth_token_logs (
+                    token_id,
+                    method,
+                    path,
+                    query,
+                    http_status,
+                    mcp_status,
+                    business_credits,
+                    billing_state,
+                    result_status,
+                    error_message,
+                    request_kind_key,
+                    request_kind_label,
+                    counts_business_quota,
+                    created_at
+                ) VALUES (?, 'POST', ?, NULL, 200, 200, ?, ?, 'success', NULL, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&bound_token.id)
+            .bind(path)
+            .bind(business_credits)
+            .bind(billing_state)
+            .bind(request_kind_key)
+            .bind(request_kind_label)
+            .bind(counts_business_quota)
+            .bind(now - offset)
+            .execute(&pool)
+            .await
+            .expect("insert user token log");
+        }
         let proxy_for_test = proxy.clone();
 
         let mut oauth_options = linuxdo_oauth_options_for_test();
@@ -1609,7 +1640,7 @@ colo=LAX
         );
 
         let token_logs_url = format!(
-            "http://{}/api/user/tokens/{}/logs?limit=20",
+            "http://{}/api/user/tokens/{}/logs?limit=50",
             addr, bound_token.id
         );
         let token_logs_resp = client
@@ -1621,13 +1652,48 @@ colo=LAX
         assert_eq!(token_logs_resp.status(), reqwest::StatusCode::OK);
         let token_logs_body: serde_json::Value =
             token_logs_resp.json().await.expect("user token logs json");
+        let token_log_items = token_logs_body.as_array().expect("user token logs array");
+        assert_eq!(token_log_items.len(), 50);
         assert_eq!(
-            token_logs_body
-                .as_array()
-                .and_then(|items| items.first())
+            token_log_items
+                .first()
                 .and_then(|value| value.get("businessCredits"))
                 .and_then(|value| value.as_i64()),
             Some(7)
+        );
+        assert_eq!(
+            token_log_items
+                .first()
+                .and_then(|value| value.get("countsBusinessQuota"))
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+
+        let billable_logs_url = format!(
+            "http://{}/api/user/tokens/{}/logs?limit=50&billing=billable",
+            addr, bound_token.id
+        );
+        let billable_logs_resp = client
+            .get(&billable_logs_url)
+            .header(reqwest::header::COOKIE, user_cookie.clone())
+            .send()
+            .await
+            .expect("billable user token logs request");
+        assert_eq!(billable_logs_resp.status(), reqwest::StatusCode::OK);
+        let billable_logs_body: serde_json::Value = billable_logs_resp
+            .json()
+            .await
+            .expect("billable user token logs json");
+        let billable_items = billable_logs_body
+            .as_array()
+            .expect("billable user token logs array");
+        assert_eq!(billable_items.len(), 28);
+        assert!(
+            billable_items.iter().all(|value| value
+                .get("countsBusinessQuota")
+                .and_then(|inner| inner.as_bool())
+                == Some(true)),
+            "billing=billable should only return request kinds that count business quota"
         );
 
         proxy_for_test
