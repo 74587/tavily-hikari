@@ -2456,6 +2456,91 @@ impl KeyStore {
         Ok(month_metrics)
     }
 
+    async fn fetch_dashboard_month_series_points_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        range_start: i64,
+        range_end: i64,
+        now_cutoff: i64,
+    ) -> Result<Vec<DashboardMonthSeriesPoint>, ProxyError> {
+        if range_end <= range_start {
+            return Ok(Vec::new());
+        }
+
+        let mut points = Vec::new();
+        let mut running_total = SummaryWindowMetrics::default();
+        let current_local_day_start = local_day_bucket_start_utc_ts(now_cutoff.saturating_sub(1));
+
+        for bucket_start in (range_start..range_end).step_by(SECS_PER_DAY as usize) {
+            let bucket_end = next_local_day_start_utc_ts(bucket_start).min(range_end);
+            let point = if bucket_start >= now_cutoff {
+                DashboardMonthSeriesPoint {
+                    bucket_start,
+                    display_bucket_start: Some(bucket_start),
+                    ..DashboardMonthSeriesPoint::default()
+                }
+            } else {
+                let bucket_metrics = if bucket_start == current_local_day_start {
+                    Self::fetch_dashboard_rollup_window_metrics_tx(
+                        tx,
+                        SECS_PER_MINUTE,
+                        bucket_start,
+                        Some(bucket_end.min(now_cutoff)),
+                    )
+                    .await?
+                } else {
+                    Self::fetch_dashboard_rollup_bucket_metrics_tx(tx, SECS_PER_DAY, bucket_start)
+                        .await?
+                };
+                add_summary_window_metrics(&mut running_total, &bucket_metrics);
+                DashboardMonthSeriesPoint {
+                    bucket_start,
+                    display_bucket_start: Some(bucket_start),
+                    total: Some(running_total.total_requests),
+                    valuable_success: Some(running_total.valuable_success_count),
+                    valuable_failure: Some(running_total.valuable_failure_count),
+                    other_success: Some(running_total.other_success_count),
+                    other_failure: Some(running_total.other_failure_count),
+                    unknown: Some(running_total.unknown_count),
+                    upstream_exhausted: Some(running_total.upstream_exhausted_key_count),
+                    new_keys: Some(running_total.new_keys),
+                    new_quarantines: Some(running_total.new_quarantines),
+                }
+            };
+            points.push(point);
+        }
+
+        Ok(points)
+    }
+
+    pub(crate) async fn fetch_dashboard_month_series(
+        &self,
+        summary_windows: &SummaryWindows,
+    ) -> Result<DashboardMonthSeries, ProxyError> {
+        let mut tx = self.pool.begin().await?;
+
+        let current = Self::fetch_dashboard_month_series_points_tx(
+            &mut tx,
+            summary_windows.month_start,
+            summary_windows.month_period_end,
+            summary_windows.month_end,
+        )
+        .await?;
+        let comparison = Self::fetch_dashboard_month_series_points_tx(
+            &mut tx,
+            summary_windows.previous_month_start,
+            summary_windows.previous_month_end,
+            summary_windows.previous_month_end,
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(DashboardMonthSeries {
+            current,
+            comparison,
+        })
+    }
+
     pub(crate) async fn fetch_summary_windows(
         &self,
         bounds: SummaryWindowBounds,

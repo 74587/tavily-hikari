@@ -1,8 +1,9 @@
 import type {
   DashboardHourlyRequestBucket,
   DashboardHourlyRequestWindow,
+  DashboardMonthSeries,
+  DashboardMonthSeriesPoint,
   SummaryWindowMetrics,
-  SummaryWindowsResponse,
 } from '../api'
 import { buildHourlyRangeSlots, getHourlyBucketsInRange } from './dashboardHourlyCharts'
 
@@ -38,15 +39,6 @@ export function buildMonthBackdropBaseline(
   values: ReadonlyArray<number | null>,
 ): number {
   return buildBackdropBaseline(getSummaryMetricValue(month, metricKey), values)
-}
-
-export function getPreviousMonthRange(summaryWindows: SummaryWindowsResponse): { rangeStart: number; rangeEnd: number } {
-  const rangeStart = summaryWindows.previous_month_start
-  const rangeEnd = summaryWindows.previous_month_end
-  if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd) && rangeEnd! > rangeStart!) {
-    return { rangeStart: rangeStart!, rangeEnd: rangeEnd! }
-  }
-  return { rangeStart: summaryWindows.month_start, rangeEnd: summaryWindows.month_start }
 }
 
 function getSummaryMetricValue(month: SummaryWindowMetrics, metricKey: DashboardBackdropMetricKey): number {
@@ -200,6 +192,61 @@ export function buildPeriodBackdropSeries(
       options.displayBucketSeconds,
     )
     : []
+  const slotCount = Math.max(current.length, comparison.length)
+  return {
+    current: Array.from({ length: slotCount }, (_, index) => current[index] ?? null),
+    comparison: Array.from({ length: slotCount }, (_, index) => comparison[index] ?? null),
+  }
+}
+
+function getMonthSeriesMetricValue(
+  point: DashboardMonthSeriesPoint,
+  metricKey: DashboardBackdropMetricKey,
+): number | null {
+  switch (metricKey) {
+    case 'total':
+      return point.total
+    case 'valuableSuccess':
+      return point.valuableSuccess
+    case 'valuableFailure':
+      return point.valuableFailure
+    case 'otherSuccess':
+      return point.otherSuccess
+    case 'otherFailure':
+      return point.otherFailure
+    case 'unknown':
+      return point.unknown
+    case 'upstreamExhausted':
+      return point.upstreamExhausted
+    case 'newKeys':
+      return point.newKeys
+    case 'newQuarantines':
+      return point.newQuarantines
+  }
+}
+
+function buildMonthSeriesIncrements(
+  points: ReadonlyArray<DashboardMonthSeriesPoint>,
+  metricKey: DashboardBackdropMetricKey,
+): Array<number | null> {
+  let previous: number | null = null
+  return points.map((point) => {
+    const current = getMonthSeriesMetricValue(point, metricKey)
+    if (current == null) {
+      return null
+    }
+    const increment = previous == null ? current : current - previous
+    previous = current
+    return Math.max(0, increment)
+  })
+}
+
+export function buildMonthSeriesBackdropSeries(
+  monthSeries: DashboardMonthSeries,
+  metricKey: DashboardBackdropMetricKey = 'total',
+): { current: Array<number | null>; comparison: Array<number | null> } {
+  const current = buildMonthSeriesIncrements(monthSeries.current, metricKey)
+  const comparison = buildMonthSeriesIncrements(monthSeries.comparison, metricKey)
   const slotCount = Math.max(current.length, comparison.length)
   return {
     current: Array.from({ length: slotCount }, (_, index) => current[index] ?? null),

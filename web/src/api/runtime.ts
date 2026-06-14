@@ -119,10 +119,30 @@ export interface DashboardHourlyRequestWindow {
   buckets: DashboardHourlyRequestBucket[]
 }
 
+export interface DashboardMonthSeriesPoint {
+  bucketStart: number
+  displayBucketStart: number | null
+  total: number | null
+  valuableSuccess: number | null
+  valuableFailure: number | null
+  otherSuccess: number | null
+  otherFailure: number | null
+  unknown: number | null
+  upstreamExhausted: number | null
+  newKeys: number | null
+  newQuarantines: number | null
+}
+
+export interface DashboardMonthSeries {
+  current: DashboardMonthSeriesPoint[]
+  comparison: DashboardMonthSeriesPoint[]
+}
+
 export interface DashboardOverviewResponse {
   summary: Summary
   summaryWindows: SummaryWindowsResponse
   hourlyRequestWindow: DashboardHourlyRequestWindow
+  monthSeries: DashboardMonthSeries
   siteStatus: DashboardSiteStatusSnapshot
   forwardProxy: DashboardForwardProxySnapshot
   trend: DashboardTrendBuckets

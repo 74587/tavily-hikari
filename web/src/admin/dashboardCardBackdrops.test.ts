@@ -4,6 +4,7 @@ import { buildDashboardHourlyRequestWindowFixture } from './dashboardHourlyChart
 import {
   buildBackdropBaseline,
   buildHourlyBackdropSeries,
+  buildMonthSeriesBackdropSeries,
   buildPeriodBackdropSeries,
 } from './dashboardCardBackdrops'
 
@@ -136,5 +137,26 @@ describe('dashboardCardBackdrops helpers', () => {
     expect(current.slice(7).every((value) => value == null)).toBe(true)
     expect(comparison.slice(0, 5).every((value) => value == null)).toBe(true)
     expect(current[4]).not.toBeNull()
+  })
+
+  it('builds month backdrops from cumulative month series while preserving future null slots', () => {
+    const monthSeries = {
+      current: [
+        { bucketStart: 1, displayBucketStart: 1, total: 100, valuableSuccess: 60, valuableFailure: 12, otherSuccess: 20, otherFailure: 5, unknown: 3, upstreamExhausted: 0, newKeys: 0, newQuarantines: 0 },
+        { bucketStart: 2, displayBucketStart: 2, total: 260, valuableSuccess: 150, valuableFailure: 28, otherSuccess: 51, otherFailure: 19, unknown: 12, upstreamExhausted: 1, newKeys: 1, newQuarantines: 0 },
+        { bucketStart: 3, displayBucketStart: 3, total: null, valuableSuccess: null, valuableFailure: null, otherSuccess: null, otherFailure: null, unknown: null, upstreamExhausted: null, newKeys: null, newQuarantines: null },
+      ],
+      comparison: [
+        { bucketStart: 11, displayBucketStart: 11, total: 90, valuableSuccess: 54, valuableFailure: 10, otherSuccess: 18, otherFailure: 5, unknown: 3, upstreamExhausted: 0, newKeys: 0, newQuarantines: 0 },
+        { bucketStart: 12, displayBucketStart: 12, total: 210, valuableSuccess: 126, valuableFailure: 24, otherSuccess: 40, otherFailure: 12, unknown: 8, upstreamExhausted: 1, newKeys: 0, newQuarantines: 0 },
+      ],
+    }
+
+    const totalBackdrop = buildMonthSeriesBackdropSeries(monthSeries, 'total')
+    const newKeysBackdrop = buildMonthSeriesBackdropSeries(monthSeries, 'newKeys')
+
+    expect(totalBackdrop.current).toEqual([100, 160, null])
+    expect(totalBackdrop.comparison).toEqual([90, 120, null])
+    expect(newKeysBackdrop.current).toEqual([0, 1, null])
   })
 })

@@ -44,6 +44,7 @@
 - `成功` 的“较昨日同刻”按 `success_count / total_requests` 计算；`错误` 按 `error_count / total_requests` 计算；两者都保留当前次数主值与 `今日占比` 副标题。
 - `今日` 的 `上游 Key 耗尽` 卡固定使用总览专用标签，并显示 `今日新增` 副标题；其主值与比较值都基于窗口内由系统自动标记 exhausted 的唯一 `key_id` 数量，而不是请求次数。
 - 摘要卡背景图必须展示对应完整周期的轴：`今日` 背景图覆盖服务端本地自然日完整 24 小时，`本月` 背景图覆盖服务端本地自然月完整日历周期；当前时刻之后的当前周期槽位必须保留为空（`null`），不得填 `0`、不得裁掉未来空间。
+- `本月` 背景图与其 `previous-month comparison line` 必须消费 overview / snapshot 提供的专用月度日粒度序列，不得复用 `hourlyRequestWindow` 或在前端从 49h 小时窗推断自然月形状。
 - 背景图的“完整周期显示轴”与主值 / delta 的“same-time 窗口”是两回事：主值和 delta 仍按现有截至当前时刻的统计窗口计算，背景图只负责把完整周期铺满。
 - 当 `yesterday.total_requests = 0` 且 `today.total_requests > 0` 时，`成功` / `错误` 不伪造百分点差，改为“昨日无基线”兜底文案并使用中性态。
 - 当 `today.total_requests = 0` 且 `yesterday.total_requests = 0` 时，`成功` / `错误` 的“较昨日同刻”显示 `0.0` 个百分点（或对应语言单位）并保持 `flat`。
@@ -81,3 +82,6 @@
 
 - source_type: `storybook_canvas`; story_id_or_title: `Admin/Components/DashboardOverview/ZhDarkEvidence`; state: `yesterday same-time window and polished today metric grid`; evidence_note: 验证今日/昨日同刻窗口对齐、今日明细两列三行卡片均分主块剩余高度、右下角信息组对齐、长 badge 单行紧凑展示，以及 `主要` / `次要` marker 不遮挡背景趋势线。
   ![管理仪表盘：昨日同刻窗口与今日明细卡片 polish](./assets/dashboard-yesterday-same-time-window.png)
+
+- source_type: `storybook_canvas`; story_id_or_title: `Admin/Components/DashboardOverview/ZhDarkEvidence`; state: `monthSeries full natural-month axis with previous-month comparison line`; evidence_note: 验证“本月”摘要卡背景已切换到专用月度日粒度序列，完整铺满自然月轴；未来日期保持空槽，且 `previous-month comparison line` 恢复可见，不再受 49h hourly window 截断。
+  ![管理仪表盘：本月完整月轴与上月参考线恢复](./assets/admin-dashboard-month-series-summary-storybook.png)

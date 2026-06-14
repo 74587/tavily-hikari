@@ -1210,6 +1210,10 @@
             snapshot_json.get("hourlyRequestWindow").is_some(),
             "hourly request window should exist"
         );
+        assert!(
+            snapshot_json.get("monthSeries").is_some(),
+            "month series should exist"
+        );
         assert_eq!(
             snapshot_json
                 .pointer("/summaryWindows/month/new_keys")
@@ -1317,6 +1321,22 @@
                 .and_then(|value| value.as_array())
                 .map(Vec::len),
             Some(49)
+        );
+        assert!(
+            snapshot_json
+                .pointer("/monthSeries/current")
+                .and_then(|value| value.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false),
+            "snapshot should expose current month series buckets"
+        );
+        assert!(
+            snapshot_json
+                .pointer("/monthSeries/comparison")
+                .and_then(|value| value.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false),
+            "snapshot should expose previous month comparison buckets"
         );
         let exhausted_key_count = snapshot_json
             .get("exhaustedKeys")

@@ -857,9 +857,46 @@ function demoSummaryWindows(
 function demoDashboardOverview(now = Date.now()) {
   const pulse = demoPulse(now)
   const currentHourStart = Math.floor(Date.now() / 3_600_000) * 3_600
+  const summaryWindows = demoSummaryWindows(currentHourStart, now)
+  const currentMonthDays = Math.max(0, Math.round((summaryWindows.month_period_end - summaryWindows.month_start) / 86_400))
+  const previousMonthDays = Math.max(0, Math.round((summaryWindows.previous_month_end - summaryWindows.previous_month_start) / 86_400))
+  const currentElapsedDays = Math.max(0, Math.ceil((summaryWindows.month_end - summaryWindows.month_start) / 86_400))
+  const monthSeriesCurrent = range(currentMonthDays).map((index) => {
+    const visible = index < currentElapsedDays
+    const total = visible ? 1_760 + index * 205 + ((index + pulse) % 3) * 55 : null
+    return {
+      bucketStart: summaryWindows.month_start + index * 86_400,
+      displayBucketStart: summaryWindows.month_start + index * 86_400,
+      total,
+      valuableSuccess: total == null ? null : Math.round(total * 0.67),
+      valuableFailure: total == null ? null : Math.round(total * 0.12),
+      otherSuccess: total == null ? null : Math.round(total * 0.14),
+      otherFailure: total == null ? null : Math.round(total * 0.04),
+      unknown: total == null ? null : Math.round(total * 0.03),
+      upstreamExhausted: total == null ? null : Math.floor(index / 4),
+      newKeys: total == null ? null : Math.floor(index / 3),
+      newQuarantines: total == null ? null : Math.floor(index / 7),
+    }
+  })
+  const monthSeriesComparison = range(previousMonthDays).map((index) => {
+    const total = 1_540 + index * 188 + ((index + pulse + 1) % 4) * 42
+    return {
+      bucketStart: summaryWindows.previous_month_start + index * 86_400,
+      displayBucketStart: summaryWindows.previous_month_start + index * 86_400,
+      total,
+      valuableSuccess: Math.round(total * 0.66),
+      valuableFailure: Math.round(total * 0.11),
+      otherSuccess: Math.round(total * 0.15),
+      otherFailure: Math.round(total * 0.05),
+      unknown: Math.round(total * 0.03),
+      upstreamExhausted: Math.floor((index + 1) / 5),
+      newKeys: Math.floor(index / 4),
+      newQuarantines: Math.floor(index / 8),
+    }
+  })
   return {
     summary: demoSummary(now),
-    summaryWindows: demoSummaryWindows(currentHourStart, now),
+    summaryWindows,
     hourlyRequestWindow: {
       bucketSeconds: 3600,
       visibleBuckets: 25,
@@ -877,6 +914,10 @@ function demoDashboardOverview(now = Date.now()) {
         apiNonBillable: 3 + (index % 5) + (index >= 42 ? pulse % 2 : 0),
         apiBillable: 18 + index + (index >= 45 ? pulse % 4 : 0),
       })),
+    },
+    monthSeries: {
+      current: monthSeriesCurrent,
+      comparison: monthSeriesComparison,
     },
     siteStatus: {
       remainingQuota: 66360 - (pulse % 7) * 24,

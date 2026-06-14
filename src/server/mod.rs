@@ -44,6 +44,8 @@ struct SummarySig {
     today: [i64; 15],
     yesterday: [i64; 15],
     month: [i64; 17],
+    month_series_current: Vec<[i64; 11]>,
+    month_series_comparison: Vec<[i64; 11]>,
     summary_window_starts: [i64; 3],
     proxy: Option<(i64, i64)>,
     exhausted_keys: Vec<String>,

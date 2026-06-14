@@ -378,6 +378,34 @@ describe('admin user tag api helpers', () => {
                 apiBillable: index === 48 ? 1 : 0,
               })),
             },
+            monthSeries: {
+              current: Array.from({ length: 31 }, (_, index) => ({
+                bucketStart: 1_775_481_600 + index * 86_400,
+                displayBucketStart: 1_775_481_600 + index * 86_400,
+                total: index < 7 ? (index + 1) * 100 : null,
+                valuableSuccess: index < 7 ? (index + 1) * 67 : null,
+                valuableFailure: index < 7 ? (index + 1) * 12 : null,
+                otherSuccess: index < 7 ? (index + 1) * 14 : null,
+                otherFailure: index < 7 ? (index + 1) * 4 : null,
+                unknown: index < 7 ? (index + 1) * 3 : null,
+                upstreamExhausted: index < 7 ? Math.floor(index / 3) : null,
+                newKeys: index < 7 ? Math.floor(index / 2) : null,
+                newQuarantines: index < 7 ? Math.floor(index / 6) : null,
+              })),
+              comparison: Array.from({ length: 31 }, (_, index) => ({
+                bucketStart: 1_772_803_200 + index * 86_400,
+                displayBucketStart: 1_772_803_200 + index * 86_400,
+                total: (index + 1) * 90,
+                valuableSuccess: (index + 1) * 61,
+                valuableFailure: (index + 1) * 10,
+                otherSuccess: (index + 1) * 13,
+                otherFailure: (index + 1) * 4,
+                unknown: (index + 1) * 2,
+                upstreamExhausted: Math.floor(index / 4),
+                newKeys: Math.floor(index / 5),
+                newQuarantines: Math.floor(index / 8),
+              })),
+            },
             trend: { request: [1, 0, 0, 0, 0, 0, 0, 0], error: [0, 0, 0, 0, 0, 0, 0, 0] },
             exhaustedKeys: [],
             recentLogs: [],
@@ -444,6 +472,9 @@ describe('admin user tag api helpers', () => {
     expect(overview.siteStatus.activeKeys).toBe(1)
     expect(overview.trend.request).toHaveLength(8)
     expect(overview.hourlyRequestWindow.buckets).toHaveLength(49)
+    expect(overview.monthSeries.current).toHaveLength(31)
+    expect(overview.monthSeries.current[7]?.total).toBeNull()
+    expect(overview.monthSeries.comparison[0]?.total).toBe(90)
     expect(overview.tokenCoverage).toBe('ok')
     expect(overview.recentAlerts.totalEvents).toBe(3)
     expect(overview.recentAlerts.topGroups[0]?.latestEvent.request?.id).toBe(91)

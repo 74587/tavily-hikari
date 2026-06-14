@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 
-import type { RecentAlertsSummary, SummaryWindowsResponse } from '../api'
+import type { DashboardMonthSeries, RecentAlertsSummary, SummaryWindowsResponse } from '../api'
 import DashboardOverview, { type DashboardMetricCard, type DashboardQuotaChargeCardData } from './DashboardOverview'
 import {
   createDashboardMonthMetrics,
@@ -376,6 +376,49 @@ const summaryWindows: SummaryWindowsResponse = {
   previous_month_end: Date.UTC(2026, 3, 1, 0, 0, 0) / 1000,
 }
 
+const monthSeries: DashboardMonthSeries = {
+  current: Array.from({ length: 31 }, (_, index) => {
+    const day = index + 1
+    const visible = day <= 7
+    const total = visible ? [12_600, 24_120, 39_880, 55_140, 71_420, 88_090, 105_041][index] ?? null : null
+    return {
+      bucketStart: summaryWindows.month_start + index * 24 * 3600,
+      displayBucketStart: summaryWindows.month_start + index * 24 * 3600,
+      total,
+      valuableSuccess: total == null ? null : Math.round(total * 0.668),
+      valuableFailure: total == null ? null : Math.round(total * 0.118),
+      otherSuccess: total == null ? null : Math.round(total * 0.096),
+      otherFailure: total == null ? null : Math.round(total * 0.039),
+      unknown: total == null ? null : Math.round(total * 0.018),
+      upstreamExhausted: total == null ? null : Math.max(0, Math.floor(day / 3)),
+      newKeys: total == null ? null : Math.max(0, Math.floor(day / 2)),
+      newQuarantines: total == null ? null : Math.max(0, Math.floor(day / 6)),
+    }
+  }),
+  comparison: Array.from({ length: 31 }, (_, index) => {
+    const previousMonthStart = summaryWindows.previous_month_start ?? summaryWindows.month_start
+    const total = [
+      10_880, 22_100, 34_560, 46_930, 58_240, 69_700, 81_240, 92_440, 103_020, 114_530,
+      125_900, 137_210, 148_040, 158_830, 169_240, 179_980, 190_640, 201_240, 212_320, 223_510,
+      234_410, 245_190, 255_840, 266_300, 277_120, 287_940, 298_310, 308_730, 318_990, 329_420,
+      339_860,
+    ][index]
+    return {
+      bucketStart: previousMonthStart + index * 24 * 3600,
+      displayBucketStart: previousMonthStart + index * 24 * 3600,
+      total,
+      valuableSuccess: Math.round(total * 0.661),
+      valuableFailure: Math.round(total * 0.115),
+      otherSuccess: Math.round(total * 0.101),
+      otherFailure: Math.round(total * 0.041),
+      unknown: Math.round(total * 0.019),
+      upstreamExhausted: Math.max(0, Math.floor((index + 1) / 4)),
+      newKeys: Math.max(0, Math.floor(index / 5)),
+      newQuarantines: index === 11 ? null : Math.max(0, Math.floor(index / 9)),
+    }
+  }),
+}
+
 const defaultHourlyRequestWindow = buildDashboardHourlyRequestWindowFixture({
   mapBucket: ({ index, bucket }) => ({
     secondarySuccess: (index % 5) + 2,
@@ -690,6 +733,7 @@ export const Default: Story = {
     statusMetrics,
     summaryWindows,
     hourlyRequestWindow: defaultHourlyRequestWindow,
+    monthSeries,
     chartLabelTimeZone: 'Asia/Shanghai',
     tokenCoverage: 'ok',
     tokens: [

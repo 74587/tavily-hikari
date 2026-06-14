@@ -55,6 +55,7 @@
 
 - 在现有 payload 中新增 `hourlyRequestWindow`。
 - 旧 `trend` 字段可保留为兼容字段，但 dashboard 前端不再用它作为主图表来源。
+- `hourlyRequestWindow` 只服务 `Traffic Trends` 的 49h 小时图与今日背景图；`本月` 摘要卡及其 `previous-month comparison line` 必须改走专用月度日粒度序列契约，禁止再从 `retainedBuckets=49` 推断整月趋势。
 
 ### admin `/api/events` snapshot
 

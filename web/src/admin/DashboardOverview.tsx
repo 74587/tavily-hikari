@@ -4,6 +4,7 @@ import type {
   ApiKeyStats,
   AuthToken,
   DashboardHourlyRequestWindow,
+  DashboardMonthSeries,
   JobLogView,
   RecentAlertsSummary,
   RequestLog,
@@ -34,10 +35,9 @@ import {
   type DashboardTypeSeriesId,
 } from './dashboardHourlyCharts'
 import {
+  buildMonthSeriesBackdropSeries,
   buildPeriodBackdropSeries,
-  buildMonthBackdropBaseline,
   getBackdropMetricKey,
-  getPreviousMonthRange,
   type DashboardBackdropMetricKey,
   type DashboardCardBackdropMap,
   type DashboardCardBackdropSeries,
@@ -151,6 +151,7 @@ interface DashboardOverviewProps {
   statusMetrics: DashboardMetricCard[]
   summaryWindows?: SummaryWindowsResponse | null
   hourlyRequestWindow: DashboardHourlyRequestWindow
+  monthSeries?: DashboardMonthSeries | null
   tokenCoverage: 'ok' | 'truncated' | 'error'
   tokens: AuthToken[]
   keys: ApiKeyStats[]
@@ -465,6 +466,7 @@ export default function DashboardOverview({
   statusMetrics,
   summaryWindows,
   hourlyRequestWindow,
+  monthSeries,
   tokenCoverage,
   tokens,
   keys,
@@ -598,10 +600,7 @@ export default function DashboardOverview({
   const comparisonRangeStart = summaryWindowValues.yesterday_start
   const comparisonRangeEnd = summaryWindowValues.today_start
   const todayPeriodEnd = summaryWindowValues.today_period_end ?? summaryWindowValues.today_end
-  const previousMonthRange = getPreviousMonthRange(summaryWindowValues)
-  const monthComparisonRangeStart = previousMonthRange.rangeStart
-  const monthComparisonRangeEnd = previousMonthRange.rangeEnd
-  const monthPeriodEnd = summaryWindowValues.month_period_end ?? summaryWindowValues.month_end
+  const monthSeriesValue = monthSeries ?? { current: [], comparison: [] }
   const todayBackdrop = useMemo(
     () => buildPeriodBackdropSeries({
       hourlyRequestWindow,
@@ -801,71 +800,23 @@ export default function DashboardOverview({
   ])
   const monthBackdrop = useMemo(
     () => {
-      const backdrop = buildPeriodBackdropSeries({
-        hourlyRequestWindow,
-        currentValueRange: {
-          rangeStart: summaryWindowValues.month_start,
-          rangeEnd: summaryWindowValues.month_end,
-        },
-        currentDisplayRange: {
-          rangeStart: summaryWindowValues.month_start,
-          rangeEnd: monthPeriodEnd,
-        },
-        comparisonValueRange: {
-          rangeStart: monthComparisonRangeStart,
-          rangeEnd: monthComparisonRangeEnd,
-        },
-        comparisonDisplayRange: {
-          rangeStart: monthComparisonRangeStart,
-          rangeEnd: monthComparisonRangeEnd,
-        },
-        displayBucketSeconds: 24 * 3600,
-        metricKey: 'total',
-      })
+      const backdrop = buildMonthSeriesBackdropSeries(monthSeriesValue, 'total')
       return {
         ...backdrop,
-        baseline: buildMonthBackdropBaseline(summaryWindowValues.month, 'total', backdrop.current),
+        baseline: 0,
       }
     },
-    [
-      hourlyRequestWindow,
-      monthComparisonRangeEnd,
-      monthComparisonRangeStart,
-      summaryWindowValues.month_end,
-      summaryWindowValues.month,
-      summaryWindowValues.month_start,
-      monthPeriodEnd,
-    ],
+    [monthSeriesValue],
   )
   const monthCardBackdrops = useMemo<DashboardCardBackdropMap>(() => {
     const buildMonthCardBackdrop = (
       metricKey: DashboardBackdropMetricKey,
       color = backdropColors.month,
     ): DashboardCardBackdropSeries => {
-      const backdrop = buildPeriodBackdropSeries({
-        hourlyRequestWindow,
-        currentValueRange: {
-          rangeStart: summaryWindowValues.month_start,
-          rangeEnd: summaryWindowValues.month_end,
-        },
-        currentDisplayRange: {
-          rangeStart: summaryWindowValues.month_start,
-          rangeEnd: monthPeriodEnd,
-        },
-        comparisonValueRange: {
-          rangeStart: monthComparisonRangeStart,
-          rangeEnd: monthComparisonRangeEnd,
-        },
-        comparisonDisplayRange: {
-          rangeStart: monthComparisonRangeStart,
-          rangeEnd: monthComparisonRangeEnd,
-        },
-        displayBucketSeconds: 24 * 3600,
-        metricKey,
-      })
+      const backdrop = buildMonthSeriesBackdropSeries(monthSeriesValue, metricKey)
       return {
         ...backdrop,
-        baseline: buildMonthBackdropBaseline(summaryWindowValues.month, metricKey, backdrop.current),
+        baseline: 0,
         color,
         comparisonColor: backdropColors.yesterday,
       }
@@ -886,12 +837,8 @@ export default function DashboardOverview({
   }, [
     backdropColors.month,
     backdropColors.yesterday,
-    hourlyRequestWindow,
-    monthComparisonRangeEnd,
-    monthComparisonRangeStart,
     monthBackdrop,
-    summaryWindowValues.month,
-    monthPeriodEnd,
+    monthSeriesValue,
   ])
   const alertGroupCount = overviewReady && recentAlerts.totalEvents > 0 ? 1 : 0
   const priorityCount = riskItems.length + alertGroupCount

@@ -49,6 +49,14 @@ describe('DashboardOverview Storybook coverage', () => {
     )
   })
 
+  it('keeps the month summary on a full natural-month axis with a visible previous-month comparison line', () => {
+    const args = dashboardStories.Default.args
+    expect(args?.monthSeries?.current).toHaveLength(31)
+    expect(args?.monthSeries?.comparison).toHaveLength(31)
+    expect(args?.monthSeries?.current.slice(7).every((point) => point.total == null)).toBe(true)
+    expect(args?.monthSeries?.comparison.some((point) => typeof point.total === 'number')).toBe(true)
+  })
+
   it('keeps the absolute charts on all-series defaults in the primary stories', () => {
     expect(dashboardStories.Default.args?.initialVisibleResultSeries).toBeUndefined()
     expect(dashboardStories.Default.args?.initialVisibleTypeSeries).toBeUndefined()

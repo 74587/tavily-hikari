@@ -1069,6 +1069,7 @@
             body.get("hourlyRequestWindow").is_some(),
             "hourly request window should exist"
         );
+        assert!(body.get("monthSeries").is_some(), "month series should exist");
         assert!(
             body.get("exhaustedKeys").is_some(),
             "exhausted keys should exist"
@@ -1105,6 +1106,20 @@
             body.pointer("/hourlyRequestWindow/retainedBuckets")
                 .and_then(|value| value.as_i64()),
             Some(49)
+        );
+        assert!(
+            body.pointer("/monthSeries/current")
+                .and_then(|value| value.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false),
+            "month series current buckets should not be empty"
+        );
+        assert!(
+            body.pointer("/monthSeries/comparison")
+                .and_then(|value| value.as_array())
+                .map(|items| !items.is_empty())
+                .unwrap_or(false),
+            "month series comparison buckets should not be empty"
         );
         assert_eq!(
             body.pointer("/recentJobs/0/status")

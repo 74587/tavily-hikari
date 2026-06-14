@@ -3633,6 +3633,42 @@ export function DashboardPageCanvas({ beforeIntro }: { beforeIntro?: ReactNode }
         monthMetrics={monthMetrics}
         statusMetrics={statusMetrics}
         hourlyRequestWindow={defaultDashboardHourlyRequestWindow}
+        monthSeries={{
+          current: Array.from({ length: 31 }, (_, index) => {
+            const visible = index < 7
+            const total = visible ? 11_400 + index * 12_800 : null
+            return {
+              bucketStart: summaryWindows.month_start + index * 24 * 3600,
+              displayBucketStart: summaryWindows.month_start + index * 24 * 3600,
+              total,
+              valuableSuccess: total == null ? null : Math.round(total * 0.67),
+              valuableFailure: total == null ? null : Math.round(total * 0.12),
+              otherSuccess: total == null ? null : Math.round(total * 0.13),
+              otherFailure: total == null ? null : Math.round(total * 0.05),
+              unknown: total == null ? null : Math.round(total * 0.03),
+              upstreamExhausted: total == null ? null : Math.floor(index / 3),
+              newKeys: total == null ? null : Math.floor(index / 2),
+              newQuarantines: total == null ? null : Math.floor(index / 6),
+            }
+          }),
+          comparison: Array.from({ length: 31 }, (_, index) => {
+            const previousMonthStart = summaryWindows.previous_month_start ?? summaryWindows.month_start
+            const total = 9_900 + index * 10_400
+            return {
+              bucketStart: previousMonthStart + index * 24 * 3600,
+              displayBucketStart: previousMonthStart + index * 24 * 3600,
+              total,
+              valuableSuccess: Math.round(total * 0.65),
+              valuableFailure: Math.round(total * 0.11),
+              otherSuccess: Math.round(total * 0.16),
+              otherFailure: Math.round(total * 0.05),
+              unknown: Math.round(total * 0.03),
+              upstreamExhausted: Math.floor(index / 4),
+              newKeys: Math.floor(index / 5),
+              newQuarantines: Math.floor(index / 8),
+            }
+          }),
+        }}
         tokenCoverage="truncated"
         tokens={MOCK_TOKENS}
         keys={MOCK_KEYS}

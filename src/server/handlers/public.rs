@@ -88,6 +88,29 @@ struct DashboardHourlyRequestWindowView {
     buckets: Vec<DashboardHourlyRequestBucketView>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardMonthSeriesPointView {
+    bucket_start: i64,
+    display_bucket_start: Option<i64>,
+    total: Option<i64>,
+    valuable_success: Option<i64>,
+    valuable_failure: Option<i64>,
+    other_success: Option<i64>,
+    other_failure: Option<i64>,
+    unknown: Option<i64>,
+    upstream_exhausted: Option<i64>,
+    new_keys: Option<i64>,
+    new_quarantines: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardMonthSeriesView {
+    current: Vec<DashboardMonthSeriesPointView>,
+    comparison: Vec<DashboardMonthSeriesPointView>,
+}
+
 impl From<tavily_hikari::DashboardHourlyRequestWindow> for DashboardHourlyRequestWindowView {
     fn from(window: tavily_hikari::DashboardHourlyRequestWindow) -> Self {
         Self {
@@ -111,6 +134,33 @@ impl From<tavily_hikari::DashboardHourlyRequestWindow> for DashboardHourlyReques
                     api_billable: bucket.api_billable,
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<tavily_hikari::DashboardMonthSeriesPoint> for DashboardMonthSeriesPointView {
+    fn from(point: tavily_hikari::DashboardMonthSeriesPoint) -> Self {
+        Self {
+            bucket_start: point.bucket_start,
+            display_bucket_start: point.display_bucket_start,
+            total: point.total,
+            valuable_success: point.valuable_success,
+            valuable_failure: point.valuable_failure,
+            other_success: point.other_success,
+            other_failure: point.other_failure,
+            unknown: point.unknown,
+            upstream_exhausted: point.upstream_exhausted,
+            new_keys: point.new_keys,
+            new_quarantines: point.new_quarantines,
+        }
+    }
+}
+
+impl From<tavily_hikari::DashboardMonthSeries> for DashboardMonthSeriesView {
+    fn from(series: tavily_hikari::DashboardMonthSeries) -> Self {
+        Self {
+            current: series.current.into_iter().map(Into::into).collect(),
+            comparison: series.comparison.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -649,6 +699,8 @@ struct DashboardOverviewPayload {
     summary_windows: SummaryWindowsView,
     #[serde(rename = "hourlyRequestWindow")]
     hourly_request_window: DashboardHourlyRequestWindowView,
+    #[serde(rename = "monthSeries")]
+    month_series: DashboardMonthSeriesView,
     #[serde(rename = "siteStatus")]
     site_status: DashboardSiteStatusView,
     #[serde(rename = "forwardProxy")]
@@ -928,6 +980,7 @@ async fn build_dashboard_overview_payload(
     let summary = state.proxy.summary().await?;
     let summary_windows = state.proxy.summary_windows().await?;
     let hourly_request_window = state.proxy.dashboard_hourly_request_window().await?;
+    let month_series = state.proxy.dashboard_month_series().await?;
     let forward_proxy = state.proxy.get_forward_proxy_dashboard_summary().await?;
     let exhausted_keys = state
         .proxy
@@ -986,6 +1039,7 @@ async fn build_dashboard_overview_payload(
         summary: summary.clone().into(),
         summary_windows: SummaryWindowsView::from(summary_windows),
         hourly_request_window: DashboardHourlyRequestWindowView::from(hourly_request_window),
+        month_series: DashboardMonthSeriesView::from(month_series),
         site_status: DashboardSiteStatusView {
             remaining_quota: summary.total_quota_remaining,
             total_quota_limit: summary.total_quota_limit,
@@ -1036,6 +1090,7 @@ async fn compute_signatures(
         month_start,
         ..
     } = state.proxy.summary_windows().await.map_err(|_| ())?;
+    let month_series = state.proxy.dashboard_month_series().await.map_err(|_| ())?;
     let forward_proxy = state
         .proxy
         .get_forward_proxy_dashboard_summary()
@@ -1090,6 +1145,21 @@ async fn compute_signatures(
         .cloned()
         .collect::<Vec<_>>();
     let disabled_token_truncated = disabled_tokens.len() > DASHBOARD_DISABLED_TOKENS_LIMIT;
+    let serialize_month_series_point = |point: tavily_hikari::DashboardMonthSeriesPoint| -> [i64; 11] {
+        [
+            point.bucket_start,
+            point.total.unwrap_or(-1),
+            point.valuable_success.unwrap_or(-1),
+            point.valuable_failure.unwrap_or(-1),
+            point.other_success.unwrap_or(-1),
+            point.other_failure.unwrap_or(-1),
+            point.unknown.unwrap_or(-1),
+            point.upstream_exhausted.unwrap_or(-1),
+            point.new_keys.unwrap_or(-1),
+            point.new_quarantines.unwrap_or(-1),
+            point.display_bucket_start.unwrap_or(-1),
+        ]
+    };
     let sig: Option<SummarySig> = Some(SummarySig {
         summary: [
             summary.total_requests,
@@ -1157,6 +1227,16 @@ async fn compute_signatures(
             month.quota_charge.stale_key_count,
             month.quota_charge.latest_sync_at.unwrap_or_default(),
         ],
+        month_series_current: month_series
+            .current
+            .into_iter()
+            .map(serialize_month_series_point)
+            .collect(),
+        month_series_comparison: month_series
+            .comparison
+            .into_iter()
+            .map(serialize_month_series_point)
+            .collect(),
         summary_window_starts: [today_start, yesterday_start, month_start],
         proxy: Some((forward_proxy.available_nodes, forward_proxy.total_nodes)),
         exhausted_keys,

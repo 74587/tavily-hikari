@@ -898,6 +898,145 @@ async fn dashboard_rollup_bounded_rebuild_is_idempotent() {
 }
 
 #[tokio::test]
+async fn dashboard_month_series_uses_full_natural_month_axis_and_previous_month_comparison() {
+    let db_path = temp_db_path("dashboard-month-series-natural-axis");
+    let db_str = db_path.to_string_lossy().to_string();
+
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-dashboard-month-series".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let key_id = proxy
+        .list_api_key_metrics()
+        .await
+        .expect("list key metrics")
+        .into_iter()
+        .next()
+        .expect("seeded key")
+        .id;
+
+    let evaluation_time = Utc
+        .with_ymd_and_hms(2026, 4, 7, 12, 10, 0)
+        .single()
+        .expect("valid utc evaluation time");
+    let local_evaluation = evaluation_time.with_timezone(&Local);
+    let summary_windows = proxy
+        .summary_windows_at(local_evaluation)
+        .await
+        .expect("summary windows");
+
+    let current_month_start = summary_windows.month_start;
+    let previous_month_start = summary_windows.previous_month_start;
+    let previous_month_end = summary_windows.previous_month_end;
+    let current_month_day_start = current_month_start + 24 * 3600;
+    let current_day_start = local_day_bucket_start_utc_ts(evaluation_time.timestamp());
+
+    insert_dashboard_summary_rollup_day_bucket(
+        &proxy,
+        current_month_start,
+        12,
+        9,
+        2,
+        1,
+    )
+    .await;
+    insert_dashboard_summary_rollup_day_bucket(
+        &proxy,
+        current_month_day_start,
+        18,
+        14,
+        3,
+        1,
+    )
+    .await;
+
+    insert_dashboard_summary_rollup_day_bucket(
+        &proxy,
+        previous_month_start,
+        10,
+        7,
+        2,
+        1,
+    )
+    .await;
+    insert_dashboard_summary_rollup_day_bucket(
+        &proxy,
+        previous_month_start + 24 * 3600,
+        8,
+        6,
+        1,
+        1,
+    )
+    .await;
+
+    insert_dashboard_hourly_log(
+        &proxy,
+        &key_id,
+        DashboardHourlyLogSeed {
+            created_at: current_day_start + 60,
+            path: "/api/tavily/search",
+            request_kind_key: "api:search",
+            request_kind_label: "API | search",
+            result_status: OUTCOME_SUCCESS,
+            failure_kind: None,
+            request_body: None,
+            visibility: REQUEST_LOG_VISIBILITY_VISIBLE,
+        },
+    )
+    .await;
+    insert_dashboard_hourly_log(
+        &proxy,
+        &key_id,
+        DashboardHourlyLogSeed {
+            created_at: current_day_start + 180,
+            path: "/mcp",
+            request_kind_key: "mcp:search",
+            request_kind_label: "MCP | search",
+            result_status: OUTCOME_ERROR,
+            failure_kind: None,
+            request_body: None,
+            visibility: REQUEST_LOG_VISIBILITY_VISIBLE,
+        },
+    )
+    .await;
+
+    let month_series = proxy
+        .key_store
+        .fetch_dashboard_month_series(&summary_windows)
+        .await
+        .expect("dashboard month series");
+
+    let current_month_days =
+        ((summary_windows.month_period_end - summary_windows.month_start) / 86_400) as usize;
+    let previous_month_days =
+        ((previous_month_end - previous_month_start) / 86_400) as usize;
+    assert_eq!(month_series.current.len(), current_month_days);
+    assert_eq!(month_series.comparison.len(), previous_month_days);
+
+    assert_eq!(month_series.current[0].total, Some(12));
+    assert_eq!(month_series.current[1].total, Some(30));
+    let current_day_index = ((current_day_start - current_month_start) / 86_400) as usize;
+    assert_eq!(month_series.current[current_day_index].total, Some(32));
+    assert!(month_series.current[(current_day_index + 1).min(month_series.current.len() - 1)]
+        .total
+        .is_none());
+
+    assert_eq!(month_series.comparison[0].total, Some(10));
+    assert_eq!(month_series.comparison[1].total, Some(18));
+    assert!(month_series
+        .comparison
+        .iter()
+        .take(2)
+        .all(|point| point.display_bucket_start.is_some()));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn rollup_rebuilds_preserve_cleaned_batch_business_classification() {
     let db_path = temp_db_path("rollup-rebuild-cleaned-batch-classification");
     let db_str = db_path.to_string_lossy().to_string();

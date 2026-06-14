@@ -1,4 +1,18 @@
 impl KeyStore {
+    async fn fetch_dashboard_rollup_bucket_metrics_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        bucket_secs: i64,
+        bucket_start: i64,
+    ) -> Result<SummaryWindowMetrics, ProxyError> {
+        Self::fetch_dashboard_rollup_aligned_window_metrics_tx(
+            tx,
+            bucket_secs,
+            bucket_start,
+            Some(bucket_start.saturating_add(bucket_secs)),
+        )
+        .await
+    }
+
     async fn fetch_dashboard_rollup_window_metrics_tx(
         tx: &mut Transaction<'_, Sqlite>,
         bucket_secs: i64,
