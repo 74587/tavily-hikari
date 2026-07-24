@@ -119,6 +119,8 @@ export interface DashboardHourlyRequestBucket {
   mcpBillable: number
   apiNonBillable: number
   apiBillable: number
+  localEstimatedCredits: number
+  upstreamActualCredits: number | null
 }
 
 export interface DashboardHourlyRequestWindow {

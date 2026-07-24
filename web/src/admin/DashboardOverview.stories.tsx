@@ -67,22 +67,19 @@ const strings = {
   otherTag: 'Other',
   unknownTag: 'Unknown',
   trendsTitle: 'Traffic Trends',
-  trendsDescription: 'Charts use 24 complete hourly slots plus the current partial hour; yesterday/previous-month comparisons stay complete and missing buckets are left blank.',
+  trendsDescription: 'Compare requests and credits across 24 complete hours plus the current partial hour, or inspect the latest 6 hours at 5-minute resolution.',
   requestTrend: 'Request volume',
   errorTrend: 'Error volume',
   chartModeResults: 'Results',
   chartModeTypes: 'Types',
-  chartModeResultsDelta: 'Δ Results',
-  chartModeTypesDelta: 'Δ Types',
+  chartModeCredits: 'Credits',
   chartModeResultsArea: 'Area · Results',
   chartModeTypesArea: 'Area · Types',
+  chartModeCreditsArea: 'Area · Credits',
   chartVisibleSeries: 'Visible series',
-  chartDeltaSeries: 'Compared series',
-  chartSelectionAll: 'All',
   chartEmpty: 'No visible chart series for the current selection.',
-  chartUtcWindow: 'Local time axis · 24 full hours + current hour ({count} current slots, {comparisonCount} comparison buckets)',
+  chartUtcWindow: 'Local time axis · 24 full hours + current hour ({count} slots)',
   chartRollingWindow: 'Local time axis · Last {range} · {bucket} buckets ({count} current buckets)',
-  chartDeltaWindow: 'Local time axis · Natural-day comparison ({count} current buckets, {comparisonCount} comparison buckets)',
   chartResultSecondarySuccess: 'Secondary success',
   chartResultPrimarySuccess: 'Primary success',
   chartResultSecondaryFailure: 'Secondary failure',
@@ -93,6 +90,8 @@ const strings = {
   chartTypeMcpBillable: 'MCP billable',
   chartTypeApiNonBillable: 'API non-billable',
   chartTypeApiBillable: 'API billable',
+  chartCreditLocalEstimate: 'Local estimate',
+  chartCreditUpstreamActual: 'Upstream actual',
   actionsTitle: 'Action Center',
   actionsDescription: 'Recent events you can jump into quickly.',
   recentRequests: 'Recent requests',
@@ -482,43 +481,6 @@ const defaultHourlyRequestWindow = buildDashboardHourlyRequestWindowFixture({
   }),
 })
 
-const fixedRangeGapHourlyRequestWindow = buildDashboardHourlyRequestWindowFixture({
-  currentHourStart: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000,
-  mapBucket: ({ index, bucket }) => {
-    if ([12, 84, 228, 372, 516].includes(index)) {
-      return {
-        ...bucket,
-        secondarySuccess: 0,
-        primarySuccess: 0,
-        secondaryFailure: 0,
-        primaryFailure429: 0,
-        primaryFailureOther: 0,
-        unknown: 0,
-        mcpNonBillable: 0,
-        mcpBillable: 0,
-        apiNonBillable: 0,
-        apiBillable: 0,
-      }
-    }
-    return {
-      secondarySuccess: (index % 4) + 1,
-      primarySuccess: bucket.primarySuccess + (index % 4),
-      secondaryFailure: index % 3,
-      primaryFailure429: index % 9 === 0 ? 2 : 0,
-      primaryFailureOther: index % 7 === 0 ? 1 : 0,
-      unknown: index % 13 === 0 ? 1 : 0,
-      mcpNonBillable: index % 2,
-      mcpBillable: (index % 4) + 2,
-      apiNonBillable: index % 3,
-      apiBillable: (index % 5) + 3,
-    }
-  },
-})
-
-fixedRangeGapHourlyRequestWindow.buckets = fixedRangeGapHourlyRequestWindow.buckets.filter(
-  (_, index) => ![2, 7, 19, 31, 42].includes(index),
-)
-
 const areaEvidenceHourlyRequestWindow = buildDashboardHourlyRequestWindowFixture({
   currentHourStart: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000,
   mapBucket: ({ index, bucket }) => ({
@@ -534,6 +496,14 @@ const areaEvidenceHourlyRequestWindow = buildDashboardHourlyRequestWindowFixture
     apiBillable: (index % 5) + 4,
   }),
 })
+
+const noUpstreamSamplesHourlyRequestWindow = {
+  ...areaEvidenceHourlyRequestWindow,
+  buckets: areaEvidenceHourlyRequestWindow.buckets.map((bucket) => ({
+    ...bucket,
+    upstreamActualCredits: null,
+  })),
+}
 
 const statusMetrics = [
   { id: 'remaining', label: 'Remaining', value: '49,482', subtitle: 'Current snapshot · 88.4%' },
@@ -569,22 +539,19 @@ const zhStrings = {
   otherTag: '次要',
   unknownTag: '未知',
   trendsTitle: '流量趋势',
-  trendsDescription: '图表使用最近 24 个完整小时 + 当前未满小时；昨日/上月对比保持完整，缺失小时留空不补。',
+  trendsDescription: '对比最近 24 个完整小时 + 当前未满小时的请求与积分，或查看最近 6 小时的 5 分钟趋势。',
   requestTrend: '请求量',
   errorTrend: '错误量',
   chartModeResults: '调用结果',
   chartModeTypes: '调用类型',
-  chartModeResultsDelta: '较昨日 · 调用结果',
-  chartModeTypesDelta: '较昨日 · 调用类型',
+  chartModeCredits: '积分',
   chartModeResultsArea: '面积图 · 调用结果',
   chartModeTypesArea: '面积图 · 调用类型',
+  chartModeCreditsArea: '面积图 · 积分',
   chartVisibleSeries: '显示系列',
-  chartDeltaSeries: '对比系列',
-  chartSelectionAll: '全部',
   chartEmpty: '当前选择下没有可显示的图表系列。',
-  chartUtcWindow: '本地时间横轴 · 24 个完整小时 + 当前小时（当前 {count} 槽，对比 {comparisonCount} 组）',
+  chartUtcWindow: '本地时间横轴 · 24 个完整小时 + 当前小时（{count} 槽）',
   chartRollingWindow: '本地时间横轴 · 最近 {range} · {bucket} 粒度（当前 {count} 组）',
-  chartDeltaWindow: '本地时间横轴 · 自然日对比窗口（当前 {count} 组，对比 {comparisonCount} 组）',
   chartResultSecondarySuccess: '次要成功',
   chartResultPrimarySuccess: '主要成功',
   chartResultSecondaryFailure: '次要失败',
@@ -595,6 +562,8 @@ const zhStrings = {
   chartTypeMcpBillable: 'MCP 计费',
   chartTypeApiNonBillable: 'API 非计费',
   chartTypeApiBillable: 'API 计费',
+  chartCreditLocalEstimate: '本地估算',
+  chartCreditUpstreamActual: '上游实扣',
   actionsTitle: '快捷入口',
   actionsDescription: '最近事件可直接跳转处理。',
   recentRequests: '近期请求',
@@ -985,19 +954,18 @@ export const TypesMode: Story = {
   },
 }
 
-export const ResultsDeltaMode: Story = {
+export const CreditsMode: Story = {
   args: {
     ...Default.args,
-    initialChartMode: 'resultsDelta',
-    initialResultDeltaSeries: 'all',
+    initialChartMode: 'credits',
   },
 }
 
-export const TypesDeltaMode: Story = {
+export const CreditsAreaMode: Story = {
   args: {
     ...Default.args,
-    initialChartMode: 'typesDelta',
-    initialTypeDeltaSeries: 'all',
+    initialChartMode: 'creditsArea',
+    hourlyRequestWindow: areaEvidenceHourlyRequestWindow,
   },
 }
 
@@ -1072,30 +1040,68 @@ export const HiddenSeriesEmpty: Story = {
   },
 }
 
-export const FixedRangeWithGaps: Story = {
+export const CreditsAreaLocalOnly: Story = {
   args: {
     ...Default.args,
-    hourlyRequestWindow: fixedRangeGapHourlyRequestWindow,
-    initialChartMode: 'resultsDelta',
-    initialResultDeltaSeries: 'primarySuccess',
+    hourlyRequestWindow: areaEvidenceHourlyRequestWindow,
+    initialChartMode: 'creditsArea',
+    initialVisibleCreditSeries: ['localEstimate'],
   },
   parameters: {
     docs: {
       description: {
         story:
-          'Fixed today/month range proof with intentionally missing hourly buckets; gaps must remain blank instead of being zero-filled.',
+          'Credit-series visibility proof. Local estimate remains visible while upstream actual is hidden in both credit modes.',
       },
     },
   },
   play: async ({ canvasElement }) => {
     await new Promise((resolve) => window.setTimeout(resolve, 50))
     if (canvasElement.querySelector('.dashboard-chart-canvas canvas') == null) {
-      throw new Error('Expected fixed-range gap story to render the dashboard chart canvas')
+      throw new Error('Expected local-only credit story to render the dashboard chart canvas')
     }
-    const meta = canvasElement.querySelector('.dashboard-trend-meta')?.textContent ?? ''
-    if (!meta.includes('Natural-day comparison')) {
-      throw new Error(`Expected natural-day comparison metadata, received: ${meta}`)
+    const chips = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('.dashboard-chart-series-chip'))
+    const local = chips.find((chip) => chip.textContent?.includes('Local estimate'))
+    const upstream = chips.find((chip) => chip.textContent?.includes('Upstream actual'))
+    if (local?.getAttribute('aria-pressed') !== 'true' || upstream?.getAttribute('aria-pressed') !== 'false') {
+      throw new Error('Expected credit visibility controls to keep only the local estimate active')
     }
+
+    const creditMode = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.trim() === 'Credits')
+    creditMode?.click()
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+    const updatedChips = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('.dashboard-chart-series-chip'))
+    const updatedUpstream = updatedChips.find((chip) => chip.textContent?.includes('Upstream actual'))
+    if (updatedUpstream?.getAttribute('aria-pressed') !== 'false') {
+      throw new Error('Expected credit visibility to stay shared when switching from area to bar mode')
+    }
+  },
+}
+
+export const CreditsAreaNoUpstreamSamples: Story = {
+  args: {
+    ...Default.args,
+    hourlyRequestWindow: noUpstreamSamplesHourlyRequestWindow,
+    initialChartMode: 'creditsArea',
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: 'No-sample proof. Upstream actual remains null across the window instead of rendering false zeroes.',
+      },
+    },
+  },
+}
+
+export const CreditsEmptyData: Story = {
+  args: {
+    ...Default.args,
+    hourlyRequestWindow: {
+      ...areaEvidenceHourlyRequestWindow,
+      buckets: [],
+    },
+    initialChartMode: 'credits',
   },
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import type { DashboardHourlyRequestWindow, SummaryWindowsResponse } from '../api'
+import type { DashboardHourlyRequestWindow } from '../api'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
 import { Bar, Line } from 'react-chartjs-2'
 import {
@@ -19,8 +19,6 @@ import {
   type TooltipItem,
 } from 'chart.js'
 import {
-  buildDeltaSeriesSlotValues,
-  buildAggregatedHourlySlots,
   buildDashboardAreaStackLayers,
   formatDashboardRealtimeWindowLabel,
   buildRollingHourlyWindow,
@@ -29,16 +27,19 @@ import {
   getVisibleHourlyWindow,
   DASHBOARD_RESULT_SERIES_ORDER,
   DASHBOARD_TYPE_SERIES_ORDER,
+  DASHBOARD_CREDIT_SERIES_ORDER,
+  DEFAULT_VISIBLE_CREDIT_SERIES,
   DEFAULT_VISIBLE_RESULT_SERIES,
   DEFAULT_VISIBLE_TYPE_SERIES,
   createDashboardHourlyChartPreferences,
   formatHourlyBucketLabel,
   getResultSeriesValue,
   getTypeSeriesValue,
+  getCreditSeriesValue,
   readDashboardHourlyChartPreferences,
   toggleSeriesSelection,
   writeDashboardHourlyChartPreferences,
-  type DashboardDeltaSelection,
+  type DashboardCreditSeriesId,
   type DashboardHourlyChartMode,
   type DashboardHourlyChartPreferences,
   type DashboardResultSeriesId,
@@ -59,6 +60,8 @@ interface DashboardChartPalette {
   mcpBillable: string
   apiNonBillable: string
   apiBillable: string
+  localEstimate: string
+  upstreamActual: string
   grid: string
   tick: string
   zeroLine: string
@@ -84,6 +87,8 @@ function readDashboardChartPalette(): DashboardChartPalette {
     mcpBillable: readChartColorVar('--dashboard-chart-type-mcp-billable', '#22d3ee'),
     apiNonBillable: readChartColorVar('--dashboard-chart-type-api-non-billable', '#93c5fd'),
     apiBillable: readChartColorVar('--dashboard-chart-type-api-billable', '#60a5fa'),
+    localEstimate: readChartColorVar('--dashboard-chart-credit-local-estimate', 'hsl(199 89% 48%)'),
+    upstreamActual: readChartColorVar('--dashboard-chart-credit-upstream-actual', 'hsl(330 81% 60%)'),
     grid: readChartColorVar('--dashboard-chart-grid', 'rgba(148, 163, 184, 0.18)'),
     tick: readChartColorVar('--dashboard-chart-tick', '#cbd5e1'),
     zeroLine: readChartColorVar('--dashboard-chart-zero-line', 'rgba(148, 163, 184, 0.32)'),
@@ -92,31 +97,23 @@ function readDashboardChartPalette(): DashboardChartPalette {
   }
 }
 
-function formatSignedValue(value: number): string {
-  if (value > 0) return `+${value}`
-  return String(value)
-}
-
 function withOpacity(color: string, opacity: number): string {
   return color.startsWith('hsl(') && color.endsWith(')')
     ? `${color.slice(0, -1)} / ${opacity})`
     : color
 }
 
-function formatChartWindow(copy: string, count: number, comparisonCount: number): string {
-  return copy
-    .replace('{count}', String(count))
-    .replace('{comparisonCount}', String(comparisonCount))
+function formatChartWindow(copy: string, count: number): string {
+  return copy.replace('{count}', String(count))
 }
 
 function formatChartWindowWithLabels(
   chartMode: DashboardHourlyChartMode,
-  strings: Pick<DashboardOverviewStrings, 'chartUtcWindow' | 'chartRollingWindow' | 'chartDeltaWindow'>,
+  strings: Pick<DashboardOverviewStrings, 'chartUtcWindow' | 'chartRollingWindow'>,
   count: number,
-  comparisonCount: number,
   window?: DashboardHourlyRequestWindow,
 ): string {
-  if (chartMode === 'resultsArea' || chartMode === 'typesArea') {
+  if (chartMode === 'resultsArea' || chartMode === 'typesArea' || chartMode === 'creditsArea') {
     return formatDashboardRealtimeWindowLabel(
       strings.chartRollingWindow,
       window?.bucketSeconds ?? 0,
@@ -124,10 +121,7 @@ function formatChartWindowWithLabels(
       count,
     )
   }
-  const template = chartMode === 'resultsDelta' || chartMode === 'typesDelta'
-    ? strings.chartDeltaWindow
-    : strings.chartUtcWindow
-  return formatChartWindow(template, count, comparisonCount)
+  return formatChartWindow(strings.chartUtcWindow, count)
 }
 
 function DashboardChartSeriesButton({
@@ -154,12 +148,12 @@ function DashboardChartSeriesButton({
   )
 }
 
-function isAreaChartMode(mode: DashboardHourlyChartMode): mode is 'resultsArea' | 'typesArea' {
-  return mode === 'resultsArea' || mode === 'typesArea'
+function isAreaChartMode(mode: DashboardHourlyChartMode): mode is 'resultsArea' | 'typesArea' | 'creditsArea' {
+  return mode === 'resultsArea' || mode === 'typesArea' || mode === 'creditsArea'
 }
 
-function isDeltaChartMode(mode: DashboardHourlyChartMode): mode is 'resultsDelta' | 'typesDelta' {
-  return mode === 'resultsDelta' || mode === 'typesDelta'
+function isCreditChartMode(mode: DashboardHourlyChartMode): mode is 'credits' | 'creditsArea' {
+  return mode === 'credits' || mode === 'creditsArea'
 }
 
 function getCategorySlotBounds(chart: ChartJS<'bar'>, index: number): { left: number; right: number } | null {
@@ -228,24 +222,20 @@ export default function DashboardTrendPanel({
   strings,
   overviewReady,
   hourlyRequestWindow,
-  summaryWindows,
   initialChartMode = 'results',
   initialVisibleResultSeries = DEFAULT_VISIBLE_RESULT_SERIES,
   initialVisibleTypeSeries = DEFAULT_VISIBLE_TYPE_SERIES,
-  initialResultDeltaSeries = 'all',
-  initialTypeDeltaSeries = 'all',
+  initialVisibleCreditSeries = DEFAULT_VISIBLE_CREDIT_SERIES,
   chartPersistenceKey = null,
   chartLabelTimeZone = null,
 }: {
   strings: DashboardOverviewStrings
   overviewReady: boolean
   hourlyRequestWindow: DashboardHourlyRequestWindow
-  summaryWindows: SummaryWindowsResponse
   initialChartMode?: DashboardHourlyChartMode
   initialVisibleResultSeries?: ReadonlyArray<DashboardResultSeriesId>
   initialVisibleTypeSeries?: ReadonlyArray<DashboardTypeSeriesId>
-  initialResultDeltaSeries?: DashboardDeltaSelection<DashboardResultSeriesId>
-  initialTypeDeltaSeries?: DashboardDeltaSelection<DashboardTypeSeriesId>
+  initialVisibleCreditSeries?: ReadonlyArray<DashboardCreditSeriesId>
   chartPersistenceKey?: string | null
   chartLabelTimeZone?: string | null
 }): JSX.Element {
@@ -262,8 +252,7 @@ export default function DashboardTrendPanel({
       chartMode: initialChartMode,
       visibleResultSeries: initialVisibleResultSeries,
       visibleTypeSeries: initialVisibleTypeSeries,
-      resultDeltaSeries: initialResultDeltaSeries,
-      typeDeltaSeries: initialTypeDeltaSeries,
+      visibleCreditSeries: initialVisibleCreditSeries,
     })
     if (typeof window === 'undefined') return fallback
     return readDashboardHourlyChartPreferences(
@@ -274,8 +263,7 @@ export default function DashboardTrendPanel({
   }, [
     chartPersistenceKey,
     initialChartMode,
-    initialResultDeltaSeries,
-    initialTypeDeltaSeries,
+    initialVisibleCreditSeries,
     initialVisibleResultSeries,
     initialVisibleTypeSeries,
     legacyChartPersistenceKeys,
@@ -284,8 +272,7 @@ export default function DashboardTrendPanel({
   const [chartMode, setChartMode] = useState<DashboardHourlyChartMode>(initialPreferences.chartMode)
   const [visibleResultSeries, setVisibleResultSeries] = useState<DashboardResultSeriesId[]>(initialPreferences.visibleResultSeries)
   const [visibleTypeSeries, setVisibleTypeSeries] = useState<DashboardTypeSeriesId[]>(initialPreferences.visibleTypeSeries)
-  const [resultDeltaSeries, setResultDeltaSeries] = useState<DashboardDeltaSelection<DashboardResultSeriesId>>(initialPreferences.resultDeltaSeries)
-  const [typeDeltaSeries, setTypeDeltaSeries] = useState<DashboardDeltaSelection<DashboardTypeSeriesId>>(initialPreferences.typeDeltaSeries)
+  const [visibleCreditSeries, setVisibleCreditSeries] = useState<DashboardCreditSeriesId[]>(initialPreferences.visibleCreditSeries)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -293,14 +280,12 @@ export default function DashboardTrendPanel({
       chartMode,
       visibleResultSeries,
       visibleTypeSeries,
-      resultDeltaSeries,
-      typeDeltaSeries,
+      visibleCreditSeries,
     })
   }, [
     chartMode,
     chartPersistenceKey,
-    resultDeltaSeries,
-    typeDeltaSeries,
+    visibleCreditSeries,
     visibleResultSeries,
     visibleTypeSeries,
   ])
@@ -310,24 +295,14 @@ export default function DashboardTrendPanel({
     () => getVisibleHourlyWindow(hourlyRequestWindow),
     [hourlyRequestWindow],
   )
-  const comparisonRangeStart = summaryWindows.yesterday_start
-  const comparisonRangeEnd = summaryWindows.yesterday_end
-  const isDeltaMode = isDeltaChartMode(chartMode)
   const isAreaMode = isAreaChartMode(chartMode)
+  const isCreditMode = isCreditChartMode(chartMode)
   const rollingRangeSlots = visibleWindow.slots
   const rollingHourlyWindow = useMemo(
     () => buildRollingHourlyWindow(hourlyRequestWindow),
     [hourlyRequestWindow],
   )
-  const elapsedNaturalDayRangeSlots = useMemo(
-    () => buildAggregatedHourlySlots(hourlyRequestWindow, summaryWindows.today_start, summaryWindows.today_end).slots,
-    [hourlyRequestWindow, summaryWindows.today_end, summaryWindows.today_start],
-  )
-  const rangeSlots = isDeltaMode ? elapsedNaturalDayRangeSlots : isAreaMode ? rollingRangeSlots : rollingHourlyWindow.slots
-  const comparisonRangeSlots = useMemo(
-    () => buildAggregatedHourlySlots(hourlyRequestWindow, comparisonRangeStart, comparisonRangeEnd).slots,
-    [comparisonRangeEnd, comparisonRangeStart, hourlyRequestWindow],
-  )
+  const rangeSlots = isAreaMode ? rollingRangeSlots : rollingHourlyWindow.slots
   const currentPartialHourHighlightIndex = getCurrentPartialHourHighlightIndex(chartMode, rangeSlots)
   const barChartKey = getDashboardHourlyBarChartKey(
     chartMode,
@@ -348,13 +323,12 @@ export default function DashboardTrendPanel({
   )
   const labels = useMemo(
     () => {
-      const slotCount = isDeltaMode ? Math.max(rangeSlots.length, comparisonRangeSlots.length) : rangeSlots.length
-      return Array.from({ length: slotCount }, (_, index) => {
-        const bucketStart = rangeSlots[index]?.bucketStart ?? comparisonRangeSlots[index]?.bucketStart
+      return Array.from({ length: rangeSlots.length }, (_, index) => {
+        const bucketStart = rangeSlots[index]?.bucketStart
         return bucketStart == null ? ['', ''] : formatHourlyBucketLabel(bucketStart, chartLabelTimeZone ?? undefined)
       })
     },
-    [chartLabelTimeZone, comparisonRangeSlots, isDeltaMode, rangeSlots],
+    [chartLabelTimeZone, rangeSlots],
   )
   const resultSeriesLabels: Record<DashboardResultSeriesId, string> = {
     secondarySuccess: strings.chartResultSecondarySuccess,
@@ -370,7 +344,11 @@ export default function DashboardTrendPanel({
     apiNonBillable: strings.chartTypeApiNonBillable,
     apiBillable: strings.chartTypeApiBillable,
   }
-  const seriesColors: Record<DashboardResultSeriesId | DashboardTypeSeriesId, string> = {
+  const creditSeriesLabels: Record<DashboardCreditSeriesId, string> = {
+    localEstimate: strings.chartCreditLocalEstimate,
+    upstreamActual: strings.chartCreditUpstreamActual,
+  }
+  const seriesColors: Record<DashboardResultSeriesId | DashboardTypeSeriesId | DashboardCreditSeriesId, string> = {
     secondarySuccess: palette.secondarySuccess,
     primarySuccess: palette.primarySuccess,
     secondaryFailure: palette.secondaryFailure,
@@ -381,6 +359,8 @@ export default function DashboardTrendPanel({
     mcpBillable: palette.mcpBillable,
     apiNonBillable: palette.apiNonBillable,
     apiBillable: palette.apiBillable,
+    localEstimate: palette.localEstimate,
+    upstreamActual: palette.upstreamActual,
   }
 
   const activeSeries = useMemo(() => {
@@ -391,12 +371,11 @@ export default function DashboardTrendPanel({
       case 'types':
       case 'typesArea':
         return visibleTypeSeries
-      case 'resultsDelta':
-        return resultDeltaSeries === 'all' ? [...DASHBOARD_RESULT_SERIES_ORDER] : [resultDeltaSeries]
-      case 'typesDelta':
-        return typeDeltaSeries === 'all' ? [...DASHBOARD_TYPE_SERIES_ORDER] : [typeDeltaSeries]
+      case 'credits':
+      case 'creditsArea':
+        return visibleCreditSeries
     }
-  }, [chartMode, resultDeltaSeries, typeDeltaSeries, visibleResultSeries, visibleTypeSeries])
+  }, [chartMode, visibleCreditSeries, visibleResultSeries, visibleTypeSeries])
 
   const chartData = useMemo<ChartData<'bar' | 'line'>>(() => {
     if (rangeSlots.length === 0 || activeSeries.length === 0) {
@@ -433,6 +412,22 @@ export default function DashboardTrendPanel({
           borderRadius: 4,
           borderSkipped: false,
           stack: 'requests',
+        })),
+      }
+    }
+
+    if (chartMode === 'credits') {
+      return {
+        labels,
+        datasets: activeSeries.map((seriesId) => ({
+          label: creditSeriesLabels[seriesId as DashboardCreditSeriesId],
+          data: labels.map((_, index) => {
+            const bucket = rangeSlots[index]?.bucket ?? null
+            return bucket ? getCreditSeriesValue(bucket, seriesId as DashboardCreditSeriesId) : null
+          }),
+          backgroundColor: seriesColors[seriesId as DashboardCreditSeriesId],
+          borderRadius: 4,
+          borderSkipped: false,
         })),
       }
     }
@@ -492,24 +487,25 @@ export default function DashboardTrendPanel({
     return {
       labels,
       datasets: activeSeries.map((seriesId) => ({
-        label: chartMode === 'resultsDelta'
-          ? resultSeriesLabels[seriesId as DashboardResultSeriesId]
-          : typeSeriesLabels[seriesId as DashboardTypeSeriesId],
-        data: buildDeltaSeriesSlotValues(
-          rangeSlots,
-          comparisonRangeSlots,
-          seriesId as DashboardResultSeriesId | DashboardTypeSeriesId,
-        ),
-        backgroundColor: seriesColors[seriesId as DashboardResultSeriesId | DashboardTypeSeriesId],
-        borderRadius: 4,
-        borderSkipped: false,
-        stack: 'delta',
+        type: 'line' as const,
+        label: creditSeriesLabels[seriesId as DashboardCreditSeriesId],
+        data: labels.map((_, index) => {
+          const bucket = rangeSlots[index]?.bucket ?? null
+          return bucket ? getCreditSeriesValue(bucket, seriesId as DashboardCreditSeriesId) : null
+        }),
+        borderColor: seriesColors[seriesId as DashboardCreditSeriesId],
+        backgroundColor: withOpacity(seriesColors[seriesId as DashboardCreditSeriesId], 0.2),
+        fill: 'origin',
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        tension: 0.18,
+        spanGaps: false,
       })),
     }
-  }, [activeSeries, chartMode, comparisonRangeSlots, labels, rangeSlots, resultSeriesLabels, seriesColors, typeSeriesLabels])
+  }, [activeSeries, chartMode, creditSeriesLabels, labels, rangeSlots, resultSeriesLabels, seriesColors, typeSeriesLabels])
 
   const chartOptions = useMemo<ChartOptions<'bar' | 'line'>>(() => {
-    const isDelta = isDeltaMode
     return {
       responsive: true,
       maintainAspectRatio: false,
@@ -530,14 +526,14 @@ export default function DashboardTrendPanel({
               const prefix = `${context.dataset.label}: `
               if (context.raw == null) return `${prefix}—`
               const value = typeof context.raw === 'number' ? context.raw : Number(context.raw)
-              return prefix + (isDelta ? formatSignedValue(value) : value)
+              return prefix + value
             },
           },
         },
       },
       scales: {
         x: {
-          stacked: true,
+          stacked: !isCreditMode,
           grid: { display: false },
           ticks: {
             color: palette.tick,
@@ -546,13 +542,10 @@ export default function DashboardTrendPanel({
           },
         },
         y: {
-          stacked: true,
-          beginAtZero: !isDelta,
+          stacked: !isCreditMode,
+          beginAtZero: true,
           ticks: {
             color: palette.tick,
-            callback(value) {
-              return isDelta ? formatSignedValue(Number(value)) : String(value)
-            },
           },
           grid: {
             color(context) {
@@ -562,7 +555,7 @@ export default function DashboardTrendPanel({
         },
       },
     }
-  }, [isDeltaMode, palette.grid, palette.tick, palette.zeroLine])
+  }, [isCreditMode, palette.grid, palette.tick, palette.zeroLine])
 
   const barChartData = chartData as ChartData<'bar'>
   const lineChartData = chartData as ChartData<'line'>
@@ -572,19 +565,18 @@ export default function DashboardTrendPanel({
   const modeOptions = [
     { value: 'results' as const, label: strings.chartModeResults },
     { value: 'types' as const, label: strings.chartModeTypes },
-    { value: 'resultsDelta' as const, label: strings.chartModeResultsDelta },
-    { value: 'typesDelta' as const, label: strings.chartModeTypesDelta },
+    { value: 'credits' as const, label: strings.chartModeCredits },
     { value: 'resultsArea' as const, label: strings.chartModeResultsArea },
     { value: 'typesArea' as const, label: strings.chartModeTypesArea },
+    { value: 'creditsArea' as const, label: strings.chartModeCreditsArea },
   ]
 
   const showEmpty = overviewReady && (rangeSlots.length === 0 || activeSeries.length === 0)
-  const chartSeriesLabel = isDeltaMode ? strings.chartDeltaSeries : strings.chartVisibleSeries
+  const chartSeriesLabel = strings.chartVisibleSeries
   const chartMeta = formatChartWindowWithLabels(
     chartMode,
     strings,
     rangeSlots.length,
-    comparisonRangeSlots.length,
     hourlyRequestWindow,
   )
 
@@ -629,43 +621,15 @@ export default function DashboardTrendPanel({
                     onClick={() => setVisibleTypeSeries((current) => toggleSeriesSelection(current, seriesId))}
                   />
                 ))
-              : chartMode === 'resultsDelta'
-                ? [
-                    <DashboardChartSeriesButton
-                      key="all"
-                      active={resultDeltaSeries === 'all'}
-                      label={strings.chartSelectionAll}
-                      color={palette.tick}
-                      onClick={() => setResultDeltaSeries('all')}
-                    />,
-                    ...DASHBOARD_RESULT_SERIES_ORDER.map((seriesId) => (
+              : DASHBOARD_CREDIT_SERIES_ORDER.map((seriesId) => (
                       <DashboardChartSeriesButton
                         key={seriesId}
-                        active={resultDeltaSeries === seriesId}
-                        label={resultSeriesLabels[seriesId]}
+                        active={visibleCreditSeries.includes(seriesId)}
+                        label={creditSeriesLabels[seriesId]}
                         color={seriesColors[seriesId]}
-                        onClick={() => setResultDeltaSeries(seriesId)}
+                        onClick={() => setVisibleCreditSeries((current) => toggleSeriesSelection(current, seriesId))}
                       />
-                    )),
-                  ]
-                : [
-                    <DashboardChartSeriesButton
-                      key="all"
-                      active={typeDeltaSeries === 'all'}
-                      label={strings.chartSelectionAll}
-                      color={palette.tick}
-                      onClick={() => setTypeDeltaSeries('all')}
-                    />,
-                    ...DASHBOARD_TYPE_SERIES_ORDER.map((seriesId) => (
-                      <DashboardChartSeriesButton
-                        key={seriesId}
-                        active={typeDeltaSeries === seriesId}
-                        label={typeSeriesLabels[seriesId]}
-                        color={seriesColors[seriesId]}
-                        onClick={() => setTypeDeltaSeries(seriesId)}
-                      />
-                    )),
-                  ])}
+                    )))}
         </div>
       </div>
 

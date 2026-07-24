@@ -1203,6 +1203,8 @@ body.not-found-page-body,
   --dashboard-chart-type-mcp-billable: 195 86% 48%;
   --dashboard-chart-type-api-non-billable: 214 82% 67%;
   --dashboard-chart-type-api-billable: 214 88% 56%;
+  --dashboard-chart-credit-local-estimate: 199 89% 48%;
+  --dashboard-chart-credit-upstream-actual: 330 81% 60%;
   --dashboard-chart-grid: 215 16% 78% / 0.18;
   --dashboard-chart-zero-line: 215 16% 70% / 0.3;
   --dashboard-chart-tick: 221 22% 38%;
@@ -1221,6 +1223,8 @@ body.not-found-page-body,
   --dashboard-chart-type-mcp-billable: 191 88% 62%;
   --dashboard-chart-type-api-non-billable: 210 92% 78%;
   --dashboard-chart-type-api-billable: 210 94% 68%;
+  --dashboard-chart-credit-local-estimate: 194 92% 64%;
+  --dashboard-chart-credit-upstream-actual: 330 90% 72%;
   --dashboard-chart-grid: 216 18% 46% / 0.18;
   --dashboard-chart-zero-line: 216 18% 58% / 0.34;
   --dashboard-chart-tick: 210 24% 84%;
@@ -1241,7 +1245,16 @@ body.not-found-page-body,
 }
 
 .dashboard-trend-segmented {
+  display: flex;
+  width: 100%;
   margin-top: 2px;
+}
+
+.dashboard-trend-segmented .segmented-tab {
+  min-width: 0;
+  flex: 1 1 0;
+  padding-inline: 10px;
+  letter-spacing: 0;
 }
 
 .dashboard-chart-toolbar {

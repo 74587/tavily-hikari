@@ -282,17 +282,14 @@ export interface AdminTranslationsShape {
     errorTrend: string
     chartModeResults: string
     chartModeTypes: string
-    chartModeResultsDelta: string
-    chartModeTypesDelta: string
+    chartModeCredits: string
     chartModeResultsArea: string
     chartModeTypesArea: string
+    chartModeCreditsArea: string
     chartVisibleSeries: string
-    chartDeltaSeries: string
-    chartSelectionAll: string
     chartEmpty: string
     chartUtcWindow: string
     chartRollingWindow: string
-    chartDeltaWindow: string
     chartResultSecondarySuccess: string
     chartResultPrimarySuccess: string
     chartResultSecondaryFailure: string
@@ -303,6 +300,8 @@ export interface AdminTranslationsShape {
     chartTypeMcpBillable: string
     chartTypeApiNonBillable: string
     chartTypeApiBillable: string
+    chartCreditLocalEstimate: string
+    chartCreditUpstreamActual: string
     actionsTitle: string
     actionsDescription: string
     recentRequests: string
