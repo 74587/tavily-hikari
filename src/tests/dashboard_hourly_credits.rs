@@ -57,6 +57,7 @@ async fn dashboard_hourly_request_window_reports_local_and_sampled_upstream_cred
             (?, 1000, 80, ?, 'hourly_credit_test'),
             ('credit-key-2', 1000, 200, ?, 'hourly_credit_test'),
             ('credit-key-2', 1000, 193, ?, 'hourly_credit_test'),
+            ('credit-key-2', 1000, 190, ?, 'hourly_credit_test'),
             ('credit-key-3', 1000, 300, ?, 'hourly_credit_test')
         "#,
     )
@@ -69,6 +70,7 @@ async fn dashboard_hourly_request_window_reports_local_and_sampled_upstream_cred
     .bind(&key_id)
     .bind(current_bucket_start + 30)
     .bind(current_bucket_start - 600 + 20)
+    .bind(current_bucket_start - 600 + 40)
     .bind(current_bucket_start - 600 + 40)
     .bind(current_bucket_start - 900 + 30)
     .execute(&proxy.key_store.pool)
@@ -99,8 +101,8 @@ async fn dashboard_hourly_request_window_reports_local_and_sampled_upstream_cred
     );
     assert_eq!(
         bucket_at(current_bucket_start - 600).upstream_actual_credits,
-        Some(17),
-        "multiple keys in one bucket should be summed",
+        Some(20),
+        "multiple keys and same-timestamp samples should be summed deterministically",
     );
     assert_eq!(
         bucket_at(current_bucket_start - 900).upstream_actual_credits,

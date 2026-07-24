@@ -56,7 +56,7 @@ impl KeyStore {
         let sample_rows = sqlx::query(
             r#"
             WITH window_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM api_key_quota_sync_samples
                 WHERE captured_at >= ?
                   AND captured_at < ?
@@ -65,7 +65,7 @@ impl KeyStore {
                 SELECT DISTINCT key_id FROM window_rows
             ),
             baseline_rows AS (
-                SELECT s.key_id, s.quota_remaining, s.captured_at
+                SELECT s.id, s.key_id, s.quota_remaining, s.captured_at
                 FROM api_key_quota_sync_samples s
                 INNER JOIN (
                     SELECT key_id, MAX(captured_at) AS captured_at
@@ -77,12 +77,12 @@ impl KeyStore {
                     ON latest.key_id = s.key_id
                    AND latest.captured_at = s.captured_at
             )
-            SELECT key_id, quota_remaining, captured_at
+            SELECT id, key_id, quota_remaining, captured_at
             FROM window_rows
             UNION ALL
-            SELECT key_id, quota_remaining, captured_at
+            SELECT id, key_id, quota_remaining, captured_at
             FROM baseline_rows
-            ORDER BY key_id ASC, captured_at ASC
+            ORDER BY key_id ASC, captured_at ASC, id ASC
             "#,
         )
         .bind(sample_window_start)
@@ -368,7 +368,7 @@ impl KeyStore {
         let row = sqlx::query(
             r#"
             WITH window_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM api_key_quota_sync_samples
                 WHERE captured_at >= ?
                   AND captured_at < ?
@@ -377,7 +377,7 @@ impl KeyStore {
                 SELECT DISTINCT key_id FROM window_rows
             ),
             baseline_rows AS (
-                SELECT s.key_id, s.quota_remaining, s.captured_at
+                SELECT s.id, s.key_id, s.quota_remaining, s.captured_at
                 FROM api_key_quota_sync_samples s
                 INNER JOIN (
                     SELECT key_id, MAX(captured_at) AS captured_at
@@ -390,10 +390,10 @@ impl KeyStore {
                    AND latest.captured_at = s.captured_at
             ),
             signature_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM window_rows
                 UNION ALL
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM baseline_rows
             )
             SELECT
@@ -688,7 +688,7 @@ impl KeyStore {
         let sample_rows = sqlx::query(
             r#"
             WITH window_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM api_key_quota_sync_samples
                 WHERE captured_at >= ?
                   AND captured_at < ?
@@ -697,7 +697,7 @@ impl KeyStore {
                 SELECT DISTINCT key_id FROM window_rows
             ),
             baseline_rows AS (
-                SELECT s.key_id, s.quota_remaining, s.captured_at
+                SELECT s.id, s.key_id, s.quota_remaining, s.captured_at
                 FROM api_key_quota_sync_samples s
                 INNER JOIN (
                     SELECT key_id, MAX(captured_at) AS captured_at
@@ -709,12 +709,12 @@ impl KeyStore {
                     ON latest.key_id = s.key_id
                    AND latest.captured_at = s.captured_at
             )
-            SELECT key_id, quota_remaining, captured_at
+            SELECT id, key_id, quota_remaining, captured_at
             FROM window_rows
             UNION ALL
-            SELECT key_id, quota_remaining, captured_at
+            SELECT id, key_id, quota_remaining, captured_at
             FROM baseline_rows
-            ORDER BY key_id ASC, captured_at ASC
+            ORDER BY key_id ASC, captured_at ASC, id ASC
             "#,
         )
         .bind(series_start)
