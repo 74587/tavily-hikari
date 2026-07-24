@@ -3,10 +3,10 @@ import type { DashboardHourlyRequestBucket, DashboardHourlyRequestWindow } from 
 export type DashboardHourlyChartMode =
   | 'results'
   | 'types'
-  | 'resultsDelta'
-  | 'typesDelta'
+  | 'credits'
   | 'resultsArea'
   | 'typesArea'
+  | 'creditsArea'
 
 export type DashboardResultSeriesId =
   | 'secondarySuccess'
@@ -22,7 +22,7 @@ export type DashboardTypeSeriesId =
   | 'apiNonBillable'
   | 'apiBillable'
 
-export type DashboardDeltaSelection<T extends string> = T | 'all'
+export type DashboardCreditSeriesId = 'localEstimate' | 'upstreamActual'
 
 export const DASHBOARD_RESULT_SERIES_ORDER = [
   'secondarySuccess',
@@ -40,6 +40,11 @@ export const DASHBOARD_TYPE_SERIES_ORDER = [
   'apiBillable',
 ] as const satisfies ReadonlyArray<DashboardTypeSeriesId>
 
+export const DASHBOARD_CREDIT_SERIES_ORDER = [
+  'localEstimate',
+  'upstreamActual',
+] as const satisfies ReadonlyArray<DashboardCreditSeriesId>
+
 export const DEFAULT_VISIBLE_RESULT_SERIES = [
   ...DASHBOARD_RESULT_SERIES_ORDER,
 ] as const satisfies ReadonlyArray<DashboardResultSeriesId>
@@ -47,6 +52,10 @@ export const DEFAULT_VISIBLE_RESULT_SERIES = [
 export const DEFAULT_VISIBLE_TYPE_SERIES = [
   ...DASHBOARD_TYPE_SERIES_ORDER,
 ] as const satisfies ReadonlyArray<DashboardTypeSeriesId>
+
+export const DEFAULT_VISIBLE_CREDIT_SERIES = [
+  ...DASHBOARD_CREDIT_SERIES_ORDER,
+] as const satisfies ReadonlyArray<DashboardCreditSeriesId>
 
 export const DASHBOARD_AREA_CHART_STACK_ID = 'area'
 export const DASHBOARD_AREA_CHART_TENSION = 0.18
@@ -61,16 +70,14 @@ export interface DashboardHourlyChartPreferences {
   chartMode: DashboardHourlyChartMode
   visibleResultSeries: DashboardResultSeriesId[]
   visibleTypeSeries: DashboardTypeSeriesId[]
-  resultDeltaSeries: DashboardDeltaSelection<DashboardResultSeriesId>
-  typeDeltaSeries: DashboardDeltaSelection<DashboardTypeSeriesId>
+  visibleCreditSeries: DashboardCreditSeriesId[]
 }
 
 export interface DashboardHourlyChartPreferencesInput {
-  chartMode?: DashboardHourlyChartMode
+  chartMode?: DashboardHourlyChartMode | 'resultsDelta' | 'typesDelta'
   visibleResultSeries?: ReadonlyArray<DashboardResultSeriesId>
   visibleTypeSeries?: ReadonlyArray<DashboardTypeSeriesId>
-  resultDeltaSeries?: DashboardDeltaSelection<DashboardResultSeriesId>
-  typeDeltaSeries?: DashboardDeltaSelection<DashboardTypeSeriesId>
+  visibleCreditSeries?: ReadonlyArray<DashboardCreditSeriesId>
 }
 
 export interface DashboardHourlyRangeSlot {
@@ -125,31 +132,24 @@ function normalizeSeriesSelection<T extends string>(
   return normalized
 }
 
-function normalizeDeltaSelection<T extends string>(
-  value: unknown,
-  allowed: ReadonlyArray<T>,
-  fallback: DashboardDeltaSelection<T>,
-): DashboardDeltaSelection<T> {
-  if (value === 'all') return 'all'
-  if (typeof value === 'string' && allowed.includes(value as T)) {
-    return value as T
-  }
-  return fallback
+function normalizeChartMode(value: unknown): DashboardHourlyChartMode {
+  if (value === 'resultsDelta') return 'credits'
+  if (value === 'typesDelta') return 'creditsArea'
+  return value === 'results'
+      || value === 'types'
+      || value === 'credits'
+      || value === 'resultsArea'
+      || value === 'typesArea'
+      || value === 'creditsArea'
+    ? value
+    : 'results'
 }
 
 export function createDashboardHourlyChartPreferences(
   overrides: DashboardHourlyChartPreferencesInput = {},
 ): DashboardHourlyChartPreferences {
   return {
-    chartMode:
-      overrides.chartMode === 'results'
-        || overrides.chartMode === 'types'
-        || overrides.chartMode === 'resultsDelta'
-        || overrides.chartMode === 'typesDelta'
-        || overrides.chartMode === 'resultsArea'
-        || overrides.chartMode === 'typesArea'
-        ? overrides.chartMode
-        : 'results',
+    chartMode: normalizeChartMode(overrides.chartMode),
     visibleResultSeries: normalizeSeriesSelection(
       overrides.visibleResultSeries,
       DASHBOARD_RESULT_SERIES_ORDER,
@@ -160,15 +160,10 @@ export function createDashboardHourlyChartPreferences(
       DASHBOARD_TYPE_SERIES_ORDER,
       DEFAULT_VISIBLE_TYPE_SERIES,
     ),
-    resultDeltaSeries: normalizeDeltaSelection(
-      overrides.resultDeltaSeries,
-      DASHBOARD_RESULT_SERIES_ORDER,
-      'all',
-    ),
-    typeDeltaSeries: normalizeDeltaSelection(
-      overrides.typeDeltaSeries,
-      DASHBOARD_TYPE_SERIES_ORDER,
-      'all',
+    visibleCreditSeries: normalizeSeriesSelection(
+      overrides.visibleCreditSeries,
+      DASHBOARD_CREDIT_SERIES_ORDER,
+      DEFAULT_VISIBLE_CREDIT_SERIES,
     ),
   }
 }
@@ -328,7 +323,7 @@ export function getCurrentPartialHourHighlightIndex(
   slots: ReadonlyArray<DashboardHourlyRangeSlot>,
 ): number | null {
   if (slots.length === 0) return null
-  return chartMode === 'results' || chartMode === 'types' ? slots.length - 1 : null
+  return chartMode === 'results' || chartMode === 'types' || chartMode === 'credits' ? slots.length - 1 : null
 }
 
 export function getDashboardHourlyBarChartKey(
@@ -424,6 +419,8 @@ function createEmptyBucket(bucketStart: number): DashboardHourlyRequestBucket {
     mcpBillable: 0,
     apiNonBillable: 0,
     apiBillable: 0,
+    localEstimatedCredits: 0,
+    upstreamActualCredits: null,
   }
 }
 
@@ -438,6 +435,10 @@ function addBucketValues(target: DashboardHourlyRequestBucket, source: Dashboard
   target.mcpBillable += source.mcpBillable
   target.apiNonBillable += source.apiNonBillable
   target.apiBillable += source.apiBillable
+  target.localEstimatedCredits += source.localEstimatedCredits
+  if (source.upstreamActualCredits != null) {
+    target.upstreamActualCredits = (target.upstreamActualCredits ?? 0) + source.upstreamActualCredits
+  }
 }
 
 export function buildAggregatedHourlySlots(
@@ -513,6 +514,13 @@ export function getTypeSeriesValue(bucket: DashboardHourlyRequestBucket, series:
   }
 }
 
+export function getCreditSeriesValue(
+  bucket: DashboardHourlyRequestBucket,
+  series: DashboardCreditSeriesId,
+): number | null {
+  return series === 'localEstimate' ? bucket.localEstimatedCredits : bucket.upstreamActualCredits
+}
+
 export function toggleSeriesSelection<T extends string>(
   selected: ReadonlyArray<T>,
   value: T,
@@ -520,42 +528,6 @@ export function toggleSeriesSelection<T extends string>(
   return selected.includes(value)
     ? selected.filter((item) => item !== value)
     : [...selected, value]
-}
-
-export function buildDeltaSeriesValues<T extends DashboardResultSeriesId | DashboardTypeSeriesId>(
-  buckets: ReadonlyArray<DashboardHourlyRequestBucket>,
-  lookup: ReadonlyMap<number, DashboardHourlyRequestBucket>,
-  series: T,
-): number[] {
-  return buckets.map((bucket) => {
-    const baseline = lookup.get(bucket.bucketStart - 24 * 3600)
-    if (!baseline) return 0
-    if ((DASHBOARD_RESULT_SERIES_ORDER as readonly string[]).includes(series)) {
-      return getResultSeriesValue(bucket, series as DashboardResultSeriesId)
-        - getResultSeriesValue(baseline, series as DashboardResultSeriesId)
-    }
-    return getTypeSeriesValue(bucket, series as DashboardTypeSeriesId)
-      - getTypeSeriesValue(baseline, series as DashboardTypeSeriesId)
-  })
-}
-
-export function buildDeltaSeriesSlotValues<T extends DashboardResultSeriesId | DashboardTypeSeriesId>(
-  slots: ReadonlyArray<DashboardHourlyRangeSlot>,
-  comparisonSlots: ReadonlyArray<DashboardHourlyRangeSlot>,
-  series: T,
-): Array<number | null> {
-  const slotCount = Math.max(slots.length, comparisonSlots.length)
-  return Array.from({ length: slotCount }, (_, index) => {
-    const slot = slots[index]
-    const comparisonBucket = comparisonSlots[index]?.bucket ?? null
-    if (!slot?.bucket || !comparisonBucket) return null
-    if ((DASHBOARD_RESULT_SERIES_ORDER as readonly string[]).includes(series)) {
-      return getResultSeriesValue(slot.bucket, series as DashboardResultSeriesId)
-        - getResultSeriesValue(comparisonBucket, series as DashboardResultSeriesId)
-    }
-    return getTypeSeriesValue(slot.bucket, series as DashboardTypeSeriesId)
-      - getTypeSeriesValue(comparisonBucket, series as DashboardTypeSeriesId)
-  })
 }
 
 export function formatDashboardRealtimeWindowLabel(
@@ -613,6 +585,8 @@ export function buildDashboardHourlyRequestWindowFixture({
       mcpBillable: (base % 5) + 2,
       apiNonBillable: base % 3,
       apiBillable: (base % 6) + 3,
+      localEstimatedCredits: (base % 9) + 5,
+      upstreamActualCredits: base % 4 === 0 ? null : (base % 7) + 3,
     }
     return {
       ...bucket,

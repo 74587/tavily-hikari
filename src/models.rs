@@ -1456,6 +1456,8 @@ pub struct DashboardHourlyRequestBucket {
     pub mcp_billable: i64,
     pub api_non_billable: i64,
     pub api_billable: i64,
+    pub local_estimated_credits: i64,
+    pub upstream_actual_credits: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]

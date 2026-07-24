@@ -56,7 +56,7 @@ impl KeyStore {
         let sample_rows = sqlx::query(
             r#"
             WITH window_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM api_key_quota_sync_samples
                 WHERE captured_at >= ?
                   AND captured_at < ?
@@ -65,7 +65,7 @@ impl KeyStore {
                 SELECT DISTINCT key_id FROM window_rows
             ),
             baseline_rows AS (
-                SELECT s.key_id, s.quota_remaining, s.captured_at
+                SELECT s.id, s.key_id, s.quota_remaining, s.captured_at
                 FROM api_key_quota_sync_samples s
                 INNER JOIN (
                     SELECT key_id, MAX(captured_at) AS captured_at
@@ -77,12 +77,12 @@ impl KeyStore {
                     ON latest.key_id = s.key_id
                    AND latest.captured_at = s.captured_at
             )
-            SELECT key_id, quota_remaining, captured_at
+            SELECT id, key_id, quota_remaining, captured_at
             FROM window_rows
             UNION ALL
-            SELECT key_id, quota_remaining, captured_at
+            SELECT id, key_id, quota_remaining, captured_at
             FROM baseline_rows
-            ORDER BY key_id ASC, captured_at ASC
+            ORDER BY key_id ASC, captured_at ASC, id ASC
             "#,
         )
         .bind(sample_window_start)
@@ -368,7 +368,7 @@ impl KeyStore {
         let row = sqlx::query(
             r#"
             WITH window_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM api_key_quota_sync_samples
                 WHERE captured_at >= ?
                   AND captured_at < ?
@@ -377,7 +377,7 @@ impl KeyStore {
                 SELECT DISTINCT key_id FROM window_rows
             ),
             baseline_rows AS (
-                SELECT s.key_id, s.quota_remaining, s.captured_at
+                SELECT s.id, s.key_id, s.quota_remaining, s.captured_at
                 FROM api_key_quota_sync_samples s
                 INNER JOIN (
                     SELECT key_id, MAX(captured_at) AS captured_at
@@ -390,10 +390,10 @@ impl KeyStore {
                    AND latest.captured_at = s.captured_at
             ),
             signature_rows AS (
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM window_rows
                 UNION ALL
-                SELECT key_id, quota_remaining, captured_at
+                SELECT id, key_id, quota_remaining, captured_at
                 FROM baseline_rows
             )
             SELECT
@@ -645,7 +645,8 @@ impl KeyStore {
                     COALESCE(SUM(mcp_non_billable), 0) AS mcp_non_billable,
                     COALESCE(SUM(mcp_billable), 0) AS mcp_billable,
                     COALESCE(SUM(api_non_billable), 0) AS api_non_billable,
-                    COALESCE(SUM(api_billable), 0) AS api_billable
+                    COALESCE(SUM(api_billable), 0) AS api_billable,
+                    COALESCE(SUM(local_estimated_credits), 0) AS local_estimated_credits
                 FROM dashboard_request_rollup_buckets
                 WHERE bucket_secs = ?
                   AND bucket_start >= ?
@@ -663,7 +664,8 @@ impl KeyStore {
                 COALESCE(aggregated.mcp_non_billable, 0) AS mcp_non_billable,
                 COALESCE(aggregated.mcp_billable, 0) AS mcp_billable,
                 COALESCE(aggregated.api_non_billable, 0) AS api_non_billable,
-                COALESCE(aggregated.api_billable, 0) AS api_billable
+                COALESCE(aggregated.api_billable, 0) AS api_billable,
+                COALESCE(aggregated.local_estimated_credits, 0) AS local_estimated_credits
             FROM hour_series
             LEFT JOIN aggregated ON aggregated.hour_bucket_start = hour_series.bucket_start
             ORDER BY hour_series.bucket_start ASC
@@ -683,6 +685,69 @@ impl KeyStore {
         .fetch_all(&mut **tx)
         .await?;
 
+        let sample_rows = sqlx::query(
+            r#"
+            WITH window_rows AS (
+                SELECT id, key_id, quota_remaining, captured_at
+                FROM api_key_quota_sync_samples
+                WHERE captured_at >= ?
+                  AND captured_at < ?
+            ),
+            sampled_keys AS (
+                SELECT DISTINCT key_id FROM window_rows
+            ),
+            baseline_rows AS (
+                SELECT s.id, s.key_id, s.quota_remaining, s.captured_at
+                FROM api_key_quota_sync_samples s
+                INNER JOIN (
+                    SELECT key_id, MAX(captured_at) AS captured_at
+                    FROM api_key_quota_sync_samples
+                    WHERE captured_at < ?
+                      AND key_id IN (SELECT key_id FROM sampled_keys)
+                    GROUP BY key_id
+                ) latest
+                    ON latest.key_id = s.key_id
+                   AND latest.captured_at = s.captured_at
+            )
+            SELECT id, key_id, quota_remaining, captured_at
+            FROM window_rows
+            UNION ALL
+            SELECT id, key_id, quota_remaining, captured_at
+            FROM baseline_rows
+            ORDER BY key_id ASC, captured_at ASC, id ASC
+            "#,
+        )
+        .bind(series_start)
+        .bind(series_end_exclusive)
+        .bind(series_start)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        let mut upstream_actual_by_bucket = std::collections::HashMap::<i64, i64>::new();
+        let mut current_key: Option<String> = None;
+        let mut previous_remaining: Option<i64> = None;
+        for row in sample_rows {
+            let key_id: String = row.try_get("key_id")?;
+            if current_key.as_deref() != Some(key_id.as_str()) {
+                current_key = Some(key_id);
+                previous_remaining = None;
+            }
+
+            let quota_remaining: i64 = row.try_get("quota_remaining")?;
+            let captured_at: i64 = row.try_get("captured_at")?;
+            if captured_at >= series_start
+                && captured_at < series_end_exclusive
+                && let Some(previous) = previous_remaining
+            {
+                let bucket_start = ((captured_at - bucket_alignment_offset) / bucket_seconds)
+                    * bucket_seconds
+                    + bucket_alignment_offset;
+                *upstream_actual_by_bucket.entry(bucket_start).or_default() +=
+                    (previous - quota_remaining).max(0);
+            }
+            previous_remaining = Some(quota_remaining);
+        }
+
         let buckets = rows
             .into_iter()
             .map(|row| {
@@ -698,6 +763,10 @@ impl KeyStore {
                     mcp_billable: row.try_get("mcp_billable")?,
                     api_non_billable: row.try_get("api_non_billable")?,
                     api_billable: row.try_get("api_billable")?,
+                    local_estimated_credits: row.try_get("local_estimated_credits")?,
+                    upstream_actual_credits: upstream_actual_by_bucket
+                        .get(&row.try_get::<i64, _>("bucket_start")?)
+                        .copied(),
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;

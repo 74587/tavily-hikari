@@ -146,6 +146,7 @@
         "tests::proxy_affinity_and_summary::summary_",
         "tests::request_rollup::summary_",
         "tests::dashboard_month_series::dashboard_",
+        "tests::dashboard_hourly_credits::",
         "tests::request_rollup::dashboard_",
         "tests::request_rollup::rollup_",
         "tests::account_quota_and_billing::startup_",

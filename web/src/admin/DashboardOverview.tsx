@@ -26,7 +26,7 @@ import {
 } from 'chart.js'
 import DashboardTrendPanel from './DashboardTrendPanel'
 import {
-  type DashboardDeltaSelection,
+  type DashboardCreditSeriesId,
   type DashboardHourlyChartMode,
   type DashboardResultSeriesId,
   type DashboardTypeSeriesId,
@@ -93,17 +93,14 @@ export interface DashboardOverviewStrings {
   errorTrend: string
   chartModeResults: string
   chartModeTypes: string
-  chartModeResultsDelta: string
-  chartModeTypesDelta: string
+  chartModeCredits: string
   chartModeResultsArea: string
   chartModeTypesArea: string
+  chartModeCreditsArea: string
   chartVisibleSeries: string
-  chartDeltaSeries: string
-  chartSelectionAll: string
   chartEmpty: string
   chartUtcWindow: string
   chartRollingWindow: string
-  chartDeltaWindow: string
   chartResultSecondarySuccess: string
   chartResultPrimarySuccess: string
   chartResultSecondaryFailure: string
@@ -114,6 +111,8 @@ export interface DashboardOverviewStrings {
   chartTypeMcpBillable: string
   chartTypeApiNonBillable: string
   chartTypeApiBillable: string
+  chartCreditLocalEstimate: string
+  chartCreditUpstreamActual: string
   actionsTitle: string
   actionsDescription: string
   recentRequests: string
@@ -176,8 +175,7 @@ interface DashboardOverviewProps {
   initialChartMode?: DashboardHourlyChartMode
   initialVisibleResultSeries?: ReadonlyArray<DashboardResultSeriesId>
   initialVisibleTypeSeries?: ReadonlyArray<DashboardTypeSeriesId>
-  initialResultDeltaSeries?: DashboardDeltaSelection<DashboardResultSeriesId>
-  initialTypeDeltaSeries?: DashboardDeltaSelection<DashboardTypeSeriesId>
+  initialVisibleCreditSeries?: ReadonlyArray<DashboardCreditSeriesId>
   chartPersistenceKey?: string | null
   chartLabelTimeZone?: string | null
 }
@@ -560,8 +558,7 @@ export default function DashboardOverview({
   initialChartMode,
   initialVisibleResultSeries,
   initialVisibleTypeSeries,
-  initialResultDeltaSeries,
-  initialTypeDeltaSeries,
+  initialVisibleCreditSeries,
   chartPersistenceKey,
   chartLabelTimeZone,
 }: DashboardOverviewProps): JSX.Element {
@@ -996,12 +993,10 @@ export default function DashboardOverview({
         strings={strings}
         overviewReady={overviewReady}
         hourlyRequestWindow={hourlyRequestWindow}
-        summaryWindows={summaryWindowValues}
         initialChartMode={initialChartMode}
         initialVisibleResultSeries={initialVisibleResultSeries}
         initialVisibleTypeSeries={initialVisibleTypeSeries}
-        initialResultDeltaSeries={initialResultDeltaSeries}
-        initialTypeDeltaSeries={initialTypeDeltaSeries}
+        initialVisibleCreditSeries={initialVisibleCreditSeries}
         chartPersistenceKey={chartPersistenceKey}
         chartLabelTimeZone={chartLabelTimeZone}
       />

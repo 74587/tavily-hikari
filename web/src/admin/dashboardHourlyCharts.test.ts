@@ -4,8 +4,6 @@ import {
   buildDashboardHourlyRequestWindowFixture,
   buildAggregatedHourlySlots,
   buildDashboardAreaStackLayers,
-  buildDeltaSeriesValues,
-  buildDeltaSeriesSlotValues,
   buildHourlyBucketLookup,
   buildHourlyRangeSlots,
   createDashboardHourlyChartPreferences,
@@ -17,6 +15,7 @@ import {
   DASHBOARD_AREA_CHART_TENSION,
   DASHBOARD_RESULT_SERIES_ORDER,
   DASHBOARD_TYPE_SERIES_ORDER,
+  DASHBOARD_CREDIT_SERIES_ORDER,
   getCurrentDayHourlyBuckets,
   formatHourlyBucketLabel,
   formatDashboardRealtimeWindowLabel,
@@ -67,27 +66,6 @@ describe('dashboardHourlyCharts helpers', () => {
     expect(rolling.slots).toHaveLength(25)
     expect(rolling.slots[0]?.bucketStart).toBe(currentHourStart - 24 * 3600)
     expect(rolling.slots.at(-1)?.bucketStart).toBe(currentHourStart)
-  })
-
-  it('computes yesterday deltas from aligned hourly buckets', () => {
-    const window = buildDashboardHourlyRequestWindowFixture({
-      bucketSeconds: 3600,
-      visibleBuckets: 25,
-      retainedBuckets: 49,
-      mapBucket: ({ index }) => ({
-        primarySuccess: index === 6 ? 10 : index === 30 ? 50 : 0,
-      }),
-    })
-    const visible = getVisibleHourlyBuckets(window)
-    const lookup = buildHourlyBucketLookup(window.buckets)
-
-    const delta = buildDeltaSeriesValues(visible, lookup, 'primarySuccess')
-    const targetVisibleIndex = visible.findIndex((bucket) => bucket.bucketStart === window.buckets[30]?.bucketStart)
-
-    expect(delta).toHaveLength(25)
-    expect(targetVisibleIndex).toBeGreaterThanOrEqual(0)
-    expect(delta[targetVisibleIndex]).toBe(40)
-    expect(delta.filter((value) => value !== 0)).toEqual([40])
   })
 
   it('formats hourly bucket labels in the requested local timezone', () => {
@@ -178,28 +156,6 @@ describe('dashboardHourlyCharts helpers', () => {
     expect(slots.every((slot) => slot.bucket?.bucketStart === slot.bucketStart)).toBe(true)
   })
 
-  it('returns null deltas when either fixed-range side is missing', () => {
-    const currentHourStart = Date.UTC(2026, 3, 7, 4, 0, 0) / 1000
-    const window = buildDashboardHourlyRequestWindowFixture({
-      currentHourStart,
-      bucketSeconds: 3600,
-      visibleBuckets: 6,
-      retainedBuckets: 6,
-      mapBucket: ({ index }) => ({
-        primarySuccess: index === 0 ? 10 : index === 4 ? 50 : 0,
-      }),
-    })
-    window.buckets = window.buckets.filter((bucket) => bucket.bucketStart !== currentHourStart)
-    const currentSlots = buildHourlyRangeSlots(window, currentHourStart - 3600, currentHourStart + 2 * 3600)
-    const comparisonSlots = buildHourlyRangeSlots(window, currentHourStart - 5 * 3600, currentHourStart - 2 * 3600)
-
-    expect(buildDeltaSeriesSlotValues(currentSlots, comparisonSlots, 'primarySuccess')).toEqual([
-      40,
-      null,
-      null,
-    ])
-  })
-
   it('toggles absolute-series visibility without mutating the source array', () => {
     const source = ['primarySuccess', 'secondaryFailure'] as const
 
@@ -236,11 +192,19 @@ describe('dashboardHourlyCharts helpers', () => {
 
     expect(preferences.visibleResultSeries).toEqual([...DASHBOARD_RESULT_SERIES_ORDER])
     expect(preferences.visibleTypeSeries).toEqual([...DASHBOARD_TYPE_SERIES_ORDER])
+    expect(preferences.visibleCreditSeries).toEqual([...DASHBOARD_CREDIT_SERIES_ORDER])
   })
 
   it('supports the expanded chart mode set including area charts', () => {
     expect(createDashboardHourlyChartPreferences({ chartMode: 'resultsArea' }).chartMode).toBe('resultsArea')
     expect(createDashboardHourlyChartPreferences({ chartMode: 'typesArea' }).chartMode).toBe('typesArea')
+    expect(createDashboardHourlyChartPreferences({ chartMode: 'credits' }).chartMode).toBe('credits')
+    expect(createDashboardHourlyChartPreferences({ chartMode: 'creditsArea' }).chartMode).toBe('creditsArea')
+  })
+
+  it('migrates removed delta chart preferences to credit modes', () => {
+    expect(createDashboardHourlyChartPreferences({ chartMode: 'resultsDelta' }).chartMode).toBe('credits')
+    expect(createDashboardHourlyChartPreferences({ chartMode: 'typesDelta' }).chartMode).toBe('creditsArea')
   })
 
   it('highlights only the current partial hour in absolute bar modes', () => {
@@ -252,10 +216,10 @@ describe('dashboardHourlyCharts helpers', () => {
 
     expect(getCurrentPartialHourHighlightIndex('results', slots)).toBe(2)
     expect(getCurrentPartialHourHighlightIndex('types', slots)).toBe(2)
-    expect(getCurrentPartialHourHighlightIndex('resultsDelta', slots)).toBeNull()
-    expect(getCurrentPartialHourHighlightIndex('typesDelta', slots)).toBeNull()
+    expect(getCurrentPartialHourHighlightIndex('credits', slots)).toBe(2)
     expect(getCurrentPartialHourHighlightIndex('resultsArea', slots)).toBeNull()
     expect(getCurrentPartialHourHighlightIndex('typesArea', slots)).toBeNull()
+    expect(getCurrentPartialHourHighlightIndex('creditsArea', slots)).toBeNull()
     expect(getCurrentPartialHourHighlightIndex('results', [])).toBeNull()
   })
 
@@ -268,7 +232,7 @@ describe('dashboardHourlyCharts helpers', () => {
 
     expect(getDashboardHourlyBarChartKey('results', slots)).toBe('results:current-partial-hour-2:3')
     expect(getDashboardHourlyBarChartKey('types', slots)).toBe('types:current-partial-hour-2:3')
-    expect(getDashboardHourlyBarChartKey('resultsDelta', slots)).toBe('resultsDelta:no-current-partial-hour:3')
+    expect(getDashboardHourlyBarChartKey('credits', slots)).toBe('credits:current-partial-hour-2:3')
     expect(getDashboardHourlyBarChartKey('typesArea', slots)).toBe('typesArea:no-current-partial-hour:3')
     expect(getDashboardHourlyBarChartKey('results', [])).toBe('results:no-current-partial-hour:0')
   })
@@ -332,16 +296,14 @@ describe('dashboardHourlyCharts helpers', () => {
       chartMode: 'results',
       visibleResultSeries: [],
       visibleTypeSeries: ['apiBillable'],
-      resultDeltaSeries: 'primaryFailure429',
-      typeDeltaSeries: 'all',
+      visibleCreditSeries: ['upstreamActual'],
     })
 
     expect(readDashboardHourlyChartPreferences(storageApi, key)).toEqual({
       chartMode: 'results',
       visibleResultSeries: [],
       visibleTypeSeries: ['apiBillable'],
-      resultDeltaSeries: 'primaryFailure429',
-      typeDeltaSeries: 'all',
+      visibleCreditSeries: ['upstreamActual'],
     })
   })
 
@@ -360,8 +322,7 @@ describe('dashboardHourlyCharts helpers', () => {
       chartMode: 'resultsArea',
       visibleResultSeries: ['primarySuccess'],
       visibleTypeSeries: ['apiBillable'],
-      resultDeltaSeries: 'primaryFailure429',
-      typeDeltaSeries: 'all',
+      visibleCreditSeries: ['localEstimate'],
     }))
 
     expect(
@@ -374,9 +335,32 @@ describe('dashboardHourlyCharts helpers', () => {
       chartMode: 'resultsArea',
       visibleResultSeries: ['primarySuccess'],
       visibleTypeSeries: ['apiBillable'],
-      resultDeltaSeries: 'primaryFailure429',
-      typeDeltaSeries: 'all',
+      visibleCreditSeries: ['localEstimate'],
     })
+  })
+
+  it('aggregates upstream credits only when at least one source bucket is sampled', () => {
+    const currentHourStart = Date.UTC(2026, 3, 7, 12, 0, 0) / 1000
+    const window = buildDashboardHourlyRequestWindowFixture({
+      currentHourStart,
+      retainedBuckets: 13,
+      visibleBuckets: 13,
+      mapBucket: ({ index }) => ({
+        localEstimatedCredits: 2,
+        upstreamActualCredits: index === 3 ? 5 : index === 8 ? 0 : null,
+      }),
+    })
+
+    const aggregated = buildAggregatedHourlySlots(
+      window,
+      currentHourStart - 60 * 60,
+      currentHourStart + 5 * 60,
+    )
+
+    expect(aggregated.slots[0]?.bucket?.localEstimatedCredits).toBe(24)
+    expect(aggregated.slots[0]?.bucket?.upstreamActualCredits).toBe(5)
+    expect(aggregated.slots[1]?.bucket?.localEstimatedCredits).toBe(2)
+    expect(aggregated.slots[1]?.bucket?.upstreamActualCredits).toBeNull()
   })
 
   it('builds the rolling visible window directly from visibleBuckets metadata', () => {
@@ -407,7 +391,7 @@ describe('dashboardHourlyCharts helpers', () => {
     expect(visible.slots[36]?.bucket).toBeNull()
   })
 
-  it('aggregates five-minute buckets into hourly slots for fixed and delta charts', () => {
+  it('aggregates five-minute buckets into hourly slots for bar charts', () => {
     const currentHourStart = Date.UTC(2026, 3, 7, 12, 0, 0) / 1000
     const window = buildDashboardHourlyRequestWindowFixture({
       currentHourStart,

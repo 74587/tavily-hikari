@@ -121,6 +121,8 @@ struct DashboardHourlyRequestBucketView {
     mcp_billable: i64,
     api_non_billable: i64,
     api_billable: i64,
+    local_estimated_credits: i64,
+    upstream_actual_credits: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +178,8 @@ impl From<tavily_hikari::DashboardHourlyRequestWindow> for DashboardHourlyReques
                     mcp_billable: bucket.mcp_billable,
                     api_non_billable: bucket.api_non_billable,
                     api_billable: bucket.api_billable,
+                    local_estimated_credits: bucket.local_estimated_credits,
+                    upstream_actual_credits: bucket.upstream_actual_credits,
                 })
                 .collect(),
         }

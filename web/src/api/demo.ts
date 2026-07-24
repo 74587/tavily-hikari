@@ -1177,6 +1177,9 @@ function demoDashboardOverview(now = Date.now()) {
         mcpBillable: 3 + (index % 6) + (index >= 580 ? pulse % 3 : 0),
         apiNonBillable: 1 + (index % 2) + (index >= 576 ? pulse % 2 : 0),
         apiBillable: 4 + (index % 10) + (index >= 582 ? pulse % 4 : 0),
+        localEstimatedCredits: 5 + (index % 9) + (index >= 576 ? pulse % 4 : 0),
+        upstreamActualCredits:
+          index % 4 === 0 ? null : 3 + (index % 7) + (index >= 580 ? pulse % 3 : 0),
       })),
     },
     monthSeries: {

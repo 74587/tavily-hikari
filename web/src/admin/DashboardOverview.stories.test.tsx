@@ -18,13 +18,15 @@ describe('DashboardOverview Storybook coverage', () => {
     expect(meta).toMatchObject({ title: 'Admin/Components/DashboardOverview' })
     expect(dashboardStories.Default).toMatchObject({})
     expect(dashboardStories.TypesMode).toMatchObject({})
-    expect(dashboardStories.ResultsDeltaMode).toMatchObject({})
-    expect(dashboardStories.TypesDeltaMode).toMatchObject({})
+    expect(dashboardStories.CreditsMode).toMatchObject({})
     expect(dashboardStories.ResultsAreaMode).toMatchObject({})
     expect(dashboardStories.TypesAreaMode).toMatchObject({})
+    expect(dashboardStories.CreditsAreaMode).toMatchObject({})
     expect(dashboardStories.TypesAreaHiddenMiddleSeries).toMatchObject({})
+    expect(dashboardStories.CreditsAreaLocalOnly).toMatchObject({})
+    expect(dashboardStories.CreditsAreaNoUpstreamSamples).toMatchObject({})
+    expect(dashboardStories.CreditsEmptyData).toMatchObject({})
     expect(dashboardStories.HiddenSeriesEmpty).toMatchObject({})
-    expect(dashboardStories.FixedRangeWithGaps).toMatchObject({})
     expect(dashboardStories.RecentAlertsDesktopEvidence).toMatchObject({})
     expect(dashboardStories.RecentAlertsBusinessHourWindow).toMatchObject({})
     expect(dashboardStories.NoPreviousMonthComparison).toMatchObject({})
@@ -41,9 +43,9 @@ describe('DashboardOverview Storybook coverage', () => {
     expect(markup).toContain('No visible chart series for the current selection.')
     expect(markup).toContain('Traffic Trends')
     expect(markup).toContain(
-      `Local time axis · 24 full hours + current hour (${expectedCurrentBuckets} current slots`,
+      `Local time axis · 24 full hours + current hour (${expectedCurrentBuckets} slots`,
     )
-    expect(markup).toContain('missing buckets are left blank')
+    expect(markup).toContain('Compare requests and credits')
     expect(markup).toContain('dashboard-summary-card-backdrop')
   })
 
@@ -114,22 +116,15 @@ describe('DashboardOverview Storybook coverage', () => {
     })
   })
 
-  it('exposes a fixed-range gap story for visual evidence', () => {
-    const args = dashboardStories.FixedRangeWithGaps.args
-    expect(args?.initialChartMode).toBe('resultsDelta')
-    expect(args?.initialResultDeltaSeries).toBe('primarySuccess')
-    expect(args?.hourlyRequestWindow.buckets.length).toBeLessThan(args?.hourlyRequestWindow.retainedBuckets ?? 0)
-    const chartBucketSeconds = 3600
-    const expectedCurrentBuckets = Math.ceil(
-      ((args?.summaryWindows.today_end ?? 0) - (args?.summaryWindows.today_start ?? 0)) / chartBucketSeconds,
-    )
-    const expectedComparisonBuckets = Math.ceil(
-      ((args?.summaryWindows.yesterday_end ?? 0) - (args?.summaryWindows.yesterday_start ?? 0)) / chartBucketSeconds,
-    )
-    const markup = renderToStaticMarkup(createElement(meta.component, args as never))
-    expect(markup).toContain(
-      `Local time axis · Natural-day comparison (${expectedCurrentBuckets} current buckets, ${expectedComparisonBuckets} comparison buckets)`,
-    )
+  it('exposes credit stories for normal, local-only, and unsampled states', () => {
+    expect(dashboardStories.CreditsMode.args?.initialChartMode).toBe('credits')
+    expect(dashboardStories.CreditsAreaMode.args?.initialChartMode).toBe('creditsArea')
+    expect(dashboardStories.CreditsAreaLocalOnly.args?.initialVisibleCreditSeries).toEqual(['localEstimate'])
+    expect(
+      dashboardStories.CreditsAreaNoUpstreamSamples.args?.hourlyRequestWindow.buckets
+        .every((bucket) => bucket.upstreamActualCredits == null),
+    ).toBe(true)
+    expect(dashboardStories.CreditsEmptyData.args?.hourlyRequestWindow.buckets).toEqual([])
   })
 
   it('keeps the month summary on a full natural-month axis with a visible previous-month comparison line', () => {
@@ -150,12 +145,13 @@ describe('DashboardOverview Storybook coverage', () => {
   it('keeps the absolute charts on all-series defaults in the primary stories', () => {
     expect(dashboardStories.Default.args?.initialVisibleResultSeries).toBeUndefined()
     expect(dashboardStories.Default.args?.initialVisibleTypeSeries).toBeUndefined()
-    expect(dashboardStories.TypesDeltaMode.args?.initialTypeDeltaSeries).toBe('all')
+    expect(dashboardStories.CreditsMode.args?.initialVisibleCreditSeries).toBeUndefined()
   })
 
-  it('exposes dedicated area-chart stories for both series families', () => {
+  it('exposes dedicated area-chart stories for all three series families', () => {
     expect(dashboardStories.ResultsAreaMode.args?.initialChartMode).toBe('resultsArea')
     expect(dashboardStories.TypesAreaMode.args?.initialChartMode).toBe('typesArea')
+    expect(dashboardStories.CreditsAreaMode.args?.initialChartMode).toBe('creditsArea')
   })
 
   it('exposes a stacked-area hidden-middle-series regression story', () => {

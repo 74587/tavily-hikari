@@ -1618,6 +1618,18 @@ async fn admin_dashboard_sse_snapshot_refreshes_when_quota_totals_change() {
             .and_then(|value| value.as_i64()),
         Some(0)
     );
+    assert!(
+        initial_json
+            .pointer("/hourlyRequestWindow/buckets/0/localEstimatedCredits")
+            .is_some(),
+        "admin SSE snapshots should expose local estimated credits",
+    );
+    assert!(
+        initial_json
+            .pointer("/hourlyRequestWindow/buckets/0/upstreamActualCredits")
+            .is_some(),
+        "admin SSE snapshots should expose nullable upstream actual credits",
+    );
 
     let options = SqliteConnectOptions::new()
         .filename(&db_str)
