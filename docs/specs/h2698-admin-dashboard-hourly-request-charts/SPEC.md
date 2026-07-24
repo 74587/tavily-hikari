@@ -161,7 +161,7 @@
   margin_policy: trim_only
   evidence_surface: page
   sensitive_exclusion: N/A
-  submission_gate: pending-owner-approval
+  submission_gate: approved
   story_id_or_title: `admin-components-dashboardoverview--credits-mode`
   state: `credits`
   evidence_note: 验证“积分”使用滚动 25 个小时槽，本地估算与上游实扣按每小时两根独立柱并排展示，tooltip 只列出两项原值。
@@ -177,7 +177,7 @@
   margin_policy: trim_only
   evidence_surface: page
   sensitive_exclusion: N/A
-  submission_gate: pending-owner-approval
+  submission_gate: approved
   story_id_or_title: `admin-components-dashboardoverview--credits-area-mode`
   state: `credits-area`
   evidence_note: 验证“面积图 · 积分”使用最近 6 小时、73 个 5 分钟槽；两项从零基线半透明重叠，上游未采样区间保持断线。

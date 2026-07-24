@@ -19,4 +19,4 @@
 
 - Rust：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`。
 - Web：`bun test`、`bun run build`、`bun run build-storybook`。
-- 视觉：Storybook mock-only 的积分并排柱状图与重叠面积图已完成非空像素检查；PR 图片提交等待 owner 明确授权。
+- 视觉：Storybook mock-only 的积分并排柱状图与重叠面积图已完成非空像素检查；owner 已授权提交 PR 图片证据。
