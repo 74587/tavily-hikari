@@ -96,6 +96,7 @@ export const UserDetailIdentityTab = { ...RuntimeStories.UserDetailIdentityTab }
 export const UserDetailSingleTokenGuard = { ...RuntimeStories.UserDetailSingleTokenGuard }
 export const UserDetailTagsTab = { ...RuntimeStories.UserDetailTagsTab }
 export const UserDetailQuotaTab = { ...RuntimeStories.UserDetailQuotaTab }
+export const UserDetailQuotaTabCompact = { ...RuntimeStories.UserDetailQuotaTabCompact }
 export const UserDetailTokensTab = { ...RuntimeStories.UserDetailTokensTab }
 export const UserDetailCompact = { ...RuntimeStories.UserDetailCompact }
 export const UserDetailSharedUsageTooltip = { ...RuntimeStories.UserDetailSharedUsageTooltip }

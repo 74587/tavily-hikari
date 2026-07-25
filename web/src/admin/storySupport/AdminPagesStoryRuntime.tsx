@@ -7511,19 +7511,40 @@ export const UserDetail: Story = {
     }
 
     await clickTopLevelTab('基础额度')
-    if (!canvasElement.textContent?.includes('账号权益账本')) {
+    const storyText = canvasElement.textContent ?? ''
+    if (!storyText.includes('账号权益账本') && !storyText.includes('Account entitlement ledger')) {
       throw new Error('Expected user detail story to render the account entitlements workspace.')
     }
     if (!canvasElement.textContent?.includes('story base entitlement') || !canvasElement.textContent?.includes('story monthly entitlement') || !canvasElement.textContent?.includes('story permanent entitlement')) {
       throw new Error('Expected user detail story to render base, monthly and permanent entitlement rows.')
     }
-    const addEntitlementButton = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent?.trim() === '新增账本记录')
+    const entitlementFilters = canvasElement.querySelector<HTMLElement>('.user-detail-entitlement-filters')
+    const scopeSelect = entitlementFilters?.querySelector('[role="combobox"]')
+    const monthInputs = entitlementFilters?.querySelectorAll<HTMLInputElement>('input[type="month"]')
+    const applyFiltersButton = entitlementFilters?.querySelector<HTMLButtonElement>('.user-detail-entitlement-apply-button')
+    if (!scopeSelect || !monthInputs || monthInputs.length !== 2 || !applyFiltersButton) {
+      throw new Error('Expected the entitlement filter row to use the shared select, one month range control, and an apply button.')
+    }
+    const monthValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    if (!monthValueSetter) throw new Error('Expected month inputs to expose a writable value property.')
+    monthValueSetter.call(monthInputs[0], '2026-07')
+    monthInputs[0].dispatchEvent(new Event('input', { bubbles: true }))
+    monthInputs[0].dispatchEvent(new Event('change', { bubbles: true }))
+    await new Promise((resolve) => window.setTimeout(resolve, 40))
+    if (monthInputs[1].min !== '2026-07') {
+      throw new Error(`Expected the entitlement end month to be constrained by the start month, received ${monthInputs[1].min || '<empty>'}.`)
+    }
+    const addEntitlementButton = Array.from(canvasElement.querySelectorAll<HTMLButtonElement>('button')).find((button) => {
+      const label = button.textContent?.trim()
+      return label === '新增账本记录' || label === 'Add ledger row'
+    })
     if (!addEntitlementButton) {
       throw new Error('Expected user detail story to render an add entitlement dialog trigger.')
     }
     addEntitlementButton.click()
     await new Promise((resolve) => window.setTimeout(resolve, 80))
-    if (!document.body.textContent?.includes('后台备注') || !document.body.textContent?.includes('前台备注')) {
+    const dialogText = document.body.textContent ?? ''
+    if (!(dialogText.includes('后台备注') && dialogText.includes('前台备注')) && !(dialogText.includes('Backend note') && dialogText.includes('Frontend note'))) {
       throw new Error('Expected the entitlement dialog to render both entitlement note fields after opening.')
     }
   },
@@ -7581,12 +7602,25 @@ export const UserDetailQuotaTab: Story = {
   render: () => <UserDetailPageCanvas initialTab="quota" />,
   play: async ({ canvasElement }) => {
     await new Promise((resolve) => window.setTimeout(resolve, 80))
-    if (!canvasElement.textContent?.includes('账号权益账本')) {
+    const storyText = canvasElement.textContent ?? ''
+    if (!storyText.includes('账号权益账本') && !storyText.includes('Account entitlement ledger')) {
       throw new Error('Expected the user detail quota story to open the quota tab.')
     }
     if (canvasElement.querySelector('.admin-user-shared-usage-panel') || canvasElement.querySelector('.admin-user-tokens-table')) {
       throw new Error('Expected the quota tab story to keep inactive panels out of the DOM.')
     }
+    const entitlementFilters = canvasElement.querySelector<HTMLElement>('.user-detail-entitlement-filters')
+    const monthInputs = entitlementFilters?.querySelectorAll('input[type="month"]')
+    if (!entitlementFilters?.querySelector('[role="combobox"]') || monthInputs?.length !== 2 || !entitlementFilters.querySelector('.user-detail-entitlement-apply-button')) {
+      throw new Error('Expected the quota tab story to render the shared scope select, one month range control, and a compact apply button.')
+    }
+  },
+}
+
+export const UserDetailQuotaTabCompact: Story = {
+  ...UserDetailQuotaTab,
+  parameters: {
+    viewport: { defaultViewport: '0390-device-iphone-14' },
   },
 }
 

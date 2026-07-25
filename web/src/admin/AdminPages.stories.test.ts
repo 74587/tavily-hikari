@@ -38,6 +38,7 @@ describe('AdminPages Storybook proofs', () => {
     expect(adminPageStories.UserDetailSingleTokenGuard).toMatchObject({})
     expect(adminPageStories.UserDetailTagsTab).toMatchObject({})
     expect(adminPageStories.UserDetailQuotaTab).toMatchObject({})
+    expect(adminPageStories.UserDetailQuotaTabCompact).toMatchObject({})
     expect(adminPageStories.UserDetailTokensTab).toMatchObject({})
     expect(adminPageStories.UserDetailBusinessCalls1h).toMatchObject({})
     expect(adminPageStories.Alerts).toMatchObject({})

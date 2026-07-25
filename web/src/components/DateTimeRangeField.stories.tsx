@@ -27,6 +27,31 @@ function DateTimeRangeFieldStory(): JSX.Element {
   )
 }
 
+function MonthRangeFieldStory(): JSX.Element {
+  const [startMonth, setStartMonth] = useState('2026-07')
+  const [endMonth, setEndMonth] = useState('2026-09')
+
+  return (
+    <div style={{ maxWidth: 760, margin: '0 auto' }}>
+      <DateTimeRangeField
+        label="Entitlement month range"
+        inputType="month"
+        startId="storybook-month-range-start"
+        endId="storybook-month-range-end"
+        startLabel="Entitlement month range start"
+        endLabel="Entitlement month range end"
+        startValue={startMonth}
+        endValue={endMonth}
+        startSeparator="to"
+        startMax={endMonth}
+        endMin={startMonth}
+        onStartChange={setStartMonth}
+        onEndChange={setEndMonth}
+      />
+    </div>
+  )
+}
+
 const meta = {
   title: 'Admin/Wrappers/DateTimeRangeField',
   component: DateTimeRangeField,
@@ -55,3 +80,7 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 export const Default: Story = {}
+
+export const MonthRange: Story = {
+  render: () => <MonthRangeFieldStory />,
+}
