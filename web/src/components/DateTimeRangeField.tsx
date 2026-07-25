@@ -6,6 +6,8 @@ import { Input } from './ui/input'
 
 interface DateTimeRangeFieldProps {
   label: ReactNode
+  inputType?: 'date' | 'month'
+  hideLabel?: boolean
   startId: string
   endId: string
   startLabel: ReactNode
@@ -23,6 +25,8 @@ interface DateTimeRangeFieldProps {
 
 export default function DateTimeRangeField({
   label,
+  inputType = 'date',
+  hideLabel = false,
   startId,
   endId,
   startLabel,
@@ -39,7 +43,7 @@ export default function DateTimeRangeField({
 }: DateTimeRangeFieldProps): JSX.Element {
   return (
     <div className={cn('date-time-range-field', className)}>
-      <div className="date-time-range-field__label">{label}</div>
+      <div className={cn('date-time-range-field__label', hideLabel && 'sr-only')}>{label}</div>
 
       <div className="date-time-range-field__control">
         <div className="date-time-range-field__segment date-time-range-field__segment--start">
@@ -48,7 +52,7 @@ export default function DateTimeRangeField({
           </label>
           <Input
             id={startId}
-            type="date"
+            type={inputType}
             value={startValue}
             onChange={(event) => onStartChange(event.target.value)}
             max={startMax || undefined}
@@ -67,7 +71,7 @@ export default function DateTimeRangeField({
           </label>
           <Input
             id={endId}
-            type="date"
+            type={inputType}
             value={endValue}
             onChange={(event) => onEndChange(event.target.value)}
             min={endMin || undefined}

@@ -308,6 +308,32 @@
 
 ![Admin user detail base quota ledger](./assets/admin-user-detail-base-quota-ledger.png)
 
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/UserDetailQuotaTab
+  state: entitlement ledger filters desktop
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1280x720
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 账本筛选栏使用共享 Radix Select 与单一月份范围外壳，起止月份由“至”分隔，应用筛选按钮按内容宽度靠右显示。
+
+![Admin entitlement ledger filters desktop](./assets/admin-user-detail-entitlement-filters-desktop.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/UserDetailQuotaTabCompact
+  state: entitlement ledger filters narrow viewport
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 390x844
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 窄屏筛选栏无横向溢出，月份范围外壳保持为单一控件并在内部堆叠起止输入，应用筛选按钮保持独立的内容宽度和触控高度。
+
+![Admin entitlement ledger filters mobile](./assets/admin-user-detail-entitlement-filters-mobile.png)
+
 - source_type: ui_demo
   demo_entry_or_url: /console/billing?announcements=closed (with VITE_DEMO_MODE=true)
   state: recharge lifecycle states with paginated recent orders

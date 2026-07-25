@@ -1,5 +1,7 @@
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
+import DateTimeRangeField from '../components/DateTimeRangeField'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -324,15 +326,36 @@ export function AdminUserDetailQuotaWorkspace({
           <span>{rechargeStrings.entitlementPermanent.replace('{value}', formatSignedQuotaDelta(detail.entitlements.currentPermanentDelta.monthlyCreditsDelta))}</span>
         </div>
         <div className="user-detail-entitlement-filters">
-          <select value={entitlementScopeFilter} onChange={(event) => setEntitlementScopeFilter(event.target.value as EntitlementScopeFilter)}>
-            <option value="all">{rechargeStrings.entitlementScopeAll}</option>
-            <option value="base">{rechargeStrings.entitlementScopeBase}</option>
-            <option value="month">{rechargeStrings.entitlementScopeMonth}</option>
-            <option value="permanent">{rechargeStrings.entitlementScopePermanent}</option>
-          </select>
-          <input className="input input-bordered" type="month" value={entitlementStartMonth} onChange={(event) => setEntitlementStartMonth(event.target.value)} aria-label={rechargeStrings.entitlementFilterStart} />
-          <input className="input input-bordered" type="month" value={entitlementEndMonth} onChange={(event) => setEntitlementEndMonth(event.target.value)} aria-label={rechargeStrings.entitlementFilterEnd} />
-          <Button type="button" variant="outline" onClick={() => void applyEntitlementFilters()} disabled={entitlementBusy}>
+          <Select value={entitlementScopeFilter} onValueChange={(value) => setEntitlementScopeFilter(value as EntitlementScopeFilter)} disabled={entitlementBusy}>
+            <SelectTrigger className="user-detail-entitlement-scope-select" aria-label={rechargeStrings.entitlementScope}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="start">
+              <SelectItem value="all">{rechargeStrings.entitlementScopeAll}</SelectItem>
+              <SelectItem value="base">{rechargeStrings.entitlementScopeBase}</SelectItem>
+              <SelectItem value="month">{rechargeStrings.entitlementScopeMonth}</SelectItem>
+              <SelectItem value="permanent">{rechargeStrings.entitlementScopePermanent}</SelectItem>
+            </SelectContent>
+          </Select>
+          <DateTimeRangeField
+            className="user-detail-entitlement-month-range"
+            label={rechargeStrings.entitlementFilterRange}
+            hideLabel
+            inputType="month"
+            startId="user-detail-entitlement-filter-start"
+            endId="user-detail-entitlement-filter-end"
+            startLabel={rechargeStrings.entitlementFilterStart}
+            endLabel={rechargeStrings.entitlementFilterEnd}
+            startValue={entitlementStartMonth}
+            endValue={entitlementEndMonth}
+            startSeparator={rechargeStrings.entitlementFilterSeparator}
+            startMax={entitlementEndMonth || undefined}
+            endMin={entitlementStartMonth || undefined}
+            disabled={entitlementBusy}
+            onStartChange={setEntitlementStartMonth}
+            onEndChange={setEntitlementEndMonth}
+          />
+          <Button className="user-detail-entitlement-apply-button" type="button" variant="outline" onClick={() => void applyEntitlementFilters()} disabled={entitlementBusy}>
             {rechargeStrings.entitlementApplyFilters}
           </Button>
         </div>
