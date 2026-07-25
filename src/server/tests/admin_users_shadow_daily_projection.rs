@@ -482,6 +482,18 @@ async fn list_users_reports_shadow_daily_usage_as_confirmed_or_projected() {
         alice_item["shadowDailyAvailability"].as_str(),
         Some("confirmed")
     );
+    assert_eq!(
+        alice_item["shadowDailyObservedPeriodCount"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        alice_item["shadowDailySettledPeriodCount"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        alice_item["shadowDailyDegradedPeriodCount"].as_i64(),
+        Some(0)
+    );
 
     let bob_item = items
         .iter()

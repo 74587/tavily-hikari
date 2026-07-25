@@ -10,6 +10,8 @@
 - 记录实际使用组合的 token id、upstream key id、period code、匿名 project id、local billed credits、
   Research pending count、first/last used time 与 eligibility epoch。
 - 唯一键覆盖 `(token_id, upstream_key_id, period_code)`。
+- `upstream_reconciliation_research` 持久化 `last_polled_at`、`next_poll_at`、`poll_attempt_count`、`last_poll_outcome`、`last_poll_error_kind`；历史 pending 记录的默认 `next_poll_at=0`，重启后由现有 worker 有界 sweep 恢复。
+- `api_key_transient_backoffs` 使用独立 `period_reconciliation` scope 保存对账 Key 的 cooldown 与固定原因；该 scope 不参与正常上游请求选路。
 
 ## Settlement and adjustment
 

@@ -21,10 +21,12 @@
 - eligibility gates、gate completion、phase、current period、next epoch；
 - `activeUpstreamMcpSessions`；
 - pending Research/usage queue 数量与最近 degraded 原因；
-- `lastReconciliationRunAt`、`lastShadowAdjustmentAt`、`lastReconciliationEnqueueErrorAt` 三个 compare-only / reconciliation 诊断时间戳；
+- `lastReconciliationRunAt`、`lastShadowAdjustmentAt`、`lastReconciliationEnqueueErrorAt`、`lastResearchSweepAt`、`lastResearchTerminalAt` reconciliation 诊断时间戳；
 - `retryBuckets`：当前 `rate_limited` settlement 按 `upstream429`、`localUsageRateLimit`、`other` 分桶后的窗口数量；
 - `currentPeriodBoundUsersByKey`：当前业务时段内按上游 Key 聚合的绑定用户数，元素为 `{ keyIdHint, count }`；
 - `currentPeriodPendingProjectIdsByKey`：当前业务时段内按上游 Key 聚合的待查询 Project ID 数，元素为 `{ keyIdHint, count }`；
+- `dailyReconciliationProgress`：当天 observed account/period、至少一个标准 settled 账期的账号、全部 terminal 账号、settled/degraded/pending period 与 terminal/pending Research 汇总；
+- `dailyReconciliationByKey`：当天每 Key 的 `{ keyIdHint, terminalResearch, pendingResearch, pendingProjectIds, cooldownUntil, cooldownReason }`，仅返回稳定短 hint 与固定原因枚举；
 - 最近 signed adjustments（token 只显示稳定短 id，upstream key 只显示本地短 id）。
 
 响应不得包含 HMAC secret、官方 API key、完整 Hikari token 或客户端原始 `X-Project-ID`。
@@ -43,6 +45,9 @@ phase 当前为：
 
 - `shadowDailyCreditsUsed: number | null`
 - `shadowDailyAvailability: "confirmed" | "projected" | null`
+- `shadowDailyObservedPeriodCount: number | null`
+- `shadowDailySettledPeriodCount: number | null`
+- `shadowDailyDegradedPeriodCount: number | null`
 
 compare-only 时合同固定为：
 
@@ -53,6 +58,7 @@ compare-only 时合同固定为：
 - 当天无本地计费且无 shadow usage 记录时，返回 `shadowDailyCreditsUsed = 0` 且 `shadowDailyAvailability = "confirmed"`。
 
 非 compare-only 路径可以返回 `shadowDailyAvailability = null`，前端不展示该列。
+compare-only 中三个 period count 分别表达已观测、标准 `shadow_settled`、`shadow_degraded` 数；前端显示“标准对账 settled/observed”，并在存在 degraded 时额外标记数量。
 
 ## MCP session bindings
 

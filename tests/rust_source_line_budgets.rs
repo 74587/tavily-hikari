@@ -36,8 +36,8 @@ const EXCEPTIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/store/key_store_bootstrap.rs",
-        3200,
-        "The bootstrap schema module now also carries the upstream reconciliation tables and indexes while the broader store-schema split remains pending.",
+        3250,
+        "The bootstrap schema module now also carries the upstream reconciliation polling columns, tables, and indexes while the broader store-schema split remains pending.",
     ),
 ];
 

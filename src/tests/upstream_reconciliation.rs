@@ -369,7 +369,7 @@ async fn shadow_reconciliation_keeps_zero_delta_usage_and_updates_runtime_marker
         .expect("read zero-delta shadow usage");
     assert_eq!(usage.get("user-shadow-zero"), Some(&0));
 
-    let (_, last_shadow_adjustment_at, _) = proxy
+    let (_, last_shadow_adjustment_at, _, _, _) = proxy
         .key_store
         .upstream_reconciliation_runtime_markers()
         .await
@@ -436,15 +436,36 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     .execute(&proxy.key_store.pool)
     .await
     .expect("insert due reconciliation usage");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_research (
+            request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+        "#,
+    )
+    .bind("research-runtime-marker")
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind("2026-07-15/S1")
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert pending research");
 
-    let app = Router::new().route(
-        "/usage",
-        get(|| async {
-            Json(serde_json::json!({
-                "key": { "usage": 0 }
-            }))
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/usage",
+            get(|| async {
+                Json(serde_json::json!({
+                    "key": { "usage": 0 }
+                }))
+            }),
+        )
+        .route(
+            "/research/research-runtime-marker",
+            get(|| async { Json(serde_json::json!({ "status": "completed" })) }),
+        );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -458,13 +479,28 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
         .await
         .expect("run reconciliation once");
     assert_eq!(settled, 1);
-    let (last_run_at, last_shadow_adjustment_at, _) = proxy
+    let (
+        last_run_at,
+        last_shadow_adjustment_at,
+        _,
+        last_research_sweep_at,
+        last_research_terminal_at,
+    ) = proxy
         .key_store
         .upstream_reconciliation_runtime_markers()
         .await
         .expect("read runtime markers");
     assert_eq!(last_run_at, Some(now));
     assert_eq!(last_shadow_adjustment_at, Some(now));
+    assert_eq!(last_research_sweep_at, Some(now));
+    assert_eq!(last_research_terminal_at, Some(now));
+    let terminal_at: Option<i64> = sqlx::query_scalar(
+        "SELECT terminal_at FROM upstream_reconciliation_research WHERE request_id = 'research-runtime-marker'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read terminal research");
+    assert_eq!(terminal_at, Some(now));
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -474,7 +510,7 @@ async fn run_upstream_reconciliation_once_applies_key_scoped_backoff_for_429() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
     let now = local_ts(2026, 7, 15, 12, 0);
-    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
     let proxy = TavilyProxy::with_options_and_time(
         vec![
             "tvly-reconciliation-key-backoff-hot",
@@ -568,7 +604,6 @@ async fn run_upstream_reconciliation_once_applies_key_scoped_backoff_for_429() {
                     hot_hits.fetch_add(1, Ordering::SeqCst);
                     return (
                         StatusCode::TOO_MANY_REQUESTS,
-                        [("retry-after", "300")],
                         Json(serde_json::json!({ "error": "rate limited" })),
                     )
                         .into_response();
@@ -614,7 +649,23 @@ async fn run_upstream_reconciliation_once_applies_key_scoped_backoff_for_429() {
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("count hot key backoff settlements");
-    assert_eq!(hot_rate_limited, 2);
+    assert_eq!(hot_rate_limited, 1);
+
+    clock.set_now_ts(now + 301);
+    let settled = proxy
+        .run_upstream_reconciliation_once(&format!("http://{addr}"))
+        .await
+        .expect("run reconciliation after cooldown expires");
+    assert_eq!(settled, 0);
+    assert_eq!(hot_hits.load(Ordering::SeqCst), 2);
+    let hot_retry_after_secs: i64 = sqlx::query_scalar(
+        "SELECT retry_after_secs FROM api_key_transient_backoffs WHERE key_id = ? AND scope = 'period_reconciliation'",
+    )
+    .bind(&hot_key_id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read escalated hot key cooldown");
+    assert_eq!(hot_retry_after_secs, 600);
 
     let cool_status: String = sqlx::query_scalar(
         r#"
@@ -788,7 +839,7 @@ async fn run_upstream_reconciliation_once_prioritizes_recent_windows_over_old_ba
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("count backlog settlements");
-    assert_eq!(backlog_rate_limited, 20);
+    assert_eq!(backlog_rate_limited, 1);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -1244,6 +1295,145 @@ async fn s3_next_day_settlement_does_not_restore_current_hour_quota() {
     assert_eq!(after.hourly_used, before.hourly_used);
     assert_eq!(after.daily_used, before.daily_used);
     assert_eq!(after.monthly_used, 7);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn daily_reconciliation_progress_includes_actual_mode_windows() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-progress"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    for (token_id, key_id, billing_subject, status) in [
+        (
+            "token-settled",
+            "key-one",
+            "account:user-settled",
+            Some("settled"),
+        ),
+        (
+            "token-degraded",
+            "key-one",
+            "account:user-degraded",
+            Some("degraded"),
+        ),
+        ("token-pending", "key-two", "account:user-pending", None),
+    ] {
+        let period_code = format!("2026-07-15/{token_id}");
+        sqlx::query(
+            r#"
+            INSERT INTO upstream_reconciliation_usage (
+                token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+                request_count, first_used_at, last_used_at, updated_at, settlement_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'actual')
+            "#,
+        )
+        .bind(token_id)
+        .bind(key_id)
+        .bind(&period_code)
+        .bind(format!("project-{token_id}"))
+        .bind(billing_subject)
+        .bind(now - 3_600)
+        .bind(now - 900)
+        .bind(now - 3_600)
+        .bind(now - 900)
+        .bind(now - 900)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert actual reconciliation usage");
+
+        if let Some(status) = status {
+            sqlx::query(
+                r#"
+                INSERT INTO upstream_reconciliation_settlements (
+                    settlement_key, token_id, period_code, project_id, billing_subject,
+                    period_start, period_end, status, attempt_count, created_at, updated_at, settled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                "#,
+            )
+            .bind(format!("v1:{token_id}:{period_code}"))
+            .bind(token_id)
+            .bind(&period_code)
+            .bind(format!("project-{token_id}"))
+            .bind(billing_subject)
+            .bind(now - 3_600)
+            .bind(now - 900)
+            .bind(status)
+            .bind(now - 900)
+            .bind(now - 900)
+            .bind(now - 900)
+            .execute(&proxy.key_store.pool)
+            .await
+            .expect("insert actual reconciliation settlement");
+        }
+    }
+
+    for (request_id, token_id, key_id, terminal_at) in [
+        (
+            "research-terminal",
+            "token-settled",
+            "key-one",
+            Some(now - 800),
+        ),
+        ("research-pending", "token-pending", "key-two", None),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO upstream_reconciliation_research (
+                request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(request_id)
+        .bind(token_id)
+        .bind(key_id)
+        .bind(format!("2026-07-15/{token_id}"))
+        .bind(now - 900)
+        .bind(terminal_at)
+        .bind(now - 800)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert actual reconciliation research");
+    }
+
+    let (progress, by_key) = proxy
+        .key_store
+        .daily_reconciliation_progress()
+        .await
+        .expect("read daily reconciliation progress");
+    assert_eq!(progress.observed_accounts, 3);
+    assert_eq!(progress.accounts_with_settled_period, 1);
+    assert_eq!(progress.fully_terminal_accounts, 2);
+    assert_eq!(progress.observed_periods, 3);
+    assert_eq!(progress.settled_periods, 1);
+    assert_eq!(progress.degraded_periods, 1);
+    assert_eq!(progress.pending_periods, 1);
+    assert_eq!(progress.research_total, 2);
+    assert_eq!(progress.research_terminal, 1);
+    assert_eq!(progress.research_pending, 1);
+    assert!(by_key.iter().any(|key| {
+        key.key_id_hint == "key-one"
+            && key.terminal_research == 1
+            && key.pending_research == 0
+            && key.pending_project_ids == 0
+    }));
+    assert!(by_key.iter().any(|key| {
+        key.key_id_hint == "key-two"
+            && key.terminal_research == 0
+            && key.pending_research == 1
+            && key.pending_project_ids == 1
+    }));
 
     let _ = std::fs::remove_file(db_path);
 }

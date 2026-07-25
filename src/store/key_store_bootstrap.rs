@@ -1712,6 +1712,11 @@ impl KeyStore {
                 period_code TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 terminal_at INTEGER,
+                last_polled_at INTEGER,
+                next_poll_at INTEGER NOT NULL DEFAULT 0,
+                poll_attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_poll_outcome TEXT,
+                last_poll_error_kind TEXT,
                 updated_at INTEGER NOT NULL
             )
             "#,
@@ -1798,6 +1803,24 @@ impl KeyStore {
             .execute(&self.pool)
             .await?;
         }
+        for (column, definition) in [
+            ("last_polled_at", "INTEGER"),
+            ("next_poll_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("poll_attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_poll_outcome", "TEXT"),
+            ("last_poll_error_kind", "TEXT"),
+        ] {
+            if !self
+                .table_column_exists("upstream_reconciliation_research", column)
+                .await?
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE upstream_reconciliation_research ADD COLUMN {column} {definition}",
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_upstream_reconciliation_usage_period ON upstream_reconciliation_usage(period_end, token_id, period_code)").execute(&self.pool).await?;
         for statement in [
             "CREATE INDEX IF NOT EXISTS idx_upstream_reconciliation_usage_subject_mode_period ON upstream_reconciliation_usage(billing_subject, settlement_mode, period_start, token_id, period_code)",
@@ -1808,6 +1831,12 @@ impl KeyStore {
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_upstream_reconciliation_research_period
                ON upstream_reconciliation_research(token_id, period_code, terminal_at)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_upstream_reconciliation_research_poll
+               ON upstream_reconciliation_research(terminal_at, next_poll_at, key_id)"#,
         )
         .execute(&self.pool)
         .await?;

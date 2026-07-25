@@ -1,4 +1,4 @@
-import type { AdminTranslations } from '../i18n'
+import type { AdminTranslations, Language } from '../i18n'
 
 export function formatShadowDailyUsageComparison(args: {
   actualUsed: number
@@ -20,6 +20,10 @@ export function buildShadowDailyUsageStack(args: {
   actualUsed: number
   shadowUsed: number | null
   shadowAvailability: 'confirmed' | 'projected' | 'unavailable' | null
+  observedPeriodCount?: number | null
+  settledPeriodCount?: number | null
+  degradedPeriodCount?: number | null
+  language: Language
   limit: number
   usersStrings: AdminTranslations['users']
   formatNumber: (value: number) => string
@@ -36,7 +40,23 @@ export function buildShadowDailyUsageStack(args: {
   secondary?: string | null
   primaryClassName?: string | null
 } {
-  const { actualUsed, shadowUsed, shadowAvailability, limit, usersStrings, formatNumber, formatQuotaStackValue } = args
+  const {
+    actualUsed,
+    shadowUsed,
+    shadowAvailability,
+    observedPeriodCount,
+    settledPeriodCount,
+    degradedPeriodCount,
+    language,
+    limit,
+    usersStrings,
+    formatNumber,
+    formatQuotaStackValue,
+  } = args
+  const coverage = observedPeriodCount == null || settledPeriodCount == null
+    ? null
+    : `${language === 'zh' ? '标准对账' : 'Standard reconciled'} ${formatNumber(settledPeriodCount)}/${formatNumber(observedPeriodCount)}${degradedPeriodCount ? ` · ${language === 'zh' ? '降级' : 'Degraded'} ${formatNumber(degradedPeriodCount)}` : ''}`
+  const withCoverage = (secondary: string | null): string | null => [secondary, coverage].filter(Boolean).join(' · ') || null
 
   if (shadowAvailability === 'unavailable') {
     return {
@@ -56,9 +76,9 @@ export function buildShadowDailyUsageStack(args: {
       return {
         primary: shadowMetric.primary,
         primaryClassName: shadowMetric.primaryClassName ?? null,
-        secondary: comparison
+        secondary: withCoverage(comparison
           ? `${comparison} · ${usersStrings.usage.shadowProjectedEstimate}`
-          : usersStrings.usage.shadowProjectedEstimate,
+          : usersStrings.usage.shadowProjectedEstimate),
       }
     }
     return {
@@ -71,11 +91,11 @@ export function buildShadowDailyUsageStack(args: {
   return {
     primary: shadowMetric.primary,
     primaryClassName: shadowMetric.primaryClassName ?? null,
-    secondary: formatShadowDailyUsageComparison({
+    secondary: withCoverage(formatShadowDailyUsageComparison({
       actualUsed,
       shadowUsed,
       usersStrings,
       formatNumber,
-    }),
+    })),
   }
 }

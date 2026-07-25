@@ -326,6 +326,21 @@ export function normalizeAdminUserSummary(value: unknown): AdminUserSummary {
       'shadowDailyAvailability',
       'shadow_daily_availability',
     ),
+    shadowDailyObservedPeriodCount: readNullableNumber(
+      source,
+      'shadowDailyObservedPeriodCount',
+      'shadow_daily_observed_period_count',
+    ),
+    shadowDailySettledPeriodCount: readNullableNumber(
+      source,
+      'shadowDailySettledPeriodCount',
+      'shadow_daily_settled_period_count',
+    ),
+    shadowDailyDegradedPeriodCount: readNullableNumber(
+      source,
+      'shadowDailyDegradedPeriodCount',
+      'shadow_daily_degraded_period_count',
+    ),
     dailyCreditsLimit,
     monthlyCreditsUsed,
     monthlyCreditsLimit,

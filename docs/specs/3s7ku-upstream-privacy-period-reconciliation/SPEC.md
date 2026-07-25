@@ -60,6 +60,8 @@
 
 - `/usage` 队列按 upstream Key 遵守每 10 分钟 10 次并解析 `Retry-After`。
 - 无 Research 在窗口结束 10 分钟后结算；有 Research 在全部终态后 10 分钟结算，最长等待 24 小时后 degraded 结算。
+- reconciliation 在每轮结算前主动轮询已关闭窗口中未终态的 Research；轮询最多 20 条、每个 Key 最多 4 条，并优先补足当天尚无标准成功账期的账号覆盖。
+- `429` 只对 `period_reconciliation` scope 中的对应 Key 建立持久化冷却，使用 `Retry-After` 或 `5/10/20/30` 分钟退避；不得批量把同 Key 的其他窗口写为 rate-limited，也不得影响正常 API/MCP 流量。
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）
@@ -107,6 +109,7 @@
   Research 等待、usage 队列、最近 adjustment、degraded 原因与活跃异常 session 数。
 - 页面展示 reconciliation 的 `rate_limited` 原因分布，必须区分上游 429、本地 usage 限流与其他重试；复杂原因留在日志与系统状态页，不进入用户列表每行。
 - 页面展示当前时段按上游 Key 聚合的活动图：绑定用户数与待查询 Project ID 数默认显示 Top 12，并用一行汇总剩余 Key。
+- 页面展示今日对账收敛进度：账号至少一个标准成功账期、账期 terminal、Research terminal 三个比例，以及每 Key 的 pending Research、待查询 Project ID 和 reconciliation 冷却状态。
 - 系统设置页在“启用 Rebalance MCP”行只在活跃异常 session 数量大于 0 时显示 warning 图标，并跳转到隐藏管理页。
 - 系统状态页始终显示“活跃 `upstream_mcp` session”统计卡；数量大于 0 时使用 warning 语义，数量为 0 时使用 neutral/success 语义。
 
@@ -230,6 +233,18 @@ PR: include
 - verifies: the same diagnostic charts remain readable on narrow screens without collapsing the key labels or the retry breakdown.
 
   ![System status key activity mobile](./assets/admin-system-status-key-activity-mobile.png)
+
+PR: include
+
+- desktop reconciliation convergence progress
+- verifies: the system status page exposes account standard coverage, terminal period and Research progress, plus per-Key pending Research, Project ID backlog, and reconciliation cooldown.
+
+  ![Reconciliation progress desktop](./assets/reconciliation-progress-desktop.png)
+
+- mobile reconciliation convergence progress
+- verifies: the same progress cards stack without overlap at the narrow mobile viewport, while retaining the per-Key diagnostic entry point.
+
+  ![Reconciliation progress mobile](./assets/reconciliation-progress-mobile.png)
 
 ### Supporting evidence
 

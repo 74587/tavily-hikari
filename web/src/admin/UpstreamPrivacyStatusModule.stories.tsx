@@ -46,6 +46,8 @@ const pendingStatus: UpstreamPrivacyStatus = {
   lastReconciliationRunAt: 1_783_958_250,
   lastShadowAdjustmentAt: 1_783_958_100,
   lastReconciliationEnqueueErrorAt: 1_783_957_900,
+  lastResearchSweepAt: 1_783_958_320,
+  lastResearchTerminalAt: 1_783_958_300,
   retryBuckets: {
     upstream429: 3,
     localUsageRateLimit: 1,
@@ -60,6 +62,36 @@ const pendingStatus: UpstreamPrivacyStatus = {
     { keyIdHint: 'key-primary', count: 28 },
     { keyIdHint: 'key-backup', count: 9 },
     { keyIdHint: 'key-eu-west', count: 4 },
+  ],
+  dailyReconciliationProgress: {
+    observedAccounts: 18,
+    accountsWithSettledPeriod: 7,
+    fullyTerminalAccounts: 10,
+    observedPeriods: 42,
+    settledPeriods: 16,
+    degradedPeriods: 2,
+    pendingPeriods: 24,
+    researchTotal: 31,
+    researchTerminal: 12,
+    researchPending: 19,
+  },
+  dailyReconciliationByKey: [
+    {
+      keyIdHint: 'key-primary',
+      terminalResearch: 7,
+      pendingResearch: 14,
+      pendingProjectIds: 28,
+      cooldownUntil: 1_783_960_000,
+      cooldownReason: 'upstream429',
+    },
+    {
+      keyIdHint: 'key-backup',
+      terminalResearch: 5,
+      pendingResearch: 5,
+      pendingProjectIds: 9,
+      cooldownUntil: null,
+      cooldownReason: null,
+    },
   ],
   recentAdjustments: [
     {
@@ -91,6 +123,8 @@ const activeStatus: UpstreamPrivacyStatus = {
   lastReconciliationRunAt: 1_783_958_500,
   lastShadowAdjustmentAt: 1_783_958_100,
   lastReconciliationEnqueueErrorAt: null,
+  lastResearchSweepAt: 1_783_958_500,
+  lastResearchTerminalAt: 1_783_958_450,
   retryBuckets: {
     upstream429: 0,
     localUsageRateLimit: 0,
@@ -98,6 +132,19 @@ const activeStatus: UpstreamPrivacyStatus = {
   },
   currentPeriodBoundUsersByKey: [],
   currentPeriodPendingProjectIdsByKey: [],
+  dailyReconciliationProgress: {
+    observedAccounts: 9,
+    accountsWithSettledPeriod: 9,
+    fullyTerminalAccounts: 9,
+    observedPeriods: 13,
+    settledPeriods: 13,
+    degradedPeriods: 0,
+    pendingPeriods: 0,
+    researchTotal: 4,
+    researchTerminal: 4,
+    researchPending: 0,
+  },
+  dailyReconciliationByKey: [],
 }
 
 const compareBlockedStatus: UpstreamPrivacyStatus = {

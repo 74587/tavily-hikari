@@ -56,6 +56,29 @@ pub(crate) fn classify_reconciliation_retry_reason(reason: Option<&str>) -> &'st
 }
 
 impl KeyStore {
+    pub(crate) async fn api_key_transient_backoff_state(
+        &self,
+        key_id: &str,
+        scope: &str,
+    ) -> Result<Option<ApiKeyTransientBackoffState>, ProxyError> {
+        let state = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT cooldown_until, retry_after_secs
+            FROM api_key_transient_backoffs
+            WHERE key_id = ? AND scope = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(key_id)
+        .bind(scope)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(state.map(|(cooldown_until, retry_after_secs)| ApiKeyTransientBackoffState {
+            cooldown_until,
+            retry_after_secs,
+        }))
+    }
+
     pub(crate) async fn count_active_upstream_mcp_sessions(
         &self,
         now: i64,
@@ -128,13 +151,17 @@ impl KeyStore {
 
     pub(crate) async fn upstream_reconciliation_runtime_markers(
         &self,
-    ) -> Result<(Option<i64>, Option<i64>, Option<i64>), ProxyError> {
+    ) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>), ProxyError> {
         Ok((
             self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_RUN_AT_V1)
                 .await?,
             self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_SHADOW_ADJUSTMENT_AT_V1)
                 .await?,
             self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_ENQUEUE_ERROR_AT_V1)
+                .await?,
+            self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1)
+                .await?,
+            self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1)
                 .await?,
         ))
     }
@@ -153,6 +180,17 @@ impl KeyStore {
     ) -> Result<(), ProxyError> {
         self.set_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_ENQUEUE_ERROR_AT_V1, timestamp)
             .await
+    }
+
+    pub(crate) async fn mark_upstream_reconciliation_research_sweep_at(
+        &self,
+        timestamp: i64,
+    ) -> Result<(), ProxyError> {
+        self.set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1,
+            timestamp,
+        )
+        .await
     }
 
     pub(crate) async fn record_upstream_reconciliation_usage(
@@ -256,17 +294,127 @@ impl KeyStore {
         let changed = sqlx::query(
             r#"
             UPDATE upstream_reconciliation_research
-            SET terminal_at = COALESCE(terminal_at, ?), updated_at = ?
-            WHERE request_id = ?
+            SET terminal_at = ?,
+                last_polled_at = ?,
+                next_poll_at = 0,
+                poll_attempt_count = poll_attempt_count + 1,
+                last_poll_outcome = 'terminal',
+                last_poll_error_kind = NULL,
+                updated_at = ?
+            WHERE request_id = ? AND terminal_at IS NULL
             "#,
         )
+        .bind(now)
         .bind(now)
         .bind(now)
         .bind(request_id)
         .execute(&self.pool)
         .await?
         .rows_affected();
+        if changed > 0 {
+            self.set_meta_i64(
+                META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1,
+                now,
+            )
+            .await?;
+        }
         Ok(changed > 0)
+    }
+
+    pub(crate) async fn next_upstream_reconciliation_research_candidates(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::models::UpstreamReconciliationResearchCandidate>, ProxyError> {
+        let now = self.backend_time.now_ts();
+        let day_window = server_local_day_window_utc(self.backend_time.now_utc().with_timezone(&Local));
+        let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
+            r#"
+            WITH pending AS (
+                SELECT
+                    r.request_id, r.token_id, r.key_id, r.period_code,
+                    MIN(u.billing_subject) AS billing_subject,
+                    MAX(u.period_end) AS period_end,
+                    r.poll_attempt_count,
+                    COUNT(*) AS window_pending_count
+                FROM upstream_reconciliation_research r
+                JOIN upstream_reconciliation_usage u
+                  ON u.token_id = r.token_id AND u.period_code = r.period_code
+                WHERE r.terminal_at IS NULL AND COALESCE(r.next_poll_at, 0) <= ?
+                GROUP BY r.request_id
+                HAVING MAX(u.period_end) <= ?
+            ), prioritized AS (
+                SELECT pending.*,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM upstream_reconciliation_usage prior_u
+                        JOIN upstream_reconciliation_settlements prior_s
+                          ON prior_s.settlement_key = 'v1:' || prior_u.token_id || ':' || prior_u.period_code
+                        WHERE prior_u.billing_subject = pending.billing_subject
+                          AND prior_u.period_start >= ? AND prior_u.period_start < ?
+                          AND prior_s.status = 'shadow_settled'
+                    ) THEN 1 ELSE 0 END AS has_settled_period
+                FROM pending
+            ), ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (PARTITION BY key_id ORDER BY has_settled_period, period_end DESC, window_pending_count, request_id) AS key_slot,
+                    ROW_NUMBER() OVER (PARTITION BY billing_subject ORDER BY period_end DESC, window_pending_count, request_id) AS subject_slot
+                FROM prioritized
+            )
+            SELECT request_id, token_id, key_id, period_code, billing_subject, period_end,
+                   poll_attempt_count, key_slot, subject_slot
+            FROM ranked
+            ORDER BY has_settled_period ASC, key_slot ASC, subject_slot ASC, period_end DESC, window_pending_count ASC, request_id ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(now)
+        .bind(now)
+        .bind(day_window.start)
+        .bind(day_window.end)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(request_id, token_id, key_id, period_code, billing_subject, period_end, poll_attempt_count, _, _)| {
+                crate::models::UpstreamReconciliationResearchCandidate {
+                    request_id,
+                    token_id,
+                    key_id,
+                    period_code,
+                    billing_subject,
+                    period_end,
+                    poll_attempt_count,
+                }
+            })
+            .collect())
+    }
+
+    pub(crate) async fn record_upstream_reconciliation_research_poll(
+        &self,
+        request_id: &str,
+        next_poll_at: i64,
+        outcome: &str,
+        error_kind: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        let now = self.backend_time.now_ts();
+        sqlx::query(
+            r#"
+            UPDATE upstream_reconciliation_research
+            SET last_polled_at = ?, next_poll_at = ?, poll_attempt_count = poll_attempt_count + 1,
+                last_poll_outcome = ?, last_poll_error_kind = ?, updated_at = ?
+            WHERE request_id = ? AND terminal_at IS NULL
+            "#,
+        )
+        .bind(now)
+        .bind(next_poll_at)
+        .bind(outcome)
+        .bind(error_kind)
+        .bind(now)
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     fn build_upstream_reconciliation_candidates(
@@ -646,89 +794,6 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    pub(crate) async fn mark_reconciliation_key_retry(
-        &self,
-        key_id: &str,
-        next_attempt_at: i64,
-        reason: Option<&str>,
-    ) -> Result<i64, ProxyError> {
-        let now = self.backend_time.now_ts();
-        let normalized_reason = classify_reconciliation_retry_reason(reason);
-        let changed = sqlx::query(
-            r#"
-            WITH candidate_windows AS (
-                SELECT
-                    u.token_id AS token_id,
-                    u.period_code AS period_code,
-                    MIN(u.project_id) AS project_id,
-                    MIN(u.billing_subject) AS billing_subject,
-                    MIN(u.period_start) AS period_start,
-                    MAX(u.period_end) AS period_end,
-                    COALESCE((
-                        SELECT COUNT(*)
-                        FROM upstream_reconciliation_research r
-                        WHERE r.token_id = u.token_id
-                          AND r.period_code = u.period_code
-                          AND r.terminal_at IS NULL
-                    ), 0) AS pending_research
-                FROM upstream_reconciliation_usage u
-                LEFT JOIN upstream_reconciliation_settlements s
-                  ON s.settlement_key = 'v1:' || u.token_id || ':' || u.period_code
-                WHERE u.key_id = ?
-                  AND u.period_end + 600 <= ?
-                  AND (s.settlement_key IS NULL OR (
-                        s.status IN ('pending', 'waiting', 'rate_limited')
-                        AND COALESCE(s.next_attempt_at, 0) <= ?
-                  ))
-                GROUP BY u.token_id, u.period_code
-            )
-            INSERT INTO upstream_reconciliation_settlements (
-                settlement_key, token_id, period_code, project_id, billing_subject,
-                period_start, period_end, status, degraded_reason, next_attempt_at,
-                attempt_count, created_at, updated_at
-            )
-            SELECT
-                'v1:' || token_id || ':' || period_code,
-                token_id,
-                period_code,
-                project_id,
-                billing_subject,
-                period_start,
-                period_end,
-                ?,
-                ?,
-                ?,
-                1,
-                ?,
-                ?
-            FROM candidate_windows
-            WHERE pending_research = 0 OR period_end + 86400 <= ?
-            ON CONFLICT(settlement_key) DO UPDATE SET
-                status = excluded.status,
-                degraded_reason = excluded.degraded_reason,
-                next_attempt_at = MAX(
-                    COALESCE(upstream_reconciliation_settlements.next_attempt_at, 0),
-                    excluded.next_attempt_at
-                ),
-                attempt_count = upstream_reconciliation_settlements.attempt_count + 1,
-                updated_at = excluded.updated_at
-            "#,
-        )
-        .bind(key_id)
-        .bind(now)
-        .bind(now)
-        .bind(RECONCILIATION_STATUS_RATE_LIMITED)
-        .bind(normalized_reason)
-        .bind(next_attempt_at)
-        .bind(now)
-        .bind(now)
-        .bind(now)
-        .execute(&self.pool)
-        .await?
-        .rows_affected() as i64;
-        Ok(changed)
     }
 
     pub(crate) async fn settle_upstream_reconciliation(
@@ -1164,6 +1229,146 @@ impl KeyStore {
         Ok((pending_research, queued, degraded))
     }
 
+    pub(crate) async fn daily_reconciliation_progress(
+        &self,
+    ) -> Result<(
+        DailyReconciliationProgress,
+        Vec<DailyReconciliationKeyProgress>,
+    ), ProxyError> {
+        let now = self.backend_time.now_ts();
+        let day_window = server_local_day_window_utc(self.backend_time.now_utc().with_timezone(&Local));
+        let (observed_accounts, accounts_with_settled_period, fully_terminal_accounts, observed_periods, settled_periods, degraded_periods, pending_periods) =
+            sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
+                r#"
+                WITH windows AS (
+                    SELECT
+                        u.token_id,
+                        u.period_code,
+                        MIN(u.billing_subject) AS billing_subject,
+                        MAX(CASE WHEN s.status IN ('settled', 'shadow_settled') THEN 1 ELSE 0 END) AS settled,
+                        MAX(CASE WHEN s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded') THEN 1 ELSE 0 END) AS terminal,
+                        MAX(CASE WHEN s.status IN ('degraded', 'shadow_degraded') THEN 1 ELSE 0 END) AS degraded
+                    FROM upstream_reconciliation_usage u
+                    LEFT JOIN upstream_reconciliation_settlements s
+                      ON s.settlement_key = 'v1:' || u.token_id || ':' || u.period_code
+                    WHERE u.period_start >= ? AND u.period_start < ?
+                    GROUP BY u.token_id, u.period_code
+                ), accounts AS (
+                    SELECT
+                        billing_subject,
+                        COUNT(*) AS observed,
+                        SUM(settled) AS settled,
+                        SUM(terminal) AS terminal,
+                        SUM(degraded) AS degraded
+                    FROM windows
+                    WHERE billing_subject LIKE 'account:%'
+                    GROUP BY billing_subject
+                )
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN settled > 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN terminal = observed THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(observed), 0),
+                    COALESCE(SUM(settled), 0),
+                    COALESCE(SUM(degraded), 0),
+                    COALESCE(SUM(observed - terminal), 0)
+                FROM accounts
+                "#,
+            )
+            .bind(day_window.start)
+            .bind(day_window.end)
+            .fetch_one(&self.pool)
+            .await?;
+        let (research_total, research_terminal, research_pending) =
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                r#"
+                SELECT
+                    COUNT(DISTINCT r.request_id),
+                    COUNT(DISTINCT CASE WHEN r.terminal_at IS NOT NULL THEN r.request_id END),
+                    COUNT(DISTINCT CASE WHEN r.terminal_at IS NULL THEN r.request_id END)
+                FROM upstream_reconciliation_research r
+                JOIN upstream_reconciliation_usage u
+                  ON u.token_id = r.token_id AND u.period_code = r.period_code
+                WHERE u.period_start >= ? AND u.period_start < ?
+                "#,
+            )
+            .bind(day_window.start)
+            .bind(day_window.end)
+            .fetch_one(&self.pool)
+            .await?;
+        let key_rows = sqlx::query_as::<_, (String, i64, i64, i64)>(
+            r#"
+            SELECT
+                u.key_id,
+                COUNT(DISTINCT CASE WHEN r.terminal_at IS NOT NULL THEN r.request_id END),
+                COUNT(DISTINCT CASE WHEN r.terminal_at IS NULL THEN r.request_id END),
+                COUNT(DISTINCT CASE
+                    WHEN s.settlement_key IS NULL OR s.status IN ('pending', 'waiting', 'rate_limited')
+                    THEN u.project_id
+                END)
+            FROM upstream_reconciliation_usage u
+            LEFT JOIN upstream_reconciliation_research r
+              ON r.token_id = u.token_id AND r.period_code = u.period_code AND r.key_id = u.key_id
+            LEFT JOIN upstream_reconciliation_settlements s
+              ON s.settlement_key = 'v1:' || u.token_id || ':' || u.period_code
+            WHERE u.period_start >= ? AND u.period_start < ?
+            GROUP BY u.key_id
+            HAVING COUNT(DISTINCT r.request_id) > 0
+                OR COUNT(DISTINCT CASE
+                    WHEN s.settlement_key IS NULL OR s.status IN ('pending', 'waiting', 'rate_limited')
+                    THEN u.project_id
+                END) > 0
+            ORDER BY 3 DESC, 4 DESC, u.key_id ASC
+            "#,
+        )
+        .bind(day_window.start)
+        .bind(day_window.end)
+        .fetch_all(&self.pool)
+        .await?;
+        let backoffs = sqlx::query_as::<_, (String, i64, Option<String>)>(
+            r#"
+            SELECT key_id, cooldown_until, reason_code
+            FROM api_key_transient_backoffs
+            WHERE scope = 'period_reconciliation' AND cooldown_until > ?
+            "#,
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|(key_id, cooldown_until, reason_code)| {
+            (key_id, (cooldown_until, reason_code))
+        })
+        .collect::<HashMap<_, _>>();
+        let progress = DailyReconciliationProgress {
+            observed_accounts,
+            accounts_with_settled_period,
+            fully_terminal_accounts,
+            observed_periods,
+            settled_periods,
+            degraded_periods,
+            pending_periods,
+            research_total,
+            research_terminal,
+            research_pending,
+        };
+        let by_key = key_rows
+            .into_iter()
+            .map(|(key_id, terminal_research, pending_research, pending_project_ids)| {
+                let cooldown = backoffs.get(&key_id);
+                DailyReconciliationKeyProgress {
+                    key_id_hint: key_id.chars().take(12).collect(),
+                    terminal_research,
+                    pending_research,
+                    pending_project_ids,
+                    cooldown_until: cooldown.map(|(until, _)| *until),
+                    cooldown_reason: cooldown.and_then(|(_, reason)| reason.clone()),
+                }
+            })
+            .collect();
+        Ok((progress, by_key))
+    }
+
     pub(crate) async fn shadow_daily_projection_for_accounts(
         &self,
         user_ids: &[String],
@@ -1205,6 +1410,8 @@ impl KeyStore {
                     shadow_settled_credits_used: 0,
                     shadow_observed_window_count: 0,
                     shadow_resolved_window_count: 0,
+                    shadow_settled_window_count: 0,
+                    shadow_degraded_window_count: 0,
                 },
             );
         }
@@ -1245,17 +1452,19 @@ impl KeyStore {
             .push(", ")
             .push_bind(RECONCILIATION_STATUS_SHADOW_DEGRADED)
             .push(
-                ") THEN COALESCE(s.upstream_usage, 0) ELSE 0 END), 0) AS settled_shadow_usage \
+                ") THEN COALESCE(s.upstream_usage, 0) ELSE 0 END), 0) AS settled_shadow_usage, \
+                 COALESCE(SUM(CASE WHEN s.status = 'shadow_settled' THEN 1 ELSE 0 END), 0) AS settled_windows, \
+                 COALESCE(SUM(CASE WHEN s.status = 'shadow_degraded' THEN 1 ELSE 0 END), 0) AS degraded_windows \
                  FROM relevant_windows w \
                  LEFT JOIN upstream_reconciliation_settlements s \
                    ON s.settlement_key = 'v1:' || w.token_id || ':' || w.period_code \
                  GROUP BY w.billing_subject",
             );
         let shadow_window_rows = shadow_window_query
-            .build_query_as::<(String, i64, i64, i64)>()
+            .build_query_as::<(String, i64, i64, i64, i64, i64)>()
             .fetch_all(&self.pool)
             .await?;
-        for (user_id, total_windows, terminal_windows, settled_shadow_usage) in shadow_window_rows {
+        for (user_id, total_windows, terminal_windows, settled_shadow_usage, settled_windows, degraded_windows) in shadow_window_rows {
             let entry = projections
                 .entry(user_id)
                 .or_insert(AccountShadowDailyProjection {
@@ -1265,12 +1474,16 @@ impl KeyStore {
                     shadow_settled_credits_used: 0,
                     shadow_observed_window_count: 0,
                     shadow_resolved_window_count: 0,
+                    shadow_settled_window_count: 0,
+                    shadow_degraded_window_count: 0,
                 });
             entry.observed_window_count += total_windows;
             entry.resolved_window_count += terminal_windows;
             entry.shadow_settled_credits_used += settled_shadow_usage;
             entry.shadow_observed_window_count += total_windows;
             entry.shadow_resolved_window_count += terminal_windows;
+            entry.shadow_settled_window_count += settled_windows;
+            entry.shadow_degraded_window_count += degraded_windows;
         }
 
         let mut actual_window_query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
@@ -1331,6 +1544,8 @@ impl KeyStore {
                     shadow_settled_credits_used: 0,
                     shadow_observed_window_count: 0,
                     shadow_resolved_window_count: 0,
+                    shadow_settled_window_count: 0,
+                    shadow_degraded_window_count: 0,
                 });
             entry.observed_window_count += total_windows;
             entry.resolved_window_count += terminal_windows;

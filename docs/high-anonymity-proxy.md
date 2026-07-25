@@ -17,8 +17,8 @@
    - `passthrough`：客户端提供非空值时原样发送。
    - `fixed`：发送管理员配置的固定名称。
    - `accessToken`：发送 `HMAC-SHA256(secret, "v1" + token_id + period_code)` 的 Base64URL-no-pad 值，默认启用。
-4. **窗口化匿名与对账**：`accessToken` 模式按服务器业务时区切成 `00-11`、`11-22`、`22-24` 三段；完整窗口结束后再按实际上游 `/usage` 做一次多退少补。
-5. **透明审计**：数据库 `request_logs` 记录 `forwarded_headers` 与 `dropped_headers` 字段名列表；管理端“系统状态”页面展示 configured/effective 策略、门禁、结算队列与最近 adjustment。
+4. **窗口化匿名与对账**：`accessToken` 模式按服务器业务时区切成 `00-11`、`11-22`、`22-24` 三段；完整窗口结束后由后台主动轮询未终态 Research，再按实际上游 `/usage` 做一次多退少补。对账 429 仅冷却对应 Key，不影响正常请求。
+5. **透明审计**：数据库 `request_logs` 记录 `forwarded_headers` 与 `dropped_headers` 字段名列表；管理端“系统状态”页面展示 configured/effective 策略、门禁、结算队列、当日覆盖和每 Key 阻塞状态。
 
 ## 配置与运行
 

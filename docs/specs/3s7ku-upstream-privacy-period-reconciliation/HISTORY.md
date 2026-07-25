@@ -15,6 +15,7 @@
 - 2026-07-23: reconciliation 候选调度新增 recent/backlog 双车道与 `12/8` 默认预算，优先收敛今日+昨日窗口，再回填旧 backlog。
 - 2026-07-20: reconciliation 补充 enqueue reuse / exhaustion 与 run started / completed 诊断信号，系统状态页新增最近运行、最近 shadow 调整、最近入队失败时间戳。
 - 2026-07-22: backlog 排障保持严格 degraded 语义，不把缺值伪装成旧值；`rate_limited` 拆分为上游 429、本地 usage 限流与其他重试，并对 hot upstream Key 应用 key-scoped backoff，系统状态页展示当前时段 per-key 活动图。
+- 2026-07-25: Research 不再依赖客户端结果 GET 才变为 terminal；现有 reconciliation worker 在结算前有界 sweep 已关闭窗口，并以独立 `period_reconciliation` Key cooldown 阻止 429 扇出。管理员可查看今日账号/账期/Research 覆盖和每 Key 阻塞状态。
 
 ## Key Reasons / Replacements
 

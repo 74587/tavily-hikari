@@ -3,6 +3,7 @@ import { useId, useMemo } from 'react'
 import type { QueryLoadState } from './queryLoadState'
 import type { Language, AdminTranslations } from '../i18n'
 import type {
+  DailyReconciliationKeyProgress,
   UpstreamKeyActivityPoint,
   UpstreamPrivacyGate,
   UpstreamPrivacyStatus,
@@ -84,6 +85,26 @@ function compactKeyActivityPoints(
     {
       keyIdHint: remainderLabel(remainderPoints.length),
       count: remainderPoints.reduce((total, point) => total + point.count, 0),
+    },
+  ]
+}
+
+function compactDailyKeyProgress(
+  rows: DailyReconciliationKeyProgress[],
+  remainderLabel: (count: number) => string,
+): DailyReconciliationKeyProgress[] {
+  if (rows.length <= KEY_ACTIVITY_VISIBLE_ROWS) return rows
+  const visibleRows = rows.slice(0, KEY_ACTIVITY_VISIBLE_ROWS)
+  const remainingRows = rows.slice(KEY_ACTIVITY_VISIBLE_ROWS)
+  return [
+    ...visibleRows,
+    {
+      keyIdHint: remainderLabel(remainingRows.length),
+      terminalResearch: remainingRows.reduce((total, row) => total + row.terminalResearch, 0),
+      pendingResearch: remainingRows.reduce((total, row) => total + row.pendingResearch, 0),
+      pendingProjectIds: remainingRows.reduce((total, row) => total + row.pendingProjectIds, 0),
+      cooldownUntil: null,
+      cooldownReason: null,
     },
   ]
 }
@@ -269,6 +290,8 @@ export default function UpstreamPrivacyStatusModule({
         lastRun: '最近对账运行',
         lastShadowAdjustment: '最近 shadow 调整',
         lastEnqueueError: '最近入队失败',
+        lastResearchSweep: '最近 Research 轮询',
+        lastResearchTerminal: '最近 Research 完成',
         retryBucketsTitle: '重试原因分布',
         retryBucketsDescription: '仅统计当前仍处于 rate_limited 的结算窗口，用来区分上游 429 与本地 usage 限流。',
         retryBucketUpstream429: '429 上游限流',
@@ -280,11 +303,25 @@ export default function UpstreamPrivacyStatusModule({
         pendingProjectIdsByKeyTitle: '待查询 Project ID 数',
         keyActivityEmpty: '当前时段暂无可展示的 Key 活动。',
         keyActivityRemainder: (count: number) => `其余 ${numberFormatter.format(count)} 个 Key`,
+        progressTitle: '今日对账收敛进度',
+        progressDescription: '只统计当天已观测到账期的账号；标准成功不包含降级账期。',
+        accountCoverage: '账号标准覆盖',
+        periodCoverage: '账期 terminal 覆盖',
+        researchCoverage: 'Research terminal 覆盖',
+        keyProgressTitle: '按 Key 收敛状态',
+        pendingResearch: '待完成 Research',
+        pendingProjectIds: '待查询 Project ID',
+        cooldown: '冷却',
+        cooldownNone: '可查询',
+        keyProgressEmpty: '当天暂无待收敛的 Key。',
+        keyProgressRemainder: (count: number) => `其余 ${numberFormatter.format(count)} 个 Key`,
       }
     : {
         lastRun: 'Last reconciliation run',
         lastShadowAdjustment: 'Last shadow adjustment',
         lastEnqueueError: 'Last enqueue error',
+        lastResearchSweep: 'Last Research sweep',
+        lastResearchTerminal: 'Last Research terminal',
         retryBucketsTitle: 'Retry reason distribution',
         retryBucketsDescription: 'Counts settlement windows that are still rate_limited, split by upstream 429 versus local usage throttling.',
         retryBucketUpstream429: 'Upstream 429',
@@ -296,12 +333,27 @@ export default function UpstreamPrivacyStatusModule({
         pendingProjectIdsByKeyTitle: 'Pending Project IDs',
         keyActivityEmpty: 'No key activity is available for the current period.',
         keyActivityRemainder: (count: number) => `${numberFormatter.format(count)} other keys`,
+        progressTitle: 'Today\'s reconciliation convergence',
+        progressDescription: 'Only accounts with observed periods today are included. Standard success excludes degraded periods.',
+        accountCoverage: 'Account standard coverage',
+        periodCoverage: 'Terminal period coverage',
+        researchCoverage: 'Terminal Research coverage',
+        keyProgressTitle: 'Convergence by key',
+        pendingResearch: 'Pending Research',
+        pendingProjectIds: 'Pending Project IDs',
+        cooldown: 'Cooldown',
+        cooldownNone: 'Ready',
+        keyProgressEmpty: 'No keys need convergence today.',
+        keyProgressRemainder: (count: number) => `${numberFormatter.format(count)} other keys`,
       }
   const boundUsersByKeyRows = status
     ? compactKeyActivityPoints(status.currentPeriodBoundUsersByKey, diagnosticsLabels.keyActivityRemainder)
     : []
   const pendingProjectIdsByKeyRows = status
     ? compactKeyActivityPoints(status.currentPeriodPendingProjectIdsByKey, diagnosticsLabels.keyActivityRemainder)
+    : []
+  const dailyKeyProgressRows = status
+    ? compactDailyKeyProgress(status.dailyReconciliationByKey, diagnosticsLabels.keyProgressRemainder)
     : []
 
   return (
@@ -469,6 +521,69 @@ export default function UpstreamPrivacyStatusModule({
                     strings.statusMissing,
                   )}
                 />
+                <PrivacyStat
+                  label={diagnosticsLabels.lastResearchSweep}
+                  value={formatOptionalTimestamp(status.lastResearchSweepAt, timestampFormatter, strings.statusMissing)}
+                />
+                <PrivacyStat
+                  label={diagnosticsLabels.lastResearchTerminal}
+                  value={formatOptionalTimestamp(status.lastResearchTerminalAt, timestampFormatter, strings.statusMissing)}
+                />
+              </div>
+            </section>
+
+            <section className="upstream-privacy-section" data-testid="system-status-reconciliation-progress">
+              <div className="panel-header">
+                <div>
+                  <h3>{diagnosticsLabels.progressTitle}</h3>
+                  <p className="panel-description">{diagnosticsLabels.progressDescription}</p>
+                </div>
+              </div>
+              <div className="upstream-privacy-progress-grid">
+                <ReconciliationProgressMeter
+                  label={diagnosticsLabels.accountCoverage}
+                  completed={status.dailyReconciliationProgress.accountsWithSettledPeriod}
+                  total={status.dailyReconciliationProgress.observedAccounts}
+                  numberFormatter={numberFormatter}
+                />
+                <ReconciliationProgressMeter
+                  label={diagnosticsLabels.periodCoverage}
+                  completed={status.dailyReconciliationProgress.observedPeriods - status.dailyReconciliationProgress.pendingPeriods}
+                  total={status.dailyReconciliationProgress.observedPeriods}
+                  supportingText={`${language === 'zh' ? '降级' : 'Degraded'} ${numberFormatter.format(status.dailyReconciliationProgress.degradedPeriods)}`}
+                  numberFormatter={numberFormatter}
+                />
+                <ReconciliationProgressMeter
+                  label={diagnosticsLabels.researchCoverage}
+                  completed={status.dailyReconciliationProgress.researchTerminal}
+                  total={status.dailyReconciliationProgress.researchTotal}
+                  supportingText={`${diagnosticsLabels.pendingResearch} ${numberFormatter.format(status.dailyReconciliationProgress.researchPending)}`}
+                  numberFormatter={numberFormatter}
+                />
+              </div>
+              <div className="upstream-privacy-key-progress">
+                <div className="upstream-privacy-key-progress__head">
+                  <strong>{diagnosticsLabels.keyProgressTitle}</strong>
+                  <span>{numberFormatter.format(dailyKeyProgressRows.length)}</span>
+                </div>
+                {dailyKeyProgressRows.length === 0 ? (
+                  <div className="upstream-privacy-empty-note">{diagnosticsLabels.keyProgressEmpty}</div>
+                ) : (
+                  <div className="upstream-privacy-key-progress__rows">
+                    {dailyKeyProgressRows.map((key) => (
+                      <article key={key.keyIdHint} className="upstream-privacy-key-progress__row">
+                        <code>{key.keyIdHint}</code>
+                        <span>{diagnosticsLabels.pendingResearch} {numberFormatter.format(key.pendingResearch)}</span>
+                        <span>{diagnosticsLabels.pendingProjectIds} {numberFormatter.format(key.pendingProjectIds)}</span>
+                        <StatusBadge tone={key.cooldownUntil ? 'warning' : 'success'}>
+                          {key.cooldownUntil
+                            ? `${diagnosticsLabels.cooldown} · ${formatOptionalTimestamp(key.cooldownUntil, timestampFormatter, strings.statusMissing)}`
+                            : diagnosticsLabels.cooldownNone}
+                        </StatusBadge>
+                      </article>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
 
@@ -705,6 +820,35 @@ function KeyActivityChart({
           })}
         </div>
       )}
+    </article>
+  )
+}
+
+function ReconciliationProgressMeter({
+  label,
+  completed,
+  total,
+  supportingText,
+  numberFormatter,
+}: {
+  label: string
+  completed: number
+  total: number
+  supportingText?: string
+  numberFormatter: Intl.NumberFormat
+}): JSX.Element {
+  const boundedCompleted = Math.max(0, Math.min(completed, total))
+  const percentage = total <= 0 ? 0 : Math.round((boundedCompleted / total) * 100)
+  return (
+    <article className="upstream-privacy-progress-meter">
+      <div>
+        <span>{label}</span>
+        <strong>{numberFormatter.format(boundedCompleted)}/{numberFormatter.format(total)}</strong>
+      </div>
+      <div className="upstream-privacy-progress-meter__track" aria-hidden="true">
+        <span style={{ width: `${percentage}%` }} />
+      </div>
+      <small>{supportingText ?? `${numberFormatter.format(percentage)}%`}</small>
     </article>
   )
 }
