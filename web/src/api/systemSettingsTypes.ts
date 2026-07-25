@@ -57,6 +57,28 @@ export interface UpstreamKeyActivityPoint {
   count: number
 }
 
+export interface DailyReconciliationProgress {
+  observedAccounts: number
+  accountsWithSettledPeriod: number
+  fullyTerminalAccounts: number
+  observedPeriods: number
+  settledPeriods: number
+  degradedPeriods: number
+  pendingPeriods: number
+  researchTotal: number
+  researchTerminal: number
+  researchPending: number
+}
+
+export interface DailyReconciliationKeyProgress {
+  keyIdHint: string
+  terminalResearch: number
+  pendingResearch: number
+  pendingProjectIds: number
+  cooldownUntil: number | null
+  cooldownReason: string | null
+}
+
 export interface UpstreamPrivacyStatus {
   phase: 'configured' | 'draining' | 'pending' | 'compare' | 'active' | 'degraded'
   configuredProjectIdMode: UpstreamProjectIdMode
@@ -80,9 +102,13 @@ export interface UpstreamPrivacyStatus {
   lastReconciliationRunAt: number | null
   lastShadowAdjustmentAt: number | null
   lastReconciliationEnqueueErrorAt: number | null
+  lastResearchSweepAt: number | null
+  lastResearchTerminalAt: number | null
   retryBuckets: UpstreamReconciliationRetryBuckets
   currentPeriodBoundUsersByKey: UpstreamKeyActivityPoint[]
   currentPeriodPendingProjectIdsByKey: UpstreamKeyActivityPoint[]
+  dailyReconciliationProgress: DailyReconciliationProgress
+  dailyReconciliationByKey: DailyReconciliationKeyProgress[]
   recentAdjustments: UpstreamReconciliationAdjustment[]
   generatedAt: number
 }

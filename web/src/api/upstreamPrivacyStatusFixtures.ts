@@ -2,7 +2,11 @@ import type { UpstreamPrivacyStatus } from './systemSettingsTypes'
 
 type ActivityDiagnostics = Pick<
   UpstreamPrivacyStatus,
-  'retryBuckets' | 'currentPeriodBoundUsersByKey' | 'currentPeriodPendingProjectIdsByKey'
+  | 'retryBuckets'
+  | 'currentPeriodBoundUsersByKey'
+  | 'currentPeriodPendingProjectIdsByKey'
+  | 'dailyReconciliationProgress'
+  | 'dailyReconciliationByKey'
 >
 
 const demoActivityDiagnostics: ActivityDiagnostics = {
@@ -15,6 +19,22 @@ const demoActivityDiagnostics: ActivityDiagnostics = {
     { keyIdHint: 'key-primary', count: 28 },
     { keyIdHint: 'key-backup', count: 9 },
     { keyIdHint: 'key-cold', count: 3 },
+  ],
+  dailyReconciliationProgress: {
+    observedAccounts: 12,
+    accountsWithSettledPeriod: 5,
+    fullyTerminalAccounts: 7,
+    observedPeriods: 21,
+    settledPeriods: 8,
+    degradedPeriods: 1,
+    pendingPeriods: 12,
+    researchTotal: 18,
+    researchTerminal: 7,
+    researchPending: 11,
+  },
+  dailyReconciliationByKey: [
+    { keyIdHint: 'key-primary', terminalResearch: 5, pendingResearch: 8, pendingProjectIds: 28, cooldownUntil: null, cooldownReason: null },
+    { keyIdHint: 'key-backup', terminalResearch: 2, pendingResearch: 3, pendingProjectIds: 9, cooldownUntil: 1_783_960_000, cooldownReason: 'upstream429' },
   ],
 }
 
@@ -30,6 +50,22 @@ const storyActivityDiagnostics: ActivityDiagnostics = {
     { keyIdHint: 'key-backup', count: 17 },
     { keyIdHint: 'key-eu-west', count: 7 },
     { keyIdHint: 'key-cold', count: 3 },
+  ],
+  dailyReconciliationProgress: {
+    observedAccounts: 31,
+    accountsWithSettledPeriod: 8,
+    fullyTerminalAccounts: 10,
+    observedPeriods: 55,
+    settledPeriods: 11,
+    degradedPeriods: 3,
+    pendingPeriods: 41,
+    researchTotal: 49,
+    researchTerminal: 13,
+    researchPending: 36,
+  },
+  dailyReconciliationByKey: [
+    { keyIdHint: 'key-primary', terminalResearch: 9, pendingResearch: 21, pendingProjectIds: 48, cooldownUntil: 1_783_960_000, cooldownReason: 'upstream429' },
+    { keyIdHint: 'key-backup', terminalResearch: 4, pendingResearch: 9, pendingProjectIds: 17, cooldownUntil: null, cooldownReason: null },
   ],
 }
 
@@ -62,6 +98,8 @@ function createUpstreamPrivacyStatus(diagnostics: ActivityDiagnostics): Upstream
     lastReconciliationRunAt: 1_783_958_250,
     lastShadowAdjustmentAt: 1_783_958_100,
     lastReconciliationEnqueueErrorAt: 1_783_957_900,
+    lastResearchSweepAt: 1_783_958_320,
+    lastResearchTerminalAt: 1_783_958_300,
     ...diagnostics,
     recentAdjustments: [
       {

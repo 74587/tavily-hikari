@@ -19,6 +19,32 @@ pub struct UpstreamKeyActivityPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct DailyReconciliationProgress {
+    pub observed_accounts: i64,
+    pub accounts_with_settled_period: i64,
+    pub fully_terminal_accounts: i64,
+    pub observed_periods: i64,
+    pub settled_periods: i64,
+    pub degraded_periods: i64,
+    pub pending_periods: i64,
+    pub research_total: i64,
+    pub research_terminal: i64,
+    pub research_pending: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyReconciliationKeyProgress {
+    pub key_id_hint: String,
+    pub terminal_research: i64,
+    pub pending_research: i64,
+    pub pending_project_ids: i64,
+    pub cooldown_until: Option<i64>,
+    pub cooldown_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct UpstreamPrivacyStatus {
     pub phase: String,
     pub configured_project_id_mode: UpstreamProjectIdMode,
@@ -42,9 +68,13 @@ pub struct UpstreamPrivacyStatus {
     pub last_reconciliation_run_at: Option<i64>,
     pub last_shadow_adjustment_at: Option<i64>,
     pub last_reconciliation_enqueue_error_at: Option<i64>,
+    pub last_research_sweep_at: Option<i64>,
+    pub last_research_terminal_at: Option<i64>,
     pub retry_buckets: UpstreamReconciliationRetryBuckets,
     pub current_period_bound_users_by_key: Vec<UpstreamKeyActivityPoint>,
     pub current_period_pending_project_ids_by_key: Vec<UpstreamKeyActivityPoint>,
+    pub daily_reconciliation_progress: DailyReconciliationProgress,
+    pub daily_reconciliation_by_key: Vec<DailyReconciliationKeyProgress>,
     pub recent_adjustments: Vec<UpstreamReconciliationAdjustment>,
     pub generated_at: i64,
 }

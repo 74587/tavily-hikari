@@ -2305,7 +2305,6 @@ export interface AdminUserQuotaBreakdownEntry {
   dailyCreditsDelta: number
   monthlyCreditsDelta: number
 }
-
 export interface AdminUserSummary {
   userId: string
   displayName: string | null
@@ -2320,6 +2319,9 @@ export interface AdminUserSummary {
   dailyCreditsUsed: number
   shadowDailyCreditsUsed: number | null
   shadowDailyAvailability: 'confirmed' | 'projected' | 'unavailable' | null
+  shadowDailyObservedPeriodCount?: number | null
+  shadowDailySettledPeriodCount?: number | null
+  shadowDailyDegradedPeriodCount?: number | null
   dailyCreditsLimit: number
   monthlyCreditsUsed: number
   monthlyCreditsLimit: number

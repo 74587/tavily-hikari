@@ -1,4 +1,8 @@
 impl TavilyProxy {
+    const RECONCILIATION_BACKOFF_SCOPE: &'static str = "period_reconciliation";
+    const RESEARCH_SWEEP_LIMIT: usize = 20;
+    const RESEARCH_SWEEP_PER_KEY_LIMIT: usize = 4;
+
     pub async fn upstream_reconciliation_shadow_compare_active_with_settings(
         &self,
         settings: &SystemSettings,
@@ -62,10 +66,16 @@ impl TavilyProxy {
             .key_store
             .current_period_reconciliation_key_activity(&period.code)
             .await?;
+        let (daily_reconciliation_progress, daily_reconciliation_by_key) = self
+            .key_store
+            .daily_reconciliation_progress()
+            .await?;
         let (
             last_reconciliation_run_at,
             last_shadow_adjustment_at,
             last_reconciliation_enqueue_error_at,
+            last_research_sweep_at,
+            last_research_terminal_at,
         ) = self
             .key_store
             .upstream_reconciliation_runtime_markers()
@@ -129,9 +139,13 @@ impl TavilyProxy {
             last_reconciliation_run_at,
             last_shadow_adjustment_at,
             last_reconciliation_enqueue_error_at,
+            last_research_sweep_at,
+            last_research_terminal_at,
             retry_buckets,
             current_period_bound_users_by_key,
             current_period_pending_project_ids_by_key,
+            daily_reconciliation_progress,
+            daily_reconciliation_by_key,
             recent_adjustments: self
                 .key_store
                 .recent_reconciliation_adjustments(10)
@@ -269,6 +283,251 @@ impl TavilyProxy {
             })
     }
 
+    async fn fetch_upstream_research_terminal(
+        &self,
+        key_id: &str,
+        usage_base: &str,
+        request_id: &str,
+    ) -> Result<bool, (ProxyError, Option<i64>)> {
+        let secret = self
+            .key_store
+            .fetch_api_key_secret(key_id)
+            .await
+            .map_err(|err| (err, None))?
+            .ok_or_else(|| (ProxyError::Database(sqlx::Error::RowNotFound), None))?;
+        let base = Url::parse(usage_base).map_err(|source| {
+            (
+                ProxyError::InvalidEndpoint {
+                    endpoint: usage_base.to_string(),
+                    source,
+                },
+                None,
+            )
+        })?;
+        let path = format!("/research/{}", urlencoding::encode(request_id));
+        let url = build_path_prefixed_url(&base, &path);
+        let response = self
+            .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                client
+                    .get(url.clone())
+                    .header("Authorization", format!("Bearer {secret}"))
+                    .timeout(Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS))
+            })
+            .await
+            .map(|(response, _)| response)
+            .map_err(|err| (err, None))?;
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .map(|seconds| self.backend_time.now_ts().saturating_add(seconds.max(1)));
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| (ProxyError::Http(err), retry_after))?;
+        if !status.is_success() {
+            return Err((
+                ProxyError::UsageHttp {
+                    status,
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                },
+                retry_after,
+            ));
+        }
+        Ok(research_response_is_terminal(&body))
+    }
+
+    async fn reconciliation_cooldown_until(
+        &self,
+        key_id: &str,
+        now: i64,
+    ) -> Result<Option<i64>, ProxyError> {
+        Ok(self
+            .key_store
+            .list_active_api_key_transient_backoffs(
+                &[key_id.to_string()],
+                Self::RECONCILIATION_BACKOFF_SCOPE,
+                now,
+            )
+            .await?
+            .get(key_id)
+            .map(|state| state.cooldown_until))
+    }
+
+    async fn arm_reconciliation_backoff(
+        &self,
+        key_id: &str,
+        requested_until: Option<i64>,
+        reason: &str,
+    ) -> Result<i64, ProxyError> {
+        let now = self.backend_time.now_ts();
+        let prior_retry_after_secs = self
+            .reconciliation_cooldown_until(key_id, now)
+            .await?
+            .map(|until| until.saturating_sub(now))
+            .or(self
+                .key_store
+                .api_key_transient_backoff_state(key_id, Self::RECONCILIATION_BACKOFF_SCOPE)
+                .await?
+                .map(|state| state.retry_after_secs));
+        let retry_after_secs = requested_until
+            .map(|until| until.saturating_sub(now).max(1))
+            .unwrap_or_else(|| match prior_retry_after_secs {
+                None | Some(0) => 300,
+                Some(1..=300) => 600,
+                Some(301..=600) => 1200,
+                _ => 1800,
+            });
+        let cooldown_until = now.saturating_add(retry_after_secs);
+        let armed = self
+            .key_store
+            .arm_api_key_transient_backoff(ApiKeyTransientBackoffArm {
+                key_id,
+                scope: Self::RECONCILIATION_BACKOFF_SCOPE,
+                cooldown_until,
+                retry_after_secs,
+                reason_code: Some(classify_reconciliation_retry_reason(Some(reason))),
+                source_request_log_id: None,
+                now,
+            })
+            .await?;
+        Ok(armed.map(|state| state.cooldown_until).unwrap_or(cooldown_until))
+    }
+
+    async fn run_research_terminal_sweep(
+        &self,
+        usage_base: &str,
+        started_at: &std::time::Instant,
+    ) -> Result<(i64, i64, i64, i64, i64), ProxyError> {
+        let now = self.backend_time.now_ts();
+        let candidates = self
+            .key_store
+            .next_upstream_reconciliation_research_candidates(80)
+            .await?;
+        let candidate_count = candidates.len() as i64;
+        tracing::info!(
+            component = "reconciliation",
+            event = "research_sweep_started",
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            job_type = "upstream_reconciliation",
+            candidate_count,
+        );
+        let mut selected_per_key = HashMap::<String, usize>::new();
+        let mut cooling_keys = HashSet::<String>::new();
+        let mut polled = 0_i64;
+        let mut terminal = 0_i64;
+        let mut pending = 0_i64;
+        let mut retries = 0_i64;
+        let mut skipped_cooldown = 0_i64;
+        for candidate in candidates {
+            if polled as usize >= Self::RESEARCH_SWEEP_LIMIT {
+                break;
+            }
+            if cooling_keys.contains(&candidate.key_id)
+                || self
+                    .reconciliation_cooldown_until(&candidate.key_id, now)
+                    .await?
+                    .is_some()
+            {
+                skipped_cooldown += 1;
+                continue;
+            }
+            let selected = selected_per_key.entry(candidate.key_id.clone()).or_default();
+            if *selected >= Self::RESEARCH_SWEEP_PER_KEY_LIMIT {
+                continue;
+            }
+            *selected += 1;
+            polled += 1;
+            match self
+                .fetch_upstream_research_terminal(&candidate.key_id, usage_base, &candidate.request_id)
+                .await
+            {
+                Ok(true) => {
+                    self.key_store
+                        .mark_upstream_reconciliation_research_terminal(&candidate.request_id)
+                        .await?;
+                    terminal += 1;
+                    tracing::debug!(
+                        component = "reconciliation",
+                        event = "research_terminal_observed",
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        job_type = "upstream_reconciliation",
+                        period_code = %candidate.period_code,
+                    );
+                }
+                Ok(false) => {
+                    self.key_store
+                        .record_upstream_reconciliation_research_poll(
+                            &candidate.request_id,
+                            now.saturating_add(120),
+                            "pending",
+                            None,
+                        )
+                        .await?;
+                    pending += 1;
+                }
+                Err((err, retry_after)) => {
+                    let reason = classify_reconciliation_retry_reason(Some(err.to_string().as_str()));
+                    let next_poll_at = if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
+                        let until = self
+                            .arm_reconciliation_backoff(&candidate.key_id, retry_after, reason)
+                            .await?;
+                        cooling_keys.insert(candidate.key_id.clone());
+                        tracing::warn!(
+                            component = "reconciliation",
+                            event = "research_key_cooldown_applied",
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            job_type = "upstream_reconciliation",
+                            key_id = %candidate.key_id,
+                            reason_kind = reason,
+                            cooldown_until = until,
+                        );
+                        until
+                    } else {
+                        now.saturating_add(match candidate.poll_attempt_count {
+                            0..=1 => 60,
+                            2..=3 => 120,
+                            4..=5 => 300,
+                            6..=7 => 600,
+                            _ => 1800,
+                        })
+                    };
+                    self.key_store
+                        .record_upstream_reconciliation_research_poll(
+                            &candidate.request_id,
+                            next_poll_at,
+                            if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
+                                "rate_limited"
+                            } else {
+                                "retry"
+                            },
+                            Some(reason),
+                        )
+                        .await?;
+                    retries += 1;
+                }
+            }
+        }
+        self.key_store
+            .mark_upstream_reconciliation_research_sweep_at(now)
+            .await?;
+        tracing::info!(
+            component = "reconciliation",
+            event = "research_sweep_completed",
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            job_type = "upstream_reconciliation",
+            candidate_count,
+            polled_count = polled,
+            terminal_count = terminal,
+            pending_count = pending,
+            retry_count = retries,
+            skipped_cooldown_count = skipped_cooldown,
+        );
+        Ok((polled, terminal, pending, retries, skipped_cooldown))
+    }
+
     pub async fn run_upstream_reconciliation_once(
         &self,
         usage_base: &str,
@@ -307,6 +566,13 @@ impl TavilyProxy {
             );
             return Ok(0);
         }
+        let (
+            research_polled_count,
+            research_terminal_count,
+            research_pending_count,
+            research_retry_count,
+            research_skipped_cooldown_count,
+        ) = self.run_research_terminal_sweep(usage_base, &started_at).await?;
         let candidate_batch = self
             .key_store
             .next_upstream_reconciliation_candidates(20)
@@ -330,6 +596,11 @@ impl TavilyProxy {
             pending_research = pending_research_before,
             queued_settlements = queued_settlements_before,
             degraded_settlements = degraded_settlements_before,
+            research_polled_count,
+            research_terminal_count,
+            research_pending_count,
+            research_retry_count,
+            research_skipped_cooldown_count,
         );
         let result = async {
             let mut settled = 0_i64;
@@ -348,6 +619,22 @@ impl TavilyProxy {
                     .reconciliation_key_ids(&candidate.token_id, &candidate.period_code)
                     .await?;
                 if key_ids.iter().any(|key_id| cooling_keys.contains(key_id)) {
+                    skipped_by_key_backoff += 1;
+                    continue;
+                }
+                let mut key_in_cooldown = false;
+                for key_id in &key_ids {
+                    if self
+                        .reconciliation_cooldown_until(key_id, self.backend_time.now_ts())
+                        .await?
+                        .is_some()
+                    {
+                        cooling_keys.insert(key_id.clone());
+                        key_in_cooldown = true;
+                        break;
+                    }
+                }
+                if key_in_cooldown {
                     skipped_by_key_backoff += 1;
                     continue;
                 }
@@ -376,41 +663,32 @@ impl TavilyProxy {
                     {
                         Ok(usage) => upstream_usage = upstream_usage.saturating_add(usage),
                         Err((err, upstream_retry_at)) => {
-                            retry_at = Some(
-                                upstream_retry_at
-                                    .unwrap_or_else(|| self.backend_time.now_ts().saturating_add(60)),
-                            );
+                            retry_at = upstream_retry_at;
                             retry_reason = Some(err.to_string());
                             retry_key_id = Some(key_id.clone());
                             break;
                         }
                     }
                 }
-                match (retry_at, retry_reason, retry_key_id) {
-                    (Some(next_attempt_at), Some(retry_reason), Some(retry_key_id)) => {
+                if let (Some(retry_reason), Some(retry_key_id)) = (retry_reason, retry_key_id) {
                         let reason_kind =
                             classify_reconciliation_retry_reason(Some(retry_reason.as_str()));
-                        let changed = self
-                            .key_store
-                            .mark_reconciliation_key_retry(
+                        let cooldown_until = self
+                            .arm_reconciliation_backoff(
                                 &retry_key_id,
-                                next_attempt_at,
+                                retry_at,
+                                reason_kind,
+                            )
+                            .await?;
+                        self.key_store
+                            .mark_reconciliation_retry(
+                                &candidate,
+                                RECONCILIATION_STATUS_RATE_LIMITED,
+                                cooldown_until,
                                 Some(retry_reason.as_str()),
                             )
                             .await?;
-                        let affected_window_count = if changed > 0 {
-                            changed
-                        } else {
-                            self.key_store
-                                .mark_reconciliation_retry(
-                                    &candidate,
-                                    RECONCILIATION_STATUS_RATE_LIMITED,
-                                    next_attempt_at,
-                                    Some(retry_reason.as_str()),
-                                )
-                                .await?;
-                            1
-                        };
+                        let affected_window_count = 1_i64;
                         match reason_kind {
                             RECONCILIATION_RETRY_REASON_UPSTREAM_429 => {
                                 upstream_429_retry_windows += affected_window_count;
@@ -432,23 +710,10 @@ impl TavilyProxy {
                             key_id = %retry_key_id,
                             period_code = %candidate.period_code,
                             reason_kind,
-                            next_attempt_at,
+                            cooldown_until,
                             affected_window_count,
                         );
                         continue;
-                    }
-                    (Some(next_attempt_at), reason, _) => {
-                        self.key_store
-                            .mark_reconciliation_retry(
-                                &candidate,
-                                RECONCILIATION_STATUS_RATE_LIMITED,
-                                next_attempt_at,
-                                reason.as_deref(),
-                            )
-                            .await?;
-                        continue;
-                    }
-                    _ => {}
                 }
                 let local_billed = self
                     .key_store
@@ -525,6 +790,11 @@ impl TavilyProxy {
                     rate_limited_other_count = other_retry_windows,
                     key_backoff_window_count,
                     skipped_by_key_backoff,
+                    research_polled_count,
+                    research_terminal_count,
+                    research_pending_count,
+                    research_retry_count,
+                    research_skipped_cooldown_count,
                 );
                 Ok(settled)
             }
@@ -550,6 +820,11 @@ impl TavilyProxy {
                     rate_limited_other_count = 0_i64,
                     key_backoff_window_count = 0_i64,
                     skipped_by_key_backoff = 0_i64,
+                    research_polled_count,
+                    research_terminal_count,
+                    research_pending_count,
+                    research_retry_count,
+                    research_skipped_cooldown_count,
                     err = %err,
                 );
                 Err(err)

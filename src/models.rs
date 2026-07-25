@@ -1022,6 +1022,19 @@ pub struct AccountShadowDailyProjection {
     pub shadow_settled_credits_used: i64,
     pub shadow_observed_window_count: i64,
     pub shadow_resolved_window_count: i64,
+    pub shadow_settled_window_count: i64,
+    pub shadow_degraded_window_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamReconciliationResearchCandidate {
+    pub request_id: String,
+    pub token_id: String,
+    pub key_id: String,
+    pub period_code: String,
+    pub billing_subject: String,
+    pub period_end: i64,
+    pub poll_attempt_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

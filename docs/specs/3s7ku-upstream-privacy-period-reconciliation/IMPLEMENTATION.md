@@ -23,6 +23,9 @@
 - reconciliation backlog 诊断已区分 `rate_limited` 的上游 429、本地 usage 限流与其他重试；系统状态页同步展示当前时段每个上游 Key 的绑定用户数与待查询 Project ID 数活动图。
 - `upstream_reconciliation` worker 已对同一上游 Key 的到期窗口应用 key-scoped backoff：首次遇到 429 或本地 usage 限流后，本轮复用该 Key 的退避状态，不再反复查询同一 hot key，同时保留其他 Key 的结算机会。
 - reconciliation 候选调度已切成 recent/backlog 双车道：今日+昨日窗口优先按 `period_end DESC` 取最多 `12` 条，旧 backlog 再按 `period_end ASC` 取最多 `8` 条，空余预算双向回填，避免近期窗口长期被旧积压饿死。
+- Research 记录已加入持久化 poll 元数据；每轮现有 reconciliation job 先执行最多 20 条、每 Key 最多 4 条的 terminal sweep，历史 pending 自动进入恢复队列。终态写入与 settlement 均保持幂等。
+- 对账限流已改用 `period_reconciliation` 独立 Key cooldown：429 不再扇出写入同 Key 的全部窗口，其他 Key 可继续结算；状态 API/页面提供今日账号与账期覆盖、Research 收敛和 per-Key cooldown 进度。
+- `/api/users` compare-only 项新增 observed/standard-settled/degraded period count，用户列表和用量页在 hybrid 值旁展示标准对账覆盖及降级数。
 
 ## Remaining Gaps
 

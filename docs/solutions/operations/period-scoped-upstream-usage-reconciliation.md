@@ -69,12 +69,15 @@ The settlement worker must be safe to retry at any point:
 - repeated queue scans must not duplicate adjustments;
 - repeated upstream `/usage` reads must not create a second settlement row;
 - a hot upstream key that returns `429` or hits the proxy's local usage-query throttle should apply
-  one key-scoped backoff to all due windows for that key, instead of letting the next scheduler pass
-  immediately spend the whole candidate budget on the same key again;
+  one durable reconciliation-only key cooldown, while recording retry state only for the current
+  window; never fan that transient result out to all same-key windows.
 - takeover by another HA node must reuse the same settlement key;
 - process restarts must resume from durable recorded usage tuples and settlement state.
 - candidate selection should prefer recently closed windows over ancient backlog so same-day UI
   convergence does not stall behind old hot keys.
+- async Research must have a server-side terminal sweep. Client result retrieval is an observation
+  path, not a completion dependency; persist poll schedule/outcome fields so restart and HA takeover
+  continue bounded polling.
 
 The simplest durable contract is:
 
@@ -123,6 +126,8 @@ Operators need to know whether exact reconciliation is active or merely configur
   causes;
 - current-period per-key activity, including bound-user count and pending Project ID count, with
   sensitive ids shortened to stable local hints;
+- same-day account standard-settlement coverage, period/Research terminal coverage, and per-key
+  pending Research plus reconciliation-only cooldown state;
 - recent signed adjustments.
 
 This is why Tavily Hikari ships a dedicated `System Status` admin page instead of hiding the state

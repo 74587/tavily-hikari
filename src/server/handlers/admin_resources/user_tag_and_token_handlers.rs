@@ -515,7 +515,13 @@ async fn list_users(
                 || (precise_cutover_configured && has_pending_shadow_projection);
         let show_shadow_projection =
             show_hybrid_shadow_projection || has_persisted_shadow_projection;
-        let (shadow_daily_credits_used, shadow_daily_availability) = if show_shadow_projection {
+        let (
+            shadow_daily_credits_used,
+            shadow_daily_availability,
+            shadow_daily_observed_period_count,
+            shadow_daily_settled_period_count,
+            shadow_daily_degraded_period_count,
+        ) = if show_shadow_projection {
             let shadow_daily_credits_used = Some(if show_hybrid_shadow_projection {
                 row.summary.daily_credits_used.saturating_add(
                     projection.map(|value| value.confirmed_delta_credits).unwrap_or_default(),
@@ -538,9 +544,15 @@ async fn list_users(
             } else {
                 Some(AdminUserShadowDailyAvailability::Confirmed)
             };
-            (shadow_daily_credits_used, shadow_daily_availability)
+            (
+                shadow_daily_credits_used,
+                shadow_daily_availability,
+                Some(projection.map(|value| value.shadow_observed_window_count).unwrap_or(0)),
+                Some(projection.map(|value| value.shadow_settled_window_count).unwrap_or(0)),
+                Some(projection.map(|value| value.shadow_degraded_window_count).unwrap_or(0)),
+            )
         } else {
-            (None, None)
+            (None, None, None, None, None)
         };
         items.push(build_admin_user_summary_view(
             &row.user,
@@ -553,6 +565,9 @@ async fn list_users(
                 recent_ip_count_7d,
                 shadow_daily_credits_used,
                 shadow_daily_availability,
+                shadow_daily_observed_period_count,
+                shadow_daily_settled_period_count,
+                shadow_daily_degraded_period_count,
                 tags,
             },
         ));
