@@ -82,8 +82,12 @@ interface RechargePanelText {
   previewScopeNote: string
   previewMonth: string
   previewCurrentQuota: string
+  previewCurrentQuotaHint: string
   previewDelta: string
+  previewDeltaHint: string
   previewExpectedQuota: string
+  previewExpectedQuotaHint: string
+  previewFieldHelpLabel: string
   previewAfterExpiry: string
   closePreview: string
   create: string

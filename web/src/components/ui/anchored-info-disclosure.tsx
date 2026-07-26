@@ -34,6 +34,7 @@ export function AnchoredInfoDisclosure({
   ...buttonProps
 }: AnchoredInfoDisclosureProps): JSX.Element {
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const pointerHoverRef = useRef(false)
   const bubbleId = useId()
   const [open, setOpen] = useState(false)
   const { layerRef: bubbleRef, position } = useAnchoredFloatingLayer<HTMLDivElement>({
@@ -78,6 +79,10 @@ export function AnchoredInfoDisclosure({
       setOpen(true)
       return
     }
+    if (pointerHoverRef.current) {
+      setOpen(true)
+      return
+    }
     setOpen((currentOpen) => !currentOpen)
   }
 
@@ -102,12 +107,14 @@ export function AnchoredInfoDisclosure({
   const handleMouseEnter = (event: MouseEvent<HTMLButtonElement>) => {
     onMouseEnter?.(event)
     if (event.defaultPrevented) return
+    pointerHoverRef.current = true
     setOpen(true)
   }
 
   const handleMouseLeave = (event: MouseEvent<HTMLButtonElement>) => {
     onMouseLeave?.(event)
     if (event.defaultPrevented) return
+    pointerHoverRef.current = false
     if (document.activeElement === triggerRef.current) return
     setOpen(false)
   }

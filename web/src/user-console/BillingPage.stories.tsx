@@ -1,3 +1,4 @@
+import { useLayoutEffect, type ReactNode } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 
@@ -29,6 +30,34 @@ function formatMoney(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
+}
+
+function MobileViewportFrame({ children }: { children: ReactNode }): JSX.Element {
+  useLayoutEffect(() => {
+    const originalMatchMedia = window.matchMedia.bind(window)
+    const mobileMatchMedia: typeof window.matchMedia = (query) => {
+      const media = originalMatchMedia(query)
+      if (!query.includes('max-width: 767px')) return media
+
+      return {
+        matches: true,
+        media: media.media,
+        onchange: media.onchange,
+        addListener: media.addListener.bind(media),
+        removeListener: media.removeListener.bind(media),
+        addEventListener: media.addEventListener.bind(media),
+        removeEventListener: media.removeEventListener.bind(media),
+        dispatchEvent: media.dispatchEvent.bind(media),
+      } as MediaQueryList
+    }
+
+    window.matchMedia = mobileMatchMedia
+    return () => {
+      window.matchMedia = originalMatchMedia
+    }
+  }, [])
+
+  return <div style={{ width: 390, maxWidth: '100%', margin: '0 auto' }}>{children}</div>
 }
 
 const storyNow = Math.floor(Date.now() / 1000)
@@ -601,11 +630,12 @@ function BillingPageStory({
 const meta = {
   title: 'User Console/Billing/Billing Page',
   component: BillingPageStory,
+  tags: ['autodocs'],
   parameters: {
     layout: 'fullscreen',
     docs: {
       description: {
-        component: 'Dedicated /console/billing route covering entitlement composition, pricing, future natural months, recent orders, and purchase fallback states.',
+        component: 'Dedicated /console/billing route covering entitlement composition, pricing, future natural months, recent orders, and the recharge preview glossary.',
       },
     },
   },
@@ -652,6 +682,7 @@ export const Default: Story = {
     await expect(canvas.getByText('+60 requests')).toBeInTheDocument()
     await expect(canvas.getByText('+300 credits')).toBeInTheDocument()
     await expect(canvas.getByText('+3,000 credits')).toBeInTheDocument()
+    await userEvent.click(canvas.getByRole('button', { name: 'Show details for Jul 2026' }))
     await expect(canvas.getByRole('button', { name: 'Show details for Jul 2026' })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -676,6 +707,17 @@ export const Default: Story = {
     await expect(summary.queryByText('Long-lived entitlements')).not.toBeInTheDocument()
     await expect(summary.queryByText('Tag adjustments')).not.toBeInTheDocument()
     await expect(summary.getByText('4,450')).toBeInTheDocument()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
+    const preview = within(document.body)
+    await expect(preview.getByRole('columnheader', { name: 'Before order' })).toBeInTheDocument()
+    await expect(preview.getByRole('columnheader', { name: 'Added by order' })).toBeInTheDocument()
+    await expect(preview.getByRole('columnheader', { name: 'After order' })).toBeInTheDocument()
+
+    await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('already scheduled for this month')
+    await userEvent.keyboard('{Escape}')
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
   },
 }
 
@@ -741,4 +783,20 @@ export const Loading: Story = {
 
 export const Mobile: Story = {
   parameters: mobileViewport,
+  render: (args) => (
+    <MobileViewportFrame>
+      <BillingPageStory {...args} />
+    </MobileViewportFrame>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(document.body)
+    const help = preview.getByRole('button', { name: 'Explain the recharge preview columns' })
+    await expect(help).toBeInTheDocument()
+    await userEvent.click(help)
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('After order')
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('base quota and other adjustments')
+  },
 }
