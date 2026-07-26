@@ -152,7 +152,7 @@
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-refresh-stacked-1100.png`
 
 - 1440px 侧栏 utility 控件：主题和语言选择按钮保持同一行，等宽承载，未回落为纵向堆叠。
-  - PR: include
+  PR: include
 
 ![1440px 侧栏 utility 控件同行](./assets/sidebar-utility-controls-row-1440.png)
 
@@ -184,7 +184,7 @@
   - Story: `Admin/AdminShell/PanelHeaderShell`
   - Viewport: `1440x1120`; source commit: `2c187c53199724bfb3cbebc4cd4063a06984802f`
   - SHA-256: `cef7d58d0920eb0e25ebd7c4620398edad51e1c85f9575e331b636015b3bbd5c`
-  - PR: include
+    PR: include
 
 ![1440px 侧栏刷新入口与长管理员名称](./assets/sidebar-refresh-desktop-1440.png)
 
@@ -192,7 +192,7 @@
   - Story: `Admin/AdminShell/PanelHeaderShellStacked`
   - Viewport: `1100x1120`; source commit: `2c187c53199724bfb3cbebc4cd4063a06984802f`
   - SHA-256: `c9186205ff8038bfe466f9bb43ae7a9b78cecba549ef8fb04847bd1845b91a1e`
-  - PR: include
+    PR: include
 
 ![1100px 堆叠刷新入口](./assets/sidebar-refresh-stacked-1100.png)
 
