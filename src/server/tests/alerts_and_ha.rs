@@ -1763,6 +1763,16 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
     .execute(&pool)
     .await
     .expect("insert second outbox row");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('upsert', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, 'checksum-c')
+        "#,
+    )
+    .bind(now - 20)
+    .execute(&pool)
+    .await
+    .expect("insert third outbox row");
     proxy
         .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-a", 1)
         .await
@@ -1772,9 +1782,9 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, Some("standby-a"))
         .await
         .expect("read outbox stats");
-    assert_eq!(stats.row_count, 2);
+    assert_eq!(stats.row_count, 3);
     assert!(stats.oldest_age_secs >= 100);
-    assert_eq!(stats.ack_lag, Some(1));
+    assert_eq!(stats.ack_lag, Some(2));
     let no_peer_stats = proxy
         .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, None)
         .await
@@ -1785,8 +1795,8 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .await
         .expect("read channel health");
     assert_eq!(health.acked_seq, Some(1));
-    assert_eq!(health.high_watermark, 2);
-    assert_eq!(health.ack_lag, Some(1));
+    assert_eq!(health.high_watermark, 3);
+    assert_eq!(health.ack_lag, Some(2));
     assert_eq!(health.cursor_state, "catching_up");
     assert_eq!(health.retention_secs, 72 * 60 * 60);
     assert!(!health.expired_backlog);
@@ -1809,7 +1819,7 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-a")
         .await
         .expect("read expired channel health");
-    assert_eq!(expired_health.high_watermark, 2);
+    assert_eq!(expired_health.high_watermark, 3);
     assert_eq!(expired_health.cursor_state, "expired_backlog");
     assert!(expired_health.expired_backlog);
 

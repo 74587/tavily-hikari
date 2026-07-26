@@ -979,6 +979,7 @@ async fn finish_ha_gc_with_continuation(
                                     HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
                                 available_at = retry_available_at,
                             );
+                            maintenance_worker_wake_for_state(retry_state.as_ref()).notify_one();
                             break;
                         }
                         Err(retry_err)

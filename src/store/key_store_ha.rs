@@ -321,9 +321,11 @@ impl KeyStore {
         let (has_retained_after_ack, has_retained_gap_after_ack) =
             if let Some(acked) = acked_seq {
                 let sql = format!(
-                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?), EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ? + 1)"
+                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ?), EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.resource IN ({allowed_resources}) AND next.seq = ? + 1))"
                 );
                 sqlx::query_as::<_, (bool, bool)>(&sql)
+                    .bind(threshold)
+                    .bind(acked)
                     .bind(threshold)
                     .bind(acked)
                     .bind(threshold)
