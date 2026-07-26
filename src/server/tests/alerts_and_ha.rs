@@ -1749,7 +1749,7 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         VALUES ('upsert', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, 'checksum-a')
         "#,
     )
-    .bind(now - 120)
+    .bind(now - 4 * 24 * 60 * 60)
     .execute(&pool)
     .await
     .expect("insert first outbox row");

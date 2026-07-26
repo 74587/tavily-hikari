@@ -317,12 +317,22 @@ impl KeyStore {
         .await?
         .flatten();
         let threshold = self.backend_time.now_ts() - ha_channel_retention_secs(channel);
-        let expired_backlog = sqlx::query_scalar::<_, bool>(&format!(
-            "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at < ? LIMIT 1)"
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        let first_retained_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MIN(seq) FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources})"
         ))
         .bind(threshold)
         .fetch_one(&mut *conn)
         .await?;
+        let expired_backlog = acked_seq.is_some_and(|acked| {
+            let latest_seq = high_watermark;
+            match first_retained_seq {
+                Some(first_retained_seq) => {
+                    acked > 0 && acked < first_retained_seq.saturating_sub(1)
+                }
+                None => acked > 0 && latest_seq > acked,
+            }
+        });
         let cursor_state = if expired_backlog {
             "expired_backlog"
         } else if high_watermark == 0 || acked_seq.is_some_and(|acked| acked >= high_watermark) {

@@ -430,6 +430,7 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
     .await;
     let continuation_delay = match job_type.as_str() {
         "request_logs_gc" if !completed => Some(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS),
+        "ha_outbox_gc" if !completed => Some(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS),
         _ => None,
     };
     if let Some(continuation_delay) = continuation_delay {
@@ -902,13 +903,13 @@ async fn finish_ha_gc_with_continuation(
     state: &Arc<AppState>,
     job_id: i64,
     message: String,
-) {
+) -> bool {
     let available_at = state
         .proxy
         .backend_time()
         .now_ts()
         .saturating_add(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS);
-    match state
+    let result = state
         .proxy
         .scheduled_job_finish_and_enqueue_auto_at(
             job_id,
@@ -918,26 +919,125 @@ async fn finish_ha_gc_with_continuation(
             Some(&message),
             available_at,
         )
-        .await
-    {
-        Ok(result) => tracing::debug!(
-            component = "ha_outbox_gc",
-            event = "continuation_queued",
-            job_id,
-            continuation_job_id = result.job_id,
-            continuation_created = result.created,
-            continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
-            available_at,
-        ),
-        Err(err) => tracing::error!(
-            component = "ha_outbox_gc",
-            event = "continuation_transaction_failed",
-            job_id,
-            continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
-            err = %err,
-            "HA outbox GC could not persist its deferred continuation"
-        ),
+        .await;
+    match result {
+        Ok(result) => {
+            tracing::debug!(
+                component = "ha_outbox_gc",
+                event = "continuation_queued",
+                job_id,
+                continuation_job_id = result.job_id,
+                continuation_created = result.created,
+                continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                available_at,
+            );
+        }
+        Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {
+            tracing::warn!(
+                component = "ha_outbox_gc",
+                event = "continuation_retry_scheduled",
+                job_id,
+                continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                err = %err,
+                "HA outbox GC continuation hit a transient SQLite conflict; retrying asynchronously"
+            );
+            let retry_state = state.clone();
+            tokio::spawn(async move {
+                loop {
+                    retry_state
+                        .proxy
+                        .backend_time()
+                        .sleep(Duration::from_secs(
+                            HA_OUTBOX_GC_CONTINUATION_DELAY_SECS as u64,
+                        ))
+                        .await;
+                    let retry_available_at = retry_state
+                        .proxy
+                        .backend_time()
+                        .now_ts()
+                        .saturating_add(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS);
+                    match retry_state
+                        .proxy
+                        .scheduled_job_finish_and_enqueue_auto_at(
+                            job_id,
+                            "ha_outbox_gc",
+                            None,
+                            1,
+                            Some(&message),
+                            retry_available_at,
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            tracing::debug!(
+                                component = "ha_outbox_gc",
+                                event = "continuation_queued_after_retry",
+                                job_id,
+                                continuation_job_id = result.job_id,
+                                continuation_created = result.created,
+                                continuation_delay_secs =
+                                    HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                                available_at = retry_available_at,
+                            );
+                            break;
+                        }
+                        Err(retry_err)
+                            if tavily_hikari::is_transient_sqlite_write_error(&retry_err) =>
+                        {
+                            tracing::warn!(
+                                component = "ha_outbox_gc",
+                                event = "continuation_retry_deferred",
+                                job_id,
+                                continuation_delay_secs =
+                                    HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                                err = %retry_err,
+                                "HA outbox GC continuation remains blocked by SQLite"
+                            );
+                        }
+                        Err(retry_err) => {
+                            tracing::error!(
+                                component = "ha_outbox_gc",
+                                event = "continuation_retry_failed",
+                                job_id,
+                                err = %retry_err,
+                                "HA outbox GC continuation could not be persisted"
+                            );
+                            let _ = retry_state
+                                .proxy
+                                .scheduled_job_finish(job_id, "error", Some(&retry_err.to_string()))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        Err(err) => {
+            tracing::error!(
+                component = "ha_outbox_gc",
+                event = "continuation_transaction_failed",
+                job_id,
+                continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                err = %err,
+                "HA outbox GC could not persist its deferred continuation"
+            );
+            if let Err(finish_err) = state
+                .proxy
+                .scheduled_job_finish(job_id, "error", Some(&message))
+                .await
+            {
+                tracing::error!(
+                    component = "ha_outbox_gc",
+                    event = "deferred_job_finish_failed",
+                    job_id,
+                    err = %finish_err,
+                    "HA outbox GC deferred job remains eligible for the outer continuation retry"
+                );
+            }
+            return false;
+        }
     }
+    true
 }
 
 async fn run_ha_outbox_gc_claimed_job(
@@ -958,13 +1058,12 @@ async fn run_ha_outbox_gc_claimed_job(
             defer_reason = "maintenance_write_gate_busy",
             continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
         );
-        finish_ha_gc_with_continuation(
+        return finish_ha_gc_with_continuation(
             &state,
             job_id,
             "deferred=maintenance_write_gate_busy".to_string(),
         )
         .await;
-        return true;
     };
     let result = state
         .proxy
@@ -988,7 +1087,7 @@ async fn run_ha_outbox_gc_claimed_job(
                     deleted_rows = report.deleted_rows,
                     elapsed_ms = report.elapsed_ms as u64,
                 );
-                finish_ha_gc_with_continuation(
+                return finish_ha_gc_with_continuation(
                     &state,
                     job_id,
                     format_ha_outbox_gc_report_message(&report, 1),
@@ -1010,7 +1109,7 @@ async fn run_ha_outbox_gc_claimed_job(
                 defer_reason = "sqlite_busy",
                 err = %err,
             );
-            finish_ha_gc_with_continuation(
+            return finish_ha_gc_with_continuation(
                 &state,
                 job_id,
                 format!("deferred=sqlite_busy error={err}"),
