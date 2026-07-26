@@ -21,6 +21,11 @@ const detail: HaNodeDetail = {
     stale: false,
     roleHint: 'standby_candidate',
     plannedCutoverEligible: true,
+    channelHealth: [
+      { channel: 'control', ackedSeq: 812, highWatermark: 812, ackLag: 0, cursorState: 'healthy', retentionSecs: 72 * 60 * 60, expiredBacklog: false },
+      { channel: 'billing', ackedSeq: 490, highWatermark: 512, ackLag: 22, cursorState: 'catching_up', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: false },
+      { channel: 'runtime', ackedSeq: null, highWatermark: 900, ackLag: null, cursorState: 'expired_backlog', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: true },
+    ],
   },
   edgeoneDomain: 'api.example.com',
   edgeoneCurrentTarget: '203.0.113.9:58087',
@@ -81,3 +86,17 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 export const Default: Story = {}
+
+export const BaselineRequired: Story = {
+  args: {
+    detail: {
+      ...detail,
+      node: {
+        ...detail.node,
+        channelHealth: detail.node.channelHealth?.map((health) => health.channel === 'runtime'
+          ? { ...health, cursorState: 'baseline_required', expiredBacklog: false }
+          : health),
+      },
+    },
+  },
+}

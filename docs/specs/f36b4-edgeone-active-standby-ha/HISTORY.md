@@ -197,3 +197,6 @@ the 101 primary look like it had a leak whenever billing baseline export repeate
   the production-shaped synthetic fixture used here, the contract passes only when standby finishes
   its first full catch-up under a `256MiB` cgroup limit and repeated active billing baseline exports
   stay within the same limit without OOM.
+- Online HA outbox cleanup now uses the application pool and a bounded non-blocking writer slice;
+  billing/runtime retention is 14 days, while expired cursors continue through the existing
+  `410 -> baseline` recovery path. Admin HA status includes low-cost per-channel ACK/GC health.

@@ -86,3 +86,6 @@
 - `src/server/handlers/public.rs`
 - `src/server/serve.rs`
 - `src/tavily_proxy/proxy_core.rs`
+- HA perf events retain stable structured fields while avoiding false ACK lag: outbox stats only
+  compute lag when a peer watermark is supplied, and the admin health path uses watermark plus
+  indexed `EXISTS` checks instead of row counts.

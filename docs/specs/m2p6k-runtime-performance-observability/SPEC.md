@@ -102,3 +102,6 @@
 - 这张 spec 是 PR1/PR2 共用的程序级合同真相源。
 - PR2 需要在此基础上把 low-memory 自动退化与 `256MiB` 稳定运行验收写成最终真相。
 - 高频 `low_memory_protection_decision` 与 HA export/sync 信息应按状态跃迁或轻量采样输出，默认日志不再依赖密集重复 INFO 来做定位。
+- HA peer-less export and baseline samples report `ack_lag=null`; normal summaries stay sampled per
+  channel, while heavy outbox and memory snapshots remain reserved for slow, error, or threshold
+  transition events.

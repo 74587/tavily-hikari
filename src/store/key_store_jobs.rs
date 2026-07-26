@@ -622,6 +622,107 @@ impl KeyStore {
         }
     }
 
+    pub(crate) async fn scheduled_job_finish_and_enqueue_auto_at(
+        &self,
+        job_id: i64,
+        job_type: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        message: Option<&str>,
+        available_at: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        let finished_at = self.backend_time.now_ts();
+        let mut conn = self.pool.acquire().await?;
+        let result = async {
+            // A deferred online slice must not turn a short SQLite writer conflict
+            // into the scheduler's long retry window.
+            sqlx::query("PRAGMA busy_timeout = 100")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut *conn)
+                .await?;
+            let updated = sqlx::query(
+                r#"UPDATE scheduled_jobs
+                   SET status = 'success', message = ?, finished_at = ?
+                   WHERE id = ? AND status = 'running'"#,
+            )
+            .bind(message)
+            .bind(finished_at)
+            .bind(job_id)
+            .execute(&mut *conn)
+            .await?;
+            if updated.rows_affected() == 0 {
+                sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+                return Err(ProxyError::Other(format!(
+                    "scheduled job {job_id} was not running"
+                )));
+            }
+
+            if let Some((continuation_id, status, current_trigger_source)) =
+                Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id).await?
+            {
+                if status == "queued" {
+                    sqlx::query(
+                        "UPDATE scheduled_jobs SET available_at = MIN(available_at, ?) WHERE id = ?",
+                    )
+                    .bind(available_at)
+                    .bind(continuation_id)
+                    .execute(&mut *conn)
+                    .await?;
+                }
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                return Ok(ScheduledJobEnqueueResult {
+                    job_id: continuation_id,
+                    created: false,
+                    promoted: false,
+                    status,
+                    trigger_source: current_trigger_source,
+                });
+            }
+
+            let inserted = sqlx::query(
+                r#"INSERT INTO scheduled_jobs (
+                       job_type,
+                       trigger_source,
+                       key_id,
+                       status,
+                       attempt,
+                       queued_at,
+                       available_at,
+                       started_at,
+                       finished_at
+                   ) VALUES (?, 'auto', ?, 'queued', ?, ?, ?, NULL, NULL)"#,
+            )
+            .bind(job_type)
+            .bind(key_id)
+            .bind(attempt)
+            .bind(finished_at)
+            .bind(available_at)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(ScheduledJobEnqueueResult {
+                job_id: inserted.last_insert_rowid(),
+                created: true,
+                promoted: false,
+                status: "queued".to_string(),
+                trigger_source: "auto".to_string(),
+            })
+        }
+        .await;
+        if result.is_err() {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        }
+        let _ = sqlx::query(&format!(
+            "PRAGMA busy_timeout = {}",
+            crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+        ))
+        .execute(&mut *conn)
+        .await;
+        result
+    }
+
     pub(crate) async fn fetch_queued_scheduled_jobs(
         &self,
         limit: usize,

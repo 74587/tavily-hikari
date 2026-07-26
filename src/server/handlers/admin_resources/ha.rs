@@ -127,7 +127,7 @@ fn emit_ha_perf_event(
             outbox_sampled = outbox.is_some(),
             outbox_row_count = outbox.map(|value| value.row_count).unwrap_or_default(),
             outbox_oldest_age_secs = outbox.map(|value| value.oldest_age_secs),
-            outbox_ack_lag = outbox.map(|value| value.ack_lag),
+            outbox_ack_lag = outbox.and_then(|value| value.ack_lag),
             memory_sampled = memory.is_some(),
             memory_current_bytes = memory.and_then(|value| value.memory_current_bytes),
             memory_limit_bytes = memory.and_then(|value| value.memory_limit_bytes),
@@ -269,6 +269,7 @@ fn peer_view_from_status(
         stale,
         role_hint: config.role_hint,
         planned_cutover_eligible,
+        channel_health: Vec::new(),
     }
 }
 
@@ -291,6 +292,7 @@ fn peer_view_from_error(
         stale: true,
         role_hint: config.role_hint,
         planned_cutover_eligible: false,
+        channel_health: Vec::new(),
     }
 }
 
@@ -363,7 +365,33 @@ async fn build_internal_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaSta
 async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatusView {
     let now_ts = state.proxy.backend_time().now_ts();
     let mut status = build_internal_ha_status(state).await;
-    let Some(internal_token) = state.ha.internal_token() else {
+    if let Some(internal_token) = state.ha.internal_token() {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        let peers: Vec<_> = state
+            .ha
+            .peer_nodes()
+            .into_iter()
+            .filter(|peer| peer.node_id != status.node_id)
+            .collect();
+        status.peer_nodes = stream::iter(peers)
+            .map(|peer| {
+                let client = client.clone();
+                let internal_token = internal_token.to_string();
+                async move {
+                    let last_seen_at = now_ts;
+                    match fetch_internal_ha_status(&client, &peer, &internal_token).await {
+                        Ok(peer_status) => peer_view_from_status(&peer, &peer_status, last_seen_at, now_ts),
+                        Err(err) => peer_view_from_error(&peer, err),
+                    }
+                }
+            })
+            .buffer_unordered(8)
+            .collect()
+            .await;
+    } else {
         status.peer_nodes = state
             .ha
             .peer_nodes()
@@ -371,33 +399,20 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
             .filter(|peer| peer.node_id != status.node_id)
             .map(|peer| peer_view_from_error(&peer, "HA_INTERNAL_TOKEN is required for peer probing".to_string()))
             .collect();
-        return status;
-    };
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| Client::new());
-    let peers: Vec<_> = state
-        .ha
-        .peer_nodes()
-        .into_iter()
-        .filter(|peer| peer.node_id != status.node_id)
-        .collect();
-    status.peer_nodes = stream::iter(peers)
-        .map(|peer| {
-            let client = client.clone();
-            let internal_token = internal_token.to_string();
-            async move {
-                let last_seen_at = now_ts;
-                match fetch_internal_ha_status(&client, &peer, &internal_token).await {
-                    Ok(peer_status) => peer_view_from_status(&peer, &peer_status, last_seen_at, now_ts),
-                    Err(err) => peer_view_from_error(&peer, err),
-                }
+    }
+    for peer in &mut status.peer_nodes {
+        let mut health = Vec::with_capacity(3);
+        for channel in [
+            tavily_hikari::HaSyncChannel::Control,
+            tavily_hikari::HaSyncChannel::Billing,
+            tavily_hikari::HaSyncChannel::Runtime,
+        ] {
+            if let Ok(value) = state.proxy.ha_peer_channel_health(channel, &peer.node_id).await {
+                health.push(value);
             }
-        })
-        .buffer_unordered(8)
-        .collect()
-        .await;
+        }
+        peer.channel_health = health;
+    }
     status
 }
 

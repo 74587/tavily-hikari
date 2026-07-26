@@ -38,6 +38,28 @@ function formatLag(value: number | null, language: 'en' | 'zh'): string {
   return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`
 }
 
+function channelLabel(channel: string, language: 'en' | 'zh'): string {
+  if (language === 'zh') {
+    return channel === 'control' ? 'Control' : channel === 'billing' ? 'Billing' : 'Runtime'
+  }
+  return channel.charAt(0).toUpperCase() + channel.slice(1)
+}
+
+function channelStateLabel(state: string, language: 'en' | 'zh'): string {
+  const labels: Record<string, [string, string]> = {
+    healthy: ['健康', 'Healthy'],
+    catching_up: ['追赶中', 'Catching up'],
+    baseline_required: ['需要 baseline', 'Baseline required'],
+    expired_backlog: ['存在过期积压', 'Expired backlog'],
+  }
+  return labels[state]?.[language === 'zh' ? 0 : 1] ?? state
+}
+
+function formatRetention(value: number, language: 'en' | 'zh'): string {
+  const days = Math.round(value / 86_400)
+  return language === 'zh' ? `${days} 天` : `${days} days`
+}
+
 function roleLabel(
   role: HaNodeDetail['node']['role'],
   strings: AdminTranslations['systemSettings']['ha'],
@@ -152,6 +174,7 @@ export default function HaNodeDetailPanel({
   const trafficStatus = node ? trafficAuthority(node, strings) : null
   const writeStatus = node ? writeAuthority(node, strings) : null
   const nodeMessage = node ? formatHaPeerMessage(node, strings) : null
+  const channelHealth = node?.channelHealth ?? []
   return (
     <section className="ha-node-panel" aria-labelledby="ha-node-detail-title">
       <div className="ha-node-panel-head">
@@ -310,6 +333,38 @@ export default function HaNodeDetailPanel({
               {formatEffectiveSource(detail?.haSourceEffective ?? null, strings)}
             </code>
           </div>
+        </article>
+
+        <article className="ha-node-detail-card ha-node-detail-card--channels" aria-label="HA channel health">
+          <div className="ha-node-detail-card-head">
+            <div className="ha-node-list-title">
+              <Server size={18} aria-hidden="true" />
+              <span>{language === 'zh' ? '复制 ACK 与 GC 健康' : 'Replication ACK and GC health'}</span>
+            </div>
+          </div>
+          {channelHealth.length === 0 ? (
+            <div className="ha-status-message"><span>—</span></div>
+          ) : (
+            <div className="ha-channel-health-list">
+              {channelHealth.map((health) => (
+                <div key={health.channel} className="ha-channel-health-row">
+                  <div className="ha-channel-health-heading">
+                    <strong>{channelLabel(health.channel, language)}</strong>
+                    <StatusBadge tone={health.cursorState === 'healthy' ? 'success' : 'warning'}>
+                      {channelStateLabel(health.cursorState, language)}
+                    </StatusBadge>
+                  </div>
+                  <dl>
+                    <div><dt>{language === 'zh' ? 'ACK 序号' : 'ACK'}</dt><dd>{health.ackedSeq ?? '—'}</dd></div>
+                    <div><dt>{language === 'zh' ? '高水位' : 'High watermark'}</dt><dd>{health.highWatermark}</dd></div>
+                    <div><dt>{language === 'zh' ? 'ACK 延迟' : 'ACK lag'}</dt><dd>{health.ackLag ?? '—'}</dd></div>
+                    <div><dt>{language === 'zh' ? '保留期' : 'Retention'}</dt><dd>{formatRetention(health.retentionSecs, language)}</dd></div>
+                    <div><dt>{language === 'zh' ? '过期积压' : 'Expired backlog'}</dt><dd>{health.expiredBacklog ? (language === 'zh' ? '是' : 'Yes') : (language === 'zh' ? '否' : 'No')}</dd></div>
+                  </dl>
+                </div>
+              ))}
+            </div>
+          )}
         </article>
       </div>
 

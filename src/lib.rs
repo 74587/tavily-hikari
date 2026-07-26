@@ -51,6 +51,7 @@ pub use runtime_logging::{
 pub use store::{
     DbLogStatus, HaApplyResult, HaBaselineApplyMode, HaBaselineApplySession, HaEventsApplySession,
     HaEventsReadSession, PerfLogScope, emit_low_memory_protection_decision, emit_perf_log,
+    is_transient_sqlite_write_error,
 };
 pub use tavily_proxy::*;
 pub use upstream_privacy::*;
@@ -603,6 +604,19 @@ impl Default for HaOutboxGcOptions {
             max_batches: HA_OUTBOX_GC_DEFAULT_MAX_BATCHES,
             max_runtime_secs: HA_OUTBOX_GC_DEFAULT_MAX_RUNTIME_SECS,
             inter_batch_sleep_ms: 0,
+        }
+    }
+}
+
+impl HaOutboxGcOptions {
+    /// Bounds used by the in-process scheduler. The standalone maintenance
+    /// command intentionally keeps the larger default window.
+    pub const fn online() -> Self {
+        Self {
+            batch_size: 250,
+            max_batches: 4,
+            max_runtime_secs: 1,
+            inter_batch_sleep_ms: 100,
         }
     }
 }

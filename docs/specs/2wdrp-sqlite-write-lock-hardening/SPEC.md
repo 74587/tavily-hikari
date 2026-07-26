@@ -306,6 +306,9 @@ source when a usable persisted runtime already exists.
   process recreation, while a manual trigger reuses and immediately unlocks the representative row.
 - Body-GC cursor queries use `observability.idx_request_logs_body_gc_cursor`, and a same-user
   candidate page reports one retention context with cache hits for subsequent candidates.
+- Online HA outbox GC must use a non-blocking maintenance write lease and a one-second slice
+  budget. If the lease or SQLite writer is busy, it must finish the current scheduled row and
+  persist a 30-second continuation instead of waiting through the scheduler's long retry window.
 - With an upstream `/usage` endpoint that hangs past the quota-sync timeout budget, manual and
   scheduler-triggered quota sync runs finish as `error`, leave no long-lived `running` row behind,
   and do not write `api_key_quota_sync_samples` or `api_keys.quota_*`.

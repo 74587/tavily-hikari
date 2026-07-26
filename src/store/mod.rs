@@ -89,7 +89,7 @@ pub(crate) fn acquire_observability_offline_guard(
     })
 }
 
-pub(crate) fn is_transient_sqlite_write_error(err: &ProxyError) -> bool {
+pub fn is_transient_sqlite_write_error(err: &ProxyError) -> bool {
     let ProxyError::Database(db_err) = err else {
         return false;
     };

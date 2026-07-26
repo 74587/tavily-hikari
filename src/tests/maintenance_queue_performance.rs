@@ -40,6 +40,65 @@ async fn scheduled_job_aging_prevents_request_logs_gc_from_starving_ha_gc() {
 }
 
 #[tokio::test]
+async fn ha_gc_continuation_finishes_job_and_requeues_atomically() {
+    let db_path = temp_db_path("ha-gc-continuation-transaction");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
+    let job = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "scheduler", None, 1)
+        .await
+        .expect("enqueue HA GC");
+    proxy
+        .scheduled_job_mark_running(job.job_id)
+        .await
+        .expect("mark HA GC running")
+        .expect("claimed HA GC job");
+    let available_at = Utc::now().timestamp() + 30;
+    let continuation = proxy
+        .scheduled_job_finish_and_enqueue_auto_at(
+            job.job_id,
+            "ha_outbox_gc",
+            None,
+            1,
+            Some("deferred=has_more"),
+            available_at,
+        )
+        .await
+        .expect("finish and enqueue continuation");
+    assert!(continuation.created);
+    assert_eq!(continuation.trigger_source, "auto");
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(job.job_id)
+            .await
+            .expect("read finished job")
+            .expect("finished job exists")
+            .status,
+        "success"
+    );
+    let queued = proxy
+        .scheduled_job_by_id(continuation.job_id)
+        .await
+        .expect("read continuation")
+        .expect("continuation exists");
+    assert_eq!(queued.status, "queued");
+    assert_eq!(queued.trigger_source, "auto");
+    let queued_available_at: i64 =
+        sqlx::query_scalar("SELECT available_at FROM scheduled_jobs WHERE id = ?")
+            .bind(continuation.job_id)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read continuation availability");
+    assert_eq!(queued_available_at, available_at);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn delayed_request_logs_gc_continuation_survives_restart_and_manual_trigger_unlocks_it() {
     let db_path = temp_db_path("scheduled-job-delayed-continuation");
     let db_str = db_path.to_string_lossy().to_string();

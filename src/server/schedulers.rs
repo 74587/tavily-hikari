@@ -8,7 +8,7 @@ use tavily_hikari::{
     format_ha_outbox_gc_report_message, format_linuxdo_credit_money,
     linuxdo_credit_recharge_system_refund_retry_delay_secs,
     linuxdo_credit_refund_params as shared_linuxdo_credit_refund_params,
-    linuxdo_credit_refund_url as shared_linuxdo_credit_refund_url, run_ha_outbox_gc_once,
+    linuxdo_credit_refund_url as shared_linuxdo_credit_refund_url,
 };
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,6 +55,7 @@ const TRIGGER_SOURCE_SCHEDULER: &str = "scheduler";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
+const HA_OUTBOX_GC_CONTINUATION_DELAY_SECS: i64 = 30;
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
@@ -420,13 +421,23 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
         job_id: job.id,
         _job_execution_gate: None,
     };
-    let completed = run_manual_claimed_job(state.clone(), job_type.clone(), key_id.clone(), claimed_job).await;
-    if job_type == "request_logs_gc" && !completed {
+    let completed = run_manual_claimed_job(
+        state.clone(),
+        job_type.clone(),
+        key_id.clone(),
+        claimed_job,
+    )
+    .await;
+    let continuation_delay = match job_type.as_str() {
+        "request_logs_gc" if !completed => Some(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS),
+        _ => None,
+    };
+    if let Some(continuation_delay) = continuation_delay {
         let available_at = state
             .proxy
             .backend_time()
             .now_ts()
-            .saturating_add(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS);
+            .saturating_add(continuation_delay);
         match enqueue_scheduled_job_at(
             state.as_ref(),
             &job_type,
@@ -437,18 +448,18 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
         .await
         {
             Ok(continuation_job_id) => tracing::debug!(
-                component = "request_logs_gc",
+                component = %job_type,
                 event = "continuation_queued",
                 trigger_source = %trigger_source,
                 continuation_job_id,
-                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                continuation_delay_secs = continuation_delay,
                 available_at,
             ),
             Err(err) => tracing::warn!(
-                component = "request_logs_gc",
+                component = %job_type,
                 event = "continuation_enqueue_failed",
                 trigger_source = %trigger_source,
-                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                continuation_delay_secs = continuation_delay,
                 err = %err,
             ),
         }
@@ -885,6 +896,136 @@ async fn run_request_logs_body_gc_index_ensure_claimed_job(
             false
         }
     }
+}
+
+async fn finish_ha_gc_with_continuation(
+    state: &Arc<AppState>,
+    job_id: i64,
+    message: String,
+) {
+    let available_at = state
+        .proxy
+        .backend_time()
+        .now_ts()
+        .saturating_add(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS);
+    match state
+        .proxy
+        .scheduled_job_finish_and_enqueue_auto_at(
+            job_id,
+            "ha_outbox_gc",
+            None,
+            1,
+            Some(&message),
+            available_at,
+        )
+        .await
+    {
+        Ok(result) => tracing::debug!(
+            component = "ha_outbox_gc",
+            event = "continuation_queued",
+            job_id,
+            continuation_job_id = result.job_id,
+            continuation_created = result.created,
+            continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+            available_at,
+        ),
+        Err(err) => tracing::error!(
+            component = "ha_outbox_gc",
+            event = "continuation_transaction_failed",
+            job_id,
+            continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+            err = %err,
+            "HA outbox GC could not persist its deferred continuation"
+        ),
+    }
+}
+
+async fn run_ha_outbox_gc_claimed_job(
+    state: Arc<AppState>,
+    claimed_job: ClaimedScheduledJob,
+) -> bool {
+    let ClaimedScheduledJob {
+        job_id,
+        _job_execution_gate,
+    } = claimed_job;
+    drop(_job_execution_gate);
+
+    let Some(_maintenance) = try_acquire_db_maintenance_write_gate() else {
+        tracing::warn!(
+            component = "ha_outbox_gc",
+            event = "deferred",
+            job_id,
+            defer_reason = "maintenance_write_gate_busy",
+            continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+        );
+        finish_ha_gc_with_continuation(
+            &state,
+            job_id,
+            "deferred=maintenance_write_gate_busy".to_string(),
+        )
+        .await;
+        return true;
+    };
+    let result = state
+        .proxy
+        .gc_ha_outbox_with_options(HaOutboxGcOptions::online())
+        .await;
+    drop(_maintenance);
+
+    match result {
+        Ok(report) => {
+            let needs_continuation = report.has_more || !report.completed;
+            if needs_continuation {
+                tracing::warn!(
+                    component = "ha_outbox_gc",
+                    event = "deferred",
+                    job_id,
+                    defer_reason = if report.has_more {
+                        "has_more"
+                    } else {
+                        "slice_budget_exhausted"
+                    },
+                    deleted_rows = report.deleted_rows,
+                    elapsed_ms = report.elapsed_ms as u64,
+                );
+                finish_ha_gc_with_continuation(
+                    &state,
+                    job_id,
+                    format_ha_outbox_gc_report_message(&report, 1),
+                )
+                .await;
+            } else {
+                let message = format_ha_outbox_gc_report_message(&report, 1);
+                let _ = state
+                    .proxy
+                    .scheduled_job_finish(job_id, "success", Some(&message))
+                    .await;
+            }
+        }
+        Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {
+            tracing::warn!(
+                component = "ha_outbox_gc",
+                event = "deferred",
+                job_id,
+                defer_reason = "sqlite_busy",
+                err = %err,
+            );
+            finish_ha_gc_with_continuation(
+                &state,
+                job_id,
+                format!("deferred=sqlite_busy error={err}"),
+            )
+            .await;
+        }
+        Err(err) => {
+            let message = err.to_string();
+            let _ = state
+                .proxy
+                .scheduled_job_finish(job_id, "error", Some(&message))
+                .await;
+        }
+    }
+    true
 }
 
 async fn record_linuxdo_user_sync_failure(
@@ -1796,6 +1937,9 @@ async fn run_manual_claimed_job(
     key_id: Option<String>,
     mut claimed_job: ClaimedScheduledJob,
 ) -> bool {
+    if job_type == "ha_outbox_gc" {
+        return run_ha_outbox_gc_claimed_job(state, claimed_job).await;
+    }
     if job_type == "request_logs_gc" {
         return run_request_logs_gc_catchup_claimed_job(state, claimed_job).await;
     }
@@ -1845,7 +1989,10 @@ async fn run_manual_claimed_job(
                 Err(ProxyError::UsageHttp { status, body }) => {
                     finish(state, "error", format!("usage_http {status}: {body}")).await
                 }
-                Err(err) => finish(state, "error", err.to_string()).await,
+                Err(err) => {
+                    let _ = finish(state, "error", err.to_string()).await;
+                    true
+                }
             }
         }
         "token_usage_rollup" | "usage_aggregation" => {
@@ -1876,23 +2023,6 @@ async fn run_manual_claimed_job(
             let _maintenance = acquire_db_maintenance_read_gate().await;
             match state.proxy.gc_auth_token_logs().await {
                 Ok(deleted) => finish(state, "success", format!("deleted_rows={deleted}")).await,
-                Err(err) => finish(state, "error", err.to_string()).await,
-            }
-        }
-        "ha_outbox_gc" => {
-            let _maintenance = acquire_db_maintenance_read_gate().await;
-            match run_ha_outbox_gc_once(
-                state.proxy.sqlite_database_path(),
-                HaOutboxGcOptions::default(),
-            )
-            .await
-            {
-                Ok(report) => finish(
-                    state,
-                    "success",
-                    format_ha_outbox_gc_report_message(&report, 1),
-                )
-                .await,
                 Err(err) => finish(state, "error", err.to_string()).await,
             }
         }

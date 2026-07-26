@@ -1357,7 +1357,7 @@ pub struct DashboardQuotaChargeSnapshot {
 pub struct HaOutboxStats {
     pub row_count: i64,
     pub oldest_age_secs: i64,
-    pub ack_lag: i64,
+    pub ack_lag: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

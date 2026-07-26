@@ -878,7 +878,7 @@ async fn emit_ha_sync_perf_event(
             outbox_sampled = outbox.is_some(),
             outbox_row_count = outbox.as_ref().map(|value| value.row_count).unwrap_or_default(),
             outbox_oldest_age_secs = outbox.as_ref().map(|value| value.oldest_age_secs),
-            outbox_ack_lag = outbox.as_ref().map(|value| value.ack_lag),
+            outbox_ack_lag = outbox.as_ref().and_then(|value| value.ack_lag),
             memory_sampled = memory.is_some(),
             memory_current_bytes = memory.and_then(|value| value.memory_current_bytes),
             memory_limit_bytes = memory.and_then(|value| value.memory_limit_bytes),

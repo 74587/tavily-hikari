@@ -1774,7 +1774,22 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .expect("read outbox stats");
     assert_eq!(stats.row_count, 2);
     assert!(stats.oldest_age_secs >= 100);
-    assert_eq!(stats.ack_lag, 1);
+    assert_eq!(stats.ack_lag, Some(1));
+    let no_peer_stats = proxy
+        .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, None)
+        .await
+        .expect("read peer-less outbox stats");
+    assert_eq!(no_peer_stats.ack_lag, None);
+    let health = proxy
+        .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-a")
+        .await
+        .expect("read channel health");
+    assert_eq!(health.acked_seq, Some(1));
+    assert_eq!(health.high_watermark, 2);
+    assert_eq!(health.ack_lag, Some(1));
+    assert_eq!(health.cursor_state, "catching_up");
+    assert_eq!(health.retention_secs, 72 * 60 * 60);
+    assert!(!health.expired_backlog);
 
     pool.close().await;
     let _ = std::fs::remove_file(&db_path);

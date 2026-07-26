@@ -1445,7 +1445,6 @@ export interface HaStatus {
   peerNodes: HaPeerNode[]
   plannedCutoverEligible: boolean
 }
-
 export interface HaPeerNode {
   nodeId: string
   publicOrigin: string | null
@@ -1460,8 +1459,9 @@ export interface HaPeerNode {
   lastSeenAt: number | null
   stale: boolean
   roleHint: 'standby_candidate' | 'observer'
-  plannedCutoverEligible: boolean
+  plannedCutoverEligible: boolean; channelHealth?: HaChannelHealth[]
 }
+export interface HaChannelHealth { channel: 'control' | 'billing' | 'runtime'; ackedSeq: number | null; highWatermark: number; ackLag: number | null; cursorState: 'healthy' | 'catching_up' | 'baseline_required' | 'expired_backlog' | string; retentionSecs: number; expiredBacklog: boolean }
 
 export interface HaTimelineEvent {
   id: number

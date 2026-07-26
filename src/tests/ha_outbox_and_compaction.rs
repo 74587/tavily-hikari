@@ -10,12 +10,25 @@ async fn explain_query_plan_details(pool: &sqlx::SqlitePool, sql: &str) -> Vec<S
         .collect()
 }
 
+#[test]
+fn online_ha_gc_has_a_tight_slice_without_changing_cli_defaults() {
+    let online = HaOutboxGcOptions::online();
+    let cli = HaOutboxGcOptions::default();
+    assert_eq!(online.batch_size, 250);
+    assert_eq!(online.max_batches, 4);
+    assert_eq!(online.max_runtime_secs, 1);
+    assert_eq!(online.inter_batch_sleep_ms, 100);
+    assert_eq!(cli.batch_size, 20_000);
+    assert_eq!(cli.max_batches, 8);
+    assert_eq!(cli.max_runtime_secs, 20);
+}
+
 #[tokio::test]
 async fn standalone_ha_outbox_gc_deletes_expired_rows_across_channels_in_bounded_batches() {
     let db_path = temp_db_path("ha-outbox-gc-bounded-control-only");
     let db_str = db_path.to_string_lossy().to_string();
     let old_control_ts = Utc::now().timestamp() - (4 * SECS_PER_DAY);
-    let old_long_retention_ts = Utc::now().timestamp() - (93 * SECS_PER_DAY);
+    let old_long_retention_ts = Utc::now().timestamp() - (15 * SECS_PER_DAY);
     let recent_ts = Utc::now().timestamp();
 
     let pool = sqlx::SqlitePool::connect_with(

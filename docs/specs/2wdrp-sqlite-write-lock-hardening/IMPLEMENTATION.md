@@ -479,3 +479,7 @@
 - The explicit migration entrypoint rejects a missing or mistyped `--db-path` before it probes
   disk space, opens SQLite, or creates the sibling `observability-migrate.lock`, so typoed paths
   do not leave behind empty core, sidecar, or lock files.
+- HA outbox GC now has a separate online budget (`250 x 4`, one second, 100ms yield) and uses the
+  application's existing SQLite pool. The scheduler probes the maintenance write lease with
+  `try_write`; writer contention becomes a durable 30-second continuation rather than a 10-second
+  lock retry. The offline HA cleanup command keeps its larger CLI defaults.

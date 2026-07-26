@@ -61,6 +61,15 @@ type DemoHaState = {
       stale: boolean
       roleHint: 'standby_candidate' | 'observer'
       plannedCutoverEligible: boolean
+      channelHealth?: Array<{
+        channel: 'control' | 'billing' | 'runtime'
+        ackedSeq: number | null
+        highWatermark: number
+        ackLag: number | null
+        cursorState: 'healthy' | 'catching_up' | 'baseline_required' | 'expired_backlog'
+        retentionSecs: number
+        expiredBacklog: boolean
+      }>
     }>
     plannedCutoverEligible: boolean
   }
@@ -136,6 +145,11 @@ export function createDemoHaStatus(nowSeconds: (offset?: number) => number): Dem
         stale: false,
         roleHint: 'standby_candidate',
         plannedCutoverEligible: true,
+        channelHealth: [
+          { channel: 'control', ackedSeq: 812, highWatermark: 812, ackLag: 0, cursorState: 'healthy', retentionSecs: 72 * 60 * 60, expiredBacklog: false },
+          { channel: 'billing', ackedSeq: 490, highWatermark: 512, ackLag: 22, cursorState: 'catching_up', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: false },
+          { channel: 'runtime', ackedSeq: null, highWatermark: 900, ackLag: null, cursorState: 'expired_backlog', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: true },
+        ],
       },
       {
         nodeId: 'demo-observer-a',
@@ -152,6 +166,11 @@ export function createDemoHaStatus(nowSeconds: (offset?: number) => number): Dem
         stale: false,
         roleHint: 'observer',
         plannedCutoverEligible: false,
+        channelHealth: [
+          { channel: 'control', ackedSeq: 810, highWatermark: 812, ackLag: 2, cursorState: 'catching_up', retentionSecs: 72 * 60 * 60, expiredBacklog: false },
+          { channel: 'billing', ackedSeq: null, highWatermark: 512, ackLag: null, cursorState: 'baseline_required', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: false },
+          { channel: 'runtime', ackedSeq: 875, highWatermark: 900, ackLag: 25, cursorState: 'catching_up', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: false },
+        ],
       },
       {
         nodeId: 'demo-observer-b',

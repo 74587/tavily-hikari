@@ -460,7 +460,8 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-areas:
     "overview overview"
-    "aside edgeone";
+    "aside edgeone"
+    "channels channels";
   gap: 14px;
   align-items: start;
 }
@@ -488,6 +489,56 @@
 
 .ha-node-detail-card--edgeone {
   grid-area: edgeone;
+}
+
+.ha-node-detail-card--channels {
+  grid-area: channels;
+}
+
+.ha-channel-health-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ha-channel-health-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid hsl(var(--border) / 0.54);
+  border-radius: 7px;
+  background: hsl(var(--muted) / 0.24);
+}
+
+.ha-channel-health-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ha-channel-health-row dl {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.ha-channel-health-row dl div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ha-channel-health-row dt {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.72rem;
+}
+
+.ha-channel-health-row dd {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .ha-node-detail-card-head {
@@ -867,7 +918,8 @@
     grid-template-areas:
       "overview"
       "aside"
-      "edgeone";
+      "edgeone"
+      "channels";
   }
 
   .ha-node-detail-card-head,
@@ -886,7 +938,8 @@
 
   .ha-node-detail-overview-facts,
   .ha-node-detail-edgeone-grid,
-  .ha-node-detail-context-grid {
+  .ha-node-detail-context-grid,
+  .ha-channel-health-row dl {
     grid-template-columns: 1fr;
   }
 }
@@ -897,7 +950,8 @@
     grid-template-areas:
       "overview"
       "aside"
-      "edgeone";
+      "edgeone"
+      "channels";
   }
 
   .ha-node-detail-overview-facts {
