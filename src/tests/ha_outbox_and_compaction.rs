@@ -358,6 +358,50 @@ async fn ha_events_cursor_ignores_legacy_sequence_after_valid_rows_are_gc() {
 }
 
 #[tokio::test]
+async fn ha_events_cursor_accepts_legacy_bridge_before_first_valid_event() {
+    let db_path = temp_db_path("ha-events-cursor-legacy-bridge");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-events-cursor-legacy-bridge-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let now = Utc::now().timestamp();
+    for (seq, resource) in [(1, "meta"), (2, "removed_resource"), (3, "meta")] {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (seq, kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES (?, 'state', ?, ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(seq)
+        .bind(resource)
+        .bind(format!("cursor-bridge-{seq}"))
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("insert cursor bridge event");
+    }
+
+    let events = proxy
+        .list_ha_events_after(HaSyncChannel::Control, 1, 10)
+        .await
+        .expect("legacy bridge should keep cursor valid");
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![3]
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn standalone_ha_outbox_gc_deletes_invalid_legacy_rows_before_retention_rows() {
     let db_path = temp_db_path("ha-outbox-gc-invalid-legacy-first");
     let db_str = db_path.to_string_lossy().to_string();

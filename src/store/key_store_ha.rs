@@ -1101,10 +1101,20 @@ impl KeyStore {
             && after_seq > 0
             && after_seq < min_seq.saturating_sub(1)
         {
-            return Err(ProxyError::Other(format!(
-                "HA {} cursor is older than retention window",
-                channel.as_str()
-            )));
+            let has_any_bridge: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND seq > ? AND seq < ?)"
+            ))
+            .bind(threshold)
+            .bind(after_seq)
+            .bind(min_seq)
+            .fetch_one(&mut **conn)
+            .await?;
+            if !has_any_bridge {
+                return Err(ProxyError::Other(format!(
+                    "HA {} cursor is older than retention window",
+                    channel.as_str()
+                )));
+            }
         }
         Ok(())
     }
