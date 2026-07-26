@@ -35,6 +35,7 @@ export function AnchoredInfoDisclosure({
 }: AnchoredInfoDisclosureProps): JSX.Element {
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const pointerHoverRef = useRef(false)
+  const pinnedRef = useRef(false)
   const suppressFocusOpenRef = useRef(false)
   const bubbleId = useId()
   const [open, setOpen] = useState(false)
@@ -56,6 +57,7 @@ export function AnchoredInfoDisclosure({
       if (!target) return
       if (triggerRef.current?.contains(target)) return
       if (bubbleRef.current?.contains(target)) return
+      pinnedRef.current = false
       setOpen(false)
     }
 
@@ -64,6 +66,7 @@ export function AnchoredInfoDisclosure({
       // Capture before modal primitives so Escape dismisses this disclosure first.
       event.preventDefault()
       event.stopPropagation()
+      pinnedRef.current = false
       setOpen(false)
       suppressFocusOpenRef.current = true
       triggerRef.current?.focus()
@@ -84,14 +87,20 @@ export function AnchoredInfoDisclosure({
     onClick?.(event)
     if (event.defaultPrevented) return
     if (event.detail === 0) {
+      pinnedRef.current = true
       setOpen(true)
       return
     }
     if (pointerHoverRef.current) {
+      pinnedRef.current = true
       setOpen(true)
       return
     }
-    setOpen((currentOpen) => !currentOpen)
+    setOpen((currentOpen) => {
+      const nextOpen = !currentOpen
+      pinnedRef.current = nextOpen
+      return nextOpen
+    })
   }
 
   const handleFocus = (event: FocusEvent<HTMLButtonElement>) => {
@@ -113,6 +122,7 @@ export function AnchoredInfoDisclosure({
     if (nextFocusedNode && (triggerRef.current?.contains(nextFocusedNode) || bubbleRef.current?.contains(nextFocusedNode))) {
       return
     }
+    if (pinnedRef.current) return
     setOpen(false)
   }
 
@@ -127,6 +137,7 @@ export function AnchoredInfoDisclosure({
     onMouseLeave?.(event)
     if (event.defaultPrevented) return
     pointerHoverRef.current = false
+    if (pinnedRef.current) return
     if (document.activeElement === triggerRef.current) return
     setOpen(false)
   }

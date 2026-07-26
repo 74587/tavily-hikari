@@ -374,9 +374,9 @@ const rechargeClampedPreviewQuote: RechargeQuote = {
       monthIndex: 0,
       monthStart: rechargeQuote.quoteMonthStart,
       isCurrentMonth: true,
-      hourlyDelta: 20,
-      dailyDelta: 100,
-      monthlyDelta: 1000,
+      hourlyDelta: 12,
+      dailyDelta: 60,
+      monthlyDelta: 600,
       fullMonthlyDelta: 1000,
       monthMoneyCents: 3000,
       monthDiscountCents: 2000,
@@ -769,8 +769,8 @@ export const ClampedCurrentMonthPreview: Story = {
     const firstMonthRow = preview.getAllByRole('row')[1]
     const cells = within(firstMonthRow).getAllByRole('cell')
     await expect(cells[1]).toHaveTextContent('600')
-    await expect(cells[2]).toHaveTextContent('+1,000')
-    await expect(cells[3]).toHaveTextContent('1,600')
+    await expect(cells[2]).toHaveTextContent('+600')
+    await expect(cells[3]).toHaveTextContent('1,200')
   },
 }
 
