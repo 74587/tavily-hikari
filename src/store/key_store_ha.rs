@@ -343,7 +343,7 @@ impl KeyStore {
                     .bind(first)
                     .fetch_one(&mut *conn)
                     .await?;
-                    first > acked + 1 && !has_any_bridge
+                    first > acked.saturating_add(1) && !has_any_bridge
                 } else {
                     false
                 };
