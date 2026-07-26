@@ -53,17 +53,13 @@ export const Default: Story = {
     title: 'Token 使用排行榜',
     subtitle: '按调用量与异常类型快速筛选，定位高负载 Token 与异常热点。',
     backLabel: '返回总览',
-    refreshLabel: '立即刷新',
-    refreshingLabel: '刷新中…',
     userConsoleLabel: '返回用户控制台',
     userConsoleHref: '/console',
-    isRefreshing: false,
     period: 'day',
     focus: 'usage',
     periodOptions,
     focusOptions,
     onBack: () => undefined,
-    onRefresh: () => undefined,
     onPeriodChange: () => undefined,
     onFocusChange: () => undefined,
   },
@@ -90,12 +86,5 @@ export const Accent: Story = {
   args: {
     ...Default.args,
     visualPreset: 'accent',
-  },
-}
-
-export const Refreshing: Story = {
-  args: {
-    ...Default.args,
-    isRefreshing: true,
   },
 }

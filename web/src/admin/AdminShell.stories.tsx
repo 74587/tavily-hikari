@@ -121,7 +121,7 @@ function PanelHeaderLayoutStory(): JSX.Element {
   const admin = useTranslate().admin
   const [activeModule, setActiveModule] = useState<AdminNavTarget>('jobs')
   const navItems = buildNavItems(admin)
-  const displayName = language === 'zh' ? 'Ivan Li' : 'Ops Admin'
+  const displayName = language === 'zh' ? 'Ivan Li - 生产环境运维管理员' : 'Operations Administrator - Production'
   const layoutBody = language === 'zh'
     ? { title: '任务作业', description: '用于验证 shell 与页头响应式布局的固定数据。' }
     : { title: 'Scheduled Jobs', description: 'Responsive layout fixture for shell and header verification.' }
@@ -141,15 +141,10 @@ function PanelHeaderLayoutStory(): JSX.Element {
               <LanguageSwitcher />
             </div>
             <div className="admin-sidebar-utility-meta">
-              <div className="user-badge user-badge-admin">
+              <div className="user-badge user-badge-admin" title={displayName}>
                 <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />
                 <span>{displayName}</span>
               </div>
-              <span className="admin-panel-header-time" aria-live="polite">
-                <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
-                <span className="admin-panel-header-time-label">{admin.header.updatedPrefix}</span>
-                <span className="admin-panel-header-time-value">11:42:10</span>
-              </span>
             </div>
           </AdminSidebarUtilityCard>
           <AdminSidebarUtilityCard>
@@ -174,8 +169,6 @@ function PanelHeaderLayoutStory(): JSX.Element {
           subtitle={admin.header.subtitle}
           displayName={displayName}
           isAdmin
-          updatedPrefix={admin.header.updatedPrefix}
-          updatedTime="11:42:10"
           isRefreshing={false}
           refreshLabel={admin.header.refreshNow}
           refreshingLabel={admin.header.refreshing}
@@ -245,7 +238,7 @@ function TokenUsageLayoutStory(): JSX.Element {
                 <Icon icon="mdi:arrow-left" width={16} height={16} aria-hidden="true" />
                 <span>{copy.back}</span>
               </Button>
-              <Button type="button" variant="outline" size="sm" className="token-usage-refresh-button admin-sidebar-utility-action">
+              <Button type="button" variant="outline" size="sm" className="admin-panel-refresh-button admin-sidebar-utility-action">
                 <Icon icon="mdi:refresh" width={16} height={16} aria-hidden="true" />
                 <span>{admin.header.refreshNow}</span>
               </Button>
@@ -260,11 +253,8 @@ function TokenUsageLayoutStory(): JSX.Element {
           subtitle={copy.subtitle}
           visualPreset="accent"
           backLabel={copy.back}
-          refreshLabel={admin.header.refreshNow}
-          refreshingLabel={admin.header.refreshing}
           userConsoleLabel={admin.header.returnToConsole}
           userConsoleHref="/console"
-          isRefreshing={false}
           period={period}
           focus={focus}
           periodOptions={[
@@ -278,7 +268,6 @@ function TokenUsageLayoutStory(): JSX.Element {
             { value: 'other', label: copy.focuses[2] },
           ]}
           onBack={() => setActiveModule('tokens')}
-          onRefresh={() => undefined}
           onPeriodChange={setPeriod}
           onFocusChange={setFocus}
         />
@@ -374,6 +363,31 @@ export const PanelHeaderShell: Story = {
     if (Math.abs(themeRect.top - languageRect.top) > 1 || Math.abs(themeRect.height - languageRect.height) > 1) {
       throw new Error('Expected sidebar utility theme and language controls to share one row.')
     }
+
+    const badge = utility.querySelector<HTMLElement>('.user-badge')
+    const badgeLabel = badge?.querySelector<HTMLElement>('span')
+    const badgeCard = badge?.closest<HTMLElement>('.admin-sidebar-utility-card')
+    if (!badge || !badgeLabel || !badgeCard) {
+      throw new Error('Expected a long administrator badge inside the sidebar utility card.')
+    }
+
+    const badgeRect = badge.getBoundingClientRect()
+    const badgeCardRect = badgeCard.getBoundingClientRect()
+    if (badgeRect.left < badgeCardRect.left - 1 || badgeRect.right > badgeCardRect.right + 1) {
+      throw new Error('Expected the administrator badge to stay inside its utility card.')
+    }
+    if (badgeLabel.scrollWidth <= badgeLabel.clientWidth) {
+      throw new Error('Expected the long administrator name fixture to use single-line truncation.')
+    }
+
+    const visibleRefreshButtons = Array.from(root.querySelectorAll<HTMLElement>('.admin-panel-refresh-button'))
+      .filter((button) => button.getClientRects().length > 0)
+    if (visibleRefreshButtons.length !== 1) {
+      throw new Error('Expected exactly one visible global refresh button in the desktop shell.')
+    }
+    if (root.querySelector('.admin-panel-header-time')) {
+      throw new Error('Expected the shell to omit the generic updated-time indicator.')
+    }
   },
 }
 
@@ -388,5 +402,17 @@ export const PanelHeaderShellStacked: Story = {
   render: () => <PanelHeaderLayoutStory />,
   parameters: {
     viewport: { defaultViewport: '1100-breakpoint-admin-stack-max' },
+  },
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+    const root = canvasElement.ownerDocument
+    const visibleRefreshButtons = Array.from(root.querySelectorAll<HTMLElement>('.admin-panel-refresh-button'))
+      .filter((button) => button.getClientRects().length > 0)
+    if (visibleRefreshButtons.length !== 1) {
+      throw new Error('Expected exactly one visible global refresh button in the stacked shell.')
+    }
+    if (root.querySelector('.admin-panel-header-time')) {
+      throw new Error('Expected the stacked shell to omit the generic updated-time indicator.')
+    }
   },
 }

@@ -454,18 +454,6 @@
   color: hsl(var(--primary));
 }
 
-.dark .admin-panel-header-time {
-  color: hsl(var(--muted-foreground));
-}
-
-.dark .admin-panel-header-time-icon {
-  color: hsl(var(--muted-foreground) / 0.9);
-}
-
-.dark .admin-panel-header-time-value {
-  color: hsl(var(--foreground) / 0.78);
-}
-
 .dark .admin-panel-refresh-button {
   border-color: hsl(var(--primary) / 0.42);
   background: hsl(var(--primary) / 0.16);
@@ -518,17 +506,6 @@
 
 .dark .token-usage-header-context-line strong {
   color: hsl(var(--foreground) / 0.9);
-}
-
-.dark .token-usage-refresh-button {
-  border-color: hsl(var(--primary) / 0.46);
-  background: hsl(var(--primary) / 0.2);
-  color: hsl(var(--primary));
-}
-
-.dark .token-usage-refresh-button:hover:not(:disabled) {
-  border-color: hsl(var(--primary) / 0.64);
-  background: hsl(var(--primary) / 0.3);
 }
 
 .dark .token-usage-header--accent {
@@ -1122,7 +1099,6 @@
     gap: 4px;
   }
 
-  .admin-main-content .admin-shell-content > .admin-panel-header:not(.admin-panel-header--stacked-actions) .admin-panel-header-time,
   .admin-main-content .admin-shell-content > .admin-panel-header:not(.admin-panel-header--stacked-actions) .user-badge,
   .admin-main-content .admin-shell-content > .admin-panel-header:not(.admin-panel-header--stacked-actions) .theme-toggle-label,
   .admin-main-content .admin-shell-content > .admin-panel-header:not(.admin-panel-header--stacked-actions) .language-switcher-trigger > svg:last-child,
@@ -1203,14 +1179,12 @@
   }
 
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-back-button span,
-  .admin-main-content .admin-shell-content > .token-usage-header .token-usage-refresh-button span,
   .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-label,
   .admin-main-content .admin-shell-content > .token-usage-header .admin-return-link span {
     display: none;
   }
 
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-back-button,
-  .admin-main-content .admin-shell-content > .token-usage-header .token-usage-refresh-button,
   .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-trigger,
   .admin-main-content .admin-shell-content > .token-usage-header .admin-return-link {
     min-height: 32px;
@@ -1323,7 +1297,6 @@
   }
 
   .admin-main-content .admin-shell-content > .token-usage-header .token-usage-back-button,
-  .admin-main-content .admin-shell-content > .token-usage-header .token-usage-refresh-button,
   .admin-main-content .admin-shell-content > .token-usage-header .theme-toggle-trigger,
   .admin-main-content .admin-shell-content > .token-usage-header .admin-return-link {
     min-width: 30px;

@@ -25,8 +25,6 @@ export const Default: Story = {
     subtitle: '监控 API Key 分配、额度健康与最新代理请求活动。',
     displayName: 'dev-mode',
     isAdmin: true,
-    updatedPrefix: '更新于',
-    updatedTime: '14:33:53',
     isRefreshing: false,
     refreshLabel: '立即刷新',
     refreshingLabel: '刷新中…',
