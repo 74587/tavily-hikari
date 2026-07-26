@@ -11,8 +11,6 @@ import type {
 } from '../api'
 import AdminLoadingRegion from '../components/AdminLoadingRegion'
 import { StatusBadge } from '../components/StatusBadge'
-import { Icon } from '../lib/icons'
-import { Button } from '../components/ui/button'
 import { Switch } from '../components/ui/switch'
 
 interface UpstreamPrivacyStatusModuleProps {
@@ -22,11 +20,9 @@ interface UpstreamPrivacyStatusModuleProps {
   status: UpstreamPrivacyStatus | null
   loadState: QueryLoadState
   error: string | null
-  refreshing: boolean
   autoRefreshEnabled: boolean
   onAutoRefreshChange: (next: boolean) => void
   onOpenMcpSessionBindings: () => void
-  onRefresh: () => Promise<void> | void
 }
 
 function phaseTone(phase: UpstreamPrivacyStatus['phase']): 'neutral' | 'info' | 'success' | 'warning' | 'error' {
@@ -151,11 +147,9 @@ export default function UpstreamPrivacyStatusModule({
   status,
   loadState,
   error,
-  refreshing,
   autoRefreshEnabled,
   onAutoRefreshChange,
   onOpenMcpSessionBindings,
-  onRefresh,
 }: UpstreamPrivacyStatusModuleProps): JSX.Element {
   const autoRefreshLabelId = useId()
   const timestampFormatter = useMemo(
@@ -373,17 +367,6 @@ export default function UpstreamPrivacyStatusModule({
               onCheckedChange={onAutoRefreshChange}
             />
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="upstream-privacy-refresh-button"
-            onClick={() => void onRefresh()}
-            disabled={refreshing}
-          >
-            <Icon icon={refreshing ? 'mdi:loading' : 'mdi:refresh'} width={16} height={16} className={refreshing ? 'icon-spin' : undefined} />
-            <span>{strings.refreshNow}</span>
-          </Button>
         </div>
       </div>
 

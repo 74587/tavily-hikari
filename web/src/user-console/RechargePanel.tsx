@@ -1,9 +1,10 @@
 import type { RechargeConfig, RechargeOrder, RechargeQuote } from '../api'
 import type { UserDashboard } from '../api'
-import { Eye, Minus, Plus } from 'lucide-react'
+import { CircleHelp, Eye, Minus, Plus } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Icon } from '../lib/icons'
 import { Button } from '../components/ui/button'
+import { AnchoredInfoDisclosure } from '../components/ui/anchored-info-disclosure'
 import {
   Dialog,
   DialogContent,
@@ -61,8 +62,12 @@ interface RechargePanelText {
   previewScopeNote: string
   previewMonth: string
   previewCurrentQuota: string
+  previewCurrentQuotaHint: string
   previewDelta: string
+  previewDeltaHint: string
   previewExpectedQuota: string
+  previewExpectedQuotaHint: string
+  previewFieldHelpLabel: string
   previewAfterExpiry: string
   closePreview: string
   create: string
@@ -390,7 +395,10 @@ export default function RechargePanel({
         <Drawer open={previewOpen} onOpenChange={setPreviewOpen} shouldScaleBackground={false}>
           <DrawerContent className="user-console-recharge-preview-drawer">
             <DrawerHeader>
-              <DrawerTitle>{text.previewTitle}</DrawerTitle>
+              <div className="user-console-recharge-preview-drawer-title-row">
+                <DrawerTitle>{text.previewTitle}</DrawerTitle>
+                <RechargePreviewMobileHelp text={text} />
+              </div>
               <DrawerDescription>{text.previewDescription}</DrawerDescription>
             </DrawerHeader>
             <RechargePreviewBody
@@ -455,6 +463,47 @@ function addMonthsToMonthStart(monthStart: number, offset: number): number {
   return Math.floor(new Date(month.getFullYear(), month.getMonth() + offset, 1).getTime() / 1000)
 }
 
+function RechargePreviewColumnLabel({
+  label,
+  hint,
+}: {
+  label: string
+  hint: string
+}): JSX.Element {
+  return (
+    <AnchoredInfoDisclosure
+      className="user-console-recharge-preview-column-label"
+      aria-label={label}
+      bubbleContent={hint}
+    >
+      {label}
+    </AnchoredInfoDisclosure>
+  )
+}
+
+function RechargePreviewFieldHelp({ text }: { text: RechargePanelText }): JSX.Element {
+  return (
+    <div className="user-console-recharge-preview-field-help">
+      <p><strong>{text.previewCurrentQuota}</strong>{text.previewCurrentQuotaHint}</p>
+      <p><strong>{text.previewDelta}</strong>{text.previewDeltaHint}</p>
+      <p><strong>{text.previewExpectedQuota}</strong>{text.previewExpectedQuotaHint}</p>
+    </div>
+  )
+}
+
+function RechargePreviewMobileHelp({ text }: { text: RechargePanelText }): JSX.Element {
+  return (
+    <AnchoredInfoDisclosure
+      className="user-console-recharge-preview-help-trigger"
+      aria-label={text.previewFieldHelpLabel}
+      bubbleContent={<RechargePreviewFieldHelp text={text} />}
+      bubbleClassName="user-console-recharge-preview-help-bubble"
+    >
+      <CircleHelp size={18} strokeWidth={2.1} aria-hidden="true" />
+    </AnchoredInfoDisclosure>
+  )
+}
+
 function buildRechargePreviewMonths(input: {
   currentMonthStart: number
   currentEntitlement: number
@@ -469,13 +518,15 @@ function buildRechargePreviewMonths(input: {
   const previewEnd = Math.max(currentEffectEnd, scheduleEnd)
   for (let monthStart = input.currentMonthStart; monthStart <= previewEnd; monthStart = addMonthsToMonthStart(monthStart, 1)) {
     const scheduleRow = quote?.schedule.find((item) => item.monthStart === monthStart)
-    const currentQuota = monthStart < currentEffectEnd ? input.currentEntitlement : 0
+    const beforeQuota = monthStart === input.currentMonthStart
+      ? input.currentMonthFinal
+      : monthStart < currentEffectEnd ? input.currentEntitlement : 0
     const delta = scheduleRow?.monthlyDelta ?? 0
     rows.push({
       monthStart,
-      currentQuota: monthStart === input.currentMonthStart ? input.currentMonthFinal : currentQuota,
+      currentQuota: beforeQuota,
       delta,
-      expectedQuota: currentQuota + delta,
+      expectedQuota: beforeQuota + delta,
       afterExpiry: monthStart > currentEffectEnd,
       clampApplied: scheduleRow?.monthEndClampApplied ?? false,
     })
@@ -529,10 +580,16 @@ function RechargePreviewBody({
 
       <div className="user-console-recharge-preview-table" role="table">
         <div className="user-console-recharge-preview-row user-console-recharge-preview-head" role="row">
-          <span role="columnheader">{text.previewMonth}</span>
-          <span role="columnheader">{text.previewCurrentQuota}</span>
-          <span role="columnheader">{text.previewDelta}</span>
-          <span role="columnheader">{text.previewExpectedQuota}</span>
+          <div role="columnheader">{text.previewMonth}</div>
+          <div role="columnheader">
+            <RechargePreviewColumnLabel label={text.previewCurrentQuota} hint={text.previewCurrentQuotaHint} />
+          </div>
+          <div role="columnheader">
+            <RechargePreviewColumnLabel label={text.previewDelta} hint={text.previewDeltaHint} />
+          </div>
+          <div role="columnheader">
+            <RechargePreviewColumnLabel label={text.previewExpectedQuota} hint={text.previewExpectedQuotaHint} />
+          </div>
         </div>
         {rows.map((row) => (
           <div

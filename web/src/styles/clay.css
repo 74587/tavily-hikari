@@ -1264,10 +1264,6 @@
     transform: translateX(20px);
   }
 
-  .upstream-privacy-refresh-button {
-    flex: none;
-  }
-
   .upstream-privacy-layout {
     display: grid;
     gap: 1rem;
@@ -1548,9 +1544,6 @@
       flex: 1 1 12rem;
     }
 
-    .upstream-privacy-refresh-button {
-      flex: 0 0 auto;
-    }
   }
 
   .system-settings-field:first-child,

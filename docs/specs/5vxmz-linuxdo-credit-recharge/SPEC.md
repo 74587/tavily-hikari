@@ -190,6 +190,18 @@
   When 用户打开 `/console/billing`
   Then 页面按自然月卡片时间线展示上月 / 本月 / 下月，并继续扩展到最近有效月份的下一个月，清楚呈现充值 credits 与月度增量；没有未来排期时也要给出明确提示。
 
+- Given 用户打开充值订单影响预览
+  When 页面展示按月份展开的充值变化
+  Then 三个数字字段明确命名为“本单前充值月额度 / 本单增加 / 本单后充值月额度”，英文表头对应为 “Before order / Added by order / After order”；其中本单后充值月额度等于本单前充值月额度加本单增加；三者只描述充值权益，不包含基础额度或其他额度调整。
+
+- Given 用户在桌面端查看充值订单影响预览
+  When 用户悬浮、聚焦或点击任一数字列表头
+  Then 页面展示对应的可访问说明；点击外部或按 Escape 可关闭固定说明，月份列左对齐，三个数字列的表头与数据共用网格轨道并右对齐，数字使用等宽数字。
+
+- Given 用户在移动端查看充值订单影响预览
+  When 用户点击抽屉标题右侧的帮助入口
+  Then 页面集中展示三个数字字段的定义，说明支付成功前提与本月剩余天数折算规则；入口支持键盘聚焦、屏幕阅读器名称、关闭与 Escape，不与标题、关闭按钮或月份卡片重叠。
+
 - Given 管理员需要调整用户基础额度
   When 在用户详情账号权益账本新增 `base` scope 记录
   Then 该记录按三项 quota delta 叠加到默认账户基线，并在有效额度拆解中展示为“基础额度”。
@@ -257,7 +269,7 @@
 
 - Stories to add/update: `BillingPage` 默认、有未来月份、无订单、充值关闭、移动端、生命周期状态面；现有 `UserConsole` 充值相关故事继续覆盖月底折抵、测试价与隐藏态；`AdminRechargeRecordsModule` 平铺、聚合、未绑定 TOTP、退款失败反馈、空记录，以及 `expired` / `cancelled` / `refunding(system:auto)` / `refunded(system:auto)`。
 - Docs pages / state galleries to add/update: 用户控制台 billing 页面状态 gallery；管理端充值记录 TOTP、最终成交与折抵状态。
-- `play` / interaction coverage to add/update: billing 页面关键分区可见性、stepper 调整、创建订单成功/失败路径、月底折抵提示、管理端未绑定 TOTP 提示与退款失败反馈。
+- `play` / interaction coverage to add/update: billing 页面关键分区可见性、stepper 调整、创建订单成功/失败路径、月底折抵提示、充值预览桌面三列表头的说明打开/关闭、移动端标题帮助入口，以及管理端未绑定 TOTP 提示与退款失败反馈。
 - Visual regression baseline changes (if any): 充值卡片桌面与移动布局，管理端记录表格新增最终成交列。
 
 ### Quality checks
@@ -366,6 +378,32 @@
 ![Admin recharge unbound TOTP prompt](./assets/admin-recharge-unbound-totp-prompt.png)
 ![Admin recharge refund failure feedback](./assets/admin-recharge-refund-failure-feedback.png)
 ![Admin recharge user detail quota calendar](./assets/admin-recharge-user-detail-calendar.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: User Console/Billing/Billing Page/Default
+  state: desktop recharge preview with the first column glossary tooltip open
+  target_program: mock-only
+  capture_scope: component
+  requested_viewport: 1280x720
+  viewport_strategy: browser-default
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 桌面充值预览使用新的三列命名，月份列左对齐，数字列和表头统一右对齐；第一列表头的固定说明明确已有充值权益范围，并说明不含基础额度及其他调整。
+
+![Recharge preview column glossary desktop](./assets/recharge-preview-columns-desktop.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: User Console/Billing/Billing Page/Mobile
+  state: mobile recharge preview drawer with the consolidated glossary open
+  target_program: mock-only
+  capture_scope: component
+  requested_viewport: 390x844
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 移动端在抽屉标题右侧提供帮助图标，一次展开即可阅读三个字段定义；标题、帮助入口、月份键值布局和底部关闭按钮保持稳定，不与说明内容重叠。
+
+![Recharge preview column glossary mobile](./assets/recharge-preview-columns-mobile.png)
 ![Admin recharge bound TOTP confirmation](./assets/admin-recharge-bound-totp-confirmation.png)
 ![Admin recharge unbound TOTP prompt](./assets/admin-recharge-unbound-totp-prompt.png)
 ![Admin recharge refund failure feedback](./assets/admin-recharge-refund-failure-feedback.png)

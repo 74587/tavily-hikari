@@ -930,6 +930,8 @@ body.not-found-page-body,
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
   padding-top: 12px;
   border-top: 1px solid hsl(var(--border) / 0.62);
 }
@@ -948,11 +950,15 @@ body.not-found-page-body,
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .admin-sidebar-utility-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   padding: 12px;
   border-radius: 14px;
   border: 1px solid hsl(var(--border) / 0.78);
@@ -986,6 +992,8 @@ body.not-found-page-body,
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .admin-sidebar-utility-toolbar {
@@ -1011,12 +1019,8 @@ body.not-found-page-body,
 }
 
 .admin-sidebar-utility .user-badge {
+  min-width: 0;
   max-width: none;
-  width: 100%;
-  justify-content: flex-start;
-}
-
-.admin-sidebar-utility .admin-panel-header-time {
   width: 100%;
   justify-content: flex-start;
 }

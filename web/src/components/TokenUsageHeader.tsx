@@ -13,11 +13,8 @@ interface TokenUsageHeaderProps {
   title: string
   subtitle: string
   backLabel: string
-  refreshLabel: string
-  refreshingLabel: string
   userConsoleLabel?: string
   userConsoleHref?: string
-  isRefreshing: boolean
   period: TokenLeaderboardPeriod
   focus: TokenLeaderboardFocus
   periodOptions: ReadonlyArray<SegmentedTabsOption<TokenLeaderboardPeriod>>
@@ -25,7 +22,6 @@ interface TokenUsageHeaderProps {
   visualPreset?: TokenUsageHeaderVisualPreset
   controlsDisabled?: boolean
   onBack: () => void
-  onRefresh: () => void
   onPeriodChange: (value: TokenLeaderboardPeriod) => void
   onFocusChange: (value: TokenLeaderboardFocus) => void
 }
@@ -78,22 +74,6 @@ export default function TokenUsageHeader(props: TokenUsageHeaderProps): JSX.Elem
             <Button type="button" variant="ghost" size="sm" className="token-usage-back-button" onClick={props.onBack}>
               <Icon icon="mdi:arrow-left" width={16} height={16} />
               <span>{props.backLabel}</span>
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="token-usage-refresh-button"
-              onClick={props.onRefresh}
-              disabled={props.isRefreshing || controlsDisabled}
-            >
-              <Icon
-                icon={props.isRefreshing ? 'mdi:loading' : 'mdi:refresh'}
-                width={16}
-                height={16}
-                className={props.isRefreshing ? 'icon-spin' : undefined}
-              />
-              <span>{props.isRefreshing ? props.refreshingLabel : props.refreshLabel}</span>
             </Button>
           </div>
         </div>

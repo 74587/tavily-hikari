@@ -3294,15 +3294,10 @@ export function AdminPageFrame({
                     <LanguageSwitcher />
                   </div>
                   <div className="admin-sidebar-utility-meta">
-                    <div className="user-badge user-badge-admin">
+                    <div className="user-badge user-badge-admin" title="Ops Admin">
                       <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />
                       <span>Ops Admin</span>
                     </div>
-                    <span className="admin-panel-header-time" aria-live="polite">
-                      <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
-                      <span className="admin-panel-header-time-label">{admin.header.updatedPrefix}</span>
-                      <span className="admin-panel-header-time-value">11:42:10</span>
-                    </span>
                   </div>
                 </AdminSidebarUtilityCard>
                 <AdminSidebarUtilityCard>
@@ -3336,8 +3331,6 @@ export function AdminPageFrame({
                   subtitle={intro.description ?? ''}
                   displayName="Ops Admin"
                   isAdmin
-                  updatedPrefix={admin.header.updatedPrefix}
-                  updatedTime="11:42:10"
                   isRefreshing={false}
                   refreshLabel={admin.header.refreshNow}
                   refreshingLabel={admin.header.refreshing}
@@ -5224,15 +5217,10 @@ function UsersUsagePageCanvas({
               <LanguageSwitcher />
             </div>
             <div className="admin-sidebar-utility-meta">
-              <div className="user-badge user-badge-admin">
+              <div className="user-badge user-badge-admin" title="Ops Admin">
                 <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />
                 <span>Ops Admin</span>
               </div>
-              <span className="admin-panel-header-time" aria-live="polite">
-                <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
-                <span className="admin-panel-header-time-label">{admin.header.updatedPrefix}</span>
-                <span className="admin-panel-header-time-value">11:42:10</span>
-              </span>
             </div>
           </AdminSidebarUtilityCard>
           <AdminSidebarUtilityCard>
@@ -6310,7 +6298,6 @@ function ProxySettingsPageCanvas(): JSX.Element {
         revalidateProgress={null}
         onPersistDraft={async () => {}}
         onValidateCandidates={async () => []}
-        onRefresh={() => {}}
         onRevalidate={() => {}}
         onSetNodesDisabled={async () => {}}
       />
@@ -6450,11 +6437,9 @@ function SystemSettingsStatusPageCanvas(): JSX.Element {
         status={storyUpstreamPrivacyStatus}
         loadState="ready"
         error={null}
-        refreshing={false}
         autoRefreshEnabled
         onAutoRefreshChange={() => {}}
         onOpenMcpSessionBindings={() => {}}
-        onRefresh={() => {}}
       />
     </AdminPageFrame>
   )

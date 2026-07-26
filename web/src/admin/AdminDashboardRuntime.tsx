@@ -2029,7 +2029,6 @@ function AdminDashboard(): JSX.Element {
     (isUsersCollectionRoute || route.name === 'user') && usersQuery.trim().length === 0
   const waitingForUsersSystemSettings =
     needsSystemSettingsForUsers && !systemSettingsLoadedRef.current && systemSettingsLoadState !== 'error'
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [version, setVersion] = useState<{ backend: string; frontend: string } | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const [haStatus, setHaStatus] = useState<HaStatus | null>(null)
@@ -2694,7 +2693,6 @@ function AdminDashboard(): JSX.Element {
         setProfile(profileData ?? null)
         setHaStatus(haData ?? null)
         setVersion(ver ?? null)
-        setLastUpdated(new Date())
         baseDataLoadedRef.current = true
       } catch (err) {
         if ((err as Error).name === 'AbortError') {
@@ -2779,7 +2777,6 @@ function AdminDashboard(): JSX.Element {
           setTokenGroups(tokenGroupsData)
         }
         setVersion(ver ?? null)
-        setLastUpdated(new Date())
         setError(null)
         setTokensLoadState('ready')
         baseDataLoadedRef.current = true
@@ -2831,7 +2828,6 @@ function AdminDashboard(): JSX.Element {
           setDashboardJobs(overview.recentJobs)
           setDashboardRecentAlerts(overview.recentAlerts)
           setDashboardOverviewLoaded(true)
-          setLastUpdated(new Date())
           setError(null)
         }
       } catch (err) {
@@ -3040,7 +3036,6 @@ function AdminDashboard(): JSX.Element {
         if (request.signal.aborted) return
         setForwardProxySettings(nextSettings)
         setForwardProxySettingsLoadState('ready')
-        setLastUpdated(new Date())
         forwardProxySettingsLoadedRef.current = true
       } catch (err) {
         if (request.signal.aborted) return
@@ -3077,7 +3072,6 @@ function AdminDashboard(): JSX.Element {
         setAdminUserListStats(envelope.adminUserListStats ?? null)
         setActiveUpstreamMcpSessions(envelope.activeUpstreamMcpSessions ?? 0)
         setSystemSettingsLoadState('ready')
-        setLastUpdated(new Date())
         systemSettingsLoadedRef.current = true
         return envelope.systemSettings ?? null
       } catch (err) {
@@ -3127,7 +3121,6 @@ function AdminDashboard(): JSX.Element {
         if (request.signal.aborted) return
         setUpstreamPrivacyStatus(nextStatus)
         setUpstreamPrivacyStatusLoadState('ready')
-        setLastUpdated(new Date())
         upstreamPrivacyStatusLoadedRef.current = true
       } catch (err) {
         if (request.signal.aborted) return
@@ -3173,7 +3166,6 @@ function AdminDashboard(): JSX.Element {
         if (request.signal.aborted) return
         setMcpSessionBindingsData(nextData)
         setMcpSessionBindingsLoadState('ready')
-        setLastUpdated(new Date())
         mcpSessionBindingsLoadedRef.current = true
       } catch (err) {
         if (request.signal.aborted) return
@@ -3208,7 +3200,6 @@ function AdminDashboard(): JSX.Element {
         if (request.signal.aborted) return
         setForwardProxyStats(nextStats)
         setForwardProxyStatsLoadState('ready')
-        setLastUpdated(new Date())
         forwardProxyStatsLoadedRef.current = true
       } catch (err) {
         if (request.signal.aborted) return
@@ -3243,7 +3234,6 @@ function AdminDashboard(): JSX.Element {
         if (request.signal.aborted) return
         setForwardProxyErrorStats(nextStats)
         setForwardProxyErrorStatsLoadState('ready')
-        setLastUpdated(new Date())
         forwardProxyErrorStatsLoadedRef.current = true
       } catch (err) {
         if (request.signal.aborted) return
@@ -3476,7 +3466,6 @@ function AdminDashboard(): JSX.Element {
       setForwardProxySettingsLoadState('ready')
       setForwardProxySettingsError(null)
       setForwardProxySavedAt(Date.now())
-      setLastUpdated(new Date())
       forwardProxySettingsLoadedRef.current = true
       onProgress?.({
         type: 'phase',
@@ -3531,7 +3520,6 @@ function AdminDashboard(): JSX.Element {
       setForwardProxySettingsLoadState('ready')
       setForwardProxySettingsError(null)
       setForwardProxySavedAt(Date.now())
-      setLastUpdated(new Date())
       forwardProxySettingsLoadedRef.current = true
       await finalizeForwardProxyRevalidate(
         async (options) => {
@@ -4635,7 +4623,6 @@ function AdminDashboard(): JSX.Element {
             setDashboardJobs(data.recentJobs)
             setDashboardOverviewLoaded(true)
           }
-          setLastUpdated(new Date())
           setError(null)
           setLoading(false)
         } catch (e) {
@@ -6797,7 +6784,6 @@ function AdminDashboard(): JSX.Element {
       const nextSettings = await updateSystemSettings(payload)
       setSystemSettings(nextSettings)
       setSystemSettingsLoadState('ready')
-      setLastUpdated(new Date())
       systemSettingsLoadedRef.current = true
       try {
         const envelope = await fetchSystemSettingsEnvelope()
@@ -9703,7 +9689,6 @@ function AdminDashboard(): JSX.Element {
   )
 
   if (route.name === 'module' && route.module === 'analysis' && route.analysisView === 'usage') {
-    const userUsageUpdatedTimeForScreen = lastUpdated ? timeOnlyFormatter.format(lastUpdated) : null
     const userUsageSidebarUtility = (
       <AdminShellSidebarUtility>
         <AdminSidebarUtilityStack>
@@ -9714,23 +9699,10 @@ function AdminDashboard(): JSX.Element {
             </div>
             <div className="admin-sidebar-utility-meta">
               {displayName && (
-                <div className={`user-badge${isAdmin ? ' user-badge-admin' : ''}`}>
+                <div className={`user-badge${isAdmin ? ' user-badge-admin' : ''}`} title={displayName}>
                   {isAdmin && <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />}
                   <span>{displayName}</span>
                 </div>
-              )}
-              {userUsageUpdatedTimeForScreen && (
-                <span className="admin-panel-header-time" aria-live="polite">
-                  <Icon
-                    icon="mdi:clock-time-four-outline"
-                    width={14}
-                    height={14}
-                    className="admin-panel-header-time-icon"
-                    aria-hidden="true"
-                  />
-                  <span className="admin-panel-header-time-label">{headerStrings.updatedPrefix}</span>
-                  <span className="admin-panel-header-time-value">{userUsageUpdatedTimeForScreen}</span>
-                </span>
               )}
             </div>
           </AdminSidebarUtilityCard>
@@ -9986,8 +9958,6 @@ function AdminDashboard(): JSX.Element {
   const showSystemSettingsGeneral =
     showSystemSettings && systemSettingsView === 'general' && !showMcpSessionBindings
   const showProxySettings = activeModule === 'proxy-settings'
-  const headerUpdatedTime = lastUpdated ? timeOnlyFormatter.format(lastUpdated) : null
-
   const moduleDesktopUtility = (
     <AdminShellSidebarUtility>
       <AdminSidebarUtilityStack>
@@ -9998,17 +9968,10 @@ function AdminDashboard(): JSX.Element {
           </div>
           <div className="admin-sidebar-utility-meta">
             {displayName && (
-              <div className={`user-badge${isAdmin ? ' user-badge-admin' : ''}`}>
+              <div className={`user-badge${isAdmin ? ' user-badge-admin' : ''}`} title={displayName}>
                 {isAdmin && <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />}
                 <span>{displayName}</span>
               </div>
-            )}
-            {headerUpdatedTime && (
-              <span className="admin-panel-header-time" aria-live="polite">
-                <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
-                <span className="admin-panel-header-time-label">{headerStrings.updatedPrefix}</span>
-                <span className="admin-panel-header-time-value">{headerUpdatedTime}</span>
-              </span>
             )}
           </div>
         </AdminSidebarUtilityCard>
@@ -10603,8 +10566,6 @@ function AdminDashboard(): JSX.Element {
             title={moduleDesktopIntro.title} subtitle={moduleDesktopIntro.description}
             displayName={displayName}
             isAdmin={isAdmin}
-            updatedPrefix={headerStrings.updatedPrefix}
-            updatedTime={headerUpdatedTime}
             isRefreshing={loading}
             refreshDisabled={activeModuleBlocking}
             refreshLabel={headerStrings.refreshNow} refreshingLabel={headerStrings.refreshing}
@@ -12546,13 +12507,9 @@ function AdminDashboard(): JSX.Element {
             status={upstreamPrivacyStatus}
             loadState={upstreamPrivacyStatusLoadState}
             error={upstreamPrivacyStatusError}
-            refreshing={isRefreshingLoadState(upstreamPrivacyStatusLoadState)}
             autoRefreshEnabled={upstreamPrivacyAutoRefreshEnabled}
             onAutoRefreshChange={setUpstreamPrivacyAutoRefreshEnabled}
             onOpenMcpSessionBindings={() => navigateMcpSessionBindings()}
-            onRefresh={async () => {
-              await loadUpstreamPrivacyStatusData({ reason: 'refresh' })
-            }}
           />
         </AdminLazyBoundary>
       )}
@@ -12688,7 +12645,6 @@ function AdminDashboard(): JSX.Element {
             revalidateProgress={forwardProxyRevalidateProgress}
             onPersistDraft={saveForwardProxySettings}
             onValidateCandidates={validateForwardProxyCandidates}
-            onRefresh={handleManualRefresh}
             onRevalidate={() => void revalidateForwardProxy()}
             onSetNodesDisabled={setForwardProxyNodesDisabled}
           />

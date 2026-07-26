@@ -12,8 +12,6 @@ interface AdminPanelHeaderProps {
   subtitle?: string
   displayName?: string | null
   isAdmin: boolean
-  updatedPrefix: string
-  updatedTime: string | null
   isRefreshing: boolean
   refreshDisabled?: boolean
   refreshLabel: string
@@ -40,7 +38,7 @@ export default function AdminPanelHeader(props: AdminPanelHeaderProps): JSX.Elem
             <LanguageSwitcher />
           </div>
           {props.displayName && (
-            <div className={`user-badge${props.isAdmin ? ' user-badge-admin' : ''}`}>
+            <div className={`user-badge${props.isAdmin ? ' user-badge-admin' : ''}`} title={props.displayName}>
               {props.isAdmin && <Icon icon="mdi:crown-outline" className="user-badge-icon" aria-hidden="true" />}
               <span>{props.displayName}</span>
             </div>
@@ -49,14 +47,6 @@ export default function AdminPanelHeader(props: AdminPanelHeaderProps): JSX.Elem
 
         <div className={`admin-panel-header-actions${props.stackActions ? ' admin-panel-header-actions--stacked' : ''}`}>
           {props.extraActions}
-
-          {props.updatedTime && (
-            <span className="admin-panel-header-time" aria-live="polite">
-              <Icon icon="mdi:clock-time-four-outline" width={14} height={14} className="admin-panel-header-time-icon" aria-hidden="true" />
-              <span className="admin-panel-header-time-label">{props.updatedPrefix}</span>
-              <span className="admin-panel-header-time-value">{props.updatedTime}</span>
-            </span>
-          )}
 
           {props.userConsoleLabel && (
             <AdminReturnToConsoleLink

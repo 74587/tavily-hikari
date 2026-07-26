@@ -42,6 +42,7 @@ describe('SystemStatusModule Storybook proofs', () => {
     expect(markup).toContain('本地 usage 限流')
     expect(markup).toContain('当前时段 Key 活动')
     expect(markup).toContain('待查询 Project ID 数')
+    expect(markup).not.toContain('立即刷新')
   })
 
   it('renders the gallery story with the state matrix and error fallback', () => {

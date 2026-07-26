@@ -426,7 +426,6 @@ function StoryCanvas({
         errorStats={forwardProxyStoryErrorStats}
         onPersistDraft={async () => {}}
         onValidateCandidates={async () => []}
-        onRefresh={() => {}}
         onRevalidate={handleRevalidate}
         onSetNodesDisabled={async () => {}}
         initialNodeView={initialNodeView}

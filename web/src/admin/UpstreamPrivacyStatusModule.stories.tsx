@@ -231,11 +231,9 @@ const meta = {
     status: pendingStatus,
     loadState: 'ready',
     error: null,
-    refreshing: false,
     autoRefreshEnabled: true,
     onAutoRefreshChange: () => undefined,
     onOpenMcpSessionBindings: () => undefined,
-    onRefresh: () => undefined,
   },
 } satisfies Meta<StoryArgs>
 
@@ -252,31 +250,22 @@ function renderWithStatus(status: UpstreamPrivacyStatus | null, overrides?: Part
       status={status}
       loadState={overrides?.loadState ?? 'ready'}
       error={overrides?.error ?? null}
-      refreshing={overrides?.refreshing ?? false}
       autoRefreshEnabled={overrides?.autoRefreshEnabled ?? true}
       onAutoRefreshChange={overrides?.onAutoRefreshChange ?? (() => undefined)}
       onOpenMcpSessionBindings={overrides?.onOpenMcpSessionBindings ?? (() => undefined)}
-      onRefresh={overrides?.onRefresh ?? (() => undefined)}
     />
   )
 }
 
 function InteractionCanvas(args: StoryArgs): JSX.Element {
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(args.autoRefreshEnabled)
-  const [refreshCount, setRefreshCount] = useState(0)
 
   return (
-    <div style={{ display: 'grid', gap: 12 }}>
-      <UpstreamPrivacyStatusModule
-        {...args}
-        autoRefreshEnabled={autoRefreshEnabled}
-        onAutoRefreshChange={setAutoRefreshEnabled}
-        onRefresh={() => setRefreshCount((current) => current + 1)}
-      />
-      <p data-testid="system-status-refresh-count" style={{ margin: 0, color: 'hsl(var(--muted-foreground))', fontSize: 13 }}>
-        刷新次数：{refreshCount}
-      </p>
-    </div>
+    <UpstreamPrivacyStatusModule
+      {...args}
+      autoRefreshEnabled={autoRefreshEnabled}
+      onAutoRefreshChange={setAutoRefreshEnabled}
+    />
   )
 }
 
@@ -378,7 +367,6 @@ export const InteractionContract: Story = {
       throw new Error('Expected the technical-details disclosure to stay collapsed by default.')
     }
 
-    await userEvent.click(canvas.getByRole('button', { name: '立即刷新' }))
-    await expect(canvas.getByTestId('system-status-refresh-count')).toHaveTextContent('刷新次数：1')
+    await expect(canvas.queryByRole('button', { name: '立即刷新' })).not.toBeInTheDocument()
   },
 }
