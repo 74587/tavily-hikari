@@ -2090,8 +2090,7 @@ async fn run_manual_claimed_job(
                     finish(state, "error", format!("usage_http {status}: {body}")).await
                 }
                 Err(err) => {
-                    let _ = finish(state, "error", err.to_string()).await;
-                    true
+                    finish(state, "error", err.to_string()).await
                 }
             }
         }
