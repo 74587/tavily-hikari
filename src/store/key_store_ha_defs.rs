@@ -219,10 +219,6 @@ fn ha_channel_event_table(channel: HaSyncChannel) -> &'static str {
     }
 }
 
-fn ha_channel_sequence_name(channel: HaSyncChannel) -> &'static str {
-    ha_channel_event_table(channel)
-}
-
 fn ha_channel_event_tables(channel: HaSyncChannel) -> &'static [&'static str] {
     match channel {
         HaSyncChannel::Control => HA_CONTROL_EVENT_TABLES,

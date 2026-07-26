@@ -1087,13 +1087,11 @@ impl KeyStore {
         .bind(threshold)
         .fetch_one(&mut **conn)
         .await?;
-        let last_seq: Option<i64> = sqlx::query_scalar(&format!(
-            "SELECT seq FROM sqlite_sequence WHERE name = {}",
-            quote_sqlite_string(ha_channel_sequence_name(channel))
-        ))
-        .fetch_optional(&mut **conn)
-        .await?;
-        if min_seq.is_none() && after_seq > 0 && last_seq.unwrap_or(0) > after_seq {
+        // Cursor validity must use the same effective watermark as exports and
+        // baselines. sqlite_sequence also includes discarded legacy rows and
+        // would make a peer repeatedly reset after the last valid event is GC'd.
+        let valid_high_watermark = Self::ha_channel_high_watermark_on_conn(conn, channel).await?;
+        if min_seq.is_none() && after_seq > 0 && valid_high_watermark > after_seq {
             return Err(ProxyError::Other(format!(
                 "HA {} cursor is older than retention window",
                 channel.as_str()

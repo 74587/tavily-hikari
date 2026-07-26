@@ -302,6 +302,62 @@ async fn ha_outbox_cursor_validation_query_prefers_resource_created_seq_index() 
 }
 
 #[tokio::test]
+async fn ha_events_cursor_ignores_legacy_sequence_after_valid_rows_are_gc() {
+    let db_path = temp_db_path("ha-events-cursor-legacy-sequence");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-events-cursor-legacy-sequence-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let old_ts = Utc::now().timestamp() - (4 * SECS_PER_DAY);
+    let valid_seq = sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(old_ts)
+    .execute(&pool)
+    .await
+    .expect("insert expired valid event")
+    .last_insert_rowid();
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('legacy', 'removed_resource', 'legacy-seq', 'delete', '{}', ?, NULL)
+        "#,
+    )
+    .bind(old_ts)
+    .execute(&pool)
+    .await
+    .expect("insert expired legacy event");
+    pool.close().await;
+
+    proxy
+        .gc_ha_outbox_with_options(HaOutboxGcOptions {
+            batch_size: 100,
+            max_batches: 8,
+            max_runtime_secs: 20,
+            inter_batch_sleep_ms: 0,
+        })
+        .await
+        .expect("gc expired valid and legacy events");
+    let events = proxy
+        .list_ha_events_after(HaSyncChannel::Control, valid_seq, 10)
+        .await
+        .expect("legacy sqlite sequence must not force a baseline reset");
+    assert!(events.is_empty());
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn standalone_ha_outbox_gc_deletes_invalid_legacy_rows_before_retention_rows() {
     let db_path = temp_db_path("ha-outbox-gc-invalid-legacy-first");
     let db_str = db_path.to_string_lossy().to_string();
