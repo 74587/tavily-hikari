@@ -51,6 +51,8 @@ function channelStateLabel(state: string, language: 'en' | 'zh'): string {
     catching_up: ['追赶中', 'Catching up'],
     baseline_required: ['需要 baseline', 'Baseline required'],
     expired_backlog: ['存在过期积压', 'Expired backlog'],
+    unavailable: ['源端不可用', 'Source unavailable'],
+    source: ['源端', 'Source'],
   }
   return labels[state]?.[language === 'zh' ? 0 : 1] ?? state
 }

@@ -1817,6 +1817,33 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
 
     sqlx::query(
         r#"
+        INSERT INTO ha_outbox (seq, kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES (2, 'legacy', 'removed_resource', 'legacy-bridge', 'delete', '{}', ?, 'checksum-legacy-bridge')
+        "#,
+    )
+    .bind(now - 15)
+    .execute(&pool)
+    .await
+    .expect("insert legacy row that bridges the sequence gap");
+    proxy
+        .ack_ha_peer_watermark(
+            tavily_hikari::HaSyncChannel::Control,
+            "standby-legacy-bridge",
+            1,
+        )
+        .await
+        .expect("ack legacy bridge watermark");
+    let legacy_bridge_health = proxy
+        .ha_peer_channel_health(
+            tavily_hikari::HaSyncChannel::Control,
+            "standby-legacy-bridge",
+        )
+        .await
+        .expect("read legacy bridge channel health");
+    assert_eq!(legacy_bridge_health.cursor_state, "catching_up");
+
+    sqlx::query(
+        r#"
         INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
         VALUES ('upsert', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, 'checksum-d')
         "#,

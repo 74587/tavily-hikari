@@ -269,7 +269,12 @@ fn peer_view_from_status(
         stale,
         role_hint: config.role_hint,
         planned_cutover_eligible,
-        channel_health: Vec::new(),
+        channel_health: status
+            .peer_nodes
+            .iter()
+            .find(|node| node.node_id == status.node_id)
+            .map(|node| node.channel_health.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -362,6 +367,53 @@ async fn build_internal_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaSta
     status
 }
 
+async fn attach_internal_source_channel_health(
+    state: &Arc<AppState>,
+    status: &mut tavily_hikari::HaStatusView,
+) {
+    let mut channel_health = Vec::with_capacity(3);
+    for channel in [
+        tavily_hikari::HaSyncChannel::Control,
+        tavily_hikari::HaSyncChannel::Billing,
+        tavily_hikari::HaSyncChannel::Runtime,
+    ] {
+        let high_watermark = state.proxy.ha_channel_high_watermark(channel).await.unwrap_or(0);
+        channel_health.push(tavily_hikari::HaChannelHealthView {
+            channel,
+            acked_seq: None,
+            high_watermark,
+            ack_lag: None,
+            cursor_state: "source".to_string(),
+            retention_secs: match channel {
+                tavily_hikari::HaSyncChannel::Control => 72 * 60 * 60,
+                tavily_hikari::HaSyncChannel::Billing
+                | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
+            },
+            expired_backlog: false,
+        });
+    }
+    status.peer_nodes = vec![tavily_hikari::HaPeerNodeView {
+        node_id: status.node_id.clone(),
+        public_origin: status.node_public_origin.clone(),
+        source_config_target: status
+            .ha_source_effective
+            .as_ref()
+            .and_then(|settings| settings.target.clone()),
+        role: Some(status.role),
+        allows_basic_business: status.allows_basic_business,
+        allows_full_writes: status.allows_full_writes,
+        last_sync_at: status.last_sync_at,
+        sync_lag_seconds: status.sync_lag_seconds,
+        recovery_status: status.recovery_status.clone(),
+        message: status.message.clone(),
+        last_seen_at: status.last_sync_at,
+        stale: false,
+        role_hint: tavily_hikari::HaPeerRoleHint::Observer,
+        planned_cutover_eligible: status.planned_cutover_eligible,
+        channel_health,
+    }];
+}
+
 async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatusView {
     let now_ts = state.proxy.backend_time().now_ts();
     let mut status = build_internal_ha_status(state).await;
@@ -408,6 +460,11 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
             tavily_hikari::HaSyncChannel::Runtime,
         ] {
             let value = if status.role == tavily_hikari::HaNodeRole::Standby {
+                let source_high_watermark = peer
+                    .channel_health
+                    .iter()
+                    .find(|health| health.channel == channel)
+                    .map(|health| health.high_watermark);
                 let watermark_name = if state.ha.dual_active_enabled() {
                     format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
                 } else {
@@ -420,15 +477,22 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     .ok()
                     .flatten();
                 let acked_seq = applied_seq.filter(|value| *value > 0);
+                let high_watermark = source_high_watermark.unwrap_or(0);
                 Some(tavily_hikari::HaChannelHealthView {
                     channel,
                     acked_seq,
-                    high_watermark: acked_seq.unwrap_or(0),
-                    ack_lag: acked_seq.map(|_| 0),
-                    cursor_state: if acked_seq.is_some() {
+                    high_watermark,
+                    ack_lag: source_high_watermark
+                        .zip(acked_seq)
+                        .map(|(high, acked)| high.saturating_sub(acked).max(0)),
+                    cursor_state: if source_high_watermark.is_none() {
+                        "unavailable"
+                    } else if acked_seq.is_none() {
+                        "baseline_required"
+                    } else if acked_seq.is_some_and(|acked| acked >= high_watermark) {
                         "healthy"
                     } else {
-                        "baseline_required"
+                        "catching_up"
                     }
                     .to_string(),
                     retention_secs: match channel {
@@ -995,14 +1059,17 @@ async fn get_internal_ha_status(
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
     if query.refresh_authority.unwrap_or(false) {
-        let status = state
+        let mut status = state
             .ha
             .refresh_authoritative_role()
             .await
             .map_err(|err| (StatusCode::BAD_GATEWAY, err))?;
+        attach_internal_source_channel_health(&state, &mut status).await;
         return Ok(Json(status));
     }
-    Ok(Json(build_internal_ha_status(&state).await))
+    let mut status = build_internal_ha_status(&state).await;
+    attach_internal_source_channel_health(&state, &mut status).await;
+    Ok(Json(status))
 }
 
 async fn get_internal_ha_mcp_session(

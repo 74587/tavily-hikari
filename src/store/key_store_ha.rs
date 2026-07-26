@@ -334,8 +334,21 @@ impl KeyStore {
                 .bind(acked)
                 .fetch_one(&mut *conn)
                 .await?;
+                let first_retained_gap = if let Some(first) = first_retained_seq {
+                    let has_any_bridge: bool = sqlx::query_scalar(&format!(
+                        "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND seq > ? AND seq < ?)"
+                    ))
+                    .bind(threshold)
+                    .bind(acked)
+                    .bind(first)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                    first > acked + 1 && !has_any_bridge
+                } else {
+                    false
+                };
                 let has_internal_gap: bool = sqlx::query_scalar(&format!(
-                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ? AND later.seq < ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.resource IN ({allowed_resources}) AND next.seq = later.seq + 1))"
+                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ? AND later.seq < ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.seq = later.seq + 1))"
                 ))
                 .bind(threshold)
                 .bind(acked)
@@ -345,8 +358,7 @@ impl KeyStore {
                 .await?;
                 (
                     has_retained_after_ack,
-                    first_retained_seq.is_some_and(|first| first > acked + 1)
-                        || has_internal_gap,
+                    first_retained_gap || has_internal_gap,
                 )
             } else {
                 (false, false)
