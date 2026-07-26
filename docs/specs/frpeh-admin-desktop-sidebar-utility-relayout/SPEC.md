@@ -148,6 +148,8 @@
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/key-detail-desktop-1440.png`
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/dashboard-stacked-1100.png`
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-utility-controls-row-1440.png`
+  - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-refresh-desktop-1440.png`
+  - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-refresh-stacked-1100.png`
 
 - 1440px 侧栏 utility 控件：主题和语言选择按钮保持同一行，等宽承载，未回落为纵向堆叠。
   - PR: include
@@ -158,7 +160,7 @@
 
 ![1440px 仪表盘桌面态](./assets/dashboard-desktop-1440.png)
 
-- 1440px Token 榜单：桌面态不再保留重型页头，侧栏 utility 承接 theme / language / identity / 更新时间 / 返回 / 刷新。
+- 1440px Token 榜单：桌面态不再保留重型页头，侧栏 utility 承接 theme / language / identity / 返回与全局刷新。
 
 ![1440px Token 榜单桌面态](./assets/token-usage-desktop-1440.png)
 
@@ -177,6 +179,22 @@
 - 1100px 仪表盘 stacked：原顶部 header 与 menu 行为仍保留，未引入桌面 utility。
 
 ![1100px 仪表盘 stacked](./assets/dashboard-stacked-1100.png)
+
+- 1440px 刷新入口与长管理员名称：utility 内没有通用更新时间，只有一个全局普通刷新入口；长名称单行省略且保持在卡片边界内。
+  - Story: `Admin/AdminShell/PanelHeaderShell`
+  - Viewport: `1440x1120`; source commit: `2c187c53199724bfb3cbebc4cd4063a06984802f`
+  - SHA-256: `cef7d58d0920eb0e25ebd7c4620398edad51e1c85f9575e331b636015b3bbd5c`
+  - PR: include
+
+![1440px 侧栏刷新入口与长管理员名称](./assets/sidebar-refresh-desktop-1440.png)
+
+- 1100px 刷新入口：desktop utility 隐藏，通用页头只保留一个全局普通刷新入口，不显示通用更新时间。
+  - Story: `Admin/AdminShell/PanelHeaderShellStacked`
+  - Viewport: `1100x1120`; source commit: `2c187c53199724bfb3cbebc4cd4063a06984802f`
+  - SHA-256: `c9186205ff8038bfe466f9bb43ae7a9b78cecba549ef8fb04847bd1845b91a1e`
+  - PR: include
+
+![1100px 堆叠刷新入口](./assets/sidebar-refresh-stacked-1100.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
