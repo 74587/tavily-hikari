@@ -318,23 +318,30 @@ impl KeyStore {
         .flatten();
         let threshold = self.backend_time.now_ts() - ha_channel_retention_secs(channel);
         let allowed_resources = ha_channel_allowed_resources_sql(channel);
-        let first_retained_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            "SELECT MIN(seq) FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources})"
-        ))
-        .bind(threshold)
-        .fetch_one(&mut *conn)
-        .await?;
+        let (has_retained_after_ack, has_retained_gap_after_ack) =
+            if let Some(acked) = acked_seq {
+                let sql = format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?), EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ? + 1)"
+                );
+                sqlx::query_as::<_, (bool, bool)>(&sql)
+                    .bind(threshold)
+                    .bind(acked)
+                    .bind(threshold)
+                    .bind(acked)
+                    .fetch_one(&mut *conn)
+                    .await?
+            } else {
+                (false, false)
+            };
         let expired_backlog = acked_seq.is_some_and(|acked| {
-            let latest_seq = high_watermark;
-            match first_retained_seq {
-                Some(first_retained_seq) => {
-                    acked > 0 && acked < first_retained_seq.saturating_sub(1)
-                }
-                None => acked > 0 && latest_seq > acked,
-            }
+            acked > 0
+                && high_watermark > acked
+                && (!has_retained_after_ack || has_retained_gap_after_ack)
         });
         let cursor_state = if expired_backlog {
             "expired_backlog"
+        } else if acked_seq == Some(0) && high_watermark > 0 {
+            "baseline_required"
         } else if high_watermark == 0 || acked_seq.is_some_and(|acked| acked >= high_watermark) {
             "healthy"
         } else if acked_seq.is_some() {
@@ -2805,13 +2812,6 @@ impl KeyStore {
         &self,
         options: HaOutboxGcOptions,
     ) -> Result<HaOutboxGcReport, ProxyError> {
-        if options.batch_size == 250
-            && options.max_batches == 4
-            && options.max_runtime_secs == 1
-            && options.inter_batch_sleep_ms == 100
-        {
-            return self.gc_ha_outbox_online(options).await;
-        }
         let started = Instant::now();
         let batch_size = options.batch_size.max(1);
         let max_batches = options.max_batches.max(1);
@@ -2974,7 +2974,12 @@ impl KeyStore {
             .await?)
     }
 
-    async fn gc_ha_outbox_online(
+    pub(crate) async fn gc_ha_outbox_online(&self) -> Result<HaOutboxGcReport, ProxyError> {
+        self.gc_ha_outbox_online_with_options(HaOutboxGcOptions::online())
+            .await
+    }
+
+    async fn gc_ha_outbox_online_with_options(
         &self,
         options: HaOutboxGcOptions,
     ) -> Result<HaOutboxGcReport, ProxyError> {

@@ -1791,6 +1791,16 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
     assert_eq!(health.retention_secs, 72 * 60 * 60);
     assert!(!health.expired_backlog);
 
+    proxy
+        .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-zero", 0)
+        .await
+        .expect("ack zero watermark");
+    let zero_cursor_health = proxy
+        .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-zero")
+        .await
+        .expect("read zero cursor health");
+    assert_eq!(zero_cursor_health.cursor_state, "baseline_required");
+
     sqlx::query("DELETE FROM ha_outbox")
         .execute(&pool)
         .await

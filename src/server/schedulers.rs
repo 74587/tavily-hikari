@@ -1,5 +1,5 @@
 use tavily_hikari::{
-    HaOutboxGcOptions, LinuxDoCreditRechargeOrder,
+    LinuxDoCreditRechargeOrder,
     LINUXDO_CREDIT_RECHARGE_REFUND_EXTERNAL_SUCCEEDED_PHASE,
     LINUXDO_CREDIT_RECHARGE_STATUS_REFUNDED,
     LINUXDO_CREDIT_RECHARGE_SYSTEM_REFUND_ACTOR,
@@ -1067,7 +1067,7 @@ async fn run_ha_outbox_gc_claimed_job(
     };
     let result = state
         .proxy
-        .gc_ha_outbox_with_options(HaOutboxGcOptions::online())
+        .gc_ha_outbox_online()
         .await;
     drop(_maintenance);
 
