@@ -361,6 +361,37 @@ const rechargeQuote: RechargeQuote = {
   schedule: [],
 }
 
+const rechargeClampedPreviewQuote: RechargeQuote = {
+  ...rechargeQuote,
+  currentMonthFinalHourlyDelta: 12,
+  currentMonthFinalDailyDelta: 60,
+  currentMonthFinalMonthlyDelta: 600,
+  currentMonthFinalMoneyCents: 3000,
+  finalOrderMoneyCents: 3000,
+  monthEndClampApplied: true,
+  schedule: [
+    {
+      monthIndex: 0,
+      monthStart: rechargeQuote.quoteMonthStart,
+      isCurrentMonth: true,
+      hourlyDelta: 12,
+      dailyDelta: 60,
+      monthlyDelta: 600,
+      fullMonthlyDelta: 1000,
+      monthMoneyCents: 3000,
+      monthDiscountCents: 2000,
+      monthEndClampApplied: true,
+      discountReason: 'remaining days inclusive cannot cover the full current-month monthly quota',
+    },
+  ],
+}
+
+const rechargeClampedPreviewConfig: RechargeConfig = {
+  ...rechargeConfig,
+  currentEntitlementCredits: 1000,
+  currentEntitlementMonthlyDelta: 600,
+}
+
 const rechargeOrders: RechargeOrder[] = [
   {
     outTradeNo: 'ldc_order_paid_001',
@@ -601,11 +632,12 @@ function BillingPageStory({
 const meta = {
   title: 'User Console/Billing/Billing Page',
   component: BillingPageStory,
+  tags: ['autodocs'],
   parameters: {
     layout: 'fullscreen',
     docs: {
       description: {
-        component: 'Dedicated /console/billing route covering entitlement composition, pricing, future natural months, recent orders, and purchase fallback states.',
+        component: 'Dedicated /console/billing route covering entitlement composition, pricing, future natural months, recent orders, and the recharge preview glossary.',
       },
     },
   },
@@ -652,6 +684,7 @@ export const Default: Story = {
     await expect(canvas.getByText('+60 requests')).toBeInTheDocument()
     await expect(canvas.getByText('+300 credits')).toBeInTheDocument()
     await expect(canvas.getByText('+3,000 credits')).toBeInTheDocument()
+    await userEvent.click(canvas.getByRole('button', { name: 'Show details for Jul 2026' }))
     await expect(canvas.getByRole('button', { name: 'Show details for Jul 2026' })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -676,6 +709,28 @@ export const Default: Story = {
     await expect(summary.queryByText('Long-lived entitlements')).not.toBeInTheDocument()
     await expect(summary.queryByText('Tag adjustments')).not.toBeInTheDocument()
     await expect(summary.getByText('4,450')).toBeInTheDocument()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
+    const preview = within(document.body)
+    await expect(preview.getByRole('columnheader', { name: 'Before order' })).toBeInTheDocument()
+    await expect(preview.getByRole('columnheader', { name: 'Added by order' })).toBeInTheDocument()
+    await expect(preview.getByRole('columnheader', { name: 'After order' })).toBeInTheDocument()
+
+    await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('already scheduled for this month')
+    await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('already scheduled for this month')
+    await userEvent.keyboard('{Escape}')
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
+
+    await userEvent.hover(preview.getByRole('button', { name: 'Added by order' }))
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('after payment succeeds')
+    await userEvent.keyboard('{Escape}')
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
   },
 }
 
@@ -702,6 +757,24 @@ export const LifecycleStates: Story = {
     await expect(canvas.getByText('7,000 / 2')).toBeInTheDocument()
     await userEvent.click(canvas.getByRole('button', { name: /^Previous$/ }))
     await expect(canvas.getByText('Page 1 / 2 · 12 orders')).toBeInTheDocument()
+  },
+}
+
+export const ClampedCurrentMonthPreview: Story = {
+  args: {
+    config: rechargeClampedPreviewConfig,
+    quote: rechargeClampedPreviewQuote,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(document.body)
+    const firstMonthRow = preview.getAllByRole('row')[1]
+    const cells = within(firstMonthRow).getAllByRole('cell')
+    await expect(cells[1]).toHaveTextContent('600')
+    await expect(cells[2]).toHaveTextContent('+600')
+    await expect(cells[3]).toHaveTextContent('1,200')
   },
 }
 
@@ -741,4 +814,18 @@ export const Loading: Story = {
 
 export const Mobile: Story = {
   parameters: mobileViewport,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(document.body)
+    const help = preview.getByRole('button', { name: 'Explain the recharge preview columns' })
+    await expect(help).toBeInTheDocument()
+    await userEvent.click(help)
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('After order')
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('base quota and other adjustments')
+    await userEvent.keyboard('{Escape}')
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
+  },
 }

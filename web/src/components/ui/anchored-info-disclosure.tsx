@@ -34,6 +34,9 @@ export function AnchoredInfoDisclosure({
   ...buttonProps
 }: AnchoredInfoDisclosureProps): JSX.Element {
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const pointerHoverRef = useRef(false)
+  const pinnedRef = useRef(false)
+  const suppressFocusOpenRef = useRef(false)
   const bubbleId = useId()
   const [open, setOpen] = useState(false)
   const { layerRef: bubbleRef, position } = useAnchoredFloatingLayer<HTMLDivElement>({
@@ -54,20 +57,29 @@ export function AnchoredInfoDisclosure({
       if (!target) return
       if (triggerRef.current?.contains(target)) return
       if (bubbleRef.current?.contains(target)) return
+      pinnedRef.current = false
       setOpen(false)
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // Capture before modal primitives so Escape dismisses this disclosure first.
+      event.preventDefault()
+      event.stopPropagation()
+      pinnedRef.current = false
       setOpen(false)
+      suppressFocusOpenRef.current = true
       triggerRef.current?.focus()
+      if (document.activeElement === triggerRef.current) {
+        suppressFocusOpenRef.current = false
+      }
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keydown', handleKeyDown, true)
     }
   }, [bubbleRef, open])
 
@@ -75,15 +87,30 @@ export function AnchoredInfoDisclosure({
     onClick?.(event)
     if (event.defaultPrevented) return
     if (event.detail === 0) {
+      pinnedRef.current = true
       setOpen(true)
       return
     }
-    setOpen((currentOpen) => !currentOpen)
+    if (pointerHoverRef.current) {
+      const nextPinned = !pinnedRef.current
+      pinnedRef.current = nextPinned
+      setOpen(nextPinned)
+      return
+    }
+    setOpen((currentOpen) => {
+      const nextOpen = !currentOpen
+      pinnedRef.current = nextOpen
+      return nextOpen
+    })
   }
 
   const handleFocus = (event: FocusEvent<HTMLButtonElement>) => {
     onFocus?.(event)
     if (event.defaultPrevented) return
+    if (suppressFocusOpenRef.current) {
+      suppressFocusOpenRef.current = false
+      return
+    }
     if (event.currentTarget.matches(':focus-visible')) {
       setOpen(true)
     }
@@ -96,18 +123,22 @@ export function AnchoredInfoDisclosure({
     if (nextFocusedNode && (triggerRef.current?.contains(nextFocusedNode) || bubbleRef.current?.contains(nextFocusedNode))) {
       return
     }
+    if (pinnedRef.current) return
     setOpen(false)
   }
 
   const handleMouseEnter = (event: MouseEvent<HTMLButtonElement>) => {
     onMouseEnter?.(event)
     if (event.defaultPrevented) return
+    pointerHoverRef.current = true
     setOpen(true)
   }
 
   const handleMouseLeave = (event: MouseEvent<HTMLButtonElement>) => {
     onMouseLeave?.(event)
     if (event.defaultPrevented) return
+    pointerHoverRef.current = false
+    if (pinnedRef.current) return
     if (document.activeElement === triggerRef.current) return
     setOpen(false)
   }

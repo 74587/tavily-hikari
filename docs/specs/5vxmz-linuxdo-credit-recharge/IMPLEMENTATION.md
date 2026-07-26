@@ -29,6 +29,8 @@
   线上配置中出现的 48-byte 最小 Ed25519 PKCS#8 v1 DER。
 - Linux.do Credit 创建订单响应按浏览器跳转模型处理：后端禁用 HTTP 自动重定向，保存并返回上游 3xx `Location` 作为支付 URL，避免服务端跟随到需要用户态认证的支付页并误判为 `403`。
 - Storybook 与前端状态面已补充 `pending`、`expired`、`cancelled`、`refunding(system:auto)`、`refunded(system:auto)` 展示，`expired` 文案改为“支付入口已关闭”，`refunding` 明确展示“已支付，正在原路退款”。
+- 充值订单影响预览已将三列统一命名为“本单前充值月额度 / 本单增加 / 本单后充值月额度”，英文表头收短为 `Before order / Added by order / After order`；桌面表头复用可访问的悬浮/聚焦/点击说明，移动抽屉标题右侧提供集中帮助入口；桌面数字列统一右对齐并使用等宽数字，移动月份卡片保持左标签/右数值键值布局。
+- `BillingPage` Storybook 默认与移动场景已覆盖桌面表头说明的打开/关闭、移动标题帮助入口和完整字段定义；移动故事使用自带 390px mock viewport，避免依赖未启用的 viewport addon。最终桌面与移动组件证据写入 `SPEC.md` 的唯一 `Visual Evidence` 区域。
 
 ## Remaining Gaps
 
