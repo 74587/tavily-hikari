@@ -99,7 +99,7 @@ async fn ha_gc_continuation_finishes_job_and_requeues_atomically() {
 }
 
 #[tokio::test]
-async fn delayed_request_logs_gc_continuation_survives_restart_and_manual_trigger_unlocks_it() {
+async fn delayed_gc_continuations_survive_restart_and_manual_trigger_unlocks_request_logs_gc() {
     let db_path = temp_db_path("scheduled-job-delayed-continuation");
     let db_str = db_path.to_string_lossy().to_string();
     let available_at = Utc::now().timestamp() + 5 * 60;
@@ -121,12 +121,22 @@ async fn delayed_request_logs_gc_continuation_survives_restart_and_manual_trigge
         );
         continuation.job_id
     };
+    let ha_continuation_id = {
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy
+            .scheduled_job_enqueue_at("ha_outbox_gc", "auto", None, 1, available_at)
+            .await
+            .expect("enqueue delayed HA continuation")
+            .job_id
+    };
 
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy recreated");
     let unrelated = proxy
-        .scheduled_job_enqueue("ha_outbox_gc", "scheduler", None, 1)
+        .scheduled_job_enqueue("auth_token_logs_gc", "scheduler", None, 1)
         .await
         .expect("enqueue unrelated queued job");
     assert_eq!(
@@ -146,6 +156,16 @@ async fn delayed_request_logs_gc_continuation_survives_restart_and_manual_trigge
             .status,
         "queued",
         "startup cleanup must preserve the durable automatic continuation"
+    );
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(ha_continuation_id)
+            .await
+            .expect("read delayed HA continuation after startup cleanup")
+            .expect("delayed HA continuation remains")
+            .status,
+        "queued",
+        "startup cleanup must preserve the durable HA continuation"
     );
     assert_eq!(
         proxy

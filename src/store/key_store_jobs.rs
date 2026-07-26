@@ -1067,9 +1067,15 @@ impl KeyStore {
                         status = 'running'
                         OR (
                             status = 'queued'
-                            -- This is the durable request-log GC catch-up contract. Its
-                            -- available_at guard still prevents an early claim after restart.
-                            AND NOT (job_type = 'request_logs_gc' AND trigger_source = 'auto')
+                            -- These are durable GC catch-up contracts. Their available_at
+                            -- guards still prevent an early claim after restart.
+                            AND NOT (
+                                trigger_source = 'auto'
+                                AND (
+                                    job_type = 'request_logs_gc'
+                                    OR job_type = 'ha_outbox_gc'
+                                )
+                            )
                         )
                     )
                   AND finished_at IS NULL
