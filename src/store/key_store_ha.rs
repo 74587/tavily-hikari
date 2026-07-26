@@ -348,7 +348,7 @@ impl KeyStore {
                     false
                 };
                 let has_internal_gap: bool = sqlx::query_scalar(&format!(
-                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ? AND later.seq < ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.seq = later.seq + 1))"
+                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.seq > ? AND later.seq < ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.seq = later.seq + 1))"
                 ))
                 .bind(threshold)
                 .bind(acked)
