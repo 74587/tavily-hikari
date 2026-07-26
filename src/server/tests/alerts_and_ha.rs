@@ -569,11 +569,16 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
         .await
         .expect("bind peer listener");
     let peer_addr = peer_listener.local_addr().expect("peer addr");
+    let observed_peer_node_id = std::sync::Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let observed_peer_node_id_for_route = observed_peer_node_id.clone();
     tokio::spawn(async move {
         let app = Router::new().route(
             "/api/internal/ha/status",
-            get(|| async {
-                Json(json!({
+            get(move |Query(params): Query<std::collections::HashMap<String, String>>| {
+                let observed_peer_node_id = observed_peer_node_id_for_route.clone();
+                async move {
+                    *observed_peer_node_id.lock().await = params.get("peerNodeId").cloned();
+                    Json(json!({
                     "mode": "active_standby",
                     "nodeId": "node-peer",
                     "nodePublicOrigin": "peer-public-origin:443",
@@ -610,7 +615,8 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
                     "message": "peer ready",
                     "peerNodes": [],
                     "plannedCutoverEligible": true
-                }))
+                    }))
+                }
             }),
         );
         axum::serve(peer_listener, app.into_make_service())
@@ -651,6 +657,10 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
     let body: Value = response.json().await.expect("ha status body");
     assert_eq!(body["peerNodes"][0]["publicOrigin"], "peer-public-origin:443");
     assert_eq!(body["peerNodes"][0]["sourceConfigTarget"], "peer-source-config:53844");
+    assert_eq!(
+        observed_peer_node_id.lock().await.as_deref(),
+        Some("node-active")
+    );
 
     let _ = std::fs::remove_file(db_path);
 }

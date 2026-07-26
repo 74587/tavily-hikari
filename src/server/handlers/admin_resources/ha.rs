@@ -306,12 +306,13 @@ async fn fetch_internal_ha_status(
     client: &Client,
     peer: &tavily_hikari::HaPeerNodeConfig,
     internal_token: &str,
+    local_node_id: &str,
 ) -> Result<tavily_hikari::HaStatusView, String> {
     let response = client
         .get(format!("{}/api/internal/ha/status", peer.admin_base_url))
         .query(&[
             ("refreshAuthority", "true"),
-            ("peerNodeId", peer.node_id.as_str()),
+            ("peerNodeId", local_node_id),
         ])
         .header("x-ha-internal-token", internal_token)
         .send()
@@ -440,13 +441,15 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
             .into_iter()
             .filter(|peer| peer.node_id != status.node_id)
             .collect();
+        let local_node_id = status.node_id.clone();
         status.peer_nodes = stream::iter(peers)
             .map(|peer| {
                 let client = client.clone();
                 let internal_token = internal_token.to_string();
+                let local_node_id = local_node_id.clone();
                 async move {
                     let last_seen_at = now_ts;
-                    match fetch_internal_ha_status(&client, &peer, &internal_token).await {
+                    match fetch_internal_ha_status(&client, &peer, &internal_token, &local_node_id).await {
                         Ok(peer_status) => peer_view_from_status(&peer, &peer_status, last_seen_at, now_ts),
                         Err(err) => peer_view_from_error(&peer, err),
                     }
@@ -1176,7 +1179,7 @@ async fn post_admin_ha_promote(
                 .unwrap_or_else(|_| Client::new());
             let mut peers_to_update = Vec::new();
             for peer in peers {
-                match fetch_internal_ha_status(&client, &peer, &internal_token).await {
+                match fetch_internal_ha_status(&client, &peer, &internal_token, &node_id).await {
                     Ok(peer_status) => {
                         if peer_status.allows_full_writes
                             || peer_status.full_master_node_id.as_deref()
@@ -1677,7 +1680,7 @@ async fn post_admin_ha_planned_cutover(
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| Client::new());
-        let peer_before = fetch_internal_ha_status(&client, &peer, &internal_token)
+        let peer_before = fetch_internal_ha_status(&client, &peer, &internal_token, &local_node_id)
             .await
             .map_err(|err| (StatusCode::BAD_GATEWAY, err))?;
         let peer_last_probe = latest_probe_timestamp(&peer_before).ok_or_else(|| {
@@ -1765,7 +1768,7 @@ async fn post_admin_ha_planned_cutover(
         {
             Ok(status) => status,
             Err(err) => {
-                match fetch_internal_ha_status(&client, &peer, &internal_token).await {
+                match fetch_internal_ha_status(&client, &peer, &internal_token, &local_node_id).await {
                     Ok(peer_status) => {
                         let peer_promoted = peer_status.full_master_node_id.as_deref()
                             == Some(peer.node_id.as_str())
@@ -1897,7 +1900,7 @@ async fn post_admin_ha_planned_cutover(
         peer.node_id,
         state.proxy.backend_time().now_ts()
     );
-    let peer_before = fetch_internal_ha_status(&client, &peer, &internal_token)
+    let peer_before = fetch_internal_ha_status(&client, &peer, &internal_token, &local_before.node_id)
         .await
         .map_err(|err| (StatusCode::BAD_GATEWAY, err))?;
     let peer_last_probe = latest_probe_timestamp(&peer_before).ok_or_else(|| {
@@ -2026,7 +2029,7 @@ async fn post_admin_ha_planned_cutover(
         format!("EdgeOne ingress already switched to {}; complete recovery reconciliation on both nodes before retrying.", peer.node_id);
     let deadline = Instant::now() + Duration::from_secs(HA_PLANNED_CUTOVER_POLL_TIMEOUT_SECS);
     let peer_after = loop {
-        let current = fetch_internal_ha_status(&client, &peer, &internal_token)
+        let current = fetch_internal_ha_status(&client, &peer, &internal_token, &local_before.node_id)
             .await
             .map_err(|err| {
                 (

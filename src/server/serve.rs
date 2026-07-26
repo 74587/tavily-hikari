@@ -1195,7 +1195,7 @@ async fn run_ha_peer_sync_once(
         return Err("HA peer sync has no configured peers".into());
     }
     for peer in peer_configs {
-        match fetch_internal_ha_status(client, &peer, internal_token).await {
+        match fetch_internal_ha_status(client, &peer, internal_token, &local_node_id).await {
             Ok(peer_status) => {
                 if peer_status.allows_full_writes && control_source_node_id.is_none() {
                     control_source_node_id = Some(peer.node_id.clone());
