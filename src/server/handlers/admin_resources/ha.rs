@@ -69,6 +69,7 @@ struct HaNodeDetailQuery {
 #[serde(rename_all = "camelCase")]
 struct InternalHaStatusQuery {
     refresh_authority: Option<bool>,
+    peer_node_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -307,10 +308,11 @@ async fn fetch_internal_ha_status(
     internal_token: &str,
 ) -> Result<tavily_hikari::HaStatusView, String> {
     let response = client
-        .get(format!(
-            "{}/api/internal/ha/status?refreshAuthority=true",
-            peer.admin_base_url
-        ))
+        .get(format!("{}/api/internal/ha/status", peer.admin_base_url))
+        .query(&[
+            ("refreshAuthority", "true"),
+            ("peerNodeId", peer.node_id.as_str()),
+        ])
         .header("x-ha-internal-token", internal_token)
         .send()
         .await
@@ -370,6 +372,7 @@ async fn build_internal_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaSta
 async fn attach_internal_source_channel_health(
     state: &Arc<AppState>,
     status: &mut tavily_hikari::HaStatusView,
+    peer_node_id: Option<&str>,
 ) {
     let mut channel_health = Vec::with_capacity(3);
     for channel in [
@@ -378,18 +381,27 @@ async fn attach_internal_source_channel_health(
         tavily_hikari::HaSyncChannel::Runtime,
     ] {
         let high_watermark = state.proxy.ha_channel_high_watermark(channel).await.unwrap_or(0);
+        let peer_health = match peer_node_id {
+            Some(peer_node_id) => state.proxy.ha_peer_channel_health(channel, peer_node_id).await.ok(),
+            None => None,
+        };
         channel_health.push(tavily_hikari::HaChannelHealthView {
             channel,
             acked_seq: None,
             high_watermark,
             ack_lag: None,
-            cursor_state: "source".to_string(),
+            cursor_state: if peer_health.as_ref().is_some_and(|health| health.expired_backlog) {
+                "expired_backlog"
+            } else {
+                "source"
+            }
+            .to_string(),
             retention_secs: match channel {
                 tavily_hikari::HaSyncChannel::Control => 72 * 60 * 60,
                 tavily_hikari::HaSyncChannel::Billing
                 | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
             },
-            expired_backlog: false,
+            expired_backlog: peer_health.is_some_and(|health| health.expired_backlog),
         });
     }
     status.peer_nodes = vec![tavily_hikari::HaPeerNodeView {
@@ -465,6 +477,11 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     .iter()
                     .find(|health| health.channel == channel)
                     .map(|health| health.high_watermark);
+                let source_expired_backlog = peer
+                    .channel_health
+                    .iter()
+                    .find(|health| health.channel == channel)
+                    .is_some_and(|health| health.expired_backlog);
                 let watermark_name = if state.ha.dual_active_enabled() {
                     format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
                 } else {
@@ -485,7 +502,9 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     ack_lag: source_high_watermark
                         .zip(acked_seq)
                         .map(|(high, acked)| high.saturating_sub(acked).max(0)),
-                    cursor_state: if source_high_watermark.is_none() {
+                    cursor_state: if source_expired_backlog {
+                        "expired_backlog"
+                    } else if source_high_watermark.is_none() {
                         "unavailable"
                     } else if acked_seq.is_none() {
                         "baseline_required"
@@ -500,7 +519,7 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                         tavily_hikari::HaSyncChannel::Billing
                         | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
                     },
-                    expired_backlog: false,
+                    expired_backlog: source_expired_backlog,
                 })
             } else {
                 state.proxy.ha_peer_channel_health(channel, &peer.node_id).await.ok()
@@ -1064,11 +1083,11 @@ async fn get_internal_ha_status(
             .refresh_authoritative_role()
             .await
             .map_err(|err| (StatusCode::BAD_GATEWAY, err))?;
-        attach_internal_source_channel_health(&state, &mut status).await;
+        attach_internal_source_channel_health(&state, &mut status, query.peer_node_id.as_deref()).await;
         return Ok(Json(status));
     }
     let mut status = build_internal_ha_status(&state).await;
-    attach_internal_source_channel_health(&state, &mut status).await;
+    attach_internal_source_channel_health(&state, &mut status, query.peer_node_id.as_deref()).await;
     Ok(Json(status))
 }
 
