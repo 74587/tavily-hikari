@@ -288,6 +288,7 @@
         "--lib"
       ],
       "include_prefixes": [
+        "ha_perf_sampling_tests::",
         "tests::jobs_and_request_log_retention::abandon_",
         "tests::jobs_and_request_log_retention::abandoned_",
         "tests::jobs_and_request_log_retention::auth_",
@@ -301,6 +302,7 @@
         "tests::proxy_affinity_and_summary::quarantine_",
         "tests::proxy_affinity_and_summary::quarantined_",
         "tests::ha_outbox_and_compaction::sqlite_",
+        "tests::maintenance_queue_performance::",
         "tests::observability_and_lifecycle::published_",
         "tests::upstream_reconciliation::",
         "upstream_privacy::tests::"
