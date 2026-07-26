@@ -361,6 +361,37 @@ const rechargeQuote: RechargeQuote = {
   schedule: [],
 }
 
+const rechargeClampedPreviewQuote: RechargeQuote = {
+  ...rechargeQuote,
+  currentMonthFinalHourlyDelta: 12,
+  currentMonthFinalDailyDelta: 60,
+  currentMonthFinalMonthlyDelta: 600,
+  currentMonthFinalMoneyCents: 3000,
+  finalOrderMoneyCents: 3000,
+  monthEndClampApplied: true,
+  schedule: [
+    {
+      monthIndex: 0,
+      monthStart: rechargeQuote.quoteMonthStart,
+      isCurrentMonth: true,
+      hourlyDelta: 20,
+      dailyDelta: 100,
+      monthlyDelta: 1000,
+      fullMonthlyDelta: 1000,
+      monthMoneyCents: 3000,
+      monthDiscountCents: 2000,
+      monthEndClampApplied: true,
+      discountReason: 'remaining days inclusive cannot cover the full current-month monthly quota',
+    },
+  ],
+}
+
+const rechargeClampedPreviewConfig: RechargeConfig = {
+  ...rechargeConfig,
+  currentEntitlementCredits: 1000,
+  currentEntitlementMonthlyDelta: 600,
+}
+
 const rechargeOrders: RechargeOrder[] = [
   {
     outTradeNo: 'ldc_order_paid_001',
@@ -716,6 +747,24 @@ export const LifecycleStates: Story = {
     await expect(canvas.getByText('7,000 / 2')).toBeInTheDocument()
     await userEvent.click(canvas.getByRole('button', { name: /^Previous$/ }))
     await expect(canvas.getByText('Page 1 / 2 · 12 orders')).toBeInTheDocument()
+  },
+}
+
+export const ClampedCurrentMonthPreview: Story = {
+  args: {
+    config: rechargeClampedPreviewConfig,
+    quote: rechargeClampedPreviewQuote,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
+
+    const preview = within(document.body)
+    const firstMonthRow = preview.getAllByRole('row')[1]
+    const cells = within(firstMonthRow).getAllByRole('cell')
+    await expect(cells[1]).toHaveTextContent('600')
+    await expect(cells[2]).toHaveTextContent('+1,000')
+    await expect(cells[3]).toHaveTextContent('1,600')
   },
 }
 

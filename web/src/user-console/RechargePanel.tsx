@@ -518,13 +518,15 @@ function buildRechargePreviewMonths(input: {
   const previewEnd = Math.max(currentEffectEnd, scheduleEnd)
   for (let monthStart = input.currentMonthStart; monthStart <= previewEnd; monthStart = addMonthsToMonthStart(monthStart, 1)) {
     const scheduleRow = quote?.schedule.find((item) => item.monthStart === monthStart)
-    const currentQuota = monthStart < currentEffectEnd ? input.currentEntitlement : 0
+    const beforeQuota = monthStart === input.currentMonthStart
+      ? input.currentMonthFinal
+      : monthStart < currentEffectEnd ? input.currentEntitlement : 0
     const delta = scheduleRow?.monthlyDelta ?? 0
     rows.push({
       monthStart,
-      currentQuota: monthStart === input.currentMonthStart ? input.currentMonthFinal : currentQuota,
+      currentQuota: beforeQuota,
       delta,
-      expectedQuota: currentQuota + delta,
+      expectedQuota: beforeQuota + delta,
       afterExpiry: monthStart > currentEffectEnd,
       clampApplied: scheduleRow?.monthEndClampApplied ?? false,
     })
