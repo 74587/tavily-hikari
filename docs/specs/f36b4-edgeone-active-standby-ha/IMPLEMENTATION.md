@@ -8,9 +8,10 @@
 - Added runtime EdgeOne authority refresh so a running old active enters `recovery` when the origin moves away, and an externally pointed standby only becomes `provisional_master` until administrator finalize.
 - Added HA peer inventory parsing through `HA_PEER_NODES_JSON`, real admin `peerNodes[]` aggregation, internal-only peer status/finalize/query endpoints, and `planned cutover` orchestration initiated from the current `full_master` or the current leader key depending on route family.
 - Active-standby status now exposes the configured remote `peerCount` and a
-  `syncDisabledReason=no_configured_peers` diagnostic when that count is zero. The peer-sync task
-  logs that startup state once and remains disabled instead of emitting a repeating sync failure;
-  health and local role semantics are unchanged.
+  `syncDisabledReason=no_configured_peers` diagnostic only when neither a peer nor a legacy
+  `HA_SYNC_SOURCE_URL` pull source is configured. The peer-sync task logs that startup state once
+  and remains disabled instead of emitting a repeating sync failure; health and local role
+  semantics are unchanged.
 - Extended admin HA peer aggregation so each `peerNodes[]` item carries both `publicOrigin` and `sourceConfigTarget`, letting the node inventory render the configured source target instead of mixing live EdgeOne target and peer direct-entry labels in the same “源站” column.
 - Added normalized HA control-plane timeline storage through `ha_control_plane_events`, admin timeline query, and hourly 7-day retention GC.
 - Replaced SQLite snapshot export/import with deprecated `410 Gone` responses so HA cannot transfer full database files.

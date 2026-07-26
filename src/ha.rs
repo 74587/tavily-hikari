@@ -976,7 +976,14 @@ impl HaRuntime {
             .iter()
             .filter(|peer| peer.node_id != self.config.node_id)
             .count();
-        let sync_disabled_reason = (self.config.mode == HaMode::ActiveStandby && peer_count == 0)
+        let has_legacy_pull_sync_source = self
+            .config
+            .sync_source_url
+            .as_deref()
+            .is_some_and(|source_url| !source_url.trim().is_empty());
+        let sync_disabled_reason = (self.config.mode == HaMode::ActiveStandby
+            && peer_count == 0
+            && !has_legacy_pull_sync_source)
             .then(|| "no_configured_peers".to_string());
         let sync_lag_seconds = state
             .last_sync_at
@@ -2465,6 +2472,18 @@ mod tests {
             status.sync_disabled_reason.as_deref(),
             Some("no_configured_peers")
         );
+    }
+
+    #[tokio::test]
+    async fn active_standby_pull_sync_does_not_report_peer_sync_as_globally_disabled() {
+        let runtime = HaRuntime::new(HaConfig {
+            mode: HaMode::ActiveStandby,
+            sync_source_url: Some("https://active.internal.example".to_string()),
+            ..HaConfig::default()
+        });
+        let status = runtime.status().await;
+        assert_eq!(status.peer_count, 0);
+        assert_eq!(status.sync_disabled_reason, None);
     }
 
     #[tokio::test]
