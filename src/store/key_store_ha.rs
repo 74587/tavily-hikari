@@ -959,15 +959,21 @@ impl KeyStore {
         conn: &mut sqlx::pool::PoolConnection<Sqlite>,
         channel: HaSyncChannel,
     ) -> Result<i64, ProxyError> {
-        Ok(
-            sqlx::query_scalar::<_, Option<i64>>(&format!(
-                "SELECT MAX(seq) FROM {}",
-                quote_sqlite_identifier(ha_channel_event_table(channel))
-            ))
-            .fetch_one(&mut **conn)
-            .await?
-            .unwrap_or(0),
+        let table_name = ha_channel_event_table(channel);
+        let max_row_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MAX(seq) FROM {}",
+            quote_sqlite_identifier(table_name)
+        ))
+        .fetch_one(&mut **conn)
+        .await?
+        .unwrap_or(0);
+        let persisted_seq: Option<i64> = sqlx::query_scalar(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?",
         )
+        .bind(table_name)
+        .fetch_optional(&mut **conn)
+        .await?;
+        Ok(max_row_seq.max(persisted_seq.unwrap_or(0)))
     }
 
     async fn validate_ha_events_cursor_on_conn(

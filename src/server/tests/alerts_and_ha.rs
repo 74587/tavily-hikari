@@ -1791,6 +1791,18 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
     assert_eq!(health.retention_secs, 72 * 60 * 60);
     assert!(!health.expired_backlog);
 
+    sqlx::query("DELETE FROM ha_outbox")
+        .execute(&pool)
+        .await
+        .expect("delete retained control events");
+    let expired_health = proxy
+        .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-a")
+        .await
+        .expect("read expired channel health");
+    assert_eq!(expired_health.high_watermark, 2);
+    assert_eq!(expired_health.cursor_state, "expired_backlog");
+    assert!(expired_health.expired_backlog);
+
     pool.close().await;
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
