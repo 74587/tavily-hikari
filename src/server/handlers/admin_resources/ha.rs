@@ -418,14 +418,19 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     .get_ha_sync_watermark(&watermark_name)
                     .await
                     .ok()
-                    .flatten()
-                    .filter(|value| *value > 0);
-                applied_seq.map(|acked_seq| tavily_hikari::HaChannelHealthView {
+                    .flatten();
+                let acked_seq = applied_seq.filter(|value| *value > 0);
+                Some(tavily_hikari::HaChannelHealthView {
                     channel,
-                    acked_seq: Some(acked_seq),
-                    high_watermark: acked_seq,
-                    ack_lag: Some(0),
-                    cursor_state: "healthy".to_string(),
+                    acked_seq,
+                    high_watermark: acked_seq.unwrap_or(0),
+                    ack_lag: acked_seq.map(|_| 0),
+                    cursor_state: if acked_seq.is_some() {
+                        "healthy"
+                    } else {
+                        "baseline_required"
+                    }
+                    .to_string(),
                     retention_secs: match channel {
                         tavily_hikari::HaSyncChannel::Control => 72 * 60 * 60,
                         tavily_hikari::HaSyncChannel::Billing

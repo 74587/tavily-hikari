@@ -320,18 +320,34 @@ impl KeyStore {
         let allowed_resources = ha_channel_allowed_resources_sql(channel);
         let (has_retained_after_ack, has_retained_gap_after_ack) =
             if let Some(acked) = acked_seq {
-                let sql = format!(
-                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ?), EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.resource IN ({allowed_resources}) AND next.seq = ? + 1))"
-                );
-                sqlx::query_as::<_, (bool, bool)>(&sql)
-                    .bind(threshold)
-                    .bind(acked)
-                    .bind(threshold)
-                    .bind(acked)
-                    .bind(threshold)
-                    .bind(acked)
-                    .fetch_one(&mut *conn)
-                    .await?
+                let has_retained_after_ack: bool = sqlx::query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?)"
+                ))
+                .bind(threshold)
+                .bind(acked)
+                .fetch_one(&mut *conn)
+                .await?;
+                let first_retained_seq: Option<i64> = sqlx::query_scalar(&format!(
+                    "SELECT MIN(seq) FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?"
+                ))
+                .bind(threshold)
+                .bind(acked)
+                .fetch_one(&mut *conn)
+                .await?;
+                let has_internal_gap: bool = sqlx::query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} AS later WHERE later.created_at >= ? AND later.resource IN ({allowed_resources}) AND later.seq > ? AND later.seq < ? AND NOT EXISTS (SELECT 1 FROM {table} AS next WHERE next.created_at >= ? AND next.resource IN ({allowed_resources}) AND next.seq = later.seq + 1))"
+                ))
+                .bind(threshold)
+                .bind(acked)
+                .bind(high_watermark)
+                .bind(threshold)
+                .fetch_one(&mut *conn)
+                .await?;
+                (
+                    has_retained_after_ack,
+                    first_retained_seq.is_some_and(|first| first > acked + 1)
+                        || has_internal_gap,
+                )
             } else {
                 (false, false)
             };
@@ -969,20 +985,80 @@ impl KeyStore {
         channel: HaSyncChannel,
     ) -> Result<i64, ProxyError> {
         let table_name = ha_channel_event_table(channel);
-        let max_row_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            "SELECT MAX(seq) FROM {}",
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        let max_valid_row_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MAX(seq) FROM {} WHERE resource IN ({allowed_resources})",
             quote_sqlite_identifier(table_name)
         ))
         .fetch_one(&mut **conn)
         .await?
         .unwrap_or(0);
-        let persisted_seq: Option<i64> = sqlx::query_scalar(
+        let has_sync_watermarks: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ha_sync_watermarks')",
+        )
+        .fetch_one(&mut **conn)
+        .await?;
+        let persisted_valid_seq: Option<i64> = if has_sync_watermarks {
+            sqlx::query_scalar("SELECT watermark FROM ha_sync_watermarks WHERE name = ?")
+                .bind(ha_channel_valid_watermark_name(channel))
+                .fetch_optional(&mut **conn)
+                .await?
+        } else {
+            None
+        };
+        if let Some(persisted_valid_seq) = persisted_valid_seq {
+            return Ok(max_valid_row_seq.max(persisted_valid_seq));
+        }
+        let sequence_seq: Option<i64> = sqlx::query_scalar(
             "SELECT seq FROM sqlite_sequence WHERE name = ?",
         )
         .bind(table_name)
         .fetch_optional(&mut **conn)
         .await?;
-        Ok(max_row_seq.max(persisted_seq.unwrap_or(0)))
+        Ok(max_valid_row_seq.max(sequence_seq.unwrap_or(0)))
+    }
+
+    async fn remember_ha_channel_valid_watermark_on_conn(
+        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        channel: HaSyncChannel,
+        updated_at: i64,
+    ) -> Result<(), ProxyError> {
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        let max_valid_seq: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT MAX(seq) FROM {table} WHERE resource IN ({allowed_resources})"
+        ))
+        .fetch_one(&mut **conn)
+        .await?;
+        let Some(max_valid_seq) = max_valid_seq else {
+            return Ok(());
+        };
+        let has_sync_watermarks: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ha_sync_watermarks')",
+        )
+        .fetch_one(&mut **conn)
+        .await?;
+        if !has_sync_watermarks {
+            return Ok(());
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO ha_sync_watermarks (
+                name, source_node_id, target_node_id, watermark, updated_at, detail
+            )
+            VALUES (?, NULL, NULL, ?, ?, 'outbox_valid_high_watermark')
+            ON CONFLICT(name) DO UPDATE SET
+                watermark = MAX(ha_sync_watermarks.watermark, excluded.watermark),
+                updated_at = excluded.updated_at,
+                detail = excluded.detail
+            "#,
+        )
+        .bind(ha_channel_valid_watermark_name(channel))
+        .bind(max_valid_seq)
+        .bind(updated_at)
+        .execute(&mut **conn)
+        .await?;
+        Ok(())
     }
 
     async fn validate_ha_events_cursor_on_conn(
@@ -1650,6 +1726,10 @@ impl HaEventsReadSession {
 
 fn ha_trigger_name(channel: HaSyncChannel, table: &str, suffix: &str) -> String {
     format!("trg_ha_{}_{}_{}", channel.as_str(), table, suffix)
+}
+
+fn ha_channel_valid_watermark_name(channel: HaSyncChannel) -> String {
+    format!("local_ha_{}_valid_seq", channel.as_str())
 }
 
 fn sanitize_ha_resource_payload(
@@ -2827,6 +2907,13 @@ impl KeyStore {
             HaSyncChannel::Billing,
             HaSyncChannel::Runtime,
         ] {
+            let mut watermark_conn = self.pool.acquire().await?;
+            Self::remember_ha_channel_valid_watermark_on_conn(
+                &mut watermark_conn,
+                channel,
+                self.backend_time.now_ts(),
+            )
+            .await?;
             let retention_secs = ha_channel_retention_secs(channel);
             let threshold = self.backend_time.now_ts() - retention_secs;
             let mut channel_deleted_rows = 0_i64;
@@ -2987,7 +3074,9 @@ impl KeyStore {
     ) -> Result<HaOutboxGcReport, ProxyError> {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
-        let mut conn = self.pool.acquire().await?;
+        let mut conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
+            .await
+            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
         let result = async {
             sqlx::query("PRAGMA busy_timeout = 100")
                 .execute(&mut *conn)
@@ -3001,6 +3090,12 @@ impl KeyStore {
                 HaSyncChannel::Billing,
                 HaSyncChannel::Runtime,
             ] {
+                Self::remember_ha_channel_valid_watermark_on_conn(
+                    &mut conn,
+                    channel,
+                    self.backend_time.now_ts(),
+                )
+                .await?;
                 let retention_secs = ha_channel_retention_secs(channel);
                 let threshold = self.backend_time.now_ts() - retention_secs;
                 let mut channel_deleted_rows = 0_i64;

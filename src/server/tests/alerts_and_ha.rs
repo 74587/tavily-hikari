@@ -1801,6 +1801,60 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
     assert_eq!(health.retention_secs, 72 * 60 * 60);
     assert!(!health.expired_backlog);
 
+    sqlx::query("DELETE FROM ha_outbox WHERE seq = 2")
+        .execute(&pool)
+        .await
+        .expect("delete middle event for gap probe");
+    proxy
+        .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-gap", 1)
+        .await
+        .expect("ack gap probe watermark");
+    let gap_health = proxy
+        .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-gap")
+        .await
+        .expect("read gap channel health");
+    assert_eq!(gap_health.cursor_state, "expired_backlog");
+
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('upsert', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, 'checksum-d')
+        "#,
+    )
+    .bind(now - 10)
+    .execute(&pool)
+    .await
+    .expect("insert fourth outbox row");
+    proxy
+        .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-valid", 4)
+        .await
+        .expect("ack latest valid watermark");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('legacy', 'removed_resource', 'legacy-1', 'delete', '{}', ?, 'checksum-legacy')
+        "#,
+    )
+    .bind(now - 5)
+    .execute(&pool)
+    .await
+    .expect("insert invalid legacy outbox row");
+    proxy
+        .gc_ha_outbox_with_options(tavily_hikari::HaOutboxGcOptions {
+            batch_size: 10,
+            max_batches: 8,
+            max_runtime_secs: 20,
+            inter_batch_sleep_ms: 0,
+        })
+        .await
+        .expect("gc invalid legacy outbox row");
+    let valid_health = proxy
+        .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-valid")
+        .await
+        .expect("read valid channel health after legacy gc");
+    assert_eq!(valid_health.high_watermark, 4);
+    assert_eq!(valid_health.cursor_state, "healthy");
+
     proxy
         .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-zero", 0)
         .await
@@ -1819,7 +1873,7 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .ha_peer_channel_health(tavily_hikari::HaSyncChannel::Control, "standby-a")
         .await
         .expect("read expired channel health");
-    assert_eq!(expired_health.high_watermark, 3);
+    assert_eq!(expired_health.high_watermark, 4);
     assert_eq!(expired_health.cursor_state, "expired_backlog");
     assert!(expired_health.expired_backlog);
 
