@@ -60,15 +60,18 @@ export function AnchoredInfoDisclosure({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // Capture before modal primitives so Escape dismisses this disclosure first.
+      event.preventDefault()
+      event.stopPropagation()
       setOpen(false)
       triggerRef.current?.focus()
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleKeyDown, true)
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keydown', handleKeyDown, true)
     }
   }, [bubbleRef, open])
 

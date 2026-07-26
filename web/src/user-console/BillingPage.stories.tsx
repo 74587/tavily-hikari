@@ -1,4 +1,3 @@
-import { useLayoutEffect, type ReactNode } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 
@@ -30,34 +29,6 @@ function formatMoney(value: number): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
-}
-
-function MobileViewportFrame({ children }: { children: ReactNode }): JSX.Element {
-  useLayoutEffect(() => {
-    const originalMatchMedia = window.matchMedia.bind(window)
-    const mobileMatchMedia: typeof window.matchMedia = (query) => {
-      const media = originalMatchMedia(query)
-      if (!query.includes('max-width: 767px')) return media
-
-      return {
-        matches: true,
-        media: media.media,
-        onchange: media.onchange,
-        addListener: media.addListener.bind(media),
-        removeListener: media.removeListener.bind(media),
-        addEventListener: media.addEventListener.bind(media),
-        removeEventListener: media.removeEventListener.bind(media),
-        dispatchEvent: media.dispatchEvent.bind(media),
-      } as MediaQueryList
-    }
-
-    window.matchMedia = mobileMatchMedia
-    return () => {
-      window.matchMedia = originalMatchMedia
-    }
-  }, [])
-
-  return <div style={{ width: 390, maxWidth: '100%', margin: '0 auto' }}>{children}</div>
 }
 
 const storyNow = Math.floor(Date.now() / 1000)
@@ -718,6 +689,7 @@ export const Default: Story = {
     await expect(preview.getByRole('tooltip')).toHaveTextContent('already scheduled for this month')
     await userEvent.keyboard('{Escape}')
     await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
   },
 }
 
@@ -783,11 +755,6 @@ export const Loading: Story = {
 
 export const Mobile: Story = {
   parameters: mobileViewport,
-  render: (args) => (
-    <MobileViewportFrame>
-      <BillingPageStory {...args} />
-    </MobileViewportFrame>
-  ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: 'Preview' }))
@@ -798,5 +765,8 @@ export const Mobile: Story = {
     await userEvent.click(help)
     await expect(preview.getByRole('tooltip')).toHaveTextContent('After order')
     await expect(preview.getByRole('tooltip')).toHaveTextContent('base quota and other adjustments')
+    await userEvent.keyboard('{Escape}')
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
   },
 }
