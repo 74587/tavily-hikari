@@ -381,7 +381,9 @@ async fn attach_internal_source_channel_health(
         tavily_hikari::HaSyncChannel::Billing,
         tavily_hikari::HaSyncChannel::Runtime,
     ] {
-        let high_watermark = state.proxy.ha_channel_high_watermark(channel).await.unwrap_or(0);
+        let high_watermark_result = state.proxy.ha_channel_high_watermark(channel).await;
+        let source_unavailable = high_watermark_result.is_err();
+        let high_watermark = high_watermark_result.unwrap_or(0);
         let peer_health = match peer_node_id {
             Some(peer_node_id) => state.proxy.ha_peer_channel_health(channel, peer_node_id).await.ok(),
             None => None,
@@ -391,7 +393,9 @@ async fn attach_internal_source_channel_health(
             acked_seq: None,
             high_watermark,
             ack_lag: None,
-            cursor_state: if peer_health.as_ref().is_some_and(|health| health.expired_backlog) {
+            cursor_state: if source_unavailable {
+                "unavailable"
+            } else if peer_health.as_ref().is_some_and(|health| health.expired_backlog) {
                 "expired_backlog"
             } else {
                 "source"
@@ -469,26 +473,33 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
     }
     for peer in &mut status.peer_nodes {
         let mut health = Vec::with_capacity(3);
-        for channel in [
-            tavily_hikari::HaSyncChannel::Control,
-            tavily_hikari::HaSyncChannel::Billing,
-            tavily_hikari::HaSyncChannel::Runtime,
-        ] {
-            let value = if status.role == tavily_hikari::HaNodeRole::Standby {
-                let source_high_watermark = peer
+            for channel in [
+                tavily_hikari::HaSyncChannel::Control,
+                tavily_hikari::HaSyncChannel::Billing,
+                tavily_hikari::HaSyncChannel::Runtime,
+            ] {
+                let value = if status.role == tavily_hikari::HaNodeRole::Standby {
+                let source_health = peer
                     .channel_health
                     .iter()
                     .find(|health| health.channel == channel)
-                    .map(|health| health.high_watermark);
-                let source_expired_backlog = peer
-                    .channel_health
-                    .iter()
-                    .find(|health| health.channel == channel)
+                    .cloned();
+                let source_high_watermark = source_health.as_ref().map(|health| health.high_watermark);
+                let source_expired_backlog = source_health
+                    .as_ref()
                     .is_some_and(|health| health.expired_backlog);
+                let source_unavailable = source_health
+                    .as_ref()
+                    .is_none_or(|health| health.cursor_state == "unavailable");
                 let watermark_name = if state.ha.dual_active_enabled() {
                     format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
                 } else {
                     format!("standby_{}_applied_seq", channel.as_str())
+                };
+                let baseline_name = if state.ha.dual_active_enabled() {
+                    format!("peer_{}_{}_baseline_applied", peer.node_id, channel.as_str())
+                } else {
+                    format!("standby_{}_baseline_applied", channel.as_str())
                 };
                 let applied_seq = state
                     .proxy
@@ -496,7 +507,18 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     .await
                     .ok()
                     .flatten();
-                let acked_seq = applied_seq.filter(|value| *value > 0);
+                let baseline_applied = state
+                    .proxy
+                    .get_ha_sync_watermark(&baseline_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| value > 0);
+                let acked_seq = match applied_seq {
+                    Some(value) if value > 0 => Some(value),
+                    Some(0) if baseline_applied => Some(0),
+                    _ => None,
+                };
                 let high_watermark = source_high_watermark.unwrap_or(0);
                 Some(tavily_hikari::HaChannelHealthView {
                     channel,
@@ -505,7 +527,9 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     ack_lag: source_high_watermark
                         .zip(acked_seq)
                         .map(|(high, acked)| high.saturating_sub(acked).max(0)),
-                    cursor_state: if source_expired_backlog {
+                    cursor_state: if source_unavailable {
+                        "unavailable"
+                    } else if source_expired_backlog {
                         "expired_backlog"
                     } else if source_high_watermark.is_none() {
                         "unavailable"
