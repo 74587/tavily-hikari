@@ -721,6 +721,12 @@ export const Default: Story = {
     await userEvent.keyboard('{Escape}')
     await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
     await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
+
+    await userEvent.hover(preview.getByRole('button', { name: 'Added by order' }))
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('after payment succeeds')
+    await userEvent.keyboard('{Escape}')
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()
   },
 }
 

@@ -35,6 +35,7 @@ export function AnchoredInfoDisclosure({
 }: AnchoredInfoDisclosureProps): JSX.Element {
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const pointerHoverRef = useRef(false)
+  const suppressFocusOpenRef = useRef(false)
   const bubbleId = useId()
   const [open, setOpen] = useState(false)
   const { layerRef: bubbleRef, position } = useAnchoredFloatingLayer<HTMLDivElement>({
@@ -64,7 +65,11 @@ export function AnchoredInfoDisclosure({
       event.preventDefault()
       event.stopPropagation()
       setOpen(false)
+      suppressFocusOpenRef.current = true
       triggerRef.current?.focus()
+      if (document.activeElement === triggerRef.current) {
+        suppressFocusOpenRef.current = false
+      }
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
@@ -92,6 +97,10 @@ export function AnchoredInfoDisclosure({
   const handleFocus = (event: FocusEvent<HTMLButtonElement>) => {
     onFocus?.(event)
     if (event.defaultPrevented) return
+    if (suppressFocusOpenRef.current) {
+      suppressFocusOpenRef.current = false
+      return
+    }
     if (event.currentTarget.matches(':focus-visible')) {
       setOpen(true)
     }
