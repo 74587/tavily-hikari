@@ -867,6 +867,7 @@ async fn emit_ha_sync_perf_event(
             event = perf.event,
             elapsed_ms = perf.elapsed.as_millis() as u64,
             source_url = perf.source_url.unwrap_or(""),
+            peer_node_id = perf.peer_node_id.unwrap_or(""),
             channel = perf.channel.as_str(),
             row_count = perf.row_count as u64,
             payload_bytes = perf.payload_bytes as u64,
@@ -894,9 +895,15 @@ async fn emit_ha_sync_perf_event(
             component = "ha",
             event = perf.event,
             elapsed_ms = perf.elapsed.as_millis() as u64,
+            source_url = perf.source_url.unwrap_or(""),
+            peer_node_id = perf.peer_node_id.unwrap_or(""),
             channel = perf.channel.as_str(),
             row_count = perf.row_count as u64,
             payload_bytes = perf.payload_bytes as u64,
+            high_watermark = perf.high_watermark,
+            after_seq = perf.after_seq,
+            next_seq = perf.next_seq,
+            detail = perf.detail.unwrap_or(""),
             "ha perf"
         );
     }

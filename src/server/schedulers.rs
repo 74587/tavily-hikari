@@ -56,6 +56,7 @@ const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
+const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
@@ -847,6 +848,40 @@ async fn run_request_logs_body_gc_index_ensure_claimed_job(
                 .proxy
                 .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
                 .await;
+            let available_at = state
+                .proxy
+                .backend_time()
+                .now_ts()
+                .saturating_add(REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS);
+            match enqueue_scheduled_job_at(
+                state.as_ref(),
+                REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE,
+                None,
+                TRIGGER_SOURCE_AUTO,
+                available_at,
+            )
+            .await
+            {
+                Ok(retry_job_id) => tracing::warn!(
+                    component = "request_logs_gc",
+                    event = "body_gc_index_retry_queued",
+                    failed_job_id = job_id,
+                    retry_job_id,
+                    retry_delay_secs = REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS,
+                    available_at,
+                    err = %err,
+                    "request-log body GC index build failed; retry queued"
+                ),
+                Err(retry_err) => tracing::warn!(
+                    component = "request_logs_gc",
+                    event = "body_gc_index_retry_enqueue_failed",
+                    failed_job_id = job_id,
+                    retry_delay_secs = REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS,
+                    err = %err,
+                    retry_err = %retry_err,
+                    "request-log body GC index build failed and retry could not be queued"
+                ),
+            }
             false
         }
     }

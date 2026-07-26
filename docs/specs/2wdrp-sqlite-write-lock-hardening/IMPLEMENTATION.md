@@ -155,7 +155,9 @@
 - Body cleanup caches debug-share and heavy-usage retention context per user for the whole bounded
   pass. Its report includes candidate scan count, unique users, cache hits, query/decision/write
   timings, and a progress status. `observability.idx_request_logs_body_gc_cursor` is created and
-  analyzed idempotently by a low-priority maintenance job after the worker is ready.
+  analyzed idempotently by a low-priority maintenance job after the worker is ready. A failed build
+  persists another delayed low-priority attempt, so transient SQLite contention does not leave the
+  cursor index absent until the next restart.
 - Manual `POST /api/jobs/trigger` now accepts/coalesces queue work and returns the representative
   `job_id` instead of exposing `db_job_execution_busy`. The response also exposes representative
   queue hints (`status`, `coalesced`, `promoted`) so the admin UI can distinguish “newly queued”
