@@ -2,6 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn user_business_calls_1h_summary_and_series_track_real_upstream_requests_only() {
+    let _env_guard = env_lock().lock_owned().await;
     let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_000_000);
     let db_path = temp_db_path("user-business-calls-1h-live-window");
     let db_str = db_path.to_string_lossy().to_string();

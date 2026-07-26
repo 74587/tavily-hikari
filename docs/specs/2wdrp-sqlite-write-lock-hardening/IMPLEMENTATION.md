@@ -105,8 +105,8 @@
   per-row trigger update for expired request payloads while keeping normal request log writes and
   updates covered by the trigger set.
 - The daily `request_logs_gc` scheduler now runs one bounded cleanup pass per
-  `scheduled_jobs` row. If backlog remains, the scheduler sleeps for the catch-up interval and
-  claims a fresh job for the next pass instead of keeping one long-running `running` row open.
+  `scheduled_jobs` row. If backlog remains, it persists an automatic continuation with a
+  five-minute `available_at` delay instead of keeping one long-running `running` row open.
 - Scheduled jobs now distinguish `trigger_source` from `job_type`, use an atomic claim path to avoid
   duplicate active work, and expose manual trigger entrypoints for maintenance/admin jobs.
 - `quota_sync` now uses a hard `/usage` timeout, a bounded job runtime budget, and claim-time stale
@@ -148,6 +148,16 @@
 - Request-log GC now requeues itself through the persisted queue when a bounded pass reports
   `completed=false`, so backlog catch-up no longer depends on one scheduler loop keeping a running
   row alive.
+- `scheduled_jobs` now has an `available_at` eligibility timestamp and orders claims by effective
+  priority, availability, admission time, and id. Non-manual jobs age one priority every five
+  minutes down to effective priority `2`; manual jobs keep their original priority and can unlock a
+  delayed representative row immediately.
+- Body cleanup caches debug-share and heavy-usage retention context per user for the whole bounded
+  pass. Its report includes candidate scan count, unique users, cache hits, query/decision/write
+  timings, and a progress status. `observability.idx_request_logs_body_gc_cursor` is created and
+  analyzed idempotently by a low-priority maintenance job after the worker is ready. A failed build
+  persists another delayed low-priority attempt, so transient SQLite contention does not leave the
+  cursor index absent until the next restart.
 - Manual `POST /api/jobs/trigger` now accepts/coalesces queue work and returns the representative
   `job_id` instead of exposing `db_job_execution_busy`. The response also exposes representative
   queue hints (`status`, `coalesced`, `promoted`) so the admin UI can distinguish “newly queued”
@@ -281,8 +291,9 @@
   in-memory paging/grouping. Those paths page and aggregate in SQL, canonicalize `request_kind`
   before filtering/grouping, and rely on dedicated `auth_token_logs` indexes for
   `failure_kind/result_status/token_id + created_at` windows.
-- Service startup now abandons leftover `queued` and `running` maintenance rows from the previous
-  process lifetime before starting the new worker.
+- Service startup abandons leftover `queued` and `running` maintenance rows from the previous
+  process lifetime before starting the new worker, except a delayed automatic `request_logs_gc`
+  continuation. The exception preserves its durable `available_at` backoff across restart.
 - Added `request_logs_gc_once` as a one-shot operational binary. It supports JSON output and
   `--run-until-complete` for deterministic low-resource validation against production-derived
   database samples.

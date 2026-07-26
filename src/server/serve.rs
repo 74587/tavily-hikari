@@ -777,6 +777,22 @@ fn spawn_ha_standby_sync_task(state: Arc<AppState>) {
 }
 
 fn spawn_ha_peer_sync_task(state: Arc<AppState>) {
+    let peer_count = state
+        .ha
+        .peer_nodes()
+        .into_iter()
+        .filter(|peer| peer.node_id != state.ha.node_id())
+        .count();
+    if peer_count == 0 {
+        tracing::warn!(
+            component = "ha",
+            event = "peer_sync_disabled",
+            peer_count,
+            sync_disabled_reason = "no_configured_peers",
+            "HA peer sync disabled because no peers are configured"
+        );
+        return;
+    }
     let Some(internal_token) = state.ha.internal_token() else {
         tracing::warn!(
             component = "ha",
@@ -811,6 +827,87 @@ fn ha_peer_sync_should_run(status: &tavily_hikari::HaStatusView) -> bool {
         status.role,
         tavily_hikari::HaNodeRole::FullMaster | tavily_hikari::HaNodeRole::Standby
     )
+}
+
+struct HaSyncPerfEvent<'a> {
+    event: &'static str,
+    elapsed: Duration,
+    channel: tavily_hikari::HaSyncChannel,
+    row_count: usize,
+    payload_bytes: usize,
+    source_url: Option<&'a str>,
+    peer_node_id: Option<&'a str>,
+    high_watermark: Option<i64>,
+    after_seq: Option<i64>,
+    next_seq: Option<i64>,
+    detail: Option<&'a str>,
+}
+
+async fn emit_ha_sync_perf_event(
+    state: &AppState,
+    perf: HaSyncPerfEvent<'_>,
+) -> Result<(), ProxyError> {
+    let sampling = tavily_hikari::sample_ha_perf_event(perf.event, perf.channel, perf.elapsed);
+    let outbox = if sampling.capture_heavy_stats {
+        Some(
+            state
+                .proxy
+                .ha_channel_outbox_stats(perf.channel, perf.peer_node_id)
+                .await?,
+        )
+    } else {
+        None
+    };
+    if sampling.emit_info || sampling.capture_heavy_stats {
+        let memory = sampling
+            .capture_heavy_stats
+            .then(tavily_hikari::capture_runtime_memory_snapshot);
+        tracing::info!(
+            component = "ha",
+            event = perf.event,
+            elapsed_ms = perf.elapsed.as_millis() as u64,
+            source_url = perf.source_url.unwrap_or(""),
+            peer_node_id = perf.peer_node_id.unwrap_or(""),
+            channel = perf.channel.as_str(),
+            row_count = perf.row_count as u64,
+            payload_bytes = perf.payload_bytes as u64,
+            high_watermark = perf.high_watermark,
+            after_seq = perf.after_seq,
+            next_seq = perf.next_seq,
+            detail = perf.detail.unwrap_or(""),
+            outbox_sampled = outbox.is_some(),
+            outbox_row_count = outbox.as_ref().map(|value| value.row_count).unwrap_or_default(),
+            outbox_oldest_age_secs = outbox.as_ref().map(|value| value.oldest_age_secs),
+            outbox_ack_lag = outbox.as_ref().map(|value| value.ack_lag),
+            memory_sampled = memory.is_some(),
+            memory_current_bytes = memory.and_then(|value| value.memory_current_bytes),
+            memory_limit_bytes = memory.and_then(|value| value.memory_limit_bytes),
+            headroom_bytes = memory.and_then(|value| value.headroom_bytes),
+            process_rss_bytes = memory.and_then(|value| value.process_rss_bytes),
+            child_process_rss_bytes = memory.and_then(|value| value.child_process_rss_bytes),
+            process_group_rss_bytes = memory.and_then(|value| value.process_group_rss_bytes),
+            process_hwm_bytes = memory.and_then(|value| value.process_hwm_bytes),
+            process_swap_bytes = memory.and_then(|value| value.process_swap_bytes),
+            "ha perf"
+        );
+    } else {
+        tracing::debug!(
+            component = "ha",
+            event = perf.event,
+            elapsed_ms = perf.elapsed.as_millis() as u64,
+            source_url = perf.source_url.unwrap_or(""),
+            peer_node_id = perf.peer_node_id.unwrap_or(""),
+            channel = perf.channel.as_str(),
+            row_count = perf.row_count as u64,
+            payload_bytes = perf.payload_bytes as u64,
+            high_watermark = perf.high_watermark,
+            after_seq = perf.after_seq,
+            next_seq = perf.next_seq,
+            detail = perf.detail.unwrap_or(""),
+            "ha perf"
+        );
+    }
+    Ok(())
 }
 
 fn is_ha_retryable_foreign_key_gap(
@@ -898,34 +995,23 @@ async fn run_ha_standby_sync_once(
             )
             .await?;
             next_seq = result.high_watermark;
-            let outbox = state
-                .proxy
-                .ha_channel_outbox_stats(channel, Some(&local_node_id))
-                .await?;
-            let memory = tavily_hikari::capture_runtime_memory_snapshot();
-            tracing::info!(
-                component = "ha",
-                event = "standby_sync_baseline_completed",
-                elapsed_ms = baseline_started.elapsed().as_millis() as u64,
-                source_url,
-                channel = channel.as_str(),
-                row_count = result.row_count as u64,
-                payload_bytes = result.payload_bytes as u64,
-                high_watermark = result.high_watermark,
-                baseline_applied = true,
-                outbox_row_count = outbox.row_count,
-                outbox_oldest_age_secs = outbox.oldest_age_secs,
-                outbox_ack_lag = outbox.ack_lag,
-                memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
-                memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
-                headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
-                process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
-                child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
-                process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
-                process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
-                process_swap_bytes = memory.process_swap_bytes.unwrap_or_default(),
-                "ha perf"
-            );
+            emit_ha_sync_perf_event(
+                state.as_ref(),
+                HaSyncPerfEvent {
+                    event: "standby_sync_baseline_completed",
+                    elapsed: baseline_started.elapsed(),
+                    channel,
+                    row_count: result.row_count,
+                    payload_bytes: result.payload_bytes,
+                    source_url: Some(source_url),
+                    peer_node_id: Some(&local_node_id),
+                    high_watermark: Some(result.high_watermark),
+                    after_seq: None,
+                    next_seq: Some(next_seq),
+                    detail: Some("baseline_applied"),
+                },
+            )
+            .await?;
             state
                 .proxy
                 .persist_ha_sync_watermark(
@@ -1056,35 +1142,23 @@ async fn run_ha_standby_sync_once(
                 .await?;
             state.proxy.flush_ha_state_writes().await?;
         }
-        let outbox = state
-            .proxy
-            .ha_channel_outbox_stats(channel, Some(&local_node_id))
-            .await?;
-        let memory = tavily_hikari::capture_runtime_memory_snapshot();
-        tracing::info!(
-            component = "ha",
-            event = "standby_sync_events_completed",
-            elapsed_ms = events_started.elapsed().as_millis() as u64,
-            source_url,
-            channel = channel.as_str(),
-            row_count = result.row_count as u64,
-            payload_bytes = result.payload_bytes as u64,
-            high_watermark = result.high_watermark,
-            after_seq = applied_seq,
-            next_seq,
-            outbox_row_count = outbox.row_count,
-            outbox_oldest_age_secs = outbox.oldest_age_secs,
-            outbox_ack_lag = outbox.ack_lag,
-            memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
-            memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
-            headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
-            process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
-            child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
-            process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
-            process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
-            process_swap_bytes = memory.process_swap_bytes.unwrap_or_default(),
-            "ha perf"
-        );
+        emit_ha_sync_perf_event(
+            state.as_ref(),
+            HaSyncPerfEvent {
+                event: "standby_sync_events_completed",
+                elapsed: events_started.elapsed(),
+                channel,
+                row_count: result.row_count,
+                payload_bytes: result.payload_bytes,
+                source_url: Some(source_url),
+                peer_node_id: Some(&local_node_id),
+                high_watermark: Some(result.high_watermark),
+                after_seq: Some(applied_seq),
+                next_seq: Some(next_seq),
+                detail: None,
+            },
+        )
+        .await?;
         let ack_target = format!("{}/api/admin/ha/events/ack", source_url.trim_end_matches('/'));
         let _ = client
             .post(ack_target)
@@ -1415,6 +1489,7 @@ fn spawn_business_background_tasks(state: Arc<AppState>) {
     spawn_mcp_sessions_gc_scheduler(state.clone());
     spawn_mcp_session_init_backoffs_gc_scheduler(state.clone());
     spawn_request_logs_gc_scheduler(state.clone());
+    spawn_request_logs_body_gc_index_ensure_scheduler(state.clone());
     if state.linuxdo_oauth.is_user_sync_scheduler_enabled() {
         spawn_linuxdo_user_status_sync_scheduler(state.clone());
     }
@@ -1565,33 +1640,27 @@ async fn apply_ha_baseline_response_stream(
     }
     let result = session.finish().await.map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
     refresh_admin_password_state_after_ha_apply(state, channel).await?;
-    let outbox = state.proxy.ha_channel_outbox_stats(channel, None).await?;
-    let memory = tavily_hikari::capture_runtime_memory_snapshot();
-    tracing::info!(
-        component = "ha",
-        event = "baseline_import_completed",
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        channel = channel.as_str(),
-        baseline_mode = match mode {
-            tavily_hikari::HaBaselineApplyMode::Replace => "replace",
-            tavily_hikari::HaBaselineApplyMode::Upsert => "upsert",
+    let detail = match mode {
+        tavily_hikari::HaBaselineApplyMode::Replace => "replace",
+        tavily_hikari::HaBaselineApplyMode::Upsert => "upsert",
+    };
+    emit_ha_sync_perf_event(
+        state,
+        HaSyncPerfEvent {
+            event: "baseline_import_completed",
+            elapsed: started.elapsed(),
+            channel,
+            row_count: result.row_count,
+            payload_bytes: result.payload_bytes,
+            source_url: None,
+            peer_node_id: peer_import_node_id,
+            high_watermark: Some(result.high_watermark),
+            after_seq: None,
+            next_seq: None,
+            detail: Some(detail),
         },
-        row_count = result.row_count as u64,
-        peer_import_node = peer_import_node_id.unwrap_or(""),
-        payload_bytes = result.payload_bytes as u64,
-        outbox_row_count = outbox.row_count,
-        outbox_oldest_age_secs = outbox.oldest_age_secs,
-        outbox_ack_lag = outbox.ack_lag,
-        memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
-        memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
-        headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
-        process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
-        child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
-        process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
-        process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
-        process_swap_bytes = memory.process_swap_bytes.unwrap_or_default(),
-        "ha perf"
-    );
+    )
+    .await?;
     Ok(result)
 }
 
@@ -1636,29 +1705,23 @@ async fn apply_ha_events_response_stream(
     }
     let result = session.finish().await.map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
     refresh_admin_password_state_after_ha_apply(state, channel).await?;
-    let outbox = state.proxy.ha_channel_outbox_stats(channel, None).await?;
-    let memory = tavily_hikari::capture_runtime_memory_snapshot();
-    tracing::info!(
-        component = "ha",
-        event = "events_import_completed",
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        channel = channel.as_str(),
-        row_count = result.row_count as u64,
-        peer_import_node = peer_import_node_id.unwrap_or(""),
-        payload_bytes = result.payload_bytes as u64,
-        outbox_row_count = outbox.row_count,
-        outbox_oldest_age_secs = outbox.oldest_age_secs,
-        outbox_ack_lag = outbox.ack_lag,
-        memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
-        memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
-        headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
-        process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
-        child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
-        process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
-        process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
-        process_swap_bytes = memory.process_swap_bytes.unwrap_or_default(),
-        "ha perf"
-    );
+    emit_ha_sync_perf_event(
+        state,
+        HaSyncPerfEvent {
+            event: "events_import_completed",
+            elapsed: started.elapsed(),
+            channel,
+            row_count: result.row_count,
+            payload_bytes: result.payload_bytes,
+            source_url: None,
+            peer_node_id: peer_import_node_id,
+            high_watermark: Some(result.high_watermark),
+            after_seq: None,
+            next_seq: None,
+            detail: None,
+        },
+    )
+    .await?;
     Ok(result)
 }
 

@@ -101,6 +101,8 @@ fn dual_active_peer_sync_runs_for_fenced_standby_until_leader_is_seeded() {
         message: Some(
             "dual-active leader key is missing; serving stays fenced until seeded".to_string(),
         ),
+        peer_count: 0,
+        sync_disabled_reason: Some("no_configured_peers".to_string()),
         peer_nodes: Vec::new(),
         planned_cutover_eligible: false,
     };
@@ -383,6 +385,8 @@ async fn persist_ha_status_snapshot_spawns_post_ready_pressure_rebuild_for_servi
         sync_lag_seconds: None,
         recovery_status: None,
         message: Some("promoted into business-serving role".to_string()),
+        peer_count: 0,
+        sync_disabled_reason: Some("no_configured_peers".to_string()),
         peer_nodes: Vec::new(),
         planned_cutover_eligible: false,
     };
@@ -530,6 +534,8 @@ async fn post_ready_serving_tasks_run_once_per_writable_tenure() {
         sync_lag_seconds: None,
         recovery_status: None,
         message: Some("promoted into business-serving role".to_string()),
+        peer_count: 0,
+        sync_disabled_reason: Some("no_configured_peers".to_string()),
         peer_nodes: Vec::new(),
         planned_cutover_eligible: false,
     };

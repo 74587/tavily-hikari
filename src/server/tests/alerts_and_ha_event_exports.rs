@@ -32,6 +32,8 @@ fn dual_active_standby_exports_billing_and_runtime_only_when_serving() {
         sync_lag_seconds: None,
         recovery_status: None,
         message: Some("dual-active leader key is missing; serving stays fenced until seeded".to_string()),
+        peer_count: 0,
+        sync_disabled_reason: Some("no_configured_peers".to_string()),
         peer_nodes: Vec::new(),
         planned_cutover_eligible: false,
     };
@@ -97,6 +99,8 @@ fn legacy_standby_cannot_export_billing_or_runtime_channels() {
         sync_lag_seconds: None,
         recovery_status: None,
         message: Some("standby waiting for source sync".to_string()),
+        peer_count: 0,
+        sync_disabled_reason: Some("no_configured_peers".to_string()),
         peer_nodes: Vec::new(),
         planned_cutover_eligible: false,
     };

@@ -15,6 +15,34 @@ struct RequestLogBodyGcCandidate {
 struct RequestLogBodyGcBatch {
     cleaned: i64,
     has_more: bool,
+    diagnostics: RequestLogBodyGcDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RequestLogBodyGcDiagnostics {
+    scanned_body_candidates: i64,
+    unique_retention_users: i64,
+    retention_context_cache_hits: i64,
+    body_candidate_query_elapsed_ms: u128,
+    body_retention_decision_elapsed_ms: u128,
+    body_write_elapsed_ms: u128,
+}
+
+impl RequestLogBodyGcDiagnostics {
+    fn merge(&mut self, other: Self) {
+        self.scanned_body_candidates += other.scanned_body_candidates;
+        self.unique_retention_users += other.unique_retention_users;
+        self.retention_context_cache_hits += other.retention_context_cache_hits;
+        self.body_candidate_query_elapsed_ms += other.body_candidate_query_elapsed_ms;
+        self.body_retention_decision_elapsed_ms += other.body_retention_decision_elapsed_ms;
+        self.body_write_elapsed_ms += other.body_write_elapsed_ms;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestLogBodyGcUserContext {
+    debug_shared: bool,
+    heavy_usage: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +104,25 @@ impl KeyStore {
             sqlx::query(sql).execute(&self.pool).await?;
         }
 
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_request_log_body_gc_cursor_index(&self) -> Result<(), ProxyError> {
+        if !self.table_exists("request_logs").await? {
+            return Ok(());
+        }
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS observability.idx_request_logs_body_gc_cursor
+            ON request_logs(created_at ASC, id ASC)
+            WHERE request_body IS NOT NULL OR response_body IS NOT NULL
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("ANALYZE observability.idx_request_logs_body_gc_cursor")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -445,9 +492,11 @@ impl KeyStore {
         settings: &RequestLogRetentionSettings,
         batch_size: i64,
         deadline: Instant,
+        retention_contexts: &mut std::collections::HashMap<String, RequestLogBodyGcUserContext>,
     ) -> Result<RequestLogBodyGcBatch, ProxyError> {
         let mut cleaned = 0_i64;
         let mut has_more = false;
+        let mut diagnostics = RequestLogBodyGcDiagnostics::default();
         let now = self.backend_time.now_ts();
         let mut cursor = self.get_request_log_body_gc_cursor().await?;
         let row_retention_threshold = configured_request_logs_retention_threshold_utc_ts_at(
@@ -469,9 +518,11 @@ impl KeyStore {
             && scanned < scan_limit
             && self.backend_time.instant_now() < deadline
         {
+            let query_started = self.backend_time.instant_now();
             let candidates = self
                 .fetch_request_log_body_gc_candidates(batch_size, after, row_retention_threshold)
                 .await?;
+            diagnostics.body_candidate_query_elapsed_ms += query_started.elapsed().as_millis();
             if candidates.is_empty() {
                 break;
             }
@@ -479,6 +530,7 @@ impl KeyStore {
             for candidate in candidates {
                 after = Some((candidate.created_at, candidate.id));
                 scanned += 1;
+                diagnostics.scanned_body_candidates += 1;
                 let request_body_slice = candidate.request_body.as_deref().unwrap_or(&[]);
                 let request_kind = canonicalize_request_log_request_kind(
                     &candidate.path,
@@ -491,19 +543,19 @@ impl KeyStore {
                     request_log_counts_business_quota(&request_kind.key, Some(request_body_slice));
                 let request_value_bucket =
                     request_value_bucket_for_request_log(&request_kind.key, Some(request_body_slice));
+                let decision_started = self.backend_time.instant_now();
                 let retention_decision = self
-                    .request_log_body_retention_decision(
+                    .request_log_body_retention_decision_for_gc(
                         settings,
                         candidate.request_user_id.as_deref(),
                         &candidate.result_status,
                         request_value_bucket,
-                        0,
-                        RequestLogBodyRetentionDecisionMode {
-                            include_debug_shared: true,
-                            include_heavy_usage: true,
-                        },
+                        retention_contexts,
+                        &mut diagnostics,
                     )
                     .await?;
+                diagnostics.body_retention_decision_elapsed_ms +=
+                    decision_started.elapsed().as_millis();
                 let retention_days = retention_decision.days;
                 if !Self::request_log_body_is_expired(
                     candidate.created_at,
@@ -548,6 +600,7 @@ impl KeyStore {
                 let request_body_sha256 = sha256_hex_bytes(request_body_slice);
                 let response_body_sha256 = sha256_hex_bytes(response_body_slice);
                 let mut retry_attempt = 0usize;
+                let write_started = self.backend_time.instant_now();
                 let result = loop {
                     match sqlx::query(
                         r#"
@@ -604,6 +657,7 @@ impl KeyStore {
                         }
                     }
                 };
+                diagnostics.body_write_elapsed_ms += write_started.elapsed().as_millis();
                 cleaned += result.rows_affected() as i64;
                 if cleaned >= batch_size
                     || scanned >= scan_limit
@@ -649,7 +703,11 @@ impl KeyStore {
             }
         }
 
-        Ok(RequestLogBodyGcBatch { cleaned, has_more })
+        Ok(RequestLogBodyGcBatch {
+            cleaned,
+            has_more,
+            diagnostics,
+        })
     }
 
     pub(crate) async fn delete_old_request_logs_bounded(
@@ -670,10 +728,17 @@ impl KeyStore {
         let mut deleted_rollups = 0_i64;
         let mut body_batch_has_more = false;
         let mut batches = 0_i64;
+        let mut retention_contexts = std::collections::HashMap::new();
+        let mut body_gc_diagnostics = RequestLogBodyGcDiagnostics::default();
 
         while batches < max_batches && self.backend_time.instant_now() < deadline {
             let body_batch = self
-                .clear_request_log_body_batch(settings, batch_size, deadline)
+                .clear_request_log_body_batch(
+                    settings,
+                    batch_size,
+                    deadline,
+                    &mut retention_contexts,
+                )
                 .await?;
             self.unlink_old_request_log_references_batch(threshold, batch_size)
                 .await?;
@@ -685,6 +750,7 @@ impl KeyStore {
                 .await?;
             body_batch_has_more = body_batch.has_more;
             cleaned_request_log_bodies += body_batch.cleaned;
+            body_gc_diagnostics.merge(body_batch.diagnostics);
             deleted_request_logs += request_deleted;
             deleted_rollups += rollup_deleted;
             batches += 1;
@@ -720,6 +786,21 @@ impl KeyStore {
             completed: !has_more,
             has_more,
             elapsed_ms: started.elapsed().as_millis(),
+            scanned_body_candidates: body_gc_diagnostics.scanned_body_candidates,
+            unique_retention_users: body_gc_diagnostics.unique_retention_users,
+            retention_context_cache_hits: body_gc_diagnostics.retention_context_cache_hits,
+            body_candidate_query_elapsed_ms: body_gc_diagnostics.body_candidate_query_elapsed_ms,
+            body_retention_decision_elapsed_ms: body_gc_diagnostics
+                .body_retention_decision_elapsed_ms,
+            body_write_elapsed_ms: body_gc_diagnostics.body_write_elapsed_ms,
+            progress_status: if !has_more {
+                "completed"
+            } else if cleaned_request_log_bodies + deleted_request_logs + deleted_rollups > 0 {
+                "incomplete_progress"
+            } else {
+                "incomplete_zero_progress"
+            }
+            .to_string(),
         })
     }
 

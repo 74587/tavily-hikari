@@ -76,6 +76,11 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 - `GET /api/admin/ha/status` 返回当前节点状态、EdgeOne 源站、同步水位、recovery 状态。
 - `GET /api/admin/ha/status` 继续保留当前本机字段，并新增 `peerNodes[]` 与 `plannedCutoverEligible`。
+- `GET /api/admin/ha/status` additionally exposes `peerCount` and
+  `syncDisabledReason=no_configured_peers` when `active_standby` has no configured remote peer and
+  no usable sync path. A legacy `HA_SYNC_SOURCE_URL` is a usable path only outside dual-active
+  peer-sync mode. This is diagnostic only: the service remains healthy and does not invent a peer
+  or disable its local serving role.
 - `GET /api/admin/ha/status` 的 `peerNodes[]` 需要同时返回对外入口 `publicOrigin` 与节点私有源站配置目标 `sourceConfigTarget`；节点清单中的“源站”列展示节点源站配置，而不是当前 EdgeOne 路由或 peer 的对外入口。
 - `GET /api/ha/status` 返回可公开给用户控制台的降级摘要，不包含 secret 或 expected origin。
 - `GET /api/admin/ha/status` 还要返回当前/预期源站类型、本地默认源站、本地覆盖源站和当前 EdgeOne target。

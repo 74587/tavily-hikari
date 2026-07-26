@@ -23,6 +23,15 @@
   - baseline/events import
   - standby baseline/events sync
   - 三路 channel 的 `outbox_row_count / oldest_age / ack_lag` 只读观测
+- HA perf events now use per-`(event, channel)` sampling: ordinary completions are DEBUG with a
+  once-per-minute INFO sample, while outbox aggregation plus full runtime-memory capture is
+  limited to once per channel every five minutes or occurs immediately for slow work. This keeps
+  the diagnostic fields available without adding read pressure on each polling pass. DEBUG samples
+  retain source, peer, watermark, cursor, and detail fields so an operator can still trace normal
+  synchronization progress without enabling the expensive aggregate collection.
+- SQLx slow-statement emission uses DEBUG instead of WARN. Default runtime logs retain structured
+  operation timing/errors without complete statement text; an explicit `sqlx::query=debug` filter
+  restores SQL-level diagnostics.
 - owner-facing 重读路径已补结构化 perf 事件：
   - dashboard overview
   - dashboard shared snapshot cache-hit / rebuild
