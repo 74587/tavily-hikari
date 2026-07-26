@@ -23,8 +23,6 @@ describe('admin return-to-console CTA', () => {
         subtitle="Monitor system health."
         displayName="Ops Admin"
         isAdmin
-        updatedPrefix="Updated"
-        updatedTime="11:42:10"
         isRefreshing={false}
         refreshLabel="Refresh"
         refreshingLabel="Refreshing"
@@ -45,11 +43,8 @@ describe('admin return-to-console CTA', () => {
         title="Token Usage"
         subtitle="Focus on heavy hitters."
         backLabel="Back"
-        refreshLabel="Refresh"
-        refreshingLabel="Refreshing"
         userConsoleLabel="Back to User Console"
         userConsoleHref={ADMIN_USER_CONSOLE_HREF}
-        isRefreshing={false}
         period="day"
         focus="usage"
         periodOptions={[
@@ -63,7 +58,6 @@ describe('admin return-to-console CTA', () => {
           { value: 'other', label: 'Other' },
         ]}
         onBack={() => undefined}
-        onRefresh={() => undefined}
         onPeriodChange={() => undefined}
         onFocusChange={() => undefined}
       />,

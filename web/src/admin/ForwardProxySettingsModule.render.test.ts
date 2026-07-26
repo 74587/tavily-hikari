@@ -208,7 +208,6 @@ describe('ForwardProxySettingsModule dialog helpers', () => {
         egressPreviewProgress: null,
         onPersistDraft: async () => {},
         onValidateCandidates: async () => [],
-        onRefresh: () => {},
         onRevalidate: () => {},
         onSetNodesDisabled: async () => {},
         dialogPreview: null,
@@ -224,5 +223,6 @@ describe('ForwardProxySettingsModule dialog helpers', () => {
     expect(markup.indexOf(strings.config.subscriptionCount.replace('{count}', '2'))).toBeLessThan(
       markup.indexOf(strings.config.manualCount.replace('{count}', '3')),
     )
+    expect(markup).not.toContain('刷新统计')
   })
 })

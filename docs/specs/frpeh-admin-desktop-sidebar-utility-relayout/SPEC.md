@@ -10,6 +10,7 @@
 
 - 当前 `/admin` 在桌面非堆叠侧栏布局下，内容区顶部仍保留一层 `surface app-header` / `AdminPanelHeader` chrome，标题、说明、全局工具与页面动作同时堆在首屏上方，信息密度过高。
 - 管理端已经有稳定的左侧导航，但右上角的主题、语言、返回控制台、刷新，以及 detail 页的 back / sync / regenerate 等动作并未利用侧栏空间。
+- 侧栏 utility 曾同时显示无业务对象的“更新时间”与页面内重复的普通刷新按钮；管理员名称在窄侧栏时也可能越过 utility card 边界。
 - `<=1100px` 的堆叠侧栏与 menu 行为已较稳定，本轮不应破坏移动端信息架构。
 
 ## 目标 / 非目标
@@ -20,12 +21,15 @@
 - 为内容区提供统一的 compact intro，让页面标题与说明继续留在内容区，但不再承担重型 header chrome。
 - 覆盖模块页、Token 榜单页，以及 key / token detail 这类当前依赖顶栏动作的管理端页面。
 - 同步 Storybook shell/page stories，并提供 1440px 与 1100px 的稳定视觉证据。
+- 普通数据刷新只保留全局入口：桌面态位于侧栏 utility，堆叠态位于通用页头；页面内不得重复放置普通刷新按钮。
+- utility 的管理员徽章与所有子内容必须在 card 内收缩，超长名称单行省略且保留完整可访问名称。
 
 ### Non-goals
 
-- 不改任何后台 API、权限逻辑、按钮文案语义或页面行为结果。
+- 不改任何后台 API、权限逻辑或数据加载结果；仅统一普通刷新入口的位置。
 - 不重做 `<=1100px` 的堆叠侧栏、menu 抽屉或移动端内容组织。
 - 不扩散到用户控制台或公共页面。
+- 不删除失败重试、密钥同步、订阅重新验证或 PWA 重载等具备独立业务语义的动作。
 
 ## 范围（Scope）
 
@@ -59,6 +63,8 @@
 - `>1100px` 时，侧栏导航下方出现当前页面对应的 utility 区。
 - `<=1100px` 时，继续显示原有 stacked header/menu 行为，不出现桌面 utility 区。
 - compact intro 必须保留标题与说明，但视觉上明显轻于原顶栏。
+- 通用更新时间不得显示；当前模块的普通数据刷新只保留一个可见的全局入口。
+- utility card 内不得出现水平溢出；管理员名称超过可用宽度时必须单行省略。
 
 ### SHOULD
 
@@ -93,6 +99,14 @@
 - Given `viewport = 1100px`
   When 打开 shell/page stories 或真实管理端页面
   Then stacked header 继续存在，desktop utility 被隐藏，menu 行为不变。
+
+- Given 任一管理端模块页
+  When 查看刷新入口
+  Then 不显示通用“更新时间”，且普通刷新只通过当前响应式布局中的全局“立即刷新”入口触发；系统状态和代理设置等页面不再重复展示普通刷新按钮。
+
+- Given 超长管理员名称
+  When 在 260px 宽侧栏中渲染 utility
+  Then 徽章保持在 utility card 内，名称单行省略，不产生水平滚动或父容器溢出。
 
 - Given Key detail / Token detail
   When 查看桌面态
@@ -134,9 +148,11 @@
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/key-detail-desktop-1440.png`
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/dashboard-stacked-1100.png`
   - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-utility-controls-row-1440.png`
+  - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-refresh-desktop-1440.png`
+  - `docs/specs/frpeh-admin-desktop-sidebar-utility-relayout/assets/sidebar-refresh-stacked-1100.png`
 
 - 1440px 侧栏 utility 控件：主题和语言选择按钮保持同一行，等宽承载，未回落为纵向堆叠。
-  - PR: include
+  PR: include
 
 ![1440px 侧栏 utility 控件同行](./assets/sidebar-utility-controls-row-1440.png)
 
@@ -144,7 +160,7 @@
 
 ![1440px 仪表盘桌面态](./assets/dashboard-desktop-1440.png)
 
-- 1440px Token 榜单：桌面态不再保留重型页头，侧栏 utility 承接 theme / language / identity / 更新时间 / 返回 / 刷新。
+- 1440px Token 榜单：桌面态不再保留重型页头，侧栏 utility 承接 theme / language / identity / 返回与全局刷新。
 
 ![1440px Token 榜单桌面态](./assets/token-usage-desktop-1440.png)
 
@@ -163,6 +179,22 @@
 - 1100px 仪表盘 stacked：原顶部 header 与 menu 行为仍保留，未引入桌面 utility。
 
 ![1100px 仪表盘 stacked](./assets/dashboard-stacked-1100.png)
+
+- 1440px 刷新入口与长管理员名称：utility 内没有通用更新时间，只有一个全局普通刷新入口；长名称单行省略且保持在卡片边界内。
+  - Story: `Admin/AdminShell/PanelHeaderShell`
+  - Viewport: `1440x1120`; source commit: `2c187c53199724bfb3cbebc4cd4063a06984802f`
+  - SHA-256: `cef7d58d0920eb0e25ebd7c4620398edad51e1c85f9575e331b636015b3bbd5c`
+    PR: include
+
+![1440px 侧栏刷新入口与长管理员名称](./assets/sidebar-refresh-desktop-1440.png)
+
+- 1100px 刷新入口：desktop utility 隐藏，通用页头只保留一个全局普通刷新入口，不显示通用更新时间。
+  - Story: `Admin/AdminShell/PanelHeaderShellStacked`
+  - Viewport: `1100x1120`; source commit: `2c187c53199724bfb3cbebc4cd4063a06984802f`
+  - SHA-256: `c9186205ff8038bfe466f9bb43ae7a9b78cecba549ef8fb04847bd1845b91a1e`
+    PR: include
+
+![1100px 堆叠刷新入口](./assets/sidebar-refresh-stacked-1100.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
@@ -196,3 +228,5 @@
 - `web/src/admin/AdminPages.stories.tsx`
 - `web/src/pages/KeyDetailRoute.stories.tsx`
 - `web/src/pages/TokenDetail.stories.tsx`
+- `web/src/admin/UpstreamPrivacyStatusModule.stories.tsx`
+- `web/src/admin/ForwardProxySettingsModule.stories.tsx`

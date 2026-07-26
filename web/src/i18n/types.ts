@@ -225,7 +225,6 @@ export interface AdminTranslationsShape {
   header: {
     title: string
     subtitle: string
-    updatedPrefix: string
     refreshNow: string
     refreshing: string
     returnToConsole: string
@@ -411,7 +410,6 @@ export interface AdminTranslationsShape {
     title: string
     description: string
     actions: {
-      refresh: string
       save: string
       saving: string
       validateSubscriptions: string
@@ -893,7 +891,6 @@ export interface AdminTranslationsShape {
       title: string
       description: string
       autoRefresh: string
-      refreshNow: string
       generatedAt: string
       currentPeriod: string
       currentPeriodEndsAt: string

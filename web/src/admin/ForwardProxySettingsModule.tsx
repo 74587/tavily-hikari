@@ -132,7 +132,6 @@ interface ForwardProxySettingsModuleProps {
     onProgress?: (event: ForwardProxyProgressEvent) => void,
     signal?: AbortSignal,
   ) => Promise<ForwardProxyValidationEntry[]>
-  onRefresh: () => void
   onRevalidate: () => void
   onSetNodesDisabled?: (proxyKeys: string[], disabled: boolean) => Promise<void>
   initialNodeView?: 'pool' | 'errors'
@@ -1798,7 +1797,6 @@ export default function ForwardProxySettingsModule({
   egressPreviewProgress = null,
   onPersistDraft,
   onValidateCandidates,
-  onRefresh,
   onRevalidate,
   onSetNodesDisabled,
   initialNodeView = 'pool',
@@ -2370,9 +2368,6 @@ export default function ForwardProxySettingsModule({
           </div>
           <div className="forward-proxy-panel-meta">
             <div className="forward-proxy-toolbar">
-              <Button type="button" variant="outline" onClick={onRefresh} disabled={saving || revalidating}>
-                {strings.actions.refresh}
-              </Button>
               <Button type="button" variant="outline" onClick={onRevalidate} disabled={saving || revalidating}>
                 {revalidating ? strings.actions.validatingSubscriptions : strings.actions.validateSubscriptions}
               </Button>
