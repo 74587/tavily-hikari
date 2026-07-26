@@ -59,10 +59,11 @@ month-tail public metrics scan.
   `elapsed_ms`, `channel`, `row_count`, `payload_bytes`, optional `compressed_bytes`, and runtime
   memory headroom fields. Do not require a second metrics pipeline just to answer “which HA leg is
   holding memory right now?”
-- Enable SQL-level slow statement logging directly on runtime `sqlx` SQLite connect options. The
-  default threshold is `250ms` for SQL statements and `1s` for explicit DB operation phases such as
-  startup pool open, schema init, request-stats flush, scheduler enqueue, OAuth upsert, and
-  pending billing settlement.
+- Enable SQL-level slow statement logging directly on runtime `sqlx` SQLite connect options, but
+  keep complete statements at DEBUG. The default threshold is `250ms` for SQL statements and `1s`
+  for explicit DB operation phases such as startup pool open, schema init, request-stats flush,
+  scheduler enqueue, OAuth upsert, and pending billing settlement. Operators can opt into raw SQL
+  with `RUST_LOG=sqlx::query=debug` without making statement text normal WARN noise.
 - Keep stable startup/runtime event names so operators can tell whether the time went into pool
   open, observability attach probing, `BEGIN IMMEDIATE`, schema bootstrap, or a later
   request/worker write path. In JSON mode this comes from structured `component/event/...` fields;
@@ -129,6 +130,14 @@ month-tail public metrics scan.
 - Keep `queued_at` separate from `started_at`. A queued job has been accepted but has not entered a
   DB execution window yet; collapsing those timestamps makes queue delay invisible and breaks admin
   diagnosis.
+- Persist an `available_at` timestamp as well. Automatic catch-up continuations need a durable
+  delay across process recreation, and queue order must age old non-manual work toward a bounded
+  priority floor so one fresh continuation family cannot starve HA cleanup forever. Manual triggers
+  should reuse and unlock their representative job immediately.
+- For request-log body GC, build the selective `(created_at, id)` partial cursor index after ready
+  through the maintenance queue, then cache per-user retention context for the bounded pass. This
+  changes retention lookup work from candidate-row-shaped to unique-user-shaped while retaining the
+  existing deletion policy.
 - Treat SQLite file shrinkage as a separate maintenance concern. Row deletes and body nulling create
   free pages; size convergence requires freelist telemetry plus a controlled compaction job after
   retention cleanup has made space reclaimable.

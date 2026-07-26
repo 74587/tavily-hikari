@@ -63,7 +63,7 @@ use std::{
     future::Future,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{
-        Arc, Weak,
+        Arc, Mutex as StdMutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
     },
     time::Duration,
@@ -89,6 +89,154 @@ use url::form_urlencoded;
 
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HaPerfSampling {
+    pub emit_info: bool,
+    pub capture_heavy_stats: bool,
+}
+
+static HA_PERF_INFO_SAMPLE_WINDOWS: OnceLock<StdMutex<HashMap<(String, String), Instant>>> =
+    OnceLock::new();
+static HA_PERF_HEAVY_SAMPLE_WINDOWS: OnceLock<StdMutex<HashMap<String, Instant>>> = OnceLock::new();
+
+pub fn sample_ha_perf_event(
+    event: &str,
+    channel: HaSyncChannel,
+    elapsed: Duration,
+) -> HaPerfSampling {
+    if elapsed >= Duration::from_secs(1) {
+        return HaPerfSampling {
+            emit_info: true,
+            capture_heavy_stats: true,
+        };
+    }
+    let info_windows = HA_PERF_INFO_SAMPLE_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let heavy_windows = HA_PERF_HEAVY_SAMPLE_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut info_windows = info_windows
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut heavy_windows = heavy_windows
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    sample_ha_perf_event_at(
+        &mut info_windows,
+        &mut heavy_windows,
+        event,
+        channel,
+        elapsed,
+        Instant::now(),
+    )
+}
+
+fn sample_ha_perf_event_at(
+    info_windows: &mut HashMap<(String, String), Instant>,
+    heavy_windows: &mut HashMap<String, Instant>,
+    event: &str,
+    channel: HaSyncChannel,
+    elapsed: Duration,
+    now: Instant,
+) -> HaPerfSampling {
+    const HA_PERF_INFO_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
+    const HA_PERF_HEAVY_SAMPLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+    const HA_PERF_SLOW_OPERATION_THRESHOLD: Duration = Duration::from_secs(1);
+
+    if elapsed >= HA_PERF_SLOW_OPERATION_THRESHOLD {
+        return HaPerfSampling {
+            emit_info: true,
+            capture_heavy_stats: true,
+        };
+    }
+
+    let channel = channel.as_str().to_string();
+    let info_key = (event.to_string(), channel.clone());
+    let last_info = info_windows.entry(info_key).or_insert(now);
+    let emit_info = now.duration_since(*last_info) >= HA_PERF_INFO_SAMPLE_INTERVAL;
+    if emit_info {
+        *last_info = now;
+    }
+
+    let last_heavy_stats = heavy_windows.entry(channel).or_insert(now);
+    let capture_heavy_stats =
+        now.duration_since(*last_heavy_stats) >= HA_PERF_HEAVY_SAMPLE_INTERVAL;
+    if capture_heavy_stats {
+        *last_heavy_stats = now;
+    }
+    HaPerfSampling {
+        emit_info,
+        capture_heavy_stats,
+    }
+}
+
+#[cfg(test)]
+mod ha_perf_sampling_tests {
+    use super::*;
+
+    #[test]
+    fn ha_perf_sampling_limits_heavy_stats_per_channel() {
+        let now = Instant::now();
+        let mut info_windows = HashMap::new();
+        let mut heavy_windows = HashMap::new();
+
+        let first = sample_ha_perf_event_at(
+            &mut info_windows,
+            &mut heavy_windows,
+            "events_export_completed",
+            HaSyncChannel::Control,
+            Duration::ZERO,
+            now,
+        );
+        assert_eq!(
+            first,
+            HaPerfSampling {
+                emit_info: false,
+                capture_heavy_stats: false,
+            }
+        );
+
+        let info_sample = sample_ha_perf_event_at(
+            &mut info_windows,
+            &mut heavy_windows,
+            "events_export_completed",
+            HaSyncChannel::Control,
+            Duration::ZERO,
+            now + Duration::from_secs(60),
+        );
+        assert!(info_sample.emit_info);
+        assert!(!info_sample.capture_heavy_stats);
+
+        let heavy_sample = sample_ha_perf_event_at(
+            &mut info_windows,
+            &mut heavy_windows,
+            "baseline_export_completed",
+            HaSyncChannel::Control,
+            Duration::ZERO,
+            now + Duration::from_secs(5 * 60),
+        );
+        assert!(heavy_sample.capture_heavy_stats);
+
+        let other_channel = sample_ha_perf_event_at(
+            &mut info_windows,
+            &mut heavy_windows,
+            "baseline_export_completed",
+            HaSyncChannel::Billing,
+            Duration::ZERO,
+            now + Duration::from_secs(5 * 60),
+        );
+        assert!(!other_channel.capture_heavy_stats);
+
+        let slow_operation = sample_ha_perf_event_at(
+            &mut info_windows,
+            &mut heavy_windows,
+            "events_export_completed",
+            HaSyncChannel::Billing,
+            Duration::from_secs(1),
+            now + Duration::from_secs(5 * 60),
+        );
+        assert!(slow_operation.emit_info);
+        assert!(slow_operation.capture_heavy_stats);
+    }
+}
 
 pub fn emit_db_operation_slow_log(operation: &str, elapsed: Duration, context: Option<&str>) {
     store::log_slow_db_operation(operation, elapsed, context);
@@ -258,6 +406,13 @@ pub struct RequestLogsGcReport {
     pub completed: bool,
     pub has_more: bool,
     pub elapsed_ms: u128,
+    pub scanned_body_candidates: i64,
+    pub unique_retention_users: i64,
+    pub retention_context_cache_hits: i64,
+    pub body_candidate_query_elapsed_ms: u128,
+    pub body_retention_decision_elapsed_ms: u128,
+    pub body_write_elapsed_ms: u128,
+    pub progress_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -330,16 +485,23 @@ pub fn format_request_logs_gc_report_message(
     passes: usize,
 ) -> String {
     format!(
-        "cleaned_bodies={} deleted_rows={} rollup_deleted={} completed={} has_more={} retention_days={} batches={} passes={} elapsed_ms={}",
+        "cleaned_bodies={} deleted_rows={} rollup_deleted={} scanned_candidates={} unique_users={} retention_cache_hits={} progress={} completed={} has_more={} retention_days={} batches={} passes={} elapsed_ms={} candidate_query_ms={} decision_ms={} write_ms={}",
         report.cleaned_request_log_bodies,
         report.deleted_request_logs,
         report.deleted_rollups,
+        report.scanned_body_candidates,
+        report.unique_retention_users,
+        report.retention_context_cache_hits,
+        report.progress_status,
         report.completed,
         report.has_more,
         report.retention_days,
         report.batches,
         passes,
-        report.elapsed_ms
+        report.elapsed_ms,
+        report.body_candidate_query_elapsed_ms,
+        report.body_retention_decision_elapsed_ms,
+        report.body_write_elapsed_ms,
     )
 }
 

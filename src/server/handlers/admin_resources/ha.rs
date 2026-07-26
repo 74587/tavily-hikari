@@ -98,37 +98,59 @@ const HA_PLANNED_CUTOVER_MAX_LAG_SECS: i64 = 30;
 const HA_PEER_STALE_SECS: i64 = 30;
 const HA_PLANNED_CUTOVER_POLL_TIMEOUT_SECS: u64 = 30;
 
-fn emit_ha_perf_event(
+struct HaPerfEvent {
     event: &'static str,
     elapsed: Duration,
     channel: tavily_hikari::HaSyncChannel,
     row_count: usize,
     payload_bytes: usize,
     compressed_bytes: u64,
-    outbox: &tavily_hikari::HaOutboxStats,
+}
+
+fn emit_ha_perf_event(
+    perf: HaPerfEvent,
+    sampling: tavily_hikari::HaPerfSampling,
+    outbox: Option<&tavily_hikari::HaOutboxStats>,
 ) {
-    let memory = tavily_hikari::capture_runtime_memory_snapshot();
-    tracing::info!(
-        component = "ha",
-        event,
-        elapsed_ms = elapsed.as_millis() as u64,
-        channel = channel.as_str(),
-        row_count = row_count as u64,
-        payload_bytes = payload_bytes as u64,
-        compressed_bytes,
-        outbox_row_count = outbox.row_count,
-        outbox_oldest_age_secs = outbox.oldest_age_secs,
-        outbox_ack_lag = outbox.ack_lag,
-        memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
-        memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
-        headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
-        process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
-        child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
-        process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
-        process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
-        process_swap_bytes = memory.process_swap_bytes.unwrap_or_default(),
-        "ha perf"
-    );
+    if sampling.emit_info || sampling.capture_heavy_stats {
+        let memory = sampling
+            .capture_heavy_stats
+            .then(tavily_hikari::capture_runtime_memory_snapshot);
+        tracing::info!(
+            component = "ha",
+            event = perf.event,
+            elapsed_ms = perf.elapsed.as_millis() as u64,
+            channel = perf.channel.as_str(),
+            row_count = perf.row_count as u64,
+            payload_bytes = perf.payload_bytes as u64,
+            compressed_bytes = perf.compressed_bytes,
+            outbox_sampled = outbox.is_some(),
+            outbox_row_count = outbox.map(|value| value.row_count).unwrap_or_default(),
+            outbox_oldest_age_secs = outbox.map(|value| value.oldest_age_secs),
+            outbox_ack_lag = outbox.map(|value| value.ack_lag),
+            memory_sampled = memory.is_some(),
+            memory_current_bytes = memory.and_then(|value| value.memory_current_bytes),
+            memory_limit_bytes = memory.and_then(|value| value.memory_limit_bytes),
+            headroom_bytes = memory.and_then(|value| value.headroom_bytes),
+            process_rss_bytes = memory.and_then(|value| value.process_rss_bytes),
+            child_process_rss_bytes = memory.and_then(|value| value.child_process_rss_bytes),
+            process_group_rss_bytes = memory.and_then(|value| value.process_group_rss_bytes),
+            process_hwm_bytes = memory.and_then(|value| value.process_hwm_bytes),
+            process_swap_bytes = memory.and_then(|value| value.process_swap_bytes),
+            "ha perf"
+        );
+    } else {
+        tracing::debug!(
+            component = "ha",
+            event = perf.event,
+            elapsed_ms = perf.elapsed.as_millis() as u64,
+            channel = perf.channel.as_str(),
+            row_count = perf.row_count as u64,
+            payload_bytes = perf.payload_bytes as u64,
+            compressed_bytes = perf.compressed_bytes,
+            "ha perf"
+        );
+    }
 }
 
 fn parse_ha_channel(raw: Option<&str>) -> Result<tavily_hikari::HaSyncChannel, (StatusCode, String)> {
@@ -713,18 +735,29 @@ async fn build_ha_baseline_reader(
         ));
     }
     rewind_ha_temp_output_file(&mut reader).await?;
-    let outbox = proxy
-        .ha_channel_outbox_stats(channel, None)
-        .await
-        .map_err(map_ha_export_error)?;
+    let elapsed = started.elapsed();
+    let sampling = tavily_hikari::sample_ha_perf_event("baseline_export_completed", channel, elapsed);
+    let outbox = if sampling.capture_heavy_stats {
+        Some(
+            proxy
+                .ha_channel_outbox_stats(channel, None)
+                .await
+                .map_err(map_ha_export_error)?,
+        )
+    } else {
+        None
+    };
     emit_ha_perf_event(
-        "baseline_export_completed",
-        started.elapsed(),
-        channel,
-        export.row_count,
-        export.payload_bytes,
-        compressed_bytes,
-        &outbox,
+        HaPerfEvent {
+            event: "baseline_export_completed",
+            elapsed,
+            channel,
+            row_count: export.row_count,
+            payload_bytes: export.payload_bytes,
+            compressed_bytes,
+        },
+        sampling,
+        outbox.as_ref(),
     );
     Ok(HaBaselineReader { reader, export })
 }
@@ -768,18 +801,30 @@ async fn build_ha_events_reader(
         if compressed_bytes <= max_compressed_bytes {
             preflight.close().await.map_err(internal_error)?;
             rewind_ha_temp_output_file(&mut reader).await?;
-            let outbox = proxy
-                .ha_channel_outbox_stats(channel, None)
-                .await
-                .map_err(map_ha_export_error)?;
+            let elapsed = started.elapsed();
+            let sampling =
+                tavily_hikari::sample_ha_perf_event("events_export_completed", channel, elapsed);
+            let outbox = if sampling.capture_heavy_stats {
+                Some(
+                    proxy
+                        .ha_channel_outbox_stats(channel, None)
+                        .await
+                        .map_err(map_ha_export_error)?,
+                )
+            } else {
+                None
+            };
             emit_ha_perf_event(
-                "events_export_completed",
-                started.elapsed(),
-                channel,
-                export.row_count,
-                export.payload_bytes,
-                compressed_bytes,
-                &outbox,
+                HaPerfEvent {
+                    event: "events_export_completed",
+                    elapsed,
+                    channel,
+                    row_count: export.row_count,
+                    payload_bytes: export.payload_bytes,
+                    compressed_bytes,
+                },
+                sampling,
+                outbox.as_ref(),
             );
             return Ok(HaEventsReader { reader, export });
         }

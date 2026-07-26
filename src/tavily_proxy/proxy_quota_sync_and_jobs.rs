@@ -1263,6 +1263,10 @@ impl TavilyProxy {
             .await
     }
 
+    pub async fn ensure_request_log_body_gc_cursor_index(&self) -> Result<(), ProxyError> {
+        self.key_store.ensure_request_log_body_gc_cursor_index().await
+    }
+
     pub async fn gc_mcp_sessions(&self) -> Result<i64, ProxyError> {
         let now = self.backend_time.now_ts();
         self.key_store
@@ -1356,11 +1360,28 @@ impl TavilyProxy {
             .await
     }
 
+    pub async fn scheduled_job_enqueue_at(
+        &self,
+        job_type: &str,
+        trigger_source: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        available_at: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        self.key_store
+            .scheduled_job_enqueue_at(job_type, trigger_source, key_id, attempt, available_at)
+            .await
+    }
+
     pub async fn fetch_queued_scheduled_jobs(
         &self,
         limit: usize,
     ) -> Result<Vec<QueuedScheduledJob>, ProxyError> {
         self.key_store.fetch_queued_scheduled_jobs(limit).await
+    }
+
+    pub async fn next_queued_scheduled_job_available_at(&self) -> Result<Option<i64>, ProxyError> {
+        self.key_store.next_queued_scheduled_job_available_at().await
     }
 
     pub async fn scheduled_job_mark_running(

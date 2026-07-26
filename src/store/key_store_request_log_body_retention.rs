@@ -154,6 +154,65 @@ impl KeyStore {
         })
     }
 
+    async fn request_log_body_retention_decision_for_gc(
+        &self,
+        settings: &RequestLogRetentionSettings,
+        user_id: Option<&str>,
+        result_status: &str,
+        request_value_bucket: RequestValueBucket,
+        contexts: &mut std::collections::HashMap<String, RequestLogBodyGcUserContext>,
+        diagnostics: &mut RequestLogBodyGcDiagnostics,
+    ) -> Result<RequestLogBodyRetentionDecision, ProxyError> {
+        let Some(user_id) = user_id else {
+            return Ok(RequestLogBodyRetentionDecision {
+                days: Self::request_log_body_days_for_profile(
+                    &settings.global,
+                    result_status,
+                    request_value_bucket,
+                ),
+                profile: REQUEST_LOG_BODY_RETENTION_PROFILE_GLOBAL,
+            });
+        };
+
+        let context = if let Some(context) = contexts.get(user_id) {
+            diagnostics.retention_context_cache_hits += 1;
+            *context
+        } else {
+            let debug_shared = self.user_debug_info_shared(user_id).await?;
+            let heavy_usage = !debug_shared
+                && self
+                    .request_log_user_is_heavy_usage(
+                        user_id,
+                        settings.heavy_usage_threshold_percent,
+                        0,
+                    )
+                    .await?;
+            let context = RequestLogBodyGcUserContext {
+                debug_shared,
+                heavy_usage,
+            };
+            contexts.insert(user_id.to_string(), context);
+            diagnostics.unique_retention_users += 1;
+            context
+        };
+
+        let (profile, retention_profile) = if context.debug_shared {
+            (&settings.debug_shared, REQUEST_LOG_BODY_RETENTION_PROFILE_DEBUG_SHARED)
+        } else if context.heavy_usage {
+            (&settings.heavy_usage, REQUEST_LOG_BODY_RETENTION_PROFILE_HEAVY_USAGE)
+        } else {
+            (&settings.global, REQUEST_LOG_BODY_RETENTION_PROFILE_GLOBAL)
+        };
+        Ok(RequestLogBodyRetentionDecision {
+            days: Self::request_log_body_days_for_profile(
+                profile,
+                result_status,
+                request_value_bucket,
+            ),
+            profile: retention_profile,
+        })
+    }
+
     fn request_log_body_storage_decision<'a>(
         retention_days: i64,
         retention_profile: &'static str,

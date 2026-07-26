@@ -1,4 +1,6 @@
 impl KeyStore {
+    const SCHEDULED_JOB_PRIORITY_AGING_SECS: i64 = 5 * 60;
+    const SCHEDULED_JOB_PRIORITY_AGING_FLOOR: i64 = 2;
     fn is_scheduled_job_active_identity_conflict(err: &ProxyError) -> bool {
         let ProxyError::Database(sqlx::Error::Database(db_err)) = err else {
             return false;
@@ -66,6 +68,20 @@ impl KeyStore {
         )
     }
 
+    fn scheduled_job_effective_priority_sql(
+        job_type_column: &str,
+        trigger_source_column: &str,
+        queued_at_column: &str,
+    ) -> String {
+        let priority_sql = Self::scheduled_job_priority_sql(job_type_column, trigger_source_column);
+        format!(
+            "CASE WHEN {trigger_source_column} = 'manual' THEN ({priority_sql}) \
+             ELSE MAX({}, ({priority_sql}) - MAX(0, (? - {queued_at_column}) / {})) END",
+            Self::SCHEDULED_JOB_PRIORITY_AGING_FLOOR,
+            Self::SCHEDULED_JOB_PRIORITY_AGING_SECS,
+        )
+    }
+
     async fn create_scheduled_jobs_indexes(&self) -> Result<(), ProxyError> {
         sqlx::query(
             r#"
@@ -77,8 +93,8 @@ impl KeyStore {
         .await?;
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_queue
-            ON scheduled_jobs(status, queued_at ASC, id ASC)
+            CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_queue_available
+            ON scheduled_jobs(status, available_at ASC, queued_at ASC, id ASC)
             "#,
         )
         .execute(&self.pool)
@@ -108,8 +124,8 @@ impl KeyStore {
         .await?;
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_queue
-            ON scheduled_jobs(status, queued_at ASC, id ASC)
+            CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_queue_available
+            ON scheduled_jobs(status, available_at ASC, queued_at ASC, id ASC)
             "#,
         )
         .execute(&mut **conn)
@@ -129,6 +145,13 @@ impl KeyStore {
     pub(crate) async fn ensure_scheduled_jobs_queue_schema(&self) -> Result<(), ProxyError> {
         if !self.table_column_exists("scheduled_jobs", "queued_at").await? {
             self.rebuild_scheduled_jobs_table().await?;
+        }
+        if !self.table_column_exists("scheduled_jobs", "available_at").await? {
+            sqlx::query(
+                "ALTER TABLE scheduled_jobs ADD COLUMN available_at INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&self.pool)
+            .await?;
         }
         self.create_scheduled_jobs_indexes().await
     }
@@ -154,6 +177,7 @@ impl KeyStore {
                     attempt INTEGER NOT NULL DEFAULT 1,
                     message TEXT,
                     queued_at INTEGER NOT NULL,
+                    available_at INTEGER NOT NULL DEFAULT 0,
                     started_at INTEGER,
                     finished_at INTEGER,
                     FOREIGN KEY (key_id) REFERENCES api_keys(id)
@@ -173,6 +197,7 @@ impl KeyStore {
                     attempt,
                     message,
                     queued_at,
+                    available_at,
                     started_at,
                     finished_at
                 )
@@ -184,6 +209,7 @@ impl KeyStore {
                     status,
                     attempt,
                     message,
+                    started_at,
                     started_at,
                     started_at,
                     finished_at
@@ -319,15 +345,17 @@ impl KeyStore {
                         status,
                         attempt,
                         queued_at,
+                        available_at,
                         started_at
                     )
-                    VALUES (?, ?, ?, 'running', ?, ?, ?)
+                    VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
                     "#,
                 )
                 .bind(job_type)
                 .bind(trigger_source)
                 .bind(key_id)
                 .bind(attempt)
+                .bind(started_at)
                 .bind(started_at)
                 .bind(started_at)
                 .execute(&mut *conn)
@@ -458,6 +486,19 @@ impl KeyStore {
         key_id: Option<&str>,
         attempt: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        let available_at = self.backend_time.now_ts();
+        self.scheduled_job_enqueue_at(job_type, trigger_source, key_id, attempt, available_at)
+            .await
+    }
+
+    pub(crate) async fn scheduled_job_enqueue_at(
+        &self,
+        job_type: &str,
+        trigger_source: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        available_at: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
         // Fast-path repeated coalesce reads so owner-facing manual triggers do not
         // fail behind an unrelated long-lived write window.
         if Self::scheduled_job_stale_group(job_type).is_none()
@@ -469,7 +510,7 @@ impl KeyStore {
                 &current_trigger_source,
                 trigger_source,
             );
-            if !promoted {
+            if !promoted && (trigger_source != "manual" || status != "queued") {
                 return Ok(ScheduledJobEnqueueResult {
                     job_id,
                     created: false,
@@ -496,13 +537,16 @@ impl KeyStore {
                         &current_trigger_source,
                         trigger_source,
                     );
-                    if promoted {
+                    if promoted || (trigger_source == "manual" && status == "queued") {
                         sqlx::query(
                             r#"UPDATE scheduled_jobs
-                               SET trigger_source = ?
+                               SET trigger_source = CASE WHEN ? THEN ? ELSE trigger_source END,
+                                   available_at = CASE WHEN status = 'queued' THEN MIN(available_at, ?) ELSE available_at END
                                WHERE id = ?"#,
                         )
+                        .bind(promoted)
                         .bind(trigger_source)
+                        .bind(queued_at)
                         .bind(job_id)
                         .execute(&mut *conn)
                         .await?;
@@ -531,10 +575,11 @@ impl KeyStore {
                         status,
                         attempt,
                         queued_at,
+                        available_at,
                         started_at,
                         finished_at
                     )
-                    VALUES (?, ?, ?, 'queued', ?, ?, NULL, NULL)
+                    VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, NULL)
                     "#,
                 )
                 .bind(job_type)
@@ -542,6 +587,7 @@ impl KeyStore {
                 .bind(key_id)
                 .bind(attempt)
                 .bind(queued_at)
+                .bind(available_at)
                 .execute(&mut *conn)
                 .await?;
                 sqlx::query("COMMIT").execute(&mut *conn).await?;
@@ -581,24 +627,32 @@ impl KeyStore {
         limit: usize,
     ) -> Result<Vec<QueuedScheduledJob>, ProxyError> {
         let limit = limit.clamp(1, 128) as i64;
-        let priority_sql = Self::scheduled_job_priority_sql("job_type", "trigger_source");
+        let now = self.backend_time.now_ts();
+        let priority_sql = Self::scheduled_job_effective_priority_sql(
+            "job_type",
+            "trigger_source",
+            "queued_at",
+        );
         let query = format!(
             r#"
-            SELECT id, job_type, trigger_source, key_id, attempt, queued_at
+            SELECT id, job_type, trigger_source, key_id, attempt, queued_at, available_at,
+                   {priority_sql} AS effective_priority
             FROM scheduled_jobs
-            WHERE status = 'queued'
-            ORDER BY {priority_sql}, queued_at ASC, id ASC
+            WHERE status = 'queued' AND available_at <= ?
+            ORDER BY effective_priority ASC, available_at ASC, queued_at ASC, id ASC
             LIMIT ?
             "#
         );
-        sqlx::query_as::<_, (i64, String, String, Option<String>, i64, i64)>(&query)
+        sqlx::query_as::<_, (i64, String, String, Option<String>, i64, i64, i64, i64)>(&query)
+            .bind(now)
+            .bind(now)
             .bind(limit)
             .fetch_all(&self.pool)
             .await
             .map(|rows| {
                 rows.into_iter()
                     .map(
-                        |(id, job_type, trigger_source, key_id, attempt, queued_at)| {
+                        |(id, job_type, trigger_source, key_id, attempt, queued_at, available_at, effective_priority)| {
                             QueuedScheduledJob {
                                 id,
                                 job_type,
@@ -606,12 +660,25 @@ impl KeyStore {
                                 key_id,
                                 attempt,
                                 queued_at,
+                                available_at,
+                                effective_priority,
                             }
                         },
                     )
                     .collect()
             })
             .map_err(ProxyError::from)
+    }
+
+    pub(crate) async fn next_queued_scheduled_job_available_at(
+        &self,
+    ) -> Result<Option<i64>, ProxyError> {
+        sqlx::query_scalar(
+            "SELECT MIN(available_at) FROM scheduled_jobs WHERE status = 'queued'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(ProxyError::from)
     }
 
     pub(crate) async fn scheduled_job_mark_running(
@@ -631,10 +698,12 @@ impl KeyStore {
                         started_at = ?
                     WHERE id = ?
                       AND status = 'queued'
+                      AND available_at <= ?
                     "#,
                 )
                 .bind(started_at)
                 .bind(job_id)
+                .bind(started_at)
                 .execute(&mut *conn)
                 .await?;
                 if updated.rows_affected() == 0 {
@@ -835,16 +904,18 @@ impl KeyStore {
                         status,
                         attempt,
                         queued_at,
+                        available_at,
                         started_at,
                         finished_at
                     )
-                    VALUES (?, ?, ?, 'running', ?, ?, ?, NULL)
+                    VALUES (?, ?, ?, 'running', ?, ?, ?, ?, NULL)
                     "#,
                 )
                 .bind(job_type)
                 .bind(trigger_source)
                 .bind(key_id)
                 .bind(attempt)
+                .bind(now)
                 .bind(now)
                 .bind(now)
                 .execute(&mut *conn)

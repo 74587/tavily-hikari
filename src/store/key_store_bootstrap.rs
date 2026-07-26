@@ -2396,6 +2396,7 @@ impl KeyStore {
                 attempt INTEGER NOT NULL DEFAULT 1,
                 message TEXT,
                 queued_at INTEGER NOT NULL,
+                available_at INTEGER NOT NULL DEFAULT 0,
                 started_at INTEGER,
                 finished_at INTEGER,
                 FOREIGN KEY (key_id) REFERENCES api_keys(id)

@@ -148,6 +148,15 @@ source when a usable persisted runtime already exists.
 - Request-log GC catch-up must finish one bounded slice, persist its progress message, and requeue a
   fresh `queued` row when more backlog remains instead of keeping one long-lived `running` row while
   waiting for the next catch-up opportunity.
+- Persisted maintenance queue ordering must use an `available_at` eligibility timestamp and a
+  five-minute age adjustment for non-manual jobs. The adjustment may raise an older job only to
+  effective priority `2`; manual priority remains unchanged. This prevents fresh GC continuation
+  rows from indefinitely starving HA cleanup or other aged maintenance work.
+- Incomplete automatic request-log GC must requeue with a persisted five-minute delay. A manual
+  trigger may reuse and immediately unlock its queued representative row. Body cleanup must cache
+  retention context per unique user for a bounded pass, and its `(created_at, id)` partial body
+  cursor index must be built by a low-priority post-ready maintenance task rather than schema
+  bootstrap.
 - Service startup must abandon any leftover `queued` or `running` maintenance rows from the previous
   process lifetime rather than implicitly resuming them after restart.
 - SQLite file size must converge after retention cleanup. The service must expose DB size/freelist
@@ -289,6 +298,11 @@ source when a usable persisted runtime already exists.
   instead of returning `db_job_execution_busy` or duplicate-running conflicts.
 - After restart, any leftover `queued` or `running` maintenance rows are marked `abandoned` with a
   completion timestamp before new queue work is accepted.
+- A continuously incomplete request-log GC cannot prevent an aged `ha_outbox_gc` row from being
+  claimed after the five-minute age window. Delayed automatic continuations remain ineligible after
+  process recreation, while a manual trigger reuses and immediately unlocks the representative row.
+- Body-GC cursor queries use `observability.idx_request_logs_body_gc_cursor`, and a same-user
+  candidate page reports one retention context with cache hits for subsequent candidates.
 - With an upstream `/usage` endpoint that hangs past the quota-sync timeout budget, manual and
   scheduler-triggered quota sync runs finish as `error`, leave no long-lived `running` row behind,
   and do not write `api_key_quota_sync_samples` or `api_keys.quota_*`.

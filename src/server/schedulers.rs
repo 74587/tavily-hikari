@@ -10,6 +10,8 @@ use tavily_hikari::{
     linuxdo_credit_refund_params as shared_linuxdo_credit_refund_params,
     linuxdo_credit_refund_url as shared_linuxdo_credit_refund_url, run_ha_outbox_gc_once,
 };
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::Instant;
 fn random_delay_secs(max_inclusive: u64) -> u64 {
     use rand::Rng;
@@ -52,6 +54,33 @@ const LINUXDO_CREDIT_RECHARGE_LIFECYCLE_JOB_TYPE: &str = "linuxdo_credit_recharg
 const TRIGGER_SOURCE_SCHEDULER: &str = "scheduler";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_AUTO: &str = "auto";
+const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
+const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
+const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
+const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
+static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
+static SCHEDULED_JOB_QUEUE_WAIT_WARN_WINDOWS: OnceLock<StdMutex<HashMap<String, Instant>>> =
+    OnceLock::new();
+
+fn should_warn_scheduled_job_queue_wait(job_type: &str) -> bool {
+    let now = Instant::now();
+    let windows = SCHEDULED_JOB_QUEUE_WAIT_WARN_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut windows = windows
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match windows.get(job_type) {
+        Some(last_warning)
+            if now.duration_since(*last_warning)
+                < Duration::from_secs(SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS) =>
+        {
+            false
+        }
+        _ => {
+            windows.insert(job_type.to_string(), now);
+            true
+        }
+    }
+}
 
 struct ClaimedScheduledJob {
     job_id: i64,
@@ -81,6 +110,21 @@ async fn enqueue_scheduled_job(
     Ok(enqueue_scheduled_job_result(state, job_type, key_id, trigger_source)
         .await?
         .job_id)
+}
+
+async fn enqueue_scheduled_job_at(
+    state: &AppState,
+    job_type: &str,
+    key_id: Option<&str>,
+    trigger_source: &str,
+    available_at: i64,
+) -> Result<i64, ProxyError> {
+    let result = state
+        .proxy
+        .scheduled_job_enqueue_at(job_type, trigger_source, key_id, 1, available_at)
+        .await?;
+    maintenance_worker_wake_for_state(state).notify_one();
+    Ok(result.job_id)
 }
 
 async fn enqueue_scheduled_job_logged(
@@ -335,6 +379,32 @@ async fn dequeue_next_scheduled_job(
         return Ok(None);
     };
 
+    let now = state.proxy.backend_time().now_ts();
+    let queue_wait_secs = now.saturating_sub(candidate.queued_at);
+    tracing::debug!(
+        component = "scheduler",
+        event = "job_claim_attempt",
+        job_id = candidate.id,
+        job_type = %candidate.job_type,
+        trigger_source = %candidate.trigger_source,
+        queue_wait_ms = queue_wait_secs.saturating_mul(1_000),
+        effective_priority = candidate.effective_priority,
+        available_at = candidate.available_at,
+    );
+    if queue_wait_secs >= SCHEDULED_JOB_WAIT_WARN_SECS
+        && should_warn_scheduled_job_queue_wait(&candidate.job_type)
+    {
+        tracing::warn!(
+            component = "scheduler",
+            event = "job_queue_wait_threshold_exceeded",
+            job_id = candidate.id,
+            job_type = %candidate.job_type,
+            queue_wait_ms = queue_wait_secs.saturating_mul(1_000),
+            effective_priority = candidate.effective_priority,
+            available_at = candidate.available_at,
+        );
+    }
+
     match state.proxy.scheduled_job_mark_running(candidate.id).await? {
         Some(job) => Ok(Some((job, remote_io_permit))),
         None => Ok(None),
@@ -350,17 +420,37 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
         _job_execution_gate: None,
     };
     let completed = run_manual_claimed_job(state.clone(), job_type.clone(), key_id.clone(), claimed_job).await;
-    if job_type == "request_logs_gc"
-        && !completed
-        && let Err(err) = enqueue_scheduled_job(
+    if job_type == "request_logs_gc" && !completed {
+        let available_at = state
+            .proxy
+            .backend_time()
+            .now_ts()
+            .saturating_add(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS);
+        match enqueue_scheduled_job_at(
             state.as_ref(),
             &job_type,
             key_id.as_deref(),
-            &trigger_source,
+            TRIGGER_SOURCE_AUTO,
+            available_at,
         )
         .await
-    {
-        eprintln!("request-logs-gc: requeue error: {err}");
+        {
+            Ok(continuation_job_id) => tracing::debug!(
+                component = "request_logs_gc",
+                event = "continuation_queued",
+                trigger_source = %trigger_source,
+                continuation_job_id,
+                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                available_at,
+            ),
+            Err(err) => tracing::warn!(
+                component = "request_logs_gc",
+                event = "continuation_enqueue_failed",
+                trigger_source = %trigger_source,
+                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                err = %err,
+            ),
+        }
     }
 }
 
@@ -382,7 +472,21 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
                         run_queued_scheduled_job(state.clone(), job).await;
                     }
                 }
-                Ok(None) => wake.notified().await,
+                Ok(None) => {
+                    let now = state.proxy.backend_time().now_ts();
+                    let delay_secs = state
+                        .proxy
+                        .next_queued_scheduled_job_available_at()
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|available_at| available_at.saturating_sub(now).max(1) as u64)
+                        .unwrap_or(60 * 60);
+                    tokio::select! {
+                        _ = wake.notified() => {}
+                        _ = state.proxy.backend_time().sleep(Duration::from_secs(delay_secs)) => {}
+                    }
+                }
                 Err(err) => {
                     eprintln!("maintenance-worker: dequeue error: {err}");
                     state.proxy.backend_time().sleep(Duration::from_secs(1)).await;
@@ -632,6 +736,19 @@ fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
     });
 }
 
+fn spawn_request_logs_body_gc_index_ensure_scheduler(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let _ = enqueue_scheduled_job_logged(
+            state.as_ref(),
+            REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE,
+            None,
+            TRIGGER_SOURCE_SCHEDULER,
+            "request-logs-body-gc-index",
+        )
+        .await;
+    });
+}
+
 async fn run_request_logs_gc_catchup_claimed_job(
     state: Arc<AppState>,
     claimed_job: ClaimedScheduledJob,
@@ -653,6 +770,35 @@ async fn run_request_logs_gc_catchup_claimed_job(
     match result {
         Ok(report) => {
             let msg = format_request_logs_gc_report_message(&report, 1);
+            let zero_progress = report.progress_status == "incomplete_zero_progress";
+            let zero_progress_streak = if zero_progress {
+                REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK.fetch_add(1, Ordering::Relaxed) + 1
+            } else {
+                REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK.store(0, Ordering::Relaxed);
+                0
+            };
+            tracing::debug!(
+                component = "request_logs_gc",
+                event = "pass_completed",
+                progress_status = %report.progress_status,
+                scanned_body_candidates = report.scanned_body_candidates,
+                unique_retention_users = report.unique_retention_users,
+                retention_context_cache_hits = report.retention_context_cache_hits,
+                candidate_query_ms = report.body_candidate_query_elapsed_ms,
+                decision_ms = report.body_retention_decision_elapsed_ms,
+                write_ms = report.body_write_elapsed_ms,
+            );
+            if zero_progress_streak == 3
+                || (zero_progress_streak > 0 && zero_progress_streak % 12 == 0)
+            {
+                tracing::warn!(
+                    component = "request_logs_gc",
+                    event = "consecutive_zero_progress",
+                    zero_progress_streak,
+                    continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                    "request-log GC is incomplete without progress"
+                );
+            }
             let _ = state
                 .proxy
                 .scheduled_job_update_message(job_id, Some(&msg))
@@ -662,6 +808,39 @@ async fn run_request_logs_gc_catchup_claimed_job(
                 .scheduled_job_finish(job_id, "success", Some(&msg))
                 .await;
             report.completed
+        }
+        Err(err) => {
+            let _ = state
+                .proxy
+                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .await;
+            false
+        }
+    }
+}
+
+async fn run_request_logs_body_gc_index_ensure_claimed_job(
+    state: Arc<AppState>,
+    claimed_job: ClaimedScheduledJob,
+) -> bool {
+    let ClaimedScheduledJob {
+        job_id,
+        _job_execution_gate,
+    } = claimed_job;
+    drop(_job_execution_gate);
+    let _job_execution_gate = acquire_db_job_execution_gate_for_state(state.as_ref()).await;
+    let _maintenance = acquire_db_maintenance_write_gate().await;
+    let result = state.proxy.ensure_request_log_body_gc_cursor_index().await;
+    drop(_maintenance);
+    drop(_job_execution_gate);
+
+    match result {
+        Ok(()) => {
+            let _ = state
+                .proxy
+                .scheduled_job_finish(job_id, "success", Some("partial_index_ready"))
+                .await;
+            true
         }
         Err(err) => {
             let _ = state
@@ -1584,6 +1763,9 @@ async fn run_manual_claimed_job(
 ) -> bool {
     if job_type == "request_logs_gc" {
         return run_request_logs_gc_catchup_claimed_job(state, claimed_job).await;
+    }
+    if job_type == REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE {
+        return run_request_logs_body_gc_index_ensure_claimed_job(state, claimed_job).await;
     }
     if job_type == LINUXDO_USER_STATUS_SYNC_JOB_TYPE {
         return run_linuxdo_user_status_sync_claimed_job(state, claimed_job).await;

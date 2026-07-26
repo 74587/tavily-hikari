@@ -472,6 +472,32 @@ mod tests {
     }
 
     #[test]
+    fn sql_statement_logging_requires_explicit_sqlx_debug() {
+        let emit_statement = || {
+            tracing::debug!(
+                target: "sqlx::query",
+                statement = "SELECT sensitive_value FROM request_logs",
+                rows_affected = 1_u64,
+                "query completed"
+            );
+        };
+
+        let default_output = capture_tracing_output(
+            RuntimeLogFormat::Json,
+            EnvFilter::new(DEFAULT_RUNTIME_LOG_FILTER),
+            emit_statement,
+        );
+        assert!(!default_output.contains("sensitive_value"));
+
+        let debug_output = capture_tracing_output(
+            RuntimeLogFormat::Json,
+            EnvFilter::new("warn,tavily_hikari=info,sqlx::query=debug"),
+            emit_statement,
+        );
+        assert!(debug_output.contains("sensitive_value"));
+    }
+
+    #[test]
     fn explicit_text_fallback_format_is_supported() {
         let output = capture_tracing_output(RuntimeLogFormat::Text, EnvFilter::new("info"), || {
             tracing::info!(

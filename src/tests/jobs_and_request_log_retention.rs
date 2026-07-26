@@ -1378,6 +1378,7 @@ async fn request_log_policy_drops_non_business_body_but_keeps_metadata() {
 
 #[tokio::test]
 async fn request_log_policy_preserves_batch_non_business_classification_without_body() {
+    let _env_guard = env_lock().lock_owned().await;
     let db_path = temp_db_path("request-log-retention-batch-classification-without-body");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -2498,6 +2499,7 @@ async fn request_logs_gc_continues_when_body_scan_only_advances_cursor() {
     assert_eq!(report.cleaned_request_log_bodies, 1);
     assert!(report.completed);
     assert!(!report.has_more);
+    assert!(report.unique_retention_users == 1 && report.retention_context_cache_hits >= 63);
 
     let cleaned_body: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT request_body FROM observability.request_logs WHERE id = ?")

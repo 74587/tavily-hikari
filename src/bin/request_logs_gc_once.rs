@@ -82,6 +82,13 @@ struct CliReport {
     completed: bool,
     has_more: bool,
     elapsed_ms: u128,
+    scanned_body_candidates: i64,
+    unique_retention_users: i64,
+    retention_context_cache_hits: i64,
+    body_candidate_query_elapsed_ms: u128,
+    body_retention_decision_elapsed_ms: u128,
+    body_write_elapsed_ms: u128,
+    progress_status: String,
     pass_reports: Vec<RequestLogsGcReport>,
 }
 
@@ -110,6 +117,31 @@ impl CliReport {
             completed: last.completed,
             has_more: last.has_more,
             elapsed_ms: reports.iter().map(|report| report.elapsed_ms).sum(),
+            scanned_body_candidates: reports
+                .iter()
+                .map(|report| report.scanned_body_candidates)
+                .sum(),
+            unique_retention_users: reports
+                .iter()
+                .map(|report| report.unique_retention_users)
+                .sum(),
+            retention_context_cache_hits: reports
+                .iter()
+                .map(|report| report.retention_context_cache_hits)
+                .sum(),
+            body_candidate_query_elapsed_ms: reports
+                .iter()
+                .map(|report| report.body_candidate_query_elapsed_ms)
+                .sum(),
+            body_retention_decision_elapsed_ms: reports
+                .iter()
+                .map(|report| report.body_retention_decision_elapsed_ms)
+                .sum(),
+            body_write_elapsed_ms: reports
+                .iter()
+                .map(|report| report.body_write_elapsed_ms)
+                .sum(),
+            progress_status: last.progress_status.clone(),
             pass_reports: reports,
         }
     }
@@ -134,6 +166,13 @@ fn write_plain_report(mut writer: impl Write, report: &CliReport) -> io::Result<
         completed: report.completed,
         has_more: report.has_more,
         elapsed_ms: report.elapsed_ms,
+        scanned_body_candidates: report.scanned_body_candidates,
+        unique_retention_users: report.unique_retention_users,
+        retention_context_cache_hits: report.retention_context_cache_hits,
+        body_candidate_query_elapsed_ms: report.body_candidate_query_elapsed_ms,
+        body_retention_decision_elapsed_ms: report.body_retention_decision_elapsed_ms,
+        body_write_elapsed_ms: report.body_write_elapsed_ms,
+        progress_status: report.progress_status.clone(),
     };
     writeln!(
         writer,
@@ -195,6 +234,13 @@ mod tests {
                     completed: false,
                     has_more: true,
                     elapsed_ms: 12,
+                    scanned_body_candidates: 10,
+                    unique_retention_users: 2,
+                    retention_context_cache_hits: 8,
+                    body_candidate_query_elapsed_ms: 1,
+                    body_retention_decision_elapsed_ms: 2,
+                    body_write_elapsed_ms: 3,
+                    progress_status: "incomplete_progress".to_string(),
                 },
                 RequestLogsGcReport {
                     retention_days: 32,
@@ -208,6 +254,13 @@ mod tests {
                     completed: true,
                     has_more: false,
                     elapsed_ms: 8,
+                    scanned_body_candidates: 4,
+                    unique_retention_users: 1,
+                    retention_context_cache_hits: 3,
+                    body_candidate_query_elapsed_ms: 1,
+                    body_retention_decision_elapsed_ms: 1,
+                    body_write_elapsed_ms: 1,
+                    progress_status: "completed".to_string(),
                 },
             ],
         );

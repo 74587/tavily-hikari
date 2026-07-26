@@ -1528,6 +1528,8 @@ pub struct QueuedScheduledJob {
     pub key_id: Option<String>,
     pub attempt: i64,
     pub queued_at: i64,
+    pub available_at: i64,
+    pub effective_priority: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

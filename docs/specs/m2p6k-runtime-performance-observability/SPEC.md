@@ -50,6 +50,12 @@
   - `outbox_row_count`
   - `outbox_oldest_age_secs`
   - `outbox_ack_lag`
+- HA normal completion events may be emitted at DEBUG, with an INFO sample per `(event, channel)`
+  at most once per minute. Outbox aggregation and full runtime-memory snapshots may be collected at
+  most once per channel every five minutes, except for slow operations.
+- Default SQLx logging must not emit complete statements at WARN. Stable operation-level logs retain
+  timing, rows, and error category; `RUST_LOG=sqlx::query=debug` remains the explicit opt-in for
+  raw SQL diagnostics.
 
 ## Required Perf Events
 

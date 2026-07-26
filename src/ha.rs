@@ -558,6 +558,10 @@ pub struct HaStatusView {
     pub sync_lag_seconds: Option<i64>,
     pub recovery_status: Option<String>,
     pub message: Option<String>,
+    #[serde(default)]
+    pub peer_count: usize,
+    #[serde(default)]
+    pub sync_disabled_reason: Option<String>,
     pub peer_nodes: Vec<HaPeerNodeView>,
     pub planned_cutover_eligible: bool,
 }
@@ -966,6 +970,14 @@ impl HaRuntime {
 
     pub async fn status(&self) -> HaStatusView {
         let state = self.state.read().await;
+        let peer_count = self
+            .config
+            .peer_nodes
+            .iter()
+            .filter(|peer| peer.node_id != self.config.node_id)
+            .count();
+        let sync_disabled_reason = (self.config.mode == HaMode::ActiveStandby && peer_count == 0)
+            .then(|| "no_configured_peers".to_string());
         let sync_lag_seconds = state
             .last_sync_at
             .map(|last| self.backend_time.now_ts().saturating_sub(last));
@@ -1059,6 +1071,8 @@ impl HaRuntime {
             sync_lag_seconds,
             recovery_status: state.recovery_status.clone(),
             message: state.message.clone(),
+            peer_count,
+            sync_disabled_reason,
             peer_nodes: Vec::new(),
             planned_cutover_eligible: false,
         }
@@ -1118,6 +1132,10 @@ impl HaRuntime {
 
     pub fn peer_nodes(&self) -> Vec<HaPeerNodeConfig> {
         self.config.peer_nodes.clone()
+    }
+
+    pub fn node_id(&self) -> &str {
+        &self.config.node_id
     }
 
     pub async fn role(&self) -> HaNodeRole {
@@ -2433,5 +2451,34 @@ mod tests {
             PublicOrigin::parse("gz.ivanli.cc:443", OriginScheme::Http).expect("http origin");
 
         assert!(!https_origin.equivalent_to(&http_origin));
+    }
+
+    #[tokio::test]
+    async fn active_standby_without_peers_reports_sync_disabled_without_losing_health() {
+        let runtime = HaRuntime::new(HaConfig {
+            mode: HaMode::ActiveStandby,
+            ..HaConfig::default()
+        });
+        let status = runtime.status().await;
+        assert_eq!(status.peer_count, 0);
+        assert_eq!(
+            status.sync_disabled_reason.as_deref(),
+            Some("no_configured_peers")
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_ha_status_payload_defaults_new_peer_diagnostics() {
+        let status = HaRuntime::new(HaConfig::default()).status().await;
+        let mut payload = serde_json::to_value(status).expect("serialize HA status");
+        let object = payload
+            .as_object_mut()
+            .expect("HA status serializes as object");
+        object.remove("peerCount");
+        object.remove("syncDisabledReason");
+
+        let decoded: HaStatusView = serde_json::from_value(payload).expect("decode legacy status");
+        assert_eq!(decoded.peer_count, 0);
+        assert_eq!(decoded.sync_disabled_reason, None);
     }
 }

@@ -608,7 +608,7 @@ fn sqlite_connect_options(
         .create_if_missing(create_if_missing)
         .read_only(read_only)
         .busy_timeout(busy_timeout)
-        .log_slow_statements(LevelFilter::Warn, SQLITE_SLOW_STATEMENT_THRESHOLD);
+        .log_slow_statements(LevelFilter::Debug, SQLITE_SLOW_STATEMENT_THRESHOLD);
     if !read_only {
         options = options.journal_mode(SqliteJournalMode::Wal);
     }
