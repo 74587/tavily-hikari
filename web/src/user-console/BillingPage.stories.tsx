@@ -718,6 +718,10 @@ export const Default: Story = {
 
     await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
     await expect(preview.getByRole('tooltip')).toHaveTextContent('already scheduled for this month')
+    await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
+    await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
+    await userEvent.click(preview.getByRole('button', { name: 'Before order' }))
+    await expect(preview.getByRole('tooltip')).toHaveTextContent('already scheduled for this month')
     await userEvent.keyboard('{Escape}')
     await expect(preview.queryByRole('tooltip')).not.toBeInTheDocument()
     await expect(preview.getByRole('heading', { name: 'Order impact preview' })).toBeInTheDocument()

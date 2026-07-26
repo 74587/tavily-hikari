@@ -92,8 +92,9 @@ export function AnchoredInfoDisclosure({
       return
     }
     if (pointerHoverRef.current) {
-      pinnedRef.current = true
-      setOpen(true)
+      const nextPinned = !pinnedRef.current
+      pinnedRef.current = nextPinned
+      setOpen(nextPinned)
       return
     }
     setOpen((currentOpen) => {
