@@ -66,13 +66,44 @@ async fn delayed_request_logs_gc_continuation_survives_restart_and_manual_trigge
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy recreated");
+    let unrelated = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "scheduler", None, 1)
+        .await
+        .expect("enqueue unrelated queued job");
+    assert_eq!(
+        proxy
+            .abandon_active_scheduled_jobs()
+            .await
+            .expect("run startup stale-job cleanup"),
+        1,
+        "startup cleanup must abandon unrelated queued work"
+    );
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(continuation_id)
+            .await
+            .expect("read delayed continuation after startup cleanup")
+            .expect("delayed continuation remains")
+            .status,
+        "queued",
+        "startup cleanup must preserve the durable automatic continuation"
+    );
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(unrelated.job_id)
+            .await
+            .expect("read abandoned unrelated job")
+            .expect("unrelated job remains in history")
+            .status,
+        "abandoned"
+    );
     assert!(
         proxy
             .fetch_queued_scheduled_jobs(1)
             .await
             .expect("fetch delayed continuation after restart")
             .is_empty(),
-        "available_at must survive process recreation"
+        "available_at must survive process recreation and startup cleanup"
     );
     let manual = proxy
         .scheduled_job_enqueue("request_logs_gc", "manual", None, 1)

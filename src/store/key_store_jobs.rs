@@ -957,7 +957,15 @@ impl KeyStore {
                 SET status = 'abandoned',
                     message = COALESCE(message, 'abandoned after process restart'),
                     finished_at = ?
-                WHERE (status = 'queued' OR status = 'running')
+                WHERE (
+                        status = 'running'
+                        OR (
+                            status = 'queued'
+                            -- This is the durable request-log GC catch-up contract. Its
+                            -- available_at guard still prevents an early claim after restart.
+                            AND NOT (job_type = 'request_logs_gc' AND trigger_source = 'auto')
+                        )
+                    )
                   AND finished_at IS NULL
                 "#,
             )

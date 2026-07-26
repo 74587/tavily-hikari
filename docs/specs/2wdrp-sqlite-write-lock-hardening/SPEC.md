@@ -157,8 +157,9 @@ source when a usable persisted runtime already exists.
   retention context per unique user for a bounded pass, and its `(created_at, id)` partial body
   cursor index must be built by a low-priority post-ready maintenance task rather than schema
   bootstrap.
-- Service startup must abandon any leftover `queued` or `running` maintenance rows from the previous
-  process lifetime rather than implicitly resuming them after restart.
+- Service startup must abandon leftover `queued` or `running` maintenance rows from the previous
+  process lifetime rather than implicitly resuming them after restart, except an automatic
+  `request_logs_gc` continuation that remains queued so its persisted `available_at` delay survives.
 - SQLite file size must converge after retention cleanup. The service must expose DB size/freelist
   telemetry, automatically trigger compaction when reclaimable space crosses the configured
   threshold, and provide a manual compaction trigger. Health checks must remain available while DB
@@ -296,8 +297,10 @@ source when a usable persisted runtime already exists.
 - Manual trigger API calls return a representative job id, job rows expose `trigger_source` plus
   `queued_at`, and duplicate active manual triggers coalesce onto the existing queued/running row
   instead of returning `db_job_execution_busy` or duplicate-running conflicts.
-- After restart, any leftover `queued` or `running` maintenance rows are marked `abandoned` with a
-  completion timestamp before new queue work is accepted.
+- After restart, leftover `queued` or `running` maintenance rows are marked `abandoned` with a
+  completion timestamp before new queue work is accepted, except the delayed automatic
+  `request_logs_gc` continuation. That continuation remains queued and becomes eligible only at its
+  persisted `available_at`.
 - A continuously incomplete request-log GC cannot prevent an aged `ha_outbox_gc` row from being
   claimed after the five-minute age window. Delayed automatic continuations remain ineligible after
   process recreation, while a manual trigger reuses and immediately unlocks the representative row.

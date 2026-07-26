@@ -133,7 +133,8 @@ month-tail public metrics scan.
 - Persist an `available_at` timestamp as well. Automatic catch-up continuations need a durable
   delay across process recreation, and queue order must age old non-manual work toward a bounded
   priority floor so one fresh continuation family cannot starve HA cleanup forever. Manual triggers
-  should reuse and unlock their representative job immediately.
+  should reuse and unlock their representative job immediately. Startup cleanup must retain that
+  delayed automatic continuation while abandoning unrelated stale queued/running work.
 - For request-log body GC, build the selective `(created_at, id)` partial cursor index after ready
   through the maintenance queue, then cache per-user retention context for the bounded pass. This
   changes retention lookup work from candidate-row-shaped to unique-user-shaped while retaining the

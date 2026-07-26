@@ -289,8 +289,9 @@
   in-memory paging/grouping. Those paths page and aggregate in SQL, canonicalize `request_kind`
   before filtering/grouping, and rely on dedicated `auth_token_logs` indexes for
   `failure_kind/result_status/token_id + created_at` windows.
-- Service startup now abandons leftover `queued` and `running` maintenance rows from the previous
-  process lifetime before starting the new worker.
+- Service startup abandons leftover `queued` and `running` maintenance rows from the previous
+  process lifetime before starting the new worker, except a delayed automatic `request_logs_gc`
+  continuation. The exception preserves its durable `available_at` backoff across restart.
 - Added `request_logs_gc_once` as a one-shot operational binary. It supports JSON output and
   `--run-until-complete` for deterministic low-resource validation against production-derived
   database samples.
