@@ -407,7 +407,36 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
             tavily_hikari::HaSyncChannel::Billing,
             tavily_hikari::HaSyncChannel::Runtime,
         ] {
-            if let Ok(value) = state.proxy.ha_peer_channel_health(channel, &peer.node_id).await {
+            let value = if status.role == tavily_hikari::HaNodeRole::Standby {
+                let watermark_name = if state.ha.dual_active_enabled() {
+                    format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
+                } else {
+                    format!("standby_{}_applied_seq", channel.as_str())
+                };
+                let applied_seq = state
+                    .proxy
+                    .get_ha_sync_watermark(&watermark_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|value| *value > 0);
+                applied_seq.map(|acked_seq| tavily_hikari::HaChannelHealthView {
+                    channel,
+                    acked_seq: Some(acked_seq),
+                    high_watermark: acked_seq,
+                    ack_lag: Some(0),
+                    cursor_state: "healthy".to_string(),
+                    retention_secs: match channel {
+                        tavily_hikari::HaSyncChannel::Control => 72 * 60 * 60,
+                        tavily_hikari::HaSyncChannel::Billing
+                        | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
+                    },
+                    expired_backlog: false,
+                })
+            } else {
+                state.proxy.ha_peer_channel_health(channel, &peer.node_id).await.ok()
+            };
+            if let Some(value) = value {
                 health.push(value);
             }
         }

@@ -632,7 +632,12 @@ impl KeyStore {
         available_at: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
         let finished_at = self.backend_time.now_ts();
-        let mut conn = self.pool.acquire().await?;
+        let mut conn = tokio::time::timeout(
+            Duration::from_millis(100),
+            self.pool.acquire(),
+        )
+        .await
+        .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
         let result = async {
             // A deferred online slice must not turn a short SQLite writer conflict
             // into the scheduler's long retry window.
