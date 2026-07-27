@@ -1172,7 +1172,10 @@ async fn run_ha_standby_sync_once(
             .await?;
     }
     state.ha.mark_sync_success().await;
-    state.proxy.flush_ha_state_writes().await?;
+    {
+        let _maintenance = acquire_db_maintenance_read_gate().await;
+        state.proxy.flush_ha_state_writes().await?;
+    }
     Ok(())
 }
 
@@ -1243,7 +1246,10 @@ async fn run_ha_peer_sync_once(
         .await?;
     }
     state.ha.mark_sync_success().await;
-    state.proxy.flush_ha_state_writes().await?;
+    {
+        let _maintenance = acquire_db_maintenance_read_gate().await;
+        state.proxy.flush_ha_state_writes().await?;
+    }
     Ok(())
 }
 
@@ -1310,6 +1316,7 @@ async fn run_ha_sync_once_for_peer(
             } else {
                 None
             };
+            let _maintenance = acquire_db_maintenance_read_gate().await;
             let result = apply_ha_baseline_response_stream(
                 state.as_ref(),
                 channel,
@@ -1372,6 +1379,7 @@ async fn run_ha_sync_once_for_peer(
             } else {
                 "retention window missed; baseline required"
             };
+            let _maintenance = acquire_db_maintenance_read_gate().await;
             state
                 .proxy
                 .persist_ha_sync_watermark(
@@ -1414,6 +1422,7 @@ async fn run_ha_sync_once_for_peer(
         } else {
             None
         };
+        let _maintenance = acquire_db_maintenance_read_gate().await;
         let result = match apply_ha_events_response_stream(
             state.as_ref(),
             channel,
@@ -1464,6 +1473,7 @@ async fn run_ha_sync_once_for_peer(
                 .await?;
             state.proxy.flush_ha_state_writes().await?;
         }
+        drop(_maintenance);
         let ack_target = format!("{}/api/admin/ha/events/ack", source_url.trim_end_matches('/'));
         let _ = client
             .post(ack_target)

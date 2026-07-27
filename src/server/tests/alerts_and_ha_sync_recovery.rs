@@ -535,16 +535,34 @@ async fn dual_active_peer_runtime_baseline_does_not_delete_local_rows() {
     });
 
     let client = Client::new();
-    run_ha_sync_once_for_peer(
-        &state,
-        &client,
-        &format!("http://{source_addr}"),
-        "node-b",
-        "test-token",
-        &[tavily_hikari::HaSyncChannel::Runtime],
-    )
-    .await
-    .expect("dual-active peer sync should preserve local runtime rows");
+    let source_url = format!("http://{source_addr}");
+    let maintenance = acquire_db_maintenance_write_gate().await;
+    let mut sync_task = tokio::spawn({
+        let state = state.clone();
+        let client = client.clone();
+        async move {
+            run_ha_sync_once_for_peer(
+                &state,
+                &client,
+                &source_url,
+                "node-b",
+                "test-token",
+                &[tavily_hikari::HaSyncChannel::Runtime],
+            )
+            .await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut sync_task)
+            .await
+            .is_err(),
+        "HA sync must wait for the shared maintenance gate before applying rows"
+    );
+    drop(maintenance);
+    sync_task
+        .await
+        .expect("HA sync task should not panic")
+        .expect("dual-active peer sync should preserve local runtime rows");
 
     let row_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mcp_sessions WHERE proxy_session_id = 'sess-local-dual-active'",
