@@ -671,6 +671,51 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
 }
 
 #[tokio::test]
+async fn admin_ha_status_keeps_unprobed_peer_channel_health_unavailable() {
+    let db_path = temp_db_path("ha-peer-health-unprobed");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-peer-health-unprobed".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        mode: tavily_hikari::HaMode::ActiveStandby,
+        node_id: "node-active".to_string(),
+        database_path: Some(db_str.clone()),
+        peer_nodes: vec![tavily_hikari::HaPeerNodeConfig {
+            node_id: "node-peer".to_string(),
+            admin_base_url: "http://127.0.0.1:1".to_string(),
+            public_origin: "peer-public-origin:443".to_string(),
+            role_hint: tavily_hikari::HaPeerRoleHint::StandbyCandidate,
+        }],
+        ..tavily_hikari::HaConfig::default()
+    });
+    let addr = spawn_ha_admin_server(proxy, ha, true).await;
+
+    let response = Client::new()
+        .get(format!("http://{addr}/api/admin/ha/status"))
+        .send()
+        .await
+        .expect("ha status response");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("ha status body");
+    let channel_health = body["peerNodes"][0]["channelHealth"]
+        .as_array()
+        .expect("unprobed peer channel health");
+    assert_eq!(channel_health.len(), 3);
+    assert!(channel_health.iter().all(|channel| {
+        channel["cursorState"] == "unavailable"
+            && channel["ackedSeq"].is_null()
+            && channel["ackLag"].is_null()
+    }));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn ha_events_endpoint_skips_legacy_non_control_rows_without_cursor_stall() {
     let db_path = temp_db_path("ha-events-legacy-control-cursor");
     let db_str = db_path.to_string_lossy().to_string();
