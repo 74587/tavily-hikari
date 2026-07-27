@@ -389,27 +389,28 @@ async fn ha_events_cursor_ignores_legacy_sequence_after_valid_rows_are_gc() {
     .expect("proxy created");
     let pool = connect_sqlite_test_pool(&db_str).await;
     let old_ts = Utc::now().timestamp() - (4 * SECS_PER_DAY);
-    let valid_seq = sqlx::query(
-        r#"
-        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
-        VALUES ('state', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, NULL)
-        "#,
-    )
-    .bind(old_ts)
-    .execute(&pool)
-    .await
-    .expect("insert expired valid event")
-    .last_insert_rowid();
-    sqlx::query(
-        r#"
-        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
-        VALUES ('legacy', 'removed_resource', 'legacy-seq', 'delete', '{}', ?, NULL)
-        "#,
-    )
-    .bind(old_ts)
-    .execute(&pool)
-    .await
-    .expect("insert expired legacy event");
+    let now = Utc::now().timestamp();
+    for (seq, resource, created_at) in [
+        (1, "meta", now),
+        (2, "meta", now),
+        (3, "removed_resource", old_ts),
+        (4, "meta", now),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (seq, kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES (?, 'state', ?, ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(seq)
+        .bind(resource)
+        .bind(format!("legacy-sequence-{seq}"))
+        .bind(created_at)
+        .execute(&pool)
+        .await
+        .expect("insert cursor sequence event");
+    }
     pool.close().await;
 
     proxy
@@ -420,12 +421,15 @@ async fn ha_events_cursor_ignores_legacy_sequence_after_valid_rows_are_gc() {
             inter_batch_sleep_ms: 0,
         })
         .await
-        .expect("gc expired valid and legacy events");
+        .expect("gc legacy event");
     let events = proxy
-        .list_ha_events_after(HaSyncChannel::Control, valid_seq, 10)
+        .list_ha_events_after(HaSyncChannel::Control, 2, 10)
         .await
         .expect("legacy sqlite sequence must not force a baseline reset");
-    assert!(events.is_empty());
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![4]
+    );
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -583,7 +587,7 @@ async fn ha_peer_health_ignores_legacy_gap_after_gc() {
     pool.close().await;
 
     proxy
-        .ack_ha_peer_watermark(HaSyncChannel::Control, "standby-legacy-gap", 1)
+        .ack_ha_peer_watermark(HaSyncChannel::Control, "standby-legacy-gap", 2)
         .await
         .expect("ack watermark");
     proxy

@@ -336,25 +336,8 @@ impl KeyStore {
                     .await?;
                 let expired_valid_seq =
                     Self::ha_channel_expired_valid_watermark_on_conn(&mut conn, channel).await?;
-                let first_retained_gap = if let Some(first) = first_retained_seq {
-                    let expired_valid_gap =
-                        expired_valid_seq.is_some_and(|deleted| acked < deleted);
-                    let has_any_bridge: bool = if expired_valid_gap {
-                        false
-                    } else {
-                        sqlx::query_scalar(&format!(
-                            "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND seq > ? AND seq < ?)"
-                        ))
-                        .bind(threshold)
-                        .bind(acked)
-                        .bind(first)
-                        .fetch_one(&mut *conn)
-                        .await?
-                    };
-                    first > acked.saturating_add(1) && (expired_valid_gap || !has_any_bridge)
-                } else {
-                    false
-                };
+                let first_retained_gap = first_retained_seq.is_some()
+                    && expired_valid_seq.is_some_and(|deleted| acked < deleted);
                 (has_retained_after_ack, first_retained_gap)
             } else {
                 (false, false)
@@ -1146,26 +1129,11 @@ impl KeyStore {
                 channel.as_str()
             )));
         }
-        if let Some(min_seq) = min_seq
-            && after_seq > 0
-            && after_seq < min_seq.saturating_sub(1)
-        {
+        if min_seq.is_some() && after_seq > 0 {
             let expired_valid_seq =
                 Self::ha_channel_expired_valid_watermark_on_conn(conn, channel).await?;
             let has_expired_valid_gap = expired_valid_seq.is_some_and(|deleted| after_seq < deleted);
-            let has_any_bridge: bool = if has_expired_valid_gap {
-                false
-            } else {
-                sqlx::query_scalar(&format!(
-                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND seq > ? AND seq < ?)"
-                ))
-                .bind(threshold)
-                .bind(after_seq)
-                .bind(min_seq)
-                .fetch_one(&mut **conn)
-                .await?
-            };
-            if has_expired_valid_gap || !has_any_bridge {
+            if has_expired_valid_gap {
                 return Err(ProxyError::Other(format!(
                     "HA {} cursor is older than retention window",
                     channel.as_str()
