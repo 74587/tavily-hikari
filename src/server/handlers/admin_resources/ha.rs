@@ -490,7 +490,7 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                     .is_some_and(|health| health.expired_backlog);
                 let source_unavailable = source_health
                     .as_ref()
-                    .is_none_or(|health| health.cursor_state == "unavailable");
+                    .is_some_and(|health| health.cursor_state == "unavailable");
                 let watermark_name = if state.ha.dual_active_enabled() {
                     format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
                 } else {
@@ -531,8 +531,10 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                         "unavailable"
                     } else if source_expired_backlog {
                         "expired_backlog"
-                    } else if source_high_watermark.is_none() {
-                        "unavailable"
+                    } else if source_health.is_none() || source_high_watermark.is_none() {
+                        // Older peers can answer successfully without the optional channel
+                        // telemetry. Keep the probe result neutral during rolling upgrades.
+                        "unknown"
                     } else if acked_seq.is_none() {
                         "baseline_required"
                     } else if acked_seq.is_some_and(|acked| acked >= high_watermark) {

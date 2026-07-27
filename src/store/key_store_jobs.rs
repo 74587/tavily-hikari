@@ -1060,9 +1060,27 @@ impl KeyStore {
             match sqlx::query(
                 r#"
                 UPDATE scheduled_jobs
-                SET status = 'abandoned',
-                    message = COALESCE(message, 'abandoned after process restart'),
-                    finished_at = ?
+                SET status = CASE
+                        WHEN status = 'running' AND job_type = 'ha_outbox_gc' THEN 'queued'
+                        ELSE 'abandoned'
+                    END,
+                    message = CASE
+                        WHEN status = 'running' AND job_type = 'ha_outbox_gc'
+                            THEN COALESCE(message, 'deferred=process_restart')
+                        ELSE COALESCE(message, 'abandoned after process restart')
+                    END,
+                    started_at = CASE
+                        WHEN status = 'running' AND job_type = 'ha_outbox_gc' THEN NULL
+                        ELSE started_at
+                    END,
+                    finished_at = CASE
+                        WHEN status = 'running' AND job_type = 'ha_outbox_gc' THEN NULL
+                        ELSE ?
+                    END,
+                    available_at = CASE
+                        WHEN status = 'running' AND job_type = 'ha_outbox_gc' THEN MAX(available_at, ?)
+                        ELSE available_at
+                    END
                 WHERE (
                         status = 'running'
                         OR (
@@ -1082,6 +1100,7 @@ impl KeyStore {
                 "#,
             )
             .bind(now)
+            .bind(now.saturating_add(30))
             .execute(&self.pool)
             .await
             {

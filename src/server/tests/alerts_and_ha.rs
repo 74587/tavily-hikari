@@ -658,6 +658,11 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
     assert_eq!(body["peerNodes"][0]["publicOrigin"], "peer-public-origin:443");
     assert_eq!(body["peerNodes"][0]["sourceConfigTarget"], "peer-source-config:53844");
     assert_eq!(
+        body["peerNodes"][0]["channelHealth"][0]["cursorState"],
+        "unknown",
+        "a reachable older peer without optional channel telemetry must not appear unavailable"
+    );
+    assert_eq!(
         observed_peer_node_id.lock().await.as_deref(),
         Some("node-active")
     );

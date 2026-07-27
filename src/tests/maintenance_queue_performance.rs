@@ -204,6 +204,61 @@ async fn delayed_gc_continuations_survive_restart_and_manual_trigger_unlocks_req
 }
 
 #[tokio::test]
+async fn running_ha_gc_is_requeued_after_restart() {
+    let db_path = temp_db_path("running-ha-gc-restart-recovery");
+    let db_str = db_path.to_string_lossy().to_string();
+    let job_id = {
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        let job = proxy
+            .scheduled_job_enqueue("ha_outbox_gc", "auto", None, 1)
+            .await
+            .expect("enqueue HA continuation");
+        proxy
+            .scheduled_job_mark_running(job.job_id)
+            .await
+            .expect("mark HA continuation running")
+            .expect("claim HA continuation");
+        job.job_id
+    };
+
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("recreate proxy");
+    assert_eq!(
+        proxy
+            .abandon_active_scheduled_jobs()
+            .await
+            .expect("recover running HA continuation"),
+        1
+    );
+    let recovered = proxy
+        .scheduled_job_by_id(job_id)
+        .await
+        .expect("read recovered HA continuation")
+        .expect("recovered HA continuation exists");
+    assert_eq!(recovered.status, "queued");
+    assert_eq!(recovered.trigger_source, "auto");
+    assert!(recovered.started_at.is_none());
+    assert!(recovered.finished_at.is_none());
+    let available_at: i64 =
+        sqlx::query_scalar("SELECT available_at FROM scheduled_jobs WHERE id = ?")
+            .bind(job_id)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read recovered availability");
+    assert!(
+        available_at >= Utc::now().timestamp() + 29,
+        "recovered HA continuation should retain a short retry delay"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn request_log_body_gc_candidate_query_uses_partial_body_index() {
     let db_path = temp_db_path("request-log-body-gc-partial-index");
     let db_str = db_path.to_string_lossy().to_string();
