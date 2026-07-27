@@ -2913,6 +2913,7 @@ include!("key_store_jobs.rs");
 include!("key_store_account_limit_snapshots.rs");
 include!("key_store_account_usage_rollups.rs");
 include!("key_store_ha_defs.rs");
+include!("key_store_ha_watermarks.rs");
 include!("key_store_ha.rs");
 #[cfg(test)]
 include!("key_store_request_logs_and_dashboard_test_support.rs");
