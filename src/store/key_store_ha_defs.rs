@@ -72,7 +72,7 @@ pub struct HaEventsApplySession {
 
 const HA_SCHEMA_VERSION: i64 = 2;
 const HA_CONTROL_OUTBOX_RETENTION_SECS: i64 = 72 * 60 * 60;
-const HA_CHANNEL_EXPORT_RETENTION_SECS: i64 = 92 * 24 * 60 * 60;
+const HA_CHANNEL_EXPORT_RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
 const HA_CONTROL_PLANE_EVENT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 const HA_CONTROL_BASELINE_TABLES: &[&str] = &[
@@ -217,10 +217,6 @@ fn ha_channel_event_table(channel: HaSyncChannel) -> &'static str {
         HaSyncChannel::Billing => "ha_billing_outbox",
         HaSyncChannel::Runtime => "ha_runtime_outbox",
     }
-}
-
-fn ha_channel_sequence_name(channel: HaSyncChannel) -> &'static str {
-    ha_channel_event_table(channel)
 }
 
 fn ha_channel_event_tables(channel: HaSyncChannel) -> &'static [&'static str] {

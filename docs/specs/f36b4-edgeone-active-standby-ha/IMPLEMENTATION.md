@@ -224,3 +224,10 @@
     - `nodeAOomKilled = false`
     - `nodeBOomKilled = false`
     - standby converged to `users=2000`, `tokens=2000`, `sessions=3000`, `billing=35000`
+- Online `ha_outbox_gc` now reuses the running application's `TavilyProxy` pool, acquires a
+  non-blocking maintenance write lease, and runs at most `250 x 4` rows within one second with
+  100ms inter-batch yielding. Busy, incomplete, or lease-deferred slices finish their job and
+  persist a 30-second continuation; the independent CLI retains its `20,000 x 8 / 20s` budget.
+- Control retention remains 72 hours while billing/runtime retention is 14 days. Peer-less export
+  diagnostics report a null ACK lag, and the admin node view now exposes per-channel ACK and GC
+  health without a `COUNT(*)` query.

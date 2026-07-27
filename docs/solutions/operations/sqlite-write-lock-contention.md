@@ -397,3 +397,10 @@ the observed symptoms like this:
 - request-path `/api/tavily/search` / MCP billing failures
   -> correlate request warning lines with `apply_pending_billing_log`, quota/billing lock logs, and
   `sqlx::query` warn lines for slow statements on the same wall-clock window
+- Keep online HA cleanup on the application's already-open pool. Probe the maintenance write gate
+  with `try_write`, pin the online slice to a connection with a short SQLite busy timeout, and
+  finish plus requeue after 30 seconds when the lease or writer is unavailable. Keep the one-shot
+  CLI's larger batch/time budget separate so operational cleanup is not accidentally throttled.
+- Treat ACK lag as peer-relative data. A full-master export/baseline has no peer watermark and must
+  report `null`, while an admin peer/channel health view can derive healthy/catching-up/baseline/
+  expired-backlog state from the watermark, retention threshold, and indexed `EXISTS` checks.

@@ -286,9 +286,8 @@ impl KeyStore {
                 .fetch_optional(&mut *conn)
                 .await?
                 .flatten()
-                .unwrap_or(0)
             }
-            None => 0,
+            None => None,
         };
         let high_watermark = Self::ha_channel_high_watermark_on_conn(&mut conn, channel).await?;
         let now = self.backend_time.now_ts();
@@ -297,7 +296,97 @@ impl KeyStore {
             oldest_age_secs: oldest_created_at
                 .map(|created_at| now.saturating_sub(created_at).max(0))
                 .unwrap_or(0),
-            ack_lag: high_watermark.saturating_sub(acked_seq).max(0),
+            ack_lag: acked_seq.map(|acked| high_watermark.saturating_sub(acked).max(0)),
+        })
+    }
+
+    pub(crate) async fn ha_peer_channel_health(
+        &self,
+        channel: HaSyncChannel,
+        peer_node_id: &str,
+    ) -> Result<crate::HaChannelHealthView, ProxyError> {
+        let mut conn = self.pool.acquire().await?;
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let high_watermark = Self::ha_channel_high_watermark_on_conn(&mut conn, channel).await?;
+        let acked_seq = sqlx::query_scalar::<_, Option<i64>>(
+            r#"SELECT acked_seq FROM ha_peer_watermarks WHERE peer_node_id = ? AND channel = ?"#,
+        )
+        .bind(peer_node_id)
+        .bind(channel.as_str())
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+        let threshold = self.backend_time.now_ts() - ha_channel_retention_secs(channel);
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        let (has_retained_after_ack, has_retained_gap_after_ack) =
+            if let Some(acked) = acked_seq {
+                let has_retained_after_ack: bool = sqlx::query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?)"
+                ))
+                .bind(threshold)
+                .bind(acked)
+                .fetch_one(&mut *conn)
+                .await?;
+                let first_retained_seq: Option<i64> = sqlx::query_scalar(&format!(
+                    "SELECT MIN(seq) FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?"
+                ))
+                .bind(threshold)
+                .bind(acked)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                let expired_valid_seq =
+                    Self::ha_channel_expired_valid_watermark_on_conn(&mut conn, channel).await?;
+                let expired_legacy_seq =
+                    Self::ha_channel_expired_legacy_watermark_on_conn(&mut conn, channel).await?;
+                let first_retained_gap = if let Some(first) = first_retained_seq {
+                    let gap = first > acked.saturating_add(1);
+                    let expired_valid_gap = expired_valid_seq.is_some_and(|deleted| acked < deleted);
+                    let expired_legacy_gap = expired_legacy_seq
+                        .is_some_and(|deleted| acked < deleted && deleted < first);
+                    let has_any_bridge: bool = if expired_valid_gap || expired_legacy_gap {
+                        false
+                    } else {
+                        sqlx::query_scalar(&format!(
+                            "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND seq > ? AND seq < ?)"
+                        ))
+                        .bind(threshold)
+                        .bind(acked)
+                        .bind(first)
+                        .fetch_one(&mut *conn)
+                        .await?
+                    };
+                    gap && (expired_valid_gap || (!expired_legacy_gap && !has_any_bridge))
+                } else {
+                    false
+                };
+                (has_retained_after_ack, first_retained_gap)
+            } else {
+                (false, false)
+            };
+        let expired_backlog = acked_seq.is_some_and(|acked| {
+            acked > 0
+                && high_watermark > acked
+                && (!has_retained_after_ack || has_retained_gap_after_ack)
+        });
+        let cursor_state = if expired_backlog {
+            "expired_backlog"
+        } else if acked_seq == Some(0) && high_watermark > 0 {
+            "baseline_required"
+        } else if high_watermark == 0 || acked_seq.is_some_and(|acked| acked >= high_watermark) {
+            "healthy"
+        } else if acked_seq.is_some() {
+            "catching_up"
+        } else {
+            "baseline_required"
+        };
+        Ok(crate::HaChannelHealthView {
+            channel,
+            acked_seq,
+            high_watermark,
+            ack_lag: acked_seq.map(|acked| high_watermark.saturating_sub(acked).max(0)),
+            cursor_state: cursor_state.to_string(),
+            retention_secs: ha_channel_retention_secs(channel),
+            expired_backlog,
         })
     }
 
@@ -903,21 +992,6 @@ impl KeyStore {
         Ok(total.max(0) as usize)
     }
 
-    async fn ha_channel_high_watermark_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
-        channel: HaSyncChannel,
-    ) -> Result<i64, ProxyError> {
-        Ok(
-            sqlx::query_scalar::<_, Option<i64>>(&format!(
-                "SELECT MAX(seq) FROM {}",
-                quote_sqlite_identifier(ha_channel_event_table(channel))
-            ))
-            .fetch_one(&mut **conn)
-            .await?
-            .unwrap_or(0),
-        )
-    }
-
     async fn validate_ha_events_cursor_on_conn(
         conn: &mut sqlx::pool::PoolConnection<Sqlite>,
         channel: HaSyncChannel,
@@ -927,18 +1001,17 @@ impl KeyStore {
         let allowed_resources = ha_channel_allowed_resources_sql(channel);
         let table = quote_sqlite_identifier(ha_channel_event_table(channel));
         let min_seq: Option<i64> = sqlx::query_scalar(&format!(
-            "SELECT MIN(seq) FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources})"
+            "SELECT MIN(seq) FROM {table} WHERE created_at >= ? AND resource IN ({allowed_resources}) AND seq > ?"
         ))
         .bind(threshold)
+        .bind(after_seq)
         .fetch_one(&mut **conn)
         .await?;
-        let last_seq: Option<i64> = sqlx::query_scalar(&format!(
-            "SELECT seq FROM sqlite_sequence WHERE name = {}",
-            quote_sqlite_string(ha_channel_sequence_name(channel))
-        ))
-        .fetch_optional(&mut **conn)
-        .await?;
-        if min_seq.is_none() && after_seq > 0 && last_seq.unwrap_or(0) > after_seq {
+        // Cursor validity must use the same effective watermark as exports and
+        // baselines. sqlite_sequence also includes discarded legacy rows and
+        // would make a peer repeatedly reset after the last valid event is GC'd.
+        let valid_high_watermark = Self::ha_channel_high_watermark_on_conn(conn, channel).await?;
+        if min_seq.is_none() && after_seq > 0 && valid_high_watermark > after_seq {
             return Err(ProxyError::Other(format!(
                 "HA {} cursor is older than retention window",
                 channel.as_str()
@@ -948,10 +1021,31 @@ impl KeyStore {
             && after_seq > 0
             && after_seq < min_seq.saturating_sub(1)
         {
-            return Err(ProxyError::Other(format!(
-                "HA {} cursor is older than retention window",
-                channel.as_str()
-            )));
+            let expired_valid_seq =
+                Self::ha_channel_expired_valid_watermark_on_conn(conn, channel).await?;
+            let has_expired_valid_gap = expired_valid_seq.is_some_and(|deleted| after_seq < deleted);
+            let expired_legacy_seq =
+                Self::ha_channel_expired_legacy_watermark_on_conn(conn, channel).await?;
+            let has_expired_legacy_gap = expired_legacy_seq
+                .is_some_and(|deleted| after_seq < deleted && deleted < min_seq);
+            let has_any_bridge: bool = if has_expired_valid_gap || has_expired_legacy_gap {
+                false
+            } else {
+                sqlx::query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at >= ? AND seq > ? AND seq < ?)"
+                ))
+                .bind(threshold)
+                .bind(after_seq)
+                .bind(min_seq)
+                .fetch_one(&mut **conn)
+                .await?
+            };
+            if has_expired_valid_gap || (!has_expired_legacy_gap && !has_any_bridge) {
+                return Err(ProxyError::Other(format!(
+                    "HA {} cursor is older than retention window",
+                    channel.as_str()
+                )));
+            }
         }
         Ok(())
     }
@@ -2661,6 +2755,23 @@ impl HaEventsApplySession {
 }
 
 impl KeyStore {
+    async fn max_ha_expired_valid_seq(
+        &self,
+        channel: HaSyncChannel,
+        threshold: i64,
+        batch_size: i64,
+    ) -> Result<Option<i64>, ProxyError> {
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT MAX(seq) FROM (SELECT seq FROM {table} WHERE created_at < ? AND resource IN ({allowed_resources}) ORDER BY seq ASC LIMIT ?)"
+        ))
+        .bind(threshold)
+        .bind(batch_size.max(1))
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     pub(crate) async fn delete_ha_channel_events_bounded(
         &self,
         channel: HaSyncChannel,
@@ -2703,6 +2814,12 @@ impl KeyStore {
         } else {
             format!("resource NOT IN ({allowed_resources})")
         };
+        let max_deleted_seq: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT MAX(seq) FROM (SELECT seq FROM {table} WHERE {where_sql} ORDER BY seq ASC LIMIT ?)"
+        ))
+        .bind(batch_size.max(1))
+        .fetch_one(&self.pool)
+        .await?;
         let deleted = sqlx::query(&format!(
             r#"
             DELETE FROM {table}
@@ -2718,6 +2835,18 @@ impl KeyStore {
         .bind(batch_size.max(1))
         .execute(&self.pool)
         .await?;
+        if deleted.rows_affected() > 0
+            && let Some(max_deleted_seq) = max_deleted_seq
+        {
+            let mut conn = self.pool.acquire().await?;
+            Self::remember_ha_channel_expired_legacy_watermark_on_conn(
+                &mut conn,
+                channel,
+                max_deleted_seq,
+                self.backend_time.now_ts(),
+            )
+            .await?;
+        }
         Ok(deleted.rows_affected() as i64)
     }
 
@@ -2753,7 +2882,6 @@ impl KeyStore {
         let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
         let mut deleted_rows = 0_i64;
         let mut batches = 0_i64;
-        let mut completed = true;
         let mut channels = Vec::new();
 
         for channel in [
@@ -2761,6 +2889,13 @@ impl KeyStore {
             HaSyncChannel::Billing,
             HaSyncChannel::Runtime,
         ] {
+            let mut watermark_conn = self.pool.acquire().await?;
+            Self::remember_ha_channel_valid_watermark_on_conn(
+                &mut watermark_conn,
+                channel,
+                self.backend_time.now_ts(),
+            )
+            .await?;
             let retention_secs = ha_channel_retention_secs(channel);
             let threshold = self.backend_time.now_ts() - retention_secs;
             let mut channel_deleted_rows = 0_i64;
@@ -2780,9 +2915,24 @@ impl KeyStore {
                         continue;
                     }
                 } else {
+                    let max_deleted_valid_seq = self
+                        .max_ha_expired_valid_seq(channel, threshold, batch_size)
+                        .await?;
                     let deleted_retention = self
                         .delete_ha_channel_events_bounded(channel, threshold, batch_size)
                         .await?;
+                    if deleted_retention > 0
+                        && let Some(max_deleted_valid_seq) = max_deleted_valid_seq
+                    {
+                        let mut marker_conn = self.pool.acquire().await?;
+                        Self::remember_ha_channel_expired_valid_watermark_on_conn(
+                            &mut marker_conn,
+                            channel,
+                            max_deleted_valid_seq,
+                            self.backend_time.now_ts(),
+                        )
+                        .await?;
+                    }
                     retention_deleted_rows += deleted_retention;
                     channel_deleted_rows += deleted_retention;
                     if deleted_retention < batch_size {
@@ -2792,7 +2942,6 @@ impl KeyStore {
                 if deleted_invalid > 0 && deleted_invalid < batch_size {
                     break;
                 }
-                completed = false;
                 if options.inter_batch_sleep_ms > 0 {
                     self.backend_time
                         .sleep(Duration::from_millis(options.inter_batch_sleep_ms))
@@ -2809,10 +2958,6 @@ impl KeyStore {
             .await?;
             let has_more_invalid = self.ha_invalid_legacy_events_exist(channel).await?;
             let has_more = has_more_invalid || has_more_retention;
-            if has_more {
-                completed = false;
-            }
-
             deleted_rows += channel_deleted_rows;
             batches += channel_batches;
             channels.push(HaOutboxGcChannelReport {
@@ -2835,6 +2980,7 @@ impl KeyStore {
             (false, 0, 0)
         };
 
+        let completed = !channels.iter().any(|channel| channel.has_more);
         Ok(HaOutboxGcReport {
             batch_size,
             max_batches,
@@ -2848,5 +2994,273 @@ impl KeyStore {
             wal_checkpoint_checkpointed_frames: checkpointed_frames,
             elapsed_ms: started.elapsed().as_millis(),
         })
+    }
+
+    async fn delete_ha_channel_events_bounded_on_conn(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        channel: HaSyncChannel,
+        threshold: i64,
+        batch_size: i64,
+    ) -> Result<i64, ProxyError> {
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let deleted = sqlx::query(&format!(
+            "DELETE FROM {table} WHERE seq IN (SELECT seq FROM {table} WHERE created_at < ? ORDER BY seq ASC LIMIT ?)"
+        ))
+        .bind(threshold)
+        .bind(batch_size.max(1))
+        .execute(&mut **conn)
+        .await?;
+        Ok(deleted.rows_affected() as i64)
+    }
+
+    async fn max_ha_expired_valid_seq_on_conn(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        channel: HaSyncChannel,
+        threshold: i64,
+        batch_size: i64,
+    ) -> Result<Option<i64>, ProxyError> {
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT MAX(seq) FROM (SELECT seq FROM {table} WHERE created_at < ? AND resource IN ({allowed_resources}) ORDER BY seq ASC LIMIT ?)"
+        ))
+        .bind(threshold)
+        .bind(batch_size.max(1))
+        .fetch_one(&mut **conn)
+        .await?)
+    }
+
+    async fn delete_ha_invalid_legacy_events_bounded_on_conn(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        channel: HaSyncChannel,
+        batch_size: i64,
+        updated_at: i64,
+    ) -> Result<i64, ProxyError> {
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let allowed_resources = ha_channel_allowed_resources(channel)
+            .iter()
+            .map(|resource| quote_sqlite_string(resource))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let where_sql = if allowed_resources.is_empty() {
+            "1=1".to_string()
+        } else {
+            format!("resource NOT IN ({allowed_resources})")
+        };
+        let max_deleted_seq: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT MAX(seq) FROM (SELECT seq FROM {table} WHERE {where_sql} ORDER BY seq ASC LIMIT ?)"
+        ))
+        .bind(batch_size.max(1))
+        .fetch_one(&mut **conn)
+        .await?;
+        let deleted = sqlx::query(&format!(
+            "DELETE FROM {table} WHERE seq IN (SELECT seq FROM {table} WHERE {where_sql} ORDER BY seq ASC LIMIT ?)"
+        ))
+        .bind(batch_size.max(1))
+        .execute(&mut **conn)
+        .await?;
+        if deleted.rows_affected() > 0
+            && let Some(max_deleted_seq) = max_deleted_seq
+        {
+            Self::remember_ha_channel_expired_legacy_watermark_on_conn(
+                conn,
+                channel,
+                max_deleted_seq,
+                updated_at,
+            )
+            .await?;
+        }
+        Ok(deleted.rows_affected() as i64)
+    }
+
+    async fn ha_invalid_legacy_events_exist_on_conn(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        channel: HaSyncChannel,
+    ) -> Result<bool, ProxyError> {
+        let table = quote_sqlite_identifier(ha_channel_event_table(channel));
+        let allowed_resources = ha_channel_allowed_resources(channel)
+            .iter()
+            .map(|resource| quote_sqlite_string(resource))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = if allowed_resources.is_empty() {
+            format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)")
+        } else {
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE resource NOT IN ({allowed_resources}) LIMIT 1)"
+            )
+        };
+        Ok(sqlx::query_scalar::<_, bool>(&sql)
+            .fetch_one(&mut **conn)
+            .await?)
+    }
+
+    pub(crate) async fn gc_ha_outbox_online(&self) -> Result<HaOutboxGcReport, ProxyError> {
+        self.gc_ha_outbox_online_with_options(HaOutboxGcOptions::online())
+            .await
+    }
+
+    async fn gc_ha_outbox_online_with_options(
+        &self,
+        options: HaOutboxGcOptions,
+    ) -> Result<HaOutboxGcReport, ProxyError> {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
+        let mut conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
+            .await
+            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
+        let result = async {
+            sqlx::query("PRAGMA busy_timeout = 100")
+                .execute(&mut *conn)
+                .await?;
+            let channels_to_gc = [
+                HaSyncChannel::Control,
+                HaSyncChannel::Billing,
+                HaSyncChannel::Runtime,
+            ];
+            let batch_size = options.batch_size.max(1);
+            let max_batches = options.max_batches.max(1);
+            let mut retention_secs = [0_i64; 3];
+            let mut thresholds = [0_i64; 3];
+            for (index, channel) in channels_to_gc.iter().copied().enumerate() {
+                Self::remember_ha_channel_valid_watermark_on_conn(
+                    &mut conn,
+                    channel,
+                    self.backend_time.now_ts(),
+                )
+                .await?;
+                retention_secs[index] = ha_channel_retention_secs(channel);
+                thresholds[index] = self.backend_time.now_ts() - retention_secs[index];
+            }
+            let mut deleted_rows = 0_i64;
+            let mut batches = 0_i64;
+            let mut channel_deleted_rows = [0_i64; 3];
+            let mut invalid_legacy_deleted_rows = [0_i64; 3];
+            let mut retention_deleted_rows = [0_i64; 3];
+            let mut channel_batches = [0_i64; 3];
+            let mut channel_done = [false; 3];
+            let mut channel_index = 0_usize;
+
+            // Rotate the bounded online budget across channels so a busy control
+            // stream cannot permanently starve billing or runtime cleanup.
+            while batches < max_batches && Instant::now() < deadline {
+                let selected_index = (0..channels_to_gc.len())
+                    .map(|offset| (channel_index + offset) % channels_to_gc.len())
+                    .find(|index| !channel_done[*index]);
+                let Some(index) = selected_index else {
+                    break;
+                };
+                let channel = channels_to_gc[index];
+                let deleted_invalid = Self::delete_ha_invalid_legacy_events_bounded_on_conn(
+                    &mut conn,
+                    channel,
+                    batch_size,
+                    self.backend_time.now_ts(),
+                )
+                .await?;
+                invalid_legacy_deleted_rows[index] += deleted_invalid;
+                channel_deleted_rows[index] += deleted_invalid;
+                channel_batches[index] += 1;
+                batches += 1;
+
+                if deleted_invalid == 0 {
+                    let max_deleted_valid_seq = Self::max_ha_expired_valid_seq_on_conn(
+                        &mut conn,
+                        channel,
+                        thresholds[index],
+                        batch_size,
+                    )
+                    .await?;
+                    let deleted_retention = Self::delete_ha_channel_events_bounded_on_conn(
+                        &mut conn,
+                        channel,
+                        thresholds[index],
+                        batch_size,
+                    )
+                    .await?;
+                    if deleted_retention > 0
+                        && let Some(max_deleted_valid_seq) = max_deleted_valid_seq
+                    {
+                        Self::remember_ha_channel_expired_valid_watermark_on_conn(
+                            &mut conn,
+                            channel,
+                            max_deleted_valid_seq,
+                            self.backend_time.now_ts(),
+                        )
+                        .await?;
+                    }
+                    retention_deleted_rows[index] += deleted_retention;
+                    channel_deleted_rows[index] += deleted_retention;
+                    if deleted_retention < batch_size {
+                        channel_done[index] = true;
+                    }
+                }
+
+                channel_index = (index + 1) % channels_to_gc.len();
+                if batches < max_batches && Instant::now() < deadline {
+                    self.backend_time
+                        .sleep(Duration::from_millis(options.inter_batch_sleep_ms))
+                        .await;
+                }
+            }
+
+            let mut channels = Vec::with_capacity(channels_to_gc.len());
+            for (index, channel) in channels_to_gc.iter().copied().enumerate() {
+                let has_more_retention: bool = sqlx::query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE created_at < ? LIMIT 1)",
+                    quote_sqlite_identifier(ha_channel_event_table(channel))
+                ))
+                .bind(thresholds[index])
+                .fetch_one(&mut *conn)
+                .await?;
+                let has_more_invalid =
+                    Self::ha_invalid_legacy_events_exist_on_conn(&mut conn, channel).await?;
+                let has_more = has_more_invalid || has_more_retention;
+                deleted_rows += channel_deleted_rows[index];
+                channels.push(HaOutboxGcChannelReport {
+                    channel,
+                    retention_secs: retention_secs[index],
+                    threshold: thresholds[index],
+                    invalid_legacy_deleted_rows: invalid_legacy_deleted_rows[index],
+                    retention_deleted_rows: retention_deleted_rows[index],
+                    deleted_rows: channel_deleted_rows[index],
+                    batches: channel_batches[index],
+                    has_more,
+                });
+            }
+
+            let (busy, log_frames, checkpointed_frames) = if deleted_rows > 0 {
+                let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = sqlx::query_as(
+                    "PRAGMA wal_checkpoint(PASSIVE)",
+                )
+                .fetch_one(&mut *conn)
+                .await?;
+                (busy != 0, log_frames, checkpointed_frames)
+            } else {
+                (false, 0, 0)
+            };
+            let completed = !channels.iter().any(|channel| channel.has_more);
+            Ok::<HaOutboxGcReport, ProxyError>(HaOutboxGcReport {
+                batch_size: options.batch_size,
+                max_batches: options.max_batches,
+                deleted_rows,
+                batches,
+                completed,
+                has_more: channels.iter().any(|channel| channel.has_more),
+                channels,
+                wal_checkpoint_busy: busy,
+                wal_checkpoint_log_frames: log_frames,
+                wal_checkpoint_checkpointed_frames: checkpointed_frames,
+                elapsed_ms: started.elapsed().as_millis(),
+            })
+        }
+        .await;
+        let _ = sqlx::query(&format!(
+            "PRAGMA busy_timeout = {}",
+            crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+        ))
+        .execute(&mut *conn)
+        .await;
+        result
     }
 }

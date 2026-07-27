@@ -39,6 +39,11 @@ const EXCEPTIONS: &[(&str, usize, &str)] = &[
         3250,
         "The bootstrap schema module now also carries the upstream reconciliation polling columns, tables, and indexes while the broader store-schema split remains pending.",
     ),
+    (
+        "src/store/key_store_ha.rs",
+        3400,
+        "HA outbox retention, peer health, cursor-gap markers, and bounded online cleanup remain together in the channel store module while the HA store extraction pass is pending.",
+    ),
 ];
 
 fn visit(dir: &Path, out: &mut Vec<PathBuf>) {

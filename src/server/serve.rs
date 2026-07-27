@@ -878,7 +878,7 @@ async fn emit_ha_sync_perf_event(
             outbox_sampled = outbox.is_some(),
             outbox_row_count = outbox.as_ref().map(|value| value.row_count).unwrap_or_default(),
             outbox_oldest_age_secs = outbox.as_ref().map(|value| value.oldest_age_secs),
-            outbox_ack_lag = outbox.as_ref().map(|value| value.ack_lag),
+            outbox_ack_lag = outbox.as_ref().and_then(|value| value.ack_lag),
             memory_sampled = memory.is_some(),
             memory_current_bytes = memory.and_then(|value| value.memory_current_bytes),
             memory_limit_bytes = memory.and_then(|value| value.memory_limit_bytes),
@@ -986,14 +986,49 @@ async fn run_ha_standby_sync_once(
                 )
                 .into());
             }
-            let result = apply_ha_baseline_response_stream(
-                state.as_ref(),
-                channel,
-                response,
-                tavily_hikari::HaBaselineApplyMode::Replace,
-                None,
-            )
-            .await?;
+            let result = {
+                let _maintenance = acquire_db_maintenance_read_gate().await;
+                let result = apply_ha_baseline_response_stream(
+                    state.as_ref(),
+                    channel,
+                    response,
+                    tavily_hikari::HaBaselineApplyMode::Replace,
+                    None,
+                )
+                .await?;
+                state
+                    .proxy
+                    .persist_ha_sync_watermark(
+                        &baseline_report_key,
+                        Some(source_url),
+                        Some(&local_node_id),
+                        result.high_watermark,
+                        Some(&format!("rows={}", result.row_count)),
+                    )
+                    .await?;
+                state
+                    .proxy
+                    .persist_ha_sync_watermark(
+                        &seq_key,
+                        Some(source_url),
+                        Some(&local_node_id),
+                        result.high_watermark,
+                        Some("baseline"),
+                    )
+                    .await?;
+                state
+                    .proxy
+                    .persist_ha_sync_watermark(
+                        &baseline_key,
+                        Some(source_url),
+                        Some(&local_node_id),
+                        1,
+                        Some("baseline applied"),
+                    )
+                    .await?;
+                state.proxy.flush_ha_state_writes().await?;
+                result
+            };
             next_seq = result.high_watermark;
             emit_ha_sync_perf_event(
                 state.as_ref(),
@@ -1012,37 +1047,6 @@ async fn run_ha_standby_sync_once(
                 },
             )
             .await?;
-            state
-                .proxy
-                .persist_ha_sync_watermark(
-                    &baseline_report_key,
-                    Some(source_url),
-                    Some(&local_node_id),
-                    result.high_watermark,
-                    Some(&format!("rows={}", result.row_count)),
-                )
-                .await?;
-            state
-                .proxy
-                .persist_ha_sync_watermark(
-                    &seq_key,
-                    Some(source_url),
-                    Some(&local_node_id),
-                    result.high_watermark,
-                    Some("baseline"),
-                )
-                .await?;
-            state
-                .proxy
-                .persist_ha_sync_watermark(
-                    &baseline_key,
-                    Some(source_url),
-                    Some(&local_node_id),
-                    1,
-                    Some("baseline applied"),
-                )
-                .await?;
-            state.proxy.flush_ha_state_writes().await?;
         }
 
         let target = format!(
@@ -1066,6 +1070,7 @@ async fn run_ha_standby_sync_once(
             } else {
                 "retention window missed; baseline required"
             };
+            let _maintenance = acquire_db_maintenance_read_gate().await;
             state
                 .proxy
                 .persist_ha_sync_watermark(
@@ -1097,6 +1102,7 @@ async fn run_ha_standby_sync_once(
             )
             .into());
         }
+        let _maintenance = acquire_db_maintenance_read_gate().await;
         let result =
             match apply_ha_events_response_stream(state.as_ref(), channel, response, None).await {
             Ok(result) => result,
@@ -1142,6 +1148,7 @@ async fn run_ha_standby_sync_once(
                 .await?;
             state.proxy.flush_ha_state_writes().await?;
         }
+        drop(_maintenance);
         emit_ha_sync_perf_event(
             state.as_ref(),
             HaSyncPerfEvent {
@@ -1172,7 +1179,10 @@ async fn run_ha_standby_sync_once(
             .await?;
     }
     state.ha.mark_sync_success().await;
-    state.proxy.flush_ha_state_writes().await?;
+    {
+        let _maintenance = acquire_db_maintenance_read_gate().await;
+        state.proxy.flush_ha_state_writes().await?;
+    }
     Ok(())
 }
 
@@ -1195,7 +1205,7 @@ async fn run_ha_peer_sync_once(
         return Err("HA peer sync has no configured peers".into());
     }
     for peer in peer_configs {
-        match fetch_internal_ha_status(client, &peer, internal_token).await {
+        match fetch_internal_ha_status(client, &peer, internal_token, &local_node_id).await {
             Ok(peer_status) => {
                 if peer_status.allows_full_writes && control_source_node_id.is_none() {
                     control_source_node_id = Some(peer.node_id.clone());
@@ -1243,7 +1253,10 @@ async fn run_ha_peer_sync_once(
         .await?;
     }
     state.ha.mark_sync_success().await;
-    state.proxy.flush_ha_state_writes().await?;
+    {
+        let _maintenance = acquire_db_maintenance_read_gate().await;
+        state.proxy.flush_ha_state_writes().await?;
+    }
     Ok(())
 }
 
@@ -1310,6 +1323,7 @@ async fn run_ha_sync_once_for_peer(
             } else {
                 None
             };
+            let _maintenance = acquire_db_maintenance_read_gate().await;
             let result = apply_ha_baseline_response_stream(
                 state.as_ref(),
                 channel,
@@ -1372,6 +1386,7 @@ async fn run_ha_sync_once_for_peer(
             } else {
                 "retention window missed; baseline required"
             };
+            let _maintenance = acquire_db_maintenance_read_gate().await;
             state
                 .proxy
                 .persist_ha_sync_watermark(
@@ -1414,6 +1429,7 @@ async fn run_ha_sync_once_for_peer(
         } else {
             None
         };
+        let _maintenance = acquire_db_maintenance_read_gate().await;
         let result = match apply_ha_events_response_stream(
             state.as_ref(),
             channel,
@@ -1464,6 +1480,7 @@ async fn run_ha_sync_once_for_peer(
                 .await?;
             state.proxy.flush_ha_state_writes().await?;
         }
+        drop(_maintenance);
         let ack_target = format!("{}/api/admin/ha/events/ack", source_url.trim_end_matches('/'));
         let _ = client
             .post(ack_target)

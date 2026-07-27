@@ -55,6 +55,7 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
   持续抬升的 GiB 级内存峰值。
 - HA wire contract 按三个正式 channel 拆分：`control`、`billing`、`runtime`。每个 channel 独立导出 baseline、独立拉取 events、独立记录 peer watermark，不支持 mixed-version HA。
 - `control` 只同步控制面小状态，事件流写入 `ha_outbox`，保留窗口为 72 小时；超过窗口必须重新拉取该 channel 的状态基线。
+- `billing` 与 `runtime` 事件流保留 14 天；过期 cursor 必须返回 `410 Gone`，standby 重新拉取该 channel baseline 后继续同步，不得阻止过期事件清理。
 - `billing` 只同步 `billing_ledger` 完整账本行历史，事件流写入 `ha_billing_outbox`，不再通过 `ha_outbox` 复制账本。
 - `runtime` 只同步 failover 后若不恢复就会影响基础 API/MCP 正确性的最小运行态，事件流写入 `ha_runtime_outbox`。允许的最小运行态包括 quota 当前状态与 bucket、token/account 月额度、MCP 当前会话必要状态、forward proxy 亲和与节点 override、以及主/次 API key affinity。
 - 如果 standby 在某个 channel 的 events apply 中命中 SQLite `FOREIGN KEY constraint failed`，
@@ -90,6 +91,7 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 - `GET /api/admin/ha/baseline?channel=<control|billing|runtime>` 仅内部或管理员认证可调用，在 active/provisional 节点输出对应 channel 的 zstd NDJSON 状态基线，并在响应头返回该 channel 的 high watermark。
 - `GET /api/admin/ha/events?channel=<control|billing|runtime>&after=<seq>&limit=<n>` 仅内部或管理员认证可调用，输出对应 channel 在 `after` 之后且仍位于 retention 窗口内的 zstd NDJSON outbox 事件；该读路径不得隐式删行，若 `after` 已落到 retention 窗口之外则返回 `410 Gone` 并要求先重拉该 channel baseline。
 - `POST /api/admin/ha/events/ack` 仅内部或管理员认证可调用，请求体必须显式携带 `channel`，用于记录 standby 已应用的该 channel outbox seq。
+- 管理员 HA 节点状态必须按 peer/channel 暴露 `ackedSeq`、`highWatermark`、`ackLag`、`cursorState`、`retentionSecs` 与 `expiredBacklog`；该查询只能使用 watermark、retention 边界和 `EXISTS`，不得执行全表计数。
 - `GET /api/internal/ha/mcp-sessions/:proxy_session_id` 仅供节点间内部控制调用，返回本地或 peer 命中的 active MCP 会话绑定，供 follow-up 和 retry window 继续使用。
 - `GET /api/internal/ha/research-requests/:request_id` 仅供节点间内部控制调用，返回本地或 peer 命中的 `{ key_id, token_id, expires_at }`，供 research 结果拉取路径继续绑定原上游 key。
 - `POST /api/admin/ha/promote` 在 legacy `direct` 路径保持 `provisional_master` 语义；dual-active 下仅作为 `force=true` takeover 入口，必须拒绝普通 promote，且探测到可达 peer 仍允许 full-write 时必须拒绝并要求使用 `planned cutover`。
@@ -141,73 +143,11 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 PR: include
 
-![Normal admin dashboard without HA panel on desktop](./assets/ha-normal-dashboard-desktop.png)
+![HA node detail replication ACK and GC health](./assets/ha-node-detail-channel-health-final.png)
 
 PR: include
 
-![Normal admin dashboard without HA panel on mobile](./assets/ha-normal-dashboard-mobile.png)
-
-PR: include
-
-![Abnormal HA compact alert on dashboard desktop](./assets/ha-compact-alert-desktop.png)
-
-PR: include
-
-![Abnormal HA compact alert on dashboard mobile](./assets/ha-compact-alert-mobile.png)
-
-PR: include
-
-![System settings HA service-node page on desktop](./assets/ha-settings-page-desktop.png)
-
-PR: include
-
-![System settings HA service-node page on mobile](./assets/ha-settings-page-mobile.png)
-
-PR: include
-
-![System settings HA source configuration entry on desktop](./assets/ha-settings-origin-panel.png)
-
-PR: include
-
-![System settings HA action buttons contained in the table](./assets/ha-action-buttons-contained.png)
-
-PR: include
-
-![HA source settings dialog using an EdgeOne origin group](./assets/ha-source-dialog-polished.png)
-
-PR: include
-
-![HA source settings dialog using a direct IP/domain origin](./assets/ha-source-dialog-direct-polished.png)
-
-PR: include
-
-![HA control-plane settings page from web demo on desktop](./assets/ha-control-plane-web-demo-desktop.png)
-
-PR: include
-
-![HA control-plane settings page from web demo on mobile](./assets/ha-control-plane-web-demo-mobile.png)
-
-PR: include
-
-![HA node detail page from web demo on desktop](./assets/ha-node-detail-web-demo-desktop.png)
-
-PR: include
-
-![HA node detail page from web demo on mobile](./assets/ha-node-detail-web-demo-mobile.png)
-
-![HA source settings dialog using an EdgeOne origin group with selected-source summary](./assets/ha-source-dialog-origin-group-polished.png)
-
-PR: include
-
-![HA source settings dialog on a standby node with save-only action](./assets/ha-source-dialog-standby-save-only.png)
-
-PR: include
-
-![HA source settings dialog submit failure uses a destructive alert with collapsed technical details](./assets/ha-source-dialog-submit-failure-alert.png)
-
-PR: include
-
-![HA node inventory source column follows node source configuration instead of live route](./assets/ha-node-source-config-proof.png)
+![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
 
 ## Acceptance
 

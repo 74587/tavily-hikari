@@ -150,6 +150,11 @@ async fn acquire_db_maintenance_write_gate() -> tokio::sync::RwLockWriteGuard<'s
     db_maintenance_gate().write().await
 }
 
+pub(crate) fn try_acquire_db_maintenance_write_gate(
+) -> Option<tokio::sync::RwLockWriteGuard<'static, ()>> {
+    db_maintenance_gate().try_write().ok()
+}
+
 async fn acquire_db_job_execution_gate_for_state(
     state: &AppState,
 ) -> tokio::sync::OwnedMutexGuard<()> {
@@ -201,6 +206,14 @@ mod db_maintenance_gate_tests {
         assert!(!db_maintenance_gated_path("/admin"));
         assert!(!db_maintenance_gated_path("/assets/admin.js"));
         assert!(!db_maintenance_gated_path("/favicon.svg"));
+    }
+
+    #[tokio::test]
+    async fn online_gc_write_gate_is_non_blocking_when_http_readers_are_present() {
+        let read_guard = super::acquire_db_maintenance_read_gate().await;
+        assert!(super::try_acquire_db_maintenance_write_gate().is_none());
+        drop(read_guard);
+        assert!(super::try_acquire_db_maintenance_write_gate().is_some());
     }
 }
 

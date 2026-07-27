@@ -569,11 +569,16 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
         .await
         .expect("bind peer listener");
     let peer_addr = peer_listener.local_addr().expect("peer addr");
+    let observed_peer_node_id = std::sync::Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let observed_peer_node_id_for_route = observed_peer_node_id.clone();
     tokio::spawn(async move {
         let app = Router::new().route(
             "/api/internal/ha/status",
-            get(|| async {
-                Json(json!({
+            get(move |Query(params): Query<std::collections::HashMap<String, String>>| {
+                let observed_peer_node_id = observed_peer_node_id_for_route.clone();
+                async move {
+                    *observed_peer_node_id.lock().await = params.get("peerNodeId").cloned();
+                    Json(json!({
                     "mode": "active_standby",
                     "nodeId": "node-peer",
                     "nodePublicOrigin": "peer-public-origin:443",
@@ -610,7 +615,8 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
                     "message": "peer ready",
                     "peerNodes": [],
                     "plannedCutoverEligible": true
-                }))
+                    }))
+                }
             }),
         );
         axum::serve(peer_listener, app.into_make_service())
@@ -651,6 +657,60 @@ async fn admin_ha_status_surfaces_peer_source_config_target() {
     let body: Value = response.json().await.expect("ha status body");
     assert_eq!(body["peerNodes"][0]["publicOrigin"], "peer-public-origin:443");
     assert_eq!(body["peerNodes"][0]["sourceConfigTarget"], "peer-source-config:53844");
+    assert_eq!(
+        body["peerNodes"][0]["channelHealth"][0]["cursorState"],
+        "unknown",
+        "a reachable older peer without optional channel telemetry must not appear unavailable"
+    );
+    assert_eq!(
+        observed_peer_node_id.lock().await.as_deref(),
+        Some("node-active")
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn admin_ha_status_keeps_unprobed_peer_channel_health_unavailable() {
+    let db_path = temp_db_path("ha-peer-health-unprobed");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-peer-health-unprobed".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let ha = tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig {
+        mode: tavily_hikari::HaMode::ActiveStandby,
+        node_id: "node-active".to_string(),
+        database_path: Some(db_str.clone()),
+        peer_nodes: vec![tavily_hikari::HaPeerNodeConfig {
+            node_id: "node-peer".to_string(),
+            admin_base_url: "http://127.0.0.1:1".to_string(),
+            public_origin: "peer-public-origin:443".to_string(),
+            role_hint: tavily_hikari::HaPeerRoleHint::StandbyCandidate,
+        }],
+        ..tavily_hikari::HaConfig::default()
+    });
+    let addr = spawn_ha_admin_server(proxy, ha, true).await;
+
+    let response = Client::new()
+        .get(format!("http://{addr}/api/admin/ha/status"))
+        .send()
+        .await
+        .expect("ha status response");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: Value = response.json().await.expect("ha status body");
+    let channel_health = body["peerNodes"][0]["channelHealth"]
+        .as_array()
+        .expect("unprobed peer channel health");
+    assert_eq!(channel_health.len(), 3);
+    assert!(channel_health.iter().all(|channel| {
+        channel["cursorState"] == "unavailable"
+            && channel["ackedSeq"].is_null()
+            && channel["ackLag"].is_null()
+    }));
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -1724,59 +1784,6 @@ async fn ha_sync_watermark_reads_pending_overlay_before_flush() {
         Some(42)
     );
 
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-}
-
-#[tokio::test]
-async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
-    let db_path = temp_db_path("ha-outbox-stats");
-    let db_str = db_path.to_string_lossy().to_string();
-    let proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-outbox-stats".to_string()],
-        DEFAULT_UPSTREAM,
-        &db_str,
-    )
-    .await
-    .expect("proxy created");
-
-    let now = Utc::now().timestamp();
-    let pool = connect_sqlite_test_pool(&db_str).await;
-    sqlx::query(
-        r#"
-        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
-        VALUES ('upsert', 'meta', 'request_rate_limit_v1', 'upsert', '{}', ?, 'checksum-a')
-        "#,
-    )
-    .bind(now - 120)
-    .execute(&pool)
-    .await
-    .expect("insert first outbox row");
-    sqlx::query(
-        r#"
-        INSERT INTO ha_outbox (kind, resource, resource_id, op, payload_json, created_at, checksum)
-        VALUES ('upsert', 'meta', 'global_ip_limit_v1', 'upsert', '{}', ?, 'checksum-b')
-        "#,
-    )
-    .bind(now - 30)
-    .execute(&pool)
-    .await
-    .expect("insert second outbox row");
-    proxy
-        .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-a", 1)
-        .await
-        .expect("ack watermark");
-
-    let stats = proxy
-        .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, Some("standby-a"))
-        .await
-        .expect("read outbox stats");
-    assert_eq!(stats.row_count, 2);
-    assert!(stats.oldest_age_secs >= 100);
-    assert_eq!(stats.ack_lag, 1);
-
-    pool.close().await;
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

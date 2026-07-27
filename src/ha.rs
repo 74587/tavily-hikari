@@ -526,6 +526,20 @@ pub struct HaPeerNodeView {
     pub stale: bool,
     pub role_hint: HaPeerRoleHint,
     pub planned_cutover_eligible: bool,
+    #[serde(default)]
+    pub channel_health: Vec<HaChannelHealthView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HaChannelHealthView {
+    pub channel: HaSyncChannel,
+    pub acked_seq: Option<i64>,
+    pub high_watermark: i64,
+    pub ack_lag: Option<i64>,
+    pub cursor_state: String,
+    pub retention_secs: i64,
+    pub expired_backlog: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -235,6 +235,27 @@ impl TavilyProxy {
             .await
     }
 
+    pub async fn gc_ha_outbox_with_options(
+        &self,
+        options: HaOutboxGcOptions,
+    ) -> Result<HaOutboxGcReport, ProxyError> {
+        self.key_store.gc_ha_outbox_with_options(options).await
+    }
+
+    pub async fn gc_ha_outbox_online(&self) -> Result<HaOutboxGcReport, ProxyError> {
+        self.key_store.gc_ha_outbox_online().await
+    }
+
+    pub async fn ha_peer_channel_health(
+        &self,
+        channel: HaSyncChannel,
+        peer_node_id: &str,
+    ) -> Result<HaChannelHealthView, ProxyError> {
+        self.key_store
+            .ha_peer_channel_health(channel, peer_node_id)
+            .await
+    }
+
     pub async fn flush_ha_state_writes(&self) -> Result<(), ProxyError> {
         self.ha_state_coalescer.wake.notify_one();
         self.ha_state_coalescer.wait_until_flushed().await;

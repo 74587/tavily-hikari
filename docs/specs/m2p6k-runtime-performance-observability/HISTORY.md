@@ -16,3 +16,6 @@
 - `docs/specs/f36b4-edgeone-active-standby-ha/SPEC.md`
 - `docs/specs/66t8u-admin-dashboard-overview-performance/SPEC.md`
 - `docs/specs/ev4td-admin-recent-requests-performance-copy/SPEC.md`
+- Corrected HA perf diagnostics so full-master export without a peer does not synthesize a zero
+  ACK watermark; expensive outbox and memory sampling remains bounded to the existing slow/error
+  and time-window triggers.

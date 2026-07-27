@@ -1373,6 +1373,27 @@ impl TavilyProxy {
             .await
     }
 
+    pub async fn scheduled_job_finish_and_enqueue_auto_at(
+        &self,
+        job_id: i64,
+        job_type: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        message: Option<&str>,
+        available_at: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        self.key_store
+            .scheduled_job_finish_and_enqueue_auto_at(
+                job_id,
+                job_type,
+                key_id,
+                attempt,
+                message,
+                available_at,
+            )
+            .await
+    }
+
     pub async fn fetch_queued_scheduled_jobs(
         &self,
         limit: usize,
