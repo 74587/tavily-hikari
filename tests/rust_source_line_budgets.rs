@@ -41,8 +41,8 @@ const EXCEPTIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "src/store/key_store_ha.rs",
-        3300,
-        "HA outbox retention, peer health, and bounded online cleanup remain together in the channel store module while the HA store extraction pass is pending.",
+        3400,
+        "HA outbox retention, peer health, cursor-gap markers, and bounded online cleanup remain together in the channel store module while the HA store extraction pass is pending.",
     ),
 ];
 

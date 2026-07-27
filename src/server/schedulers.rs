@@ -1096,10 +1096,26 @@ async fn run_ha_outbox_gc_claimed_job(
                 .await;
             } else {
                 let message = format_ha_outbox_gc_report_message(&report, 1);
-                let _ = state
+                if let Err(err) = state
                     .proxy
                     .scheduled_job_finish(job_id, "success", Some(&message))
+                    .await
+                {
+                    tracing::warn!(
+                        component = "ha_outbox_gc",
+                        event = "deferred",
+                        job_id,
+                        defer_reason = "job_finish_failed",
+                        err = %err,
+                        "HA outbox GC completion could not be persisted; retaining a durable continuation"
+                    );
+                    return finish_ha_gc_with_continuation(
+                        &state,
+                        job_id,
+                        format!("deferred=job_finish_failed error={err}"),
+                    )
                     .await;
+                }
             }
         }
         Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {

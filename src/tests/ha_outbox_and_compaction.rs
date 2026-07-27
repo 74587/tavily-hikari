@@ -477,6 +477,76 @@ async fn ha_events_cursor_accepts_legacy_bridge_before_first_valid_event() {
 }
 
 #[tokio::test]
+async fn ha_events_cursor_returns_baseline_after_expired_valid_gap() {
+    let db_path = temp_db_path("ha-events-cursor-expired-valid-gap");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-events-cursor-expired-valid-gap-key".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let old_ts = Utc::now().timestamp() - (4 * SECS_PER_DAY);
+    let now = Utc::now().timestamp();
+    for (seq, resource, created_at) in [
+        (1, "meta", now),
+        (2, "meta", old_ts),
+        (3, "removed_resource", now),
+        (4, "meta", now),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (seq, kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES (?, 'state', ?, ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(seq)
+        .bind(resource)
+        .bind(format!("expired-valid-gap-{seq}"))
+        .bind(created_at)
+        .execute(&pool)
+        .await
+        .expect("insert cursor gap event");
+    }
+    pool.close().await;
+
+    proxy
+        .gc_ha_outbox_with_options(HaOutboxGcOptions {
+            batch_size: 100,
+            max_batches: 8,
+            max_runtime_secs: 20,
+            inter_batch_sleep_ms: 0,
+        })
+        .await
+        .expect("gc expired valid and legacy events");
+    let error = proxy
+        .list_ha_events_after(HaSyncChannel::Control, 1, 10)
+        .await
+        .expect_err("cursor must require a baseline after valid retention deletion");
+    assert!(
+        error.to_string().contains("older than retention window"),
+        "unexpected cursor error: {error}"
+    );
+    proxy
+        .ack_ha_peer_watermark(HaSyncChannel::Control, "standby-expired-valid-gap", 1)
+        .await
+        .expect("ack peer watermark");
+    let health = proxy
+        .ha_peer_channel_health(HaSyncChannel::Control, "standby-expired-valid-gap")
+        .await
+        .expect("read expired channel health");
+    assert_eq!(health.cursor_state, "expired_backlog");
+    assert!(health.expired_backlog);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn ha_peer_health_ignores_legacy_gap_after_gc() {
     let db_path = temp_db_path("ha-peer-health-legacy-gap");
     let db_str = db_path.to_string_lossy().to_string();
