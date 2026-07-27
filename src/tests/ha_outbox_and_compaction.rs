@@ -24,6 +24,81 @@ fn online_ha_gc_has_a_tight_slice_without_changing_cli_defaults() {
 }
 
 #[tokio::test]
+async fn online_ha_gc_rotates_budget_across_channels() {
+    let db_path = temp_db_path("ha-outbox-online-gc-round-robin");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-online-gc-round-robin".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let old_ts = Utc::now().timestamp() - (15 * SECS_PER_DAY);
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let mut tx = pool.begin().await.expect("begin seed transaction");
+    for index in 0..1_000 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("online-control-{index}"))
+        .bind(old_ts)
+        .execute(&mut *tx)
+        .await
+        .expect("insert old control event");
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO ha_billing_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'billing_ledger', 'online-billing', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(old_ts)
+    .execute(&mut *tx)
+    .await
+    .expect("insert old billing event");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_runtime_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'mcp_sessions', 'online-runtime', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(old_ts)
+    .execute(&mut *tx)
+    .await
+    .expect("insert old runtime event");
+    tx.commit().await.expect("commit seed transaction");
+    pool.close().await;
+
+    let report = proxy.gc_ha_outbox_online().await.expect("online gc");
+    assert_eq!(report.batches, 4);
+    assert_eq!(report.deleted_rows, 502);
+    assert_eq!(report.channels.len(), 3);
+    assert_eq!(report.channels[0].channel, HaSyncChannel::Control);
+    assert_eq!(report.channels[0].batches, 2);
+    assert_eq!(report.channels[0].deleted_rows, 500);
+    assert!(report.channels[0].has_more);
+    assert_eq!(report.channels[1].channel, HaSyncChannel::Billing);
+    assert_eq!(report.channels[1].batches, 1);
+    assert_eq!(report.channels[1].deleted_rows, 1);
+    assert!(!report.channels[1].has_more);
+    assert_eq!(report.channels[2].channel, HaSyncChannel::Runtime);
+    assert_eq!(report.channels[2].batches, 1);
+    assert_eq!(report.channels[2].deleted_rows, 1);
+    assert!(!report.channels[2].has_more);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn standalone_ha_outbox_gc_deletes_expired_rows_across_channels_in_bounded_batches() {
     let db_path = temp_db_path("ha-outbox-gc-bounded-control-only");
     let db_str = db_path.to_string_lossy().to_string();
@@ -395,6 +470,67 @@ async fn ha_events_cursor_accepts_legacy_bridge_before_first_valid_event() {
         events.iter().map(|event| event.seq).collect::<Vec<_>>(),
         vec![3]
     );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn ha_peer_health_ignores_legacy_gap_after_gc() {
+    let db_path = temp_db_path("ha-peer-health-legacy-gap");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-peer-health-legacy-gap".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let now = Utc::now().timestamp();
+    for (seq, resource) in [
+        (1, "meta"),
+        (2, "meta"),
+        (3, "removed_resource"),
+        (4, "meta"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (seq, kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES (?, 'state', ?, ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(seq)
+        .bind(resource)
+        .bind(format!("legacy-gap-{seq}"))
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("insert legacy-gap event");
+    }
+    pool.close().await;
+
+    proxy
+        .ack_ha_peer_watermark(HaSyncChannel::Control, "standby-legacy-gap", 1)
+        .await
+        .expect("ack watermark");
+    proxy
+        .gc_ha_outbox_with_options(HaOutboxGcOptions {
+            batch_size: 10,
+            max_batches: 8,
+            max_runtime_secs: 20,
+            inter_batch_sleep_ms: 0,
+        })
+        .await
+        .expect("gc legacy event");
+    let health = proxy
+        .ha_peer_channel_health(HaSyncChannel::Control, "standby-legacy-gap")
+        .await
+        .expect("read channel health");
+    assert_eq!(health.cursor_state, "catching_up");
+    assert!(!health.expired_backlog);
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
