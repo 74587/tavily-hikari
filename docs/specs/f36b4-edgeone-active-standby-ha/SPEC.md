@@ -143,77 +143,11 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 PR: include
 
-![Normal admin dashboard without HA panel on desktop](./assets/ha-normal-dashboard-desktop.png)
-
-PR: include
-
-![Normal admin dashboard without HA panel on mobile](./assets/ha-normal-dashboard-mobile.png)
-
-PR: include
-
-![Abnormal HA compact alert on dashboard desktop](./assets/ha-compact-alert-desktop.png)
-
-PR: include
-
-![Abnormal HA compact alert on dashboard mobile](./assets/ha-compact-alert-mobile.png)
-
-PR: include
-
-![System settings HA service-node page on desktop](./assets/ha-settings-page-desktop.png)
-
-PR: include
-
-![System settings HA service-node page on mobile](./assets/ha-settings-page-mobile.png)
-
-PR: include
-
-![System settings HA source configuration entry on desktop](./assets/ha-settings-origin-panel.png)
-
-PR: include
-
-![System settings HA action buttons contained in the table](./assets/ha-action-buttons-contained.png)
-
-PR: include
-
-![HA source settings dialog using an EdgeOne origin group](./assets/ha-source-dialog-polished.png)
-
-PR: include
-
-![HA source settings dialog using a direct IP/domain origin](./assets/ha-source-dialog-direct-polished.png)
-
-PR: include
-
-![HA control-plane settings page from web demo on desktop](./assets/ha-control-plane-web-demo-desktop.png)
-
-PR: include
-
-![HA control-plane settings page from web demo on mobile](./assets/ha-control-plane-web-demo-mobile.png)
-
-PR: include
-
-![HA node detail page from web demo on desktop](./assets/ha-node-detail-web-demo-desktop.png)
-
-PR: include
-
-![HA node detail page from web demo on mobile](./assets/ha-node-detail-web-demo-mobile.png)
-
-![HA source settings dialog using an EdgeOne origin group with selected-source summary](./assets/ha-source-dialog-origin-group-polished.png)
-
-PR: include
-
-![HA source settings dialog on a standby node with save-only action](./assets/ha-source-dialog-standby-save-only.png)
-
-PR: include
-
-![HA source settings dialog submit failure uses a destructive alert with collapsed technical details](./assets/ha-source-dialog-submit-failure-alert.png)
-
-PR: include
-
-![HA node inventory source column follows node source configuration instead of live route](./assets/ha-node-source-config-proof.png)
-
-PR: include
-
 ![HA node detail replication ACK and GC health](./assets/ha-node-detail-channel-health-final.png)
+
+PR: include
+
+![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
 
 ## Acceptance
 

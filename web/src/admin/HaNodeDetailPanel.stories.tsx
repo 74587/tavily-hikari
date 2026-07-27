@@ -72,6 +72,23 @@ const detail: HaNodeDetail = {
 const meta = {
   title: 'Admin/HaNodeDetailPanel',
   component: HaNodeDetailPanel,
+  parameters: {
+    layout: 'fullscreen',
+  },
+  decorators: [
+    (Story) => (
+      <div
+        style={{
+          minHeight: '100vh',
+          boxSizing: 'border-box',
+          padding: '28px 33.5px 34px 28px',
+          background: '#f7f5fb',
+        }}
+      >
+        <Story />
+      </div>
+    ),
+  ],
   args: {
     detail,
     strings: translations.zh.admin.systemSettings.ha,
