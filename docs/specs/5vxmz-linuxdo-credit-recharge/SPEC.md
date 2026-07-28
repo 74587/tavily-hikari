@@ -190,6 +190,10 @@
   When 用户打开 `/console/billing`
   Then 页面按自然月卡片时间线展示上月 / 本月 / 下月，并继续扩展到最近有效月份的下一个月，清楚呈现充值 credits 与月度增量；没有未来排期时也要给出明确提示。
 
+- Given 自然月时间线同时包含上月、当前月和后续月份
+  When 用户首次打开 `/console/billing`
+  Then 当前月卡片默认处于选中状态，所选月份详情展示当前月额度；用户随后选择其他月份并发生响应式布局变化时，时间线保持该选择并将对应卡片带回可视范围。
+
 - Given 用户打开充值订单影响预览
   When 页面展示按月份展开的充值变化
   Then 三个数字字段明确命名为“本单前充值月额度 / 本单增加 / 本单后充值月额度”，英文表头对应为 “Before order / Added by order / After order”；其中本单后充值月额度等于本单前充值月额度加本单增加；三者只描述充值权益，不包含基础额度或其他额度调整。
@@ -297,6 +301,19 @@
 
 - source_type: ui_demo
   demo_entry_or_url: /console/billing?demo=1
+  state: desktop default current-month selection
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: devtools-emulate
+  sensitive_exclusion: N/A
+  evidence_note: 首次加载时当前月卡片保持高亮，且下方详情展示当前月的月度调整与充值权益。
+
+PR: include
+![Billing page desktop current-month selection](./assets/console-billing-current-month-selected-desktop.png)
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?demo=1
   state: mobile
   target_program: mock-only
   capture_scope: browser-viewport
@@ -306,6 +323,19 @@
   evidence_note: 同一 billing 页面在移动端收敛为单卡横滑的自然月视图，左右切换按钮下沉到卡片底部，同时仍保留统一的“基础权益”、订单状态与购买控件的完整页面级阅读路径。
 
 ![User console billing page mobile](./assets/console-billing-live-mobile-carousel.png)
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?demo=1
+  state: mobile selected-month follow
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 390x844
+  viewport_strategy: devtools-emulate
+  sensitive_exclusion: N/A
+  evidence_note: 用户在桌面选择后续月份后切换到移动布局，该月份仍保持选中并回到单卡可视范围，详情继续对应所选月份。
+
+PR: include
+![Billing page mobile selected-month follow](./assets/console-billing-selected-month-mobile-follow.png)
 
 - source_type: storybook_canvas
   story_id_or_title: Admin/Pages/UserDetailQuotaTab

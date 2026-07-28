@@ -446,7 +446,8 @@ export default function BillingPage({
   const timelineViewportRef = useRef<HTMLDivElement | null>(null)
   const [timelineVisibleCount, setTimelineVisibleCount] = useState<1 | 2 | 3>(1)
   const [timelineWindowIndex, setTimelineWindowIndex] = useState(0)
-  const [selectedTimelineIndex, setSelectedTimelineIndex] = useState(0)
+  const [selectedTimelineMonthStart, setSelectedTimelineMonthStart] = useState<number | null>(null)
+  const previousCurrentMonthStartRef = useRef<number | null>(null)
   const [ordersPage, setOrdersPage] = useState(1)
   const timeline = summary?.timeline ?? []
   const rechargeVisible = config?.visible ?? false
@@ -463,7 +464,14 @@ export default function BillingPage({
   const effectiveUntilLabel = summary?.effectiveUntilMonthStart
     ? formatMonthLabel(summary.effectiveUntilMonthStart, language)
     : null
-  const currentTimelineIndex = Math.max(0, timeline.findIndex((item) => item.isCurrentMonth))
+  const timelineMonthStarts = timeline.map((item) => item.monthStart).join(':')
+  const markedCurrentTimelineIndex = timeline.findIndex((item) => item.isCurrentMonth)
+  const summaryCurrentTimelineIndex = summary
+    ? timeline.findIndex((item) => item.monthStart === summary.currentMonthStart)
+    : -1
+  const currentTimelineIndex = markedCurrentTimelineIndex >= 0
+    ? markedCurrentTimelineIndex
+    : Math.max(0, summaryCurrentTimelineIndex)
   const visibleTimelineCount = Math.max(1, Math.min(timelineVisibleCount, timeline.length || 1))
   const maxTimelineIndex = Math.max(0, timeline.length - visibleTimelineCount)
   const defaultTimelineIndex = useMemo(() => {
@@ -474,7 +482,12 @@ export default function BillingPage({
     return clampIndex(currentTimelineIndex, maxTimelineIndex)
   }, [currentTimelineIndex, maxTimelineIndex, timeline.length, visibleTimelineCount])
   const safeTimelineWindowIndex = clampIndex(timelineWindowIndex, maxTimelineIndex)
-  const safeSelectedTimelineIndex = clampIndex(selectedTimelineIndex, timeline.length - 1)
+  const selectedTimelineIndex = selectedTimelineMonthStart == null
+    ? currentTimelineIndex
+    : timeline.findIndex((item) => item.monthStart === selectedTimelineMonthStart)
+  const safeSelectedTimelineIndex = selectedTimelineIndex >= 0
+    ? selectedTimelineIndex
+    : currentTimelineIndex
   const visibleTimelineEndIndex = Math.min(
     timeline.length - 1,
     safeTimelineWindowIndex + visibleTimelineCount - 1,
@@ -592,12 +605,22 @@ export default function BillingPage({
 
   useEffect(() => {
     if (timeline.length === 0) {
-      setSelectedTimelineIndex(0)
+      setSelectedTimelineMonthStart(null)
+      previousCurrentMonthStartRef.current = summary?.currentMonthStart ?? null
       return
     }
 
-    setSelectedTimelineIndex(currentTimelineIndex)
-  }, [currentTimelineIndex, timeline.length])
+    const currentMonthStart = summary?.currentMonthStart ?? null
+    const currentMonthChanged = previousCurrentMonthStartRef.current != null
+      && previousCurrentMonthStartRef.current !== currentMonthStart
+    const selectedMonthStillExists = selectedTimelineMonthStart != null
+      && timeline.some((item) => item.monthStart === selectedTimelineMonthStart)
+
+    if (selectedTimelineMonthStart == null || !selectedMonthStillExists || currentMonthChanged) {
+      setSelectedTimelineMonthStart(timeline[currentTimelineIndex]?.monthStart ?? null)
+    }
+    previousCurrentMonthStartRef.current = currentMonthStart
+  }, [currentTimelineIndex, selectedTimelineMonthStart, summary?.currentMonthStart, timeline.length, timelineMonthStarts])
 
   useEffect(() => {
     const viewport = timelineViewportRef.current
@@ -625,8 +648,20 @@ export default function BillingPage({
       })
 
       setTimelineWindowIndex((current) => current === nextIndex ? current : nextIndex)
-      if (visibleTimelineCount === 1 && !isInitialSync) {
-        setSelectedTimelineIndex((current) => current === nextIndex ? current : nextIndex)
+      if (!isInitialSync) {
+        setSelectedTimelineMonthStart((current) => {
+          const currentIndex = current == null
+            ? currentTimelineIndex
+            : timeline.findIndex((item) => item.monthStart === current)
+          const resolvedCurrentIndex = currentIndex >= 0 ? currentIndex : currentTimelineIndex
+          const nextVisibleEnd = Math.min(timeline.length - 1, nextIndex + visibleTimelineCount - 1)
+          const nextSelectedIndex = resolvedCurrentIndex < nextIndex
+            ? nextIndex
+            : resolvedCurrentIndex > nextVisibleEnd
+              ? nextVisibleEnd
+              : resolvedCurrentIndex
+          return timeline[nextSelectedIndex]?.monthStart ?? null
+        })
       }
     }
 
@@ -643,7 +678,7 @@ export default function BillingPage({
       window.cancelAnimationFrame(frame)
       viewport.removeEventListener('scroll', handleScroll)
     }
-  }, [timeline.length, visibleTimelineCount])
+  }, [currentTimelineIndex, timeline.length, timelineMonthStarts, visibleTimelineCount])
 
   useEffect(() => {
     setOrdersPage((current) => Math.min(Math.max(current, 1), ordersTotalPages))
@@ -652,18 +687,30 @@ export default function BillingPage({
   useEffect(() => {
     if (timeline.length === 0) return
 
-    setSelectedTimelineIndex((current) => {
-      const clampedCurrent = clampIndex(current, timeline.length - 1)
-      if (clampedCurrent < safeTimelineWindowIndex) return safeTimelineWindowIndex
-      if (clampedCurrent > visibleTimelineEndIndex) return visibleTimelineEndIndex
-      return current
+    const nextWindowIndex = safeSelectedTimelineIndex < safeTimelineWindowIndex
+      ? safeSelectedTimelineIndex
+      : safeSelectedTimelineIndex > visibleTimelineEndIndex
+        ? safeSelectedTimelineIndex - visibleTimelineCount + 1
+        : safeTimelineWindowIndex
+    if (nextWindowIndex === safeTimelineWindowIndex) return
+
+    setTimelineWindowIndex(nextWindowIndex)
+    const handle = window.requestAnimationFrame(() => {
+      scrollTimelineToIndex(timelineViewportRef.current, nextWindowIndex, 'auto')
     })
-  }, [safeTimelineWindowIndex, timeline.length, visibleTimelineEndIndex])
+    return () => window.cancelAnimationFrame(handle)
+  }, [safeSelectedTimelineIndex, safeTimelineWindowIndex, timeline.length, visibleTimelineCount, visibleTimelineEndIndex])
 
   const moveTimeline = (step: number) => {
     const nextIndex = clampIndex(safeTimelineWindowIndex + step, maxTimelineIndex)
     setTimelineWindowIndex(nextIndex)
-    if (visibleTimelineCount === 1) setSelectedTimelineIndex(nextIndex)
+    const nextVisibleEnd = Math.min(timeline.length - 1, nextIndex + visibleTimelineCount - 1)
+    const nextSelectedIndex = safeSelectedTimelineIndex < nextIndex
+      ? nextIndex
+      : safeSelectedTimelineIndex > nextVisibleEnd
+        ? nextVisibleEnd
+        : safeSelectedTimelineIndex
+    setSelectedTimelineMonthStart(timeline[nextSelectedIndex]?.monthStart ?? null)
     scrollTimelineToIndex(timelineViewportRef.current, nextIndex, 'smooth')
   }
 
@@ -717,7 +764,7 @@ export default function BillingPage({
                       currentMonthStart={summary?.currentMonthStart ?? month.monthStart}
                       month={month}
                       selected={index === safeSelectedTimelineIndex}
-                      onSelect={(nextIndex) => setSelectedTimelineIndex(nextIndex)}
+                      onSelect={(nextIndex) => setSelectedTimelineMonthStart(timeline[nextIndex]?.monthStart ?? null)}
                     />
                   ))}
                 </div>
