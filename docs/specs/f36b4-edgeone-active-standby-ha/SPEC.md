@@ -169,8 +169,8 @@ PR: include
   override set to `390x844`. The rendered page reports that the target node detail is present and
   the current-node EdgeOne card and source-configuration entry are absent. `trim_whitespace.py`
   reported `action=unchanged` with `reason=ambiguous_border`, so its raw crop remains canonical.
-- publish_state: Both peer-scope screenshots remain local until the owner explicitly approves
-  committing and pushing screenshot assets.
+- publish_state: Both peer-scope screenshots are committed on the PR branch and included in the
+  PR visual evidence.
 
 ## Acceptance
 
