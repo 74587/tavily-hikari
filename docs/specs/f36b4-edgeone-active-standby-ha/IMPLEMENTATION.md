@@ -13,6 +13,9 @@
   mode requires a configured peer. The peer-sync task logs that startup state once and remains
   disabled instead of emitting a repeating sync failure; health and local role semantics are unchanged.
 - Extended admin HA peer aggregation so each `peerNodes[]` item carries both `publicOrigin` and `sourceConfigTarget`, letting the node inventory render the configured source target instead of mixing live EdgeOne target and peer direct-entry labels in the same “源站” column.
+- Narrowed `GET /api/admin/ha/nodes/:node_id` to the selected peer, `currentNodeId`, and their
+  interaction timeline. The endpoint no longer serializes current-node EdgeOne or source-setting
+  fields, and its response boundary has a regression test.
 - Added normalized HA control-plane timeline storage through `ha_control_plane_events`, admin timeline query, and hourly 7-day retention GC.
 - Replaced SQLite snapshot export/import with deprecated `410 Gone` responses so HA cannot transfer full database files.
 - Added admin/internal endpoints for HA status, zstd NDJSON state baseline, zstd NDJSON outbox events, event acknowledgement, promote, finalize, and recovery import.
@@ -142,6 +145,9 @@
 - Added user console banner for degraded HA states.
 - Added Storybook scenarios for provisional, standby, full master, recovery, compact admin attention, System Settings high availability, and user degraded states.
 - Added i18n-backed HA service-node copy for zh/en, plus a source-configuration dialog on the System Settings high-availability page and Storybook/tests that no longer hardcode English text.
+- Scoped `HaNodeDetailPanel` to the selected peer by removing the local EdgeOne settings and
+  operations-context cards. The current-node relationship remains in the introduction and timeline;
+  source configuration remains available only from the HA overview.
 - Added a local shadcn-style `Alert` primitive and upgraded the HA source settings dialog submit-failure state to use a destructive alert with operator-friendly titles, concise recovery guidance, and default-collapsed technical details. Field-level validation remains attached to the relevant direct/origin-group inputs instead of collapsing into a single raw error block.
 
 ## Visual Evidence

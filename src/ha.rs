@@ -607,10 +607,6 @@ pub struct HaTimelinePage {
 pub struct HaNodeDetailView {
     pub current_node_id: String,
     pub node: HaPeerNodeView,
-    pub edgeone_domain: Option<String>,
-    pub edgeone_current_target: Option<String>,
-    pub edgeone_current_source_kind: Option<HaSourceKind>,
-    pub ha_source_effective: Option<HaSourceSettingsView>,
     pub timeline: HaTimelinePage,
 }
 

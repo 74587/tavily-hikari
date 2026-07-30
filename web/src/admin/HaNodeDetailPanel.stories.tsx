@@ -27,17 +27,6 @@ const detail: HaNodeDetail = {
       { channel: 'runtime', ackedSeq: null, highWatermark: 900, ackLag: null, cursorState: 'expired_backlog', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: true },
     ],
   },
-  edgeoneDomain: 'api.example.com',
-  edgeoneCurrentTarget: '203.0.113.9:58087',
-  edgeoneCurrentSourceKind: 'direct',
-  haSourceEffective: {
-    sourceKind: 'direct',
-    directOriginScheme: 'https',
-    directOriginHost: '203.0.113.9',
-    directOriginPort: 58087,
-    originGroupId: null,
-    target: '203.0.113.9:58087',
-  },
   timeline: {
     events: [
       {
@@ -72,8 +61,15 @@ const detail: HaNodeDetail = {
 const meta = {
   title: 'Admin/HaNodeDetailPanel',
   component: HaNodeDetailPanel,
+  tags: ['autodocs'],
   parameters: {
     layout: 'fullscreen',
+    docs: {
+      description: {
+        component:
+          'Peer-scoped HA node detail showing the selected node, channel health, and interaction history with the current management node.',
+      },
+    },
   },
   decorators: [
     (Story) => (
@@ -94,7 +90,6 @@ const meta = {
     strings: translations.zh.admin.systemSettings.ha,
     language: 'zh',
     onBack: () => undefined,
-    onConfigureSource: () => undefined,
     hasMoreTimeline: false,
   },
 } satisfies Meta<typeof HaNodeDetailPanel>
@@ -113,6 +108,17 @@ export const BaselineRequired: Story = {
         channelHealth: detail.node.channelHealth?.map((health) => health.channel === 'runtime'
           ? { ...health, cursorState: 'baseline_required', expiredBacklog: false }
           : health),
+      },
+    },
+  },
+}
+
+export const Mobile: Story = {
+  parameters: {
+    viewport: { defaultViewport: '0390-device-iphone-14' },
+    docs: {
+      description: {
+        story: 'The peer-scoped detail remains readable at the mobile viewport without local EdgeOne configuration controls.',
       },
     },
   },

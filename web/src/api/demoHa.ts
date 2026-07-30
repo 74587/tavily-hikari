@@ -306,18 +306,14 @@ export function handleDemoHaRoute(
     if (!node) {
       return jsonResponse({ detail: `unknown HA peer node: ${nodeId}` }, { status: 404 })
     }
-      return jsonResponse({
-        currentNodeId: state.haStatus.nodeId,
-        node,
-        edgeoneDomain: state.haStatus.edgeoneDomain,
-        edgeoneCurrentTarget: state.haStatus.edgeoneCurrentTarget,
-        edgeoneCurrentSourceKind: state.haStatus.edgeoneCurrentSourceKind,
-        haSourceEffective: state.haStatus.haSourceEffective,
-        timeline: {
-          events: nodeInteractions[nodeId] ?? [],
-          nextCursor: null,
-        },
-      })
+    return jsonResponse({
+      currentNodeId: state.haStatus.nodeId,
+      node,
+      timeline: {
+        events: nodeInteractions[nodeId] ?? [],
+        nextCursor: null,
+      },
+    })
   }
   if (path === '/api/admin/ha/timeline') {
     return jsonResponse({
