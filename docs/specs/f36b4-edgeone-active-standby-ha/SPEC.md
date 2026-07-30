@@ -147,11 +147,7 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 ## Visual Evidence
 
-PR: include
-
 ![HA node detail replication ACK and GC health](./assets/ha-node-detail-channel-health-final.png)
-
-PR: include
 
 ![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
 
