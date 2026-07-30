@@ -10,6 +10,9 @@ fn relay_mesh_mark_svgs_are_true_vectors() {
     ] {
         assert!(svg.contains("<circle"), "mark SVG should contain vector circles");
         assert!(svg.contains("<line"), "mark SVG should contain vector lines");
+        assert_eq!(svg.matches("<line ").count(), 25);
+        assert_eq!(svg.matches("r=\"16.7\"").count(), 7);
+        assert!(svg.contains("id=\"edge-top-right\""));
         assert!(!svg.contains("<image"), "mark SVG must not embed an image");
         assert!(!svg.contains("data:"), "mark SVG must not embed raster data");
     }
@@ -22,7 +25,7 @@ fn relay_mesh_mark_geometry_is_semantically_decomposed() {
     );
 
     assert_eq!(svg.matches("<circle").count(), 7);
-    assert_eq!(svg.matches("<line").count(), 23);
+    assert_eq!(svg.matches("<line ").count(), 25);
     for group in ["outer-network", "center-spokes", "nodes", "search-symbol"] {
         assert!(
             svg.contains(&format!("id=\"{group}\"")),
@@ -32,6 +35,8 @@ fn relay_mesh_mark_geometry_is_semantically_decomposed() {
     assert!(!svg.contains("<image"), "mark geometry must not embed an image");
     assert!(!svg.contains("data:"), "mark geometry must not embed raster data");
     assert!(!svg.contains("href="), "mark geometry must not link raster data");
+    assert_eq!(svg.matches("r=\"16.7\"").count(), 6);
+    assert!(svg.contains("id=\"edge-top-right\""));
 }
 
 #[tokio::test]

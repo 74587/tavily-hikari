@@ -157,6 +157,7 @@ PR: none
 
 - 无文字标记参数化彩色对照：[relay-mesh-mark-parametric-color-comparison.png](./assets/relay-mesh-mark-parametric-color-comparison.png)
 - 无文字标记参数化二值几何对齐：[relay-mesh-mark-geometry-mono-comparison.png](./assets/relay-mesh-mark-geometry-mono-comparison.png)
+- 等径外围节点与镜像虚线修正版：[relay-mesh-mark-corrected-preview.png](./assets/relay-mesh-mark-corrected-preview.png)
 - 桌面端无卡片登录布局：[admin-login-no-methods-desktop.png](./assets/admin-login-no-methods-desktop.png)
 - 移动端无卡片布局与参数化矢量标记：[admin-login-parametric-mark-mobile.png](./assets/admin-login-parametric-mark-mobile.png)
 - Passkey 登录状态：[admin-login-passkey.png](./assets/admin-login-passkey.png)

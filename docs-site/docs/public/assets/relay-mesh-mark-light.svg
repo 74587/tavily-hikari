@@ -54,7 +54,11 @@
         <line x1="53.3" y1="58.5" x2="66.7" y2="49.4" stroke="#9765F9" />
         <line x1="37.9" y1="67.6" x2="49.8" y2="60.1" stroke="#9C70FC" stroke-width="5.5" />
       </g>
-      <line id="edge-top-right" x1="127.4837" y1="40.6072" x2="171.8933" y2="67.8865" stroke="url(#edge-top-right-gradient)" stroke-width="5.6304" />
+      <g id="edge-top-right" stroke="url(#edge-top-right-gradient)">
+        <line x1="127.415" y1="40.2" x2="139.165" y2="47.6" />
+        <line x1="142.865" y1="49.4" x2="156.265" y2="58.5" />
+        <line x1="159.765" y1="60.1" x2="171.665" y2="67.6" stroke-width="5.5" />
+      </g>
       <g id="edge-right" stroke-width="4.2">
         <line x1="191.5" y1="107" x2="191.75" y2="118" stroke="#0394F1" stroke-width="5.2" stroke-linecap="round" />
         <line x1="191.5" y1="125" x2="191.5" y2="139.5" stroke="#0396EF" stroke-linecap="round" />
@@ -87,13 +91,13 @@
     </g>
 
     <g id="nodes" stroke="none" filter="url(#soft-depth)">
-      <circle id="node-top" cx="104.7825" cy="27.66" r="19.50875" fill="url(#node-top-gradient)" />
-      <circle id="node-top-lighting" cx="104.7825" cy="27.66" r="19.50875" fill="url(#node-top-lighting)" />
-      <circle id="node-upper-right" cx="191.2975" cy="81.66" r="16.71" fill="url(#node-upper-right-gradient)" />
-      <circle id="node-lower-right" cx="191.6" cy="182.54" r="16.64" fill="url(#node-lower-right-gradient)" />
-      <circle id="node-bottom" cx="104.825" cy="233.69" r="17.58" fill="url(#node-bottom-gradient)" />
-      <circle id="node-lower-left" cx="18.64125" cy="182.6" r="16.6" fill="url(#node-lower-left-gradient)" />
-      <circle id="node-upper-left" cx="18.6425" cy="81.62" r="16.57" fill="url(#node-upper-left-gradient)" />
+      <circle id="node-top" cx="104.7825" cy="27.66" r="16.7" fill="url(#node-top-gradient)" />
+      <circle id="node-top-lighting" cx="104.7825" cy="27.66" r="16.7" fill="url(#node-top-lighting)" />
+      <circle id="node-upper-right" cx="191.2975" cy="81.66" r="16.7" fill="url(#node-upper-right-gradient)" />
+      <circle id="node-lower-right" cx="191.6" cy="182.54" r="16.7" fill="url(#node-lower-right-gradient)" />
+      <circle id="node-bottom" cx="104.825" cy="233.69" r="16.7" fill="url(#node-bottom-gradient)" />
+      <circle id="node-lower-left" cx="18.64125" cy="182.6" r="16.7" fill="url(#node-lower-left-gradient)" />
+      <circle id="node-upper-left" cx="18.6425" cy="81.62" r="16.7" fill="url(#node-upper-left-gradient)" />
     </g>
 
     <g id="search-symbol" fill="none" stroke="url(#search-gradient)" stroke-linecap="round" filter="url(#soft-depth)">
