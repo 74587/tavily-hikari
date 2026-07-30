@@ -37,6 +37,7 @@ mod tests {
     mod alerts_and_ha;
     mod alerts_and_ha_dashboard_defaults;
     mod alerts_and_ha_event_exports;
+    mod alerts_and_ha_node_detail;
     mod alerts_and_ha_node_state;
     mod alerts_and_ha_sync_recovery;
     mod alerts_and_ha_serving_modes;
