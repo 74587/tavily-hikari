@@ -155,6 +155,27 @@ PR: include
 
 ![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
 
+PR: include
+
+![Peer-scoped HA node detail desktop](./assets/ha-node-detail-peer-scope-desktop.png)
+
+- evidence_note: The mock-only HA web demo now shows only the URL-selected peer, its channel
+  health, and its interaction history with the current management node. The current node's EdgeOne
+  and source-setting controls are absent; their only configuration entry remains on the HA overview.
+  The desktop capture is `1748x1337`; `trim_whitespace.py` reported `action=unchanged` with
+  `reason=ambiguous_border`, so its raw crop remains canonical.
+
+PR: include
+
+![Peer-scoped HA node detail mobile](./assets/ha-node-detail-peer-scope-mobile.png)
+
+- mobile_evidence: Captured from the same mock-only HA web demo with Chrome's supported `viewport`
+  override set to `390x844`. The rendered page reports that the target node detail is present and
+  the current-node EdgeOne card and source-configuration entry are absent. `trim_whitespace.py`
+  reported `action=unchanged` with `reason=ambiguous_border`, so its raw crop remains canonical.
+- publish_state: Both peer-scope screenshots remain local until the owner explicitly approves
+  committing and pushing screenshot assets.
+
 ## Acceptance
 
 - `standby/recovery` 禁止外部业务写入。
