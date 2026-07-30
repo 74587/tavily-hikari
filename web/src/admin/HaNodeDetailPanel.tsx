@@ -1,4 +1,4 @@
-import { ArrowLeft, RotateCcw, Route, Server, Settings2 } from 'lucide-react'
+import { ArrowLeft, RotateCcw, Server } from 'lucide-react'
 
 import type { HaNodeDetail, HaTimelineEvent } from '../api'
 import type { AdminTranslations } from '../i18n'
@@ -126,36 +126,12 @@ function writeAuthority(
   return { tone: 'warning', label: strings.authorityWritesBlocked }
 }
 
-function sourceKindLabel(
-  value: HaNodeDetail['edgeoneCurrentSourceKind'],
-  strings: AdminTranslations['systemSettings']['ha'],
-): string {
-  if (value === 'direct') return strings.sourceKindDirect
-  if (value === 'origin_group') return strings.sourceKindOriginGroup
-  return '—'
-}
-
-function formatEffectiveSource(
-  settings: HaNodeDetail['haSourceEffective'],
-  strings: AdminTranslations['systemSettings']['ha'],
-): string {
-  if (!settings) return '—'
-  if (settings.sourceKind === 'origin_group') {
-    return settings.originGroupId ?? '—'
-  }
-  const scheme = settings.directOriginScheme?.toUpperCase() ?? '—'
-  const host = settings.directOriginHost ?? '—'
-  const port = settings.directOriginPort ?? '—'
-  return `${scheme} · ${host}:${port}`
-}
-
 export interface HaNodeDetailPanelProps {
   detail: HaNodeDetail | null
   strings: AdminTranslations['systemSettings']['ha']
   language: 'en' | 'zh'
   loading?: boolean
   onBack: () => void
-  onConfigureSource?: () => void
   onLoadMoreTimeline?: (() => void) | null
   hasMoreTimeline?: boolean
 }
@@ -166,7 +142,6 @@ export default function HaNodeDetailPanel({
   language,
   loading = false,
   onBack,
-  onConfigureSource,
   onLoadMoreTimeline = null,
   hasMoreTimeline = false,
 }: HaNodeDetailPanelProps): JSX.Element {
@@ -267,74 +242,6 @@ export default function HaNodeDetailPanel({
               <span>{strings.nodeDetailLoading}</span>
             </div>
           )}
-        </article>
-
-        <article className="ha-node-detail-card ha-node-detail-card--aside" aria-label={strings.nodeDetailContextTitle}>
-          <h3>{strings.nodeDetailContextTitle}</h3>
-          <dl className="ha-node-detail-context-grid">
-            <div>
-              <dt>{strings.nodeDetailCurrentNodeLabel}</dt>
-              <dd>
-                <code className="ha-node-detail-code">{detail?.currentNodeId ?? '—'}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>{strings.timelineTitle}</dt>
-              <dd>{strings.nodeDetailRetentionWindow}</dd>
-            </div>
-            <div>
-              <dt>{strings.nodeDetailTrafficLabel}</dt>
-              <dd>{trafficStatus ? <StatusBadge tone={trafficStatus.tone}>{trafficStatus.label}</StatusBadge> : '—'}</dd>
-            </div>
-            <div>
-              <dt>{strings.nodeDetailWriteLabel}</dt>
-              <dd>{writeStatus ? <StatusBadge tone={writeStatus.tone}>{writeStatus.label}</StatusBadge> : '—'}</dd>
-            </div>
-          </dl>
-          <p className="ha-node-detail-context-note">{strings.nodeDetailRetentionDescription}</p>
-        </article>
-
-        <article className="ha-node-detail-card ha-node-detail-card--edgeone" aria-label={strings.nodeDetailEdgeoneTitle}>
-          <div className="ha-node-detail-card-head">
-            <div className="ha-node-list-title">
-              <Route size={18} aria-hidden="true" />
-              <span>{strings.nodeDetailEdgeoneTitle}</span>
-            </div>
-            {onConfigureSource ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="ha-node-detail-configure-button"
-                onClick={onConfigureSource}
-              >
-                <Settings2 className="h-4 w-4" aria-hidden="true" />
-                {strings.configureSource}
-              </Button>
-            ) : null}
-          </div>
-          <dl className="ha-node-detail-edgeone-grid">
-            <div>
-              <dt>{strings.nodeDetailEdgeoneDomainLabel}</dt>
-              <dd>{detail?.edgeoneDomain ?? '—'}</dd>
-            </div>
-            <div>
-              <dt>{strings.nodeDetailEdgeoneSourceLabel}</dt>
-              <dd>{sourceKindLabel(detail?.edgeoneCurrentSourceKind ?? null, strings)}</dd>
-            </div>
-            <div className="ha-node-detail-edgeone-wide">
-              <dt>{strings.nodeDetailEdgeoneTargetLabel}</dt>
-              <dd>
-                <code className="ha-node-detail-code">{detail?.edgeoneCurrentTarget ?? '—'}</code>
-              </dd>
-            </div>
-          </dl>
-          <div className="ha-node-detail-config">
-            <span className="ha-node-detail-config-label">{strings.nodeDetailEdgeoneEffectiveLabel}</span>
-            <code className="ha-node-detail-code">
-              {formatEffectiveSource(detail?.haSourceEffective ?? null, strings)}
-            </code>
-          </div>
         </article>
 
         <article className="ha-node-detail-card ha-node-detail-card--channels" aria-label="HA channel health">

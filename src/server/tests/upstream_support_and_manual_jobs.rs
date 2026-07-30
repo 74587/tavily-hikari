@@ -1697,6 +1697,10 @@ pub(super) async fn spawn_ha_admin_server(
 
     let app = Router::new()
         .route("/api/admin/ha/status", get(get_admin_ha_status))
+        .route(
+            "/api/admin/ha/nodes/:node_id",
+            get(get_admin_ha_node_detail),
+        )
         .route("/api/internal/ha/status", get(get_internal_ha_status))
         .route(
             "/api/admin/ha/snapshot",

@@ -115,6 +115,17 @@ Production validation exposed a second, separate HA control-plane defect during 
 
 HA source settings originally drifted across layers: the frontend, demo fixtures, and spec already used lowercase `http|https|follow`, but the Rust enum deserializer still expected PascalCase variants, causing direct-origin saves to fail before the handler executed. The accepted contract is now explicitly lowercase on the HA admin JSON wire, with the uppercase `HTTP|HTTPS|FOLLOW` mapping confined to the downstream EdgeOne control-plane payload.
 
+## Node Detail Scope
+
+The node-detail endpoint and page previously combined the URL-selected peer with current-node
+EdgeOne settings. That made a peer detail screen look like the peer owned the current management
+node's domain and source configuration.
+
+- Node detail is now a peer-scoped inspection surface: it returns and renders the selected node,
+  the current management-node identifier, and their interaction timeline.
+- Current-node EdgeOne/source configuration and its mutation entry point remain exclusively on the
+  HA overview, where the setting ownership is unambiguous.
+
 ## Source Settings Failure UX Hardening
 
 The HA source settings dialog previously dumped raw backend failure text straight into the modal body, which was both visually inconsistent and hard to scan. The accepted interaction keeps local input validation beside the affected field and reserves form-level remote failures for a formal destructive alert with operator-friendly copy plus a default-collapsed technical-details disclosure.

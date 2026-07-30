@@ -457,11 +457,10 @@
 
 .ha-node-detail-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
-    "overview overview"
-    "aside edgeone"
-    "channels channels";
+    "overview"
+    "channels";
   gap: 14px;
   align-items: start;
 }
@@ -479,16 +478,6 @@
 
 .ha-node-detail-card--overview {
   grid-area: overview;
-}
-
-.ha-node-detail-card--aside {
-  grid-area: aside;
-  align-content: start;
-  gap: 14px;
-}
-
-.ha-node-detail-card--edgeone {
-  grid-area: edgeone;
 }
 
 .ha-node-detail-card--channels {
@@ -631,8 +620,7 @@
   padding-top: 2px;
 }
 
-.ha-node-detail-overview-facts,
-.ha-node-detail-edgeone-grid {
+.ha-node-detail-overview-facts {
   display: grid;
   gap: 10px;
 }
@@ -642,9 +630,7 @@
   gap: 12px;
 }
 
-.ha-node-detail-overview-facts div,
-.ha-node-detail-context-grid div,
-.ha-node-detail-edgeone-grid div {
+.ha-node-detail-overview-facts div {
   padding: 12px 14px;
   border: 1px solid hsl(var(--border) / 0.54);
   border-radius: 8px;
@@ -655,31 +641,6 @@
   grid-column: 1 / -1;
 }
 
-.ha-node-detail-edgeone-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.ha-node-detail-config {
-  display: grid;
-  gap: 6px;
-  padding: 12px 14px;
-  border: 1px solid hsl(var(--border) / 0.58);
-  border-radius: 8px;
-  background: linear-gradient(180deg, hsl(var(--muted) / 0.22), hsl(var(--card) / 0.82));
-}
-
-.ha-node-detail-configure-button {
-  flex: 0 0 auto;
-}
-
-.ha-node-detail-config-label {
-  color: hsl(var(--muted-foreground));
-  font-size: 0.72rem;
-  font-weight: 850;
-  text-transform: uppercase;
-}
-
 .ha-node-detail-code {
   display: block;
   font-family: var(--font-mono);
@@ -687,28 +648,6 @@
   line-height: 1.45;
   color: hsl(var(--foreground));
   overflow-wrap: anywhere;
-}
-
-.ha-node-detail-context-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.ha-node-detail-context-grid dd {
-  display: flex;
-  align-items: center;
-  min-height: 1.5rem;
-}
-
-.ha-node-detail-context-note {
-  color: hsl(var(--muted-foreground));
-  font-size: 0.85rem;
-  line-height: 1.5;
-}
-
-.ha-node-detail-edgeone-wide {
-  grid-column: 1 / -1;
 }
 
 .ha-source-kind-tabs {
@@ -917,8 +856,6 @@
     grid-template-columns: 1fr;
     grid-template-areas:
       "overview"
-      "aside"
-      "edgeone"
       "channels";
   }
 
@@ -932,13 +869,7 @@
     justify-self: start;
   }
 
-  .ha-node-detail-configure-button {
-    width: 100%;
-  }
-
   .ha-node-detail-overview-facts,
-  .ha-node-detail-edgeone-grid,
-  .ha-node-detail-context-grid,
   .ha-channel-health-row dl {
     grid-template-columns: 1fr;
   }
@@ -949,8 +880,6 @@
     grid-template-columns: 1fr;
     grid-template-areas:
       "overview"
-      "aside"
-      "edgeone"
       "channels";
   }
 

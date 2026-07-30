@@ -1484,10 +1484,6 @@ export interface HaTimelinePage {
 export interface HaNodeDetail {
   currentNodeId: string
   node: HaPeerNode
-  edgeoneDomain: string | null
-  edgeoneCurrentTarget: string | null
-  edgeoneCurrentSourceKind: HaSourceKind | null
-  haSourceEffective: HaSourceSettings | null
   timeline: HaTimelinePage
 }
 

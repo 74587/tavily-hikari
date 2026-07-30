@@ -12552,7 +12552,6 @@ function AdminDashboard(): JSX.Element {
               language={language}
               loading={haNodeDetailLoading}
               onBack={() => navigateToPath(systemSettingsHaPath())}
-              onConfigureSource={() => setHaSourceDialogOpen(true)}
               onLoadMoreTimeline={haNodeDetailNextCursor != null
                 ? () => void refreshHaNodeDetail(route.nodeId, haNodeDetailNextCursor, true)
                 : null}

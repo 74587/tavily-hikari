@@ -1659,10 +1659,6 @@ async fn get_admin_ha_node_detail(
     Ok(Json(tavily_hikari::HaNodeDetailView {
         current_node_id: status.node_id,
         node,
-        edgeone_domain: status.edgeone_domain,
-        edgeone_current_target: status.edgeone_current_target,
-        edgeone_current_source_kind: status.edgeone_current_source_kind,
-        ha_source_effective: status.ha_source_effective,
         timeline: tavily_hikari::HaTimelinePage { events, next_cursor },
     }))
 }

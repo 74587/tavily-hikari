@@ -77,6 +77,9 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 - `GET /api/admin/ha/status` 返回当前节点状态、EdgeOne 源站、同步水位、recovery 状态。
 - `GET /api/admin/ha/status` 继续保留当前本机字段，并新增 `peerNodes[]` 与 `plannedCutoverEligible`。
+- `GET /api/admin/ha/nodes/:node_id` 只返回 URL 指定的 peer `node`、当前管理节点
+  `currentNodeId` 与二者交互时间线；不得返回当前节点的 EdgeOne 域名、生效目标、源站类型或
+  有效源站配置。
 - `GET /api/admin/ha/status` additionally exposes `peerCount` and
   `syncDisabledReason=no_configured_peers` when `active_standby` has no configured remote peer and
   no usable sync path. A legacy `HA_SYNC_SOURCE_URL` is a usable path only outside dual-active
@@ -130,6 +133,9 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 - 管理员控制台的完整 HA 服务节点管理面板只出现在系统设置的高可用二级界面，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。
 - 管理员控制台的 HA 页面必须稳定分成三块：真实节点清单、`planned cutover` 操作区、7 天时间线；dual-active 模式下还要显示当前 leader key 语义下的控制面写节点。
 - HA 管理页还要提供当前节点源站配置入口，允许在 `IP/域名` 与 `源站组` 之间切换，并在 active/provisional 时支持保存后切换 EdgeOne 到此源站。
+- 节点详情只服务于 URL 指定的目标节点：节点信息、同步/健康、权限与交互日志可以展示目标
+  节点，当前管理节点只保留在介绍和交互关系语义中；当前节点 EdgeOne 设置及“配置源站”入口
+  只能保留在 HA 总览。
 - 节点清单的“源站”列统一显示节点源站配置：当前节点显示本机 `haSourceEffective.target`，peer 节点显示 peer 自己上报的 `sourceConfigTarget`；`publicOrigin` 只作为对外入口信息保留给其他交互，不占用该列。
 - 节点清单必须直接展示 peer eligibility、最后探测时间、同步状态、恢复状态，以及哪个 peer 是当前允许切流的目标。
 - `planned cutover` 必须通过明确确认流展示目标节点、当前路由和预检语义。
@@ -141,13 +147,30 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 ## Visual Evidence
 
-PR: include
-
 ![HA node detail replication ACK and GC health](./assets/ha-node-detail-channel-health-final.png)
 
+![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
+
 PR: include
 
-![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
+![Peer-scoped HA node detail desktop](./assets/ha-node-detail-peer-scope-desktop.png)
+
+- evidence_note: The mock-only HA web demo now shows only the URL-selected peer, its channel
+  health, and its interaction history with the current management node. The current node's EdgeOne
+  and source-setting controls are absent; their only configuration entry remains on the HA overview.
+  The desktop capture is `1748x1337`; `trim_whitespace.py` reported `action=unchanged` with
+  `reason=ambiguous_border`, so its raw crop remains canonical.
+
+PR: include
+
+![Peer-scoped HA node detail mobile](./assets/ha-node-detail-peer-scope-mobile.png)
+
+- mobile_evidence: Captured from the same mock-only HA web demo with Chrome's supported `viewport`
+  override set to `390x844`. The rendered page reports that the target node detail is present and
+  the current-node EdgeOne card and source-configuration entry are absent. `trim_whitespace.py`
+  reported `action=unchanged` with `reason=ambiguous_border`, so its raw crop remains canonical.
+- publish_state: Both peer-scope screenshots are committed on the PR branch and included in the
+  PR visual evidence.
 
 ## Acceptance
 
@@ -162,6 +185,8 @@ PR: include
 - 双节点 mock EdgeOne 验收必须覆盖 `pre -> failover -> recovery`：单入口业务流量、standby
   fencing、状态基线、outbox 增量 catch-up、standby promote、leader key 切换、旧主账本 recovery 和重复导入幂等。
 - `GET /api/admin/ha/timeline` 分页、过滤、技术详情 disclosure 与 7 天保留清理必须有自动化覆盖。
+- `GET /api/admin/ha/nodes/:node_id` 必须有响应边界回归测试，确保当前节点 EdgeOne 与源站设置
+  不会重新进入 peer 节点详情。
 - 大量调用记录和大请求/响应正文不得进入 HA baseline、events 或 recovery payload。
 - 共享 `codex-testbox` 上的 256MiB cgroup v2 合同验证必须通过：standby 首次全量 baseline
   sync 成功、active 连续 billing baseline 导出成功，且主备进程组 `memory.current` 峰值都不
