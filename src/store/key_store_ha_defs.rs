@@ -179,6 +179,9 @@ const HA_META_KEYS: &[&str] = &[
     "upstream_project_id_fixed_value_v1",
     "upstream_mcp_user_agent_v1",
     "upstream_project_id_hmac_secret_v1",
+    "upstream_reconciliation_backoff_level_v1",
+    "upstream_reconciliation_backoff_until_v1",
+    "upstream_reconciliation_pressure_streak_v1",
     "upstream_reconciliation_ready_after_v1",
     "global_ip_limit_v1",
     "ha_full_master_node_id_v1",
@@ -242,7 +245,7 @@ fn ha_channel_outbox_trigger_prefixes(channel: HaSyncChannel) -> Vec<String> {
     prefixes
 }
 
-fn ha_channel_allowed_resources(channel: HaSyncChannel) -> &'static [&'static str] {
+pub(crate) fn ha_outbox_gc_allowed_resources(channel: HaSyncChannel) -> &'static [&'static str] {
     ha_baseline_tables(channel)
 }
 

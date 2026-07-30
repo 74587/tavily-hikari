@@ -1,10 +1,14 @@
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    str::FromStr,
+};
 
 use clap::Parser;
 use dotenvy::dotenv;
 use serde::Serialize;
+use sqlx::{ConnectOptions, SqlitePool, sqlite::SqliteConnectOptions};
 use tavily_hikari::{
-    HaOutboxGcChannelReport, HaOutboxGcOptions, HaOutboxGcReport,
+    HaOutboxGcChannelReport, HaOutboxGcOptions, HaOutboxGcReport, HaSyncChannel,
     format_ha_outbox_gc_report_message, run_ha_outbox_gc_once,
 };
 
@@ -15,7 +19,7 @@ use tavily_hikari::{
     about = "Run bounded HA control outbox GC once, or repeatedly until complete"
 )]
 struct Cli {
-    /// SQLite database path to mutate.
+    /// SQLite database path to inspect or mutate.
     #[arg(long, env = "PROXY_DB_PATH", default_value = "data/tavily_proxy.db")]
     db_path: String,
 
@@ -50,6 +54,109 @@ struct Cli {
     /// Emit JSON output. Plain output is retained for interactive use.
     #[arg(long, default_value_t = false)]
     json: bool,
+
+    /// Inspect cleanup readiness without repairing triggers or deleting data.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreflightChannel {
+    channel: &'static str,
+    retention_secs: i64,
+    created_at_index_present: bool,
+    oldest_age_secs: Option<i64>,
+    high_watermark: i64,
+    lowest_peer_ack: Option<i64>,
+    pending_cleanup: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreflightReport {
+    dry_run: bool,
+    channels: Vec<PreflightChannel>,
+}
+
+async fn read_only_preflight(db_path: &str) -> Result<PreflightReport, Box<dyn std::error::Error>> {
+    let options = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))?
+        .read_only(true)
+        .disable_statement_logging();
+    let pool = SqlitePool::connect_with(options).await?;
+    let now = chrono::Utc::now().timestamp();
+    let mut channels = Vec::with_capacity(3);
+    for (ha_channel, table, index, retention_secs) in [
+        (
+            HaSyncChannel::Control,
+            "ha_outbox",
+            "idx_ha_outbox_created",
+            72 * 60 * 60,
+        ),
+        (
+            HaSyncChannel::Billing,
+            "ha_billing_outbox",
+            "idx_ha_billing_outbox_created",
+            14 * 24 * 60 * 60,
+        ),
+        (
+            HaSyncChannel::Runtime,
+            "ha_runtime_outbox",
+            "idx_ha_runtime_outbox_created",
+            14 * 24 * 60 * 60,
+        ),
+    ] {
+        let channel = ha_channel.as_str();
+        let created_at_index_present: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
+        )
+        .bind(index)
+        .fetch_one(&pool)
+        .await?;
+        let oldest_created_at: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT created_at FROM {table} ORDER BY created_at ASC, seq ASC LIMIT 1"
+        ))
+        .fetch_optional(&pool)
+        .await?;
+        let high_watermark: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT seq FROM {table} ORDER BY seq DESC LIMIT 1"
+        ))
+        .fetch_optional(&pool)
+        .await?;
+        let lowest_peer_ack: Option<i64> = sqlx::query_scalar(
+            "SELECT acked_seq FROM ha_peer_watermarks WHERE channel = ? ORDER BY acked_seq ASC LIMIT 1",
+        )
+        .bind(channel)
+        .fetch_optional(&pool)
+        .await?;
+        let allowed_resources = tavily_hikari::ha_outbox_gc_allowed_resources(ha_channel);
+        let placeholders = std::iter::repeat_n("?", allowed_resources.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let pending_sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM {table} WHERE created_at < ? OR resource NOT IN ({placeholders}) LIMIT 1)"
+        );
+        let mut pending_query =
+            sqlx::query_scalar::<_, bool>(&pending_sql).bind(now - retention_secs);
+        for resource in allowed_resources {
+            pending_query = pending_query.bind(*resource);
+        }
+        let pending_cleanup = pending_query.fetch_one(&pool).await?;
+        channels.push(PreflightChannel {
+            channel,
+            retention_secs,
+            created_at_index_present,
+            oldest_age_secs: oldest_created_at.map(|value| now.saturating_sub(value).max(0)),
+            high_watermark: high_watermark.unwrap_or(0),
+            lowest_peer_ack,
+            pending_cleanup,
+        });
+    }
+    pool.close().await;
+    Ok(PreflightReport {
+        dry_run: true,
+        channels,
+    })
 }
 
 fn positive_i64(value: &str) -> Result<i64, String> {
@@ -173,6 +280,27 @@ fn write_plain_report(mut writer: impl Write, report: &CliReport) -> io::Result<
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     let cli = Cli::parse();
+    if cli.dry_run {
+        let report = read_only_preflight(&cli.db_path).await?;
+        if cli.json {
+            serde_json::to_writer_pretty(io::stdout().lock(), &report)?;
+            println!();
+        } else {
+            for channel in report.channels {
+                println!(
+                    "{}: index_pending={} retention_secs={} oldest_age_secs={:?} high_watermark={} lowest_peer_ack={:?} pending_cleanup={}",
+                    channel.channel,
+                    !channel.created_at_index_present,
+                    channel.retention_secs,
+                    channel.oldest_age_secs,
+                    channel.high_watermark,
+                    channel.lowest_peer_ack,
+                    channel.pending_cleanup,
+                );
+            }
+        }
+        return Ok(());
+    }
     let mode = tavily_hikari::HaMode::parse(&cli.ha_mode);
     let options = HaOutboxGcOptions {
         batch_size: cli.batch_size,
@@ -214,6 +342,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_only_preflight_reports_recent_invalid_legacy_rows_as_pending_cleanup() {
+        let directory = std::env::temp_dir().join(format!(
+            "tavily-hikari-ha-outbox-preflight-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&directory).expect("create preflight test directory");
+        let db_path = directory.join("test.db");
+        let db_string = db_path.to_string_lossy().to_string();
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{db_string}"))
+            .expect("parse sqlite path")
+            .create_if_missing(true)
+            .disable_statement_logging();
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .expect("open test database");
+        for table in ["ha_outbox", "ha_billing_outbox", "ha_runtime_outbox"] {
+            sqlx::query(&format!(
+                "CREATE TABLE {table} (seq INTEGER PRIMARY KEY, created_at INTEGER NOT NULL, resource TEXT NOT NULL)"
+            ))
+            .execute(&pool)
+            .await
+            .expect("create outbox table");
+        }
+        sqlx::query(
+            "CREATE TABLE ha_peer_watermarks (channel TEXT NOT NULL, acked_seq INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create peer watermarks table");
+        sqlx::query(
+            "INSERT INTO ha_outbox (seq, created_at, resource) VALUES (1, ?, 'scheduled_jobs')",
+        )
+        .bind(chrono::Utc::now().timestamp())
+        .execute(&pool)
+        .await
+        .expect("insert recent invalid legacy event");
+        pool.close().await;
+
+        let report = read_only_preflight(&db_string)
+            .await
+            .expect("run read-only preflight");
+        let control = report
+            .channels
+            .iter()
+            .find(|channel| channel.channel == "control")
+            .expect("control preflight channel");
+        assert!(control.pending_cleanup);
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn cli_report_sums_invalid_and_retention_passes() {
