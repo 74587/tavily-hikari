@@ -860,23 +860,6 @@
     color: hsl(var(--primary));
   }
 
-  .auth-shell {
-    background:
-      radial-gradient(680px 320px at 12% -8%, hsl(var(--primary) / 0.18), transparent 68%),
-      radial-gradient(620px 280px at 100% 0%, hsl(var(--accent) / 0.16), transparent 72%),
-      hsl(var(--background));
-  }
-
-  .auth-subtitle {
-    color: hsl(var(--muted-foreground));
-  }
-
-  .auth-card {
-    width: min(100%, 46rem);
-    max-width: 46rem;
-    margin-inline: auto;
-  }
-
   .dark body {
     background:
       radial-gradient(980px 520px at 2% -14%, hsl(var(--primary) / 0.24), transparent 72%),
@@ -911,10 +894,6 @@
 @media (max-width: 767px) {
   .app-shell {
     padding: 18px 14px 30px;
-  }
-
-  .auth-card {
-    max-width: 100%;
   }
 }
 

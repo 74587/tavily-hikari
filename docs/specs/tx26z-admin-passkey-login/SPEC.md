@@ -153,6 +153,12 @@
 
 ## Visual Evidence
 
+PR: none
+
+- 无文字标记参数化彩色对照：[relay-mesh-mark-parametric-color-comparison.png](./assets/relay-mesh-mark-parametric-color-comparison.png)
+- 无文字标记参数化二值几何对齐：[relay-mesh-mark-geometry-mono-comparison.png](./assets/relay-mesh-mark-geometry-mono-comparison.png)
+- 桌面端无卡片登录布局：[admin-login-no-methods-desktop.png](./assets/admin-login-no-methods-desktop.png)
+- 移动端无卡片布局与参数化矢量标记：[admin-login-parametric-mark-mobile.png](./assets/admin-login-parametric-mark-mobile.png)
 - Passkey 登录状态：[admin-login-passkey.png](./assets/admin-login-passkey.png)
 - Reset 注册状态：[admin-login-reset.png](./assets/admin-login-reset.png)
 - Reset URL 注册模式：[admin-login-reset-enrollment.png](./assets/admin-login-reset-enrollment.png)

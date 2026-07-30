@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 import shutil
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from PIL import Image, ImageDraw
 
@@ -27,6 +28,9 @@ ICON_MASTER_SIZE = 1024
 ICON_MARGIN = 92
 ICON_RADIUS = 208
 ICON_BORDER_WIDTH = 10
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+
+ET.register_namespace("", SVG_NAMESPACE)
 
 
 def load_rgba(path: Path) -> Image.Image:
@@ -190,6 +194,35 @@ def write_svg_wrapper(href: str, width: int, height: int, path: Path) -> None:
     )
 
 
+def write_mark_svg(
+    path: Path,
+    *,
+    color: tuple[int, int, int] | None = None,
+    lighten_ratio: float | None = None,
+) -> None:
+    source = REFERENCE_DIR / "approved-mark-vector-light.svg"
+    root = ET.parse(source).getroot()
+    artwork = root.find(".//*[@id='mark-artwork']")
+    if artwork is None:
+        raise ValueError(f"missing #mark-artwork in {source}")
+
+    for element in root.iter():
+        for attribute in ("fill", "stroke", "stop-color", "flood-color"):
+            value = element.get(attribute)
+            if not value or not value.startswith("#") or len(value) != 7:
+                continue
+            source_color = tuple(int(value[index:index + 2], 16) for index in (1, 3, 5))
+            output_color = color or (
+                blend(source_color, WHITE, lighten_ratio)
+                if lighten_ratio is not None
+                else source_color
+            )
+            element.set(attribute, "#" + "".join(f"{channel:02X}" for channel in output_color))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+
+
 def write_theme_svg(
     light_href: str,
     dark_href: str,
@@ -333,30 +366,10 @@ def export_static_assets(public_dir: Path) -> None:
         mark_light.height,
         public_dir / "favicon.svg",
     )
-    write_svg_wrapper(
-        local_asset_path("relay-mesh-mark-light.png"),
-        mark_light.width,
-        mark_light.height,
-        assets_dir / "relay-mesh-mark-light.svg",
-    )
-    write_svg_wrapper(
-        local_asset_path("relay-mesh-mark-dark.png"),
-        mark_dark.width,
-        mark_dark.height,
-        assets_dir / "relay-mesh-mark-dark.svg",
-    )
-    write_svg_wrapper(
-        local_asset_path("relay-mesh-mark-mono-dark.png"),
-        mark_mono_dark.width,
-        mark_mono_dark.height,
-        assets_dir / "relay-mesh-mark-mono-dark.svg",
-    )
-    write_svg_wrapper(
-        local_asset_path("relay-mesh-mark-mono-light.png"),
-        mark_mono_light.width,
-        mark_mono_light.height,
-        assets_dir / "relay-mesh-mark-mono-light.svg",
-    )
+    write_mark_svg(assets_dir / "relay-mesh-mark-light.svg")
+    write_mark_svg(assets_dir / "relay-mesh-mark-dark.svg", lighten_ratio=0.14)
+    write_mark_svg(assets_dir / "relay-mesh-mark-mono-dark.svg", color=CLAY_INK)
+    write_mark_svg(assets_dir / "relay-mesh-mark-mono-light.svg", color=LIGHT_CLAY)
     write_svg_wrapper(
         local_asset_path("relay-mesh-icon-mono-dark.png"),
         launcher_mono_dark.width,

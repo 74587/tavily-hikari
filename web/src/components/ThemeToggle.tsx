@@ -34,7 +34,14 @@ export default function ThemeToggle(): JSX.Element {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button type="button" variant="ghost" size="sm" className="theme-toggle-trigger">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="theme-toggle-trigger"
+          aria-label={copy.trigger}
+          title={copy.trigger}
+        >
           <ThemeIcon mode={mode} />
           <span className="theme-toggle-label">{copy.trigger}</span>
         </Button>

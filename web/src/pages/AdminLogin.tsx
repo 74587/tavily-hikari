@@ -15,7 +15,6 @@ import OfflineStatusBanner from '../components/OfflineStatusBanner'
 import ThemeToggle from '../components/ThemeToggle'
 import { ConnectedUpdateAvailableBanner } from '../components/UpdateAvailableBanner'
 import { Button } from '../components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Input } from '../components/ui/input'
 import { useTranslate } from '../i18n'
 import { useOfflineState } from '../pwa/useOfflineState'
@@ -156,37 +155,56 @@ function AdminLogin(): JSX.Element {
 
   return (
     <div className="auth-shell min-h-screen bg-background text-foreground">
-      <div className="auth-page-frame mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10 lg:px-10 lg:py-14">
-        <div className="auth-page-header flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <BrandLockup
-              title="Tavily Hikari"
-              className="auth-brand-lockup"
-              markClassName="auth-brand-mark"
-            />
-            <h1 className="auth-title text-4xl font-semibold tracking-tight">{ui.title}</h1>
-            <p className="auth-subtitle text-base text-muted-foreground">{ui.description}</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <ThemeToggle />
-            <LanguageSwitcher />
-          </div>
+      <div className="auth-page-frame mx-auto w-full max-w-6xl px-6 py-10 lg:px-10 lg:py-14">
+        <div className="auth-page-brand">
+          <BrandLockup
+            title="Tavily Hikari"
+            className="auth-brand-lockup"
+            markClassName="auth-brand-mark"
+          />
+          <img
+            src="/assets/relay-mesh-mark-light.svg"
+            alt="Tavily Hikari"
+            className="auth-brand-mobile-mark auth-brand-mobile-mark-light"
+            loading="eager"
+            decoding="async"
+          />
+          <img
+            src="/assets/relay-mesh-mark-dark.svg"
+            alt=""
+            aria-hidden="true"
+            className="auth-brand-mobile-mark auth-brand-mobile-mark-dark"
+            loading="eager"
+            decoding="async"
+          />
+        </div>
+        <div className="auth-page-header-controls flex items-center gap-2">
+          <ThemeToggle />
+          <LanguageSwitcher />
         </div>
 
-        <ConnectedUpdateAvailableBanner strings={strings.public.updateBanner} />
+        <main className="auth-login-main">
+          <div className="auth-page-header flex flex-col gap-4">
+            <div className="auth-page-header-main min-w-0 space-y-1">
+              <h1 className="auth-title text-4xl font-semibold tracking-tight">{ui.title}</h1>
+              <p className="auth-subtitle text-base text-muted-foreground">{ui.description}</p>
+            </div>
+          </div>
 
-        {offline.isOffline ? (
-          <OfflineStatusBanner
-            title="Offline shell loaded"
-            description="Admin sign-in needs the network. Reconnect before submitting your password."
-          />
-        ) : null}
+          <ConnectedUpdateAvailableBanner strings={strings.public.updateBanner} />
 
-        <Card className="auth-card border-border/80 bg-card/90 backdrop-blur">
-          <CardHeader>
-            <CardTitle>{ui.credentialsTitle}</CardTitle>
-          </CardHeader>
-          <CardContent className="auth-card-content space-y-6">
+          {offline.isOffline ? (
+            <OfflineStatusBanner
+              title="Offline shell loaded"
+              description="Admin sign-in needs the network. Reconnect before submitting your password."
+            />
+          ) : null}
+
+          <section className="auth-login-section" aria-labelledby="admin-login-credentials-title">
+            <h2 id="admin-login-credentials-title" className="auth-credentials-title text-xl font-semibold">
+              {ui.credentialsTitle}
+            </h2>
+            <div className="auth-login-content space-y-6">
             {profileUnavailable ? (
               <div className="rounded-lg border border-warning/35 bg-warning/10 p-3 text-sm text-warning">
                 {ui.hints.profileUnavailable}
@@ -301,10 +319,16 @@ function AdminLogin(): JSX.Element {
                 {error}
               </div>
             ) : null}
-          </CardContent>
-        </Card>
+            </div>
+          </section>
 
-        {state === 'checking' ? <div className="text-center text-sm text-muted-foreground">{ui.hints.checking}</div> : null}
+          {state === 'checking' ? <div className="text-center text-sm text-muted-foreground">{ui.hints.checking}</div> : null}
+        </main>
+
+        <div className="auth-page-footer-controls items-center gap-2">
+          <ThemeToggle />
+          <LanguageSwitcher />
+        </div>
       </div>
     </div>
   )

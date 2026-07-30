@@ -88,6 +88,16 @@ export default meta
 
 type Story = StoryObj<typeof meta>
 
+const desktopViewport = { viewport: { defaultViewport: '1440-device-desktop' } } as const
+const mobileViewport = { viewport: { defaultViewport: '0390-device-iphone-14' } } as const
+
+const noLoginMethodsProfile: Profile = {
+  ...baseProfile,
+  builtinAuthEnabled: false,
+  passkeyAuthEnabled: false,
+  adminLoginTotpRequired: false,
+}
+
 export const PasskeyLogin: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
@@ -164,17 +174,40 @@ export const PasskeyOnlyTotpRequired: Story = {
 }
 
 export const NoLoginMethods: Story = {
+  name: 'No login methods / desktop',
+  parameters: desktopViewport,
+  globals: {
+    language: 'zh',
+  },
   args: {
-    profile: {
-      ...baseProfile,
-      builtinAuthEnabled: false,
-      passkeyAuthEnabled: false,
-      adminLoginTotpRequired: false,
-    },
+    profile: noLoginMethodsProfile,
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.findByText(/disabled|未启用/i)).resolves.toBeInTheDocument()
+    await expect(canvas.findByRole('region', { name: /credentials|登录凭据/i })).resolves.toBeInTheDocument()
+    await expect(canvasElement.querySelector('.shadow-clayCard')).toBeNull()
+  },
+}
+
+export const NoLoginMethodsMobile: Story = {
+  name: 'No login methods / mobile',
+  parameters: mobileViewport,
+  globals: {
+    language: 'zh',
+  },
+  args: {
+    profile: noLoginMethodsProfile,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const mobileMark = await canvas.findByRole('img', { name: 'Tavily Hikari' })
+    await expect(mobileMark).toHaveAttribute('src', '/assets/relay-mesh-mark-light.svg')
+    await expect(mobileMark).toBeVisible()
+    await expect(canvas.getByRole('button', { name: /theme|主题/i })).toBeVisible()
+    await expect(canvas.getByRole('button', { name: /language|语言/i })).toBeVisible()
+    await expect(canvas.getByRole('region', { name: /credentials|登录凭据/i })).toBeInTheDocument()
+    await expect(canvasElement.querySelector('.shadow-clayCard')).toBeNull()
   },
 }
 

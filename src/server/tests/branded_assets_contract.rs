@@ -2,6 +2,38 @@ use super::*;
 use super::core_support_and_parsing::*;
 use super::upstream_support_and_manual_jobs::*;
 
+#[test]
+fn relay_mesh_mark_svgs_are_true_vectors() {
+    for svg in [
+        include_str!("../../../web/public/assets/relay-mesh-mark-light.svg"),
+        include_str!("../../../web/public/assets/relay-mesh-mark-dark.svg"),
+    ] {
+        assert!(svg.contains("<circle"), "mark SVG should contain vector circles");
+        assert!(svg.contains("<line"), "mark SVG should contain vector lines");
+        assert!(!svg.contains("<image"), "mark SVG must not embed an image");
+        assert!(!svg.contains("data:"), "mark SVG must not embed raster data");
+    }
+}
+
+#[test]
+fn relay_mesh_mark_geometry_is_semantically_decomposed() {
+    let svg = include_str!(
+        "../../../web/brand/relay-mesh/reference/approved-mark-geometry-mono.svg"
+    );
+
+    assert_eq!(svg.matches("<circle").count(), 7);
+    assert_eq!(svg.matches("<line").count(), 23);
+    for group in ["outer-network", "center-spokes", "nodes", "search-symbol"] {
+        assert!(
+            svg.contains(&format!("id=\"{group}\"")),
+            "mark geometry should contain the {group} group"
+        );
+    }
+    assert!(!svg.contains("<image"), "mark geometry must not embed an image");
+    assert!(!svg.contains("data:"), "mark geometry must not embed raster data");
+    assert!(!svg.contains("href="), "mark geometry must not link raster data");
+}
+
 #[tokio::test]
 async fn branded_assets_are_served_from_assets_contract_and_favicon_remains_available() {
     let db_path = temp_db_path("branded-assets-contract");
