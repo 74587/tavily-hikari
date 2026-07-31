@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -29,6 +30,10 @@ TAGLINE_SEPARATOR_CENTER_Y = 209.5
 TAGLINE_SEPARATOR_RADIUS = 4
 TAGLINE_SECONDARY_LEFT = 547
 TAGLINE_SECONDARY_RIGHT = 935
+CANONICAL_TAGLINE_PATH_HASHES = {
+    "tagline-primary": "d0fefc4c75401c4312292bdc4072dce7d21e06bf4587aa881cb1310c03b6c563",
+    "tagline-secondary": "29dbbfd1413843796fb4455e92df1bded56ea434a86fc8ebca2083085ddd5b1a",
+}
 FULL_LOCKUP_HEIGHT = 310
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
@@ -215,6 +220,13 @@ def load_canonical_tagline_groups() -> dict[str, ET.Element]:
     expected_groups = {"tagline-primary", "tagline-secondary"}
     if set(groups) != expected_groups:
         raise RuntimeError("canonical full lockup master is missing its outlined tagline groups")
+    for group_id, expected_hash in CANONICAL_TAGLINE_PATH_HASHES.items():
+        paths = groups[group_id].findall(svg_tag("path"))
+        if len(paths) != 1 or not paths[0].get("d"):
+            raise RuntimeError(f"canonical full lockup master has an invalid {group_id} outline")
+        actual_hash = hashlib.sha256(paths[0].get("d", "").encode("utf-8")).hexdigest()
+        if actual_hash != expected_hash:
+            raise RuntimeError(f"canonical full lockup master has drifted in {group_id}")
     return groups
 
 
