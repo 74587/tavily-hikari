@@ -510,6 +510,7 @@ fn spawn_dashboard_rollup_integrity_scheduler(state: Arc<AppState>) {
 async fn finish_dashboard_rollup_integrity_and_enqueue(
     state: &AppState,
     job_id: i64,
+    claim_generation: i64,
     message: &str,
     available_at: i64,
 ) -> bool {
@@ -517,6 +518,7 @@ async fn finish_dashboard_rollup_integrity_and_enqueue(
         .proxy
         .scheduled_job_finish_and_enqueue_auto_at(
             job_id,
+            claim_generation,
             DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
             None,
             1,
@@ -540,7 +542,12 @@ async fn finish_dashboard_rollup_integrity_and_enqueue(
             let fallback_message = format!("{message}; scheduler handoff fallback: {err}");
             if let Err(finish_err) = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&fallback_message))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&fallback_message),
+                )
                 .await
             {
                 tracing::error!(
@@ -571,6 +578,7 @@ async fn run_dashboard_rollup_integrity_claimed_job(
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate: existing_gate,
     } = claimed_job;
     let _job_execution_gate = match existing_gate {
@@ -601,6 +609,7 @@ async fn run_dashboard_rollup_integrity_claimed_job(
             let handed_off = finish_dashboard_rollup_integrity_and_enqueue(
                 state.as_ref(),
                 job_id,
+                claim_generation,
                 &message,
                 available_at,
             )
@@ -611,6 +620,7 @@ async fn run_dashboard_rollup_integrity_claimed_job(
     finish_dashboard_rollup_integrity_and_enqueue(
         state.as_ref(),
         job_id,
+        claim_generation,
         &message,
         now.saturating_add(next_delay_secs),
     )
