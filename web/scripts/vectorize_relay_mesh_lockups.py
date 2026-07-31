@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from math import ceil
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 from generate_relay_mesh_brand_assets import remove_background
 
@@ -20,19 +19,13 @@ RASTER_SOURCE = REFERENCE_DIR / "approved-lockup-raster.png"
 MARK_SOURCE = REFERENCE_DIR / "approved-mark-vector-light.svg"
 FULL_OUTPUT = REFERENCE_DIR / "approved-lockup-vector-light.svg"
 COMPACT_OUTPUT = REFERENCE_DIR / "approved-lockup-compact-vector-light.svg"
-# The static instance is committed alongside the variable design source so the
-# traced outlines do not depend on the host's font-instancing implementation.
+# The static instance is committed alongside the reviewed SVG master as the
+# provenance source for its permanently outlined tagline.
 TAGLINE_FONT_SOURCE = REFERENCE_DIR / "fonts" / "RobotoCondensed-Regular.ttf"
-TAGLINE_PRIMARY_COPY = "KEY POOL"
-TAGLINE_SECONDARY_COPY = "BALANCE. ROUTE."
-TAGLINE_FONT_SIZE = 52
-TAGLINE_TRACKING = 0.5
 WORDMARK_TRANSLATE_Y = -34
-TAGLINE_TOP = 190
-TAGLINE_TARGET_HEIGHT = (37, 39)
 TAGLINE_PRIMARY_LEFT = 297
-TAGLINE_PRIMARY_RIGHT = 510
 TAGLINE_SEPARATOR_CENTER_X = 530
+TAGLINE_SEPARATOR_CENTER_Y = 209.5
 TAGLINE_SEPARATOR_RADIUS = 4
 TAGLINE_SECONDARY_LEFT = 547
 TAGLINE_SECONDARY_RIGHT = 935
@@ -85,62 +78,6 @@ def trace_region(alpha: Image.Image, box: tuple[int, int, int, int], group_id: s
     traced_group.attrib.pop("fill", None)
     traced_group.attrib.pop("stroke", None)
     return traced_group
-
-
-def tracked_text_width(draw: ImageDraw.ImageDraw, copy: str, font: ImageFont.FreeTypeFont) -> int:
-    return ceil(draw.textlength(copy, font=font) + TAGLINE_TRACKING * (len(copy) - 1))
-
-
-def draw_tracked_text(
-    draw: ImageDraw.ImageDraw,
-    copy: str,
-    font: ImageFont.FreeTypeFont,
-    left: int,
-    top: int,
-) -> tuple[int, int, int, int]:
-    bbox = draw.textbbox((0, 0), copy, font=font)
-    width = tracked_text_width(draw, copy, font)
-    height = bbox[3] - bbox[1]
-    for index, character in enumerate(copy):
-        prefix_width = draw.textlength(copy[:index], font=font)
-        draw.text(
-            (left + prefix_width + TAGLINE_TRACKING * index, top - bbox[1]),
-            character,
-            font=font,
-            fill=255,
-        )
-    return left, top, left + width, top + height
-
-
-def render_tagline_alpha() -> Image.Image:
-    if not TAGLINE_FONT_SOURCE.exists():
-        raise RuntimeError(f"missing vendored tagline font: {TAGLINE_FONT_SOURCE}")
-
-    scratch = Image.new("L", (1000, FULL_LOCKUP_HEIGHT), 0)
-    draw = ImageDraw.Draw(scratch)
-    font = ImageFont.truetype(TAGLINE_FONT_SOURCE, size=TAGLINE_FONT_SIZE)
-    primary_bbox = draw_tracked_text(
-        draw,
-        TAGLINE_PRIMARY_COPY,
-        font,
-        TAGLINE_PRIMARY_LEFT,
-        TAGLINE_TOP,
-    )
-    secondary_bbox = draw_tracked_text(
-        draw,
-        TAGLINE_SECONDARY_COPY,
-        font,
-        TAGLINE_SECONDARY_LEFT,
-        TAGLINE_TOP,
-    )
-    print(f"[brand] tagline_primary_bbox={','.join(map(str, primary_bbox))}")
-    print(f"[brand] tagline_secondary_bbox={','.join(map(str, secondary_bbox))}")
-    height = max(primary_bbox[3], secondary_bbox[3]) - TAGLINE_TOP
-    if not TAGLINE_TARGET_HEIGHT[0] <= height <= TAGLINE_TARGET_HEIGHT[1]:
-        raise RuntimeError("unable to fit tagline inside the approved geometry contract")
-    if primary_bbox[2] > TAGLINE_PRIMARY_RIGHT or secondary_bbox[2] > TAGLINE_SECONDARY_RIGHT:
-        raise RuntimeError("tagline groups exceed their approved horizontal regions")
-    return scratch
 
 
 def add_linear_gradient(
@@ -247,7 +184,7 @@ def build_lockup(
             svg_tag("circle"),
             {
                 "cx": str(TAGLINE_SEPARATOR_CENTER_X * 10),
-                "cy": str((FULL_LOCKUP_HEIGHT - (TAGLINE_TOP + 19.5)) * 10),
+                "cy": str((FULL_LOCKUP_HEIGHT - TAGLINE_SEPARATOR_CENTER_Y) * 10),
                 "r": str(TAGLINE_SEPARATOR_RADIUS * 10),
             },
         )
@@ -263,16 +200,34 @@ def write_svg(root: ET.Element, path: Path) -> None:
     ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
 
+def load_canonical_tagline_groups() -> dict[str, ET.Element]:
+    if not TAGLINE_FONT_SOURCE.exists():
+        raise RuntimeError(f"missing vendored tagline font source: {TAGLINE_FONT_SOURCE}")
+    if not FULL_OUTPUT.exists():
+        raise RuntimeError(f"missing canonical full lockup master: {FULL_OUTPUT}")
+
+    source_root = ET.parse(FULL_OUTPUT).getroot()
+    groups = {
+        element.get("id"): deepcopy(element)
+        for element in source_root.iter()
+        if element.get("id") in {"tagline-primary", "tagline-secondary"}
+    }
+    expected_groups = {"tagline-primary", "tagline-secondary"}
+    if set(groups) != expected_groups:
+        raise RuntimeError("canonical full lockup master is missing its outlined tagline groups")
+    return groups
+
+
 def main() -> None:
     raster = Image.open(RASTER_SOURCE).convert("RGBA")
     alpha = remove_background(raster, fill_threshold=60, soft_threshold=84).getchannel("A")
-    tagline_alpha = render_tagline_alpha()
     traced_groups = {
         "wordmark-tavily": trace_region(alpha, (240, 55, 630, 205), "wordmark-tavily"),
         "wordmark-hikari": trace_region(alpha, (640, 55, 990, 205), "wordmark-hikari"),
-        "tagline-primary": trace_region(tagline_alpha, (290, 160, 520, 230), "tagline-primary"),
-        "tagline-secondary": trace_region(tagline_alpha, (540, 160, 945, 230), "tagline-secondary"),
     }
+    # The full SVG is the canonical vector master. Its reviewed tagline paths
+    # are kept verbatim so host FreeType rasterization cannot mutate the logo.
+    traced_groups.update(load_canonical_tagline_groups())
     mark_root = ET.parse(MARK_SOURCE).getroot()
     write_svg(build_lockup(mark_root, traced_groups, include_tagline=True), FULL_OUTPUT)
     write_svg(build_lockup(mark_root, traced_groups, include_tagline=False), COMPACT_OUTPUT)

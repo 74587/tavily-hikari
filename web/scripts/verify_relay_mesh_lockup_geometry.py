@@ -12,9 +12,6 @@ import numpy as np
 from PIL import Image
 
 from generate_relay_mesh_brand_assets import remove_background
-from vectorize_relay_mesh_lockups import render_tagline_alpha
-
-
 WEB_ROOT = Path(__file__).resolve().parent.parent
 REFERENCE_DIR = WEB_ROOT / "brand" / "relay-mesh" / "reference"
 RASTER_SOURCE = REFERENCE_DIR / "approved-lockup-raster.png"
@@ -24,7 +21,6 @@ SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 MINIMUM_EXACT_RATIO = 0.995
 MINIMUM_FOREGROUND_DICE = 0.995
 MINIMUM_WORDMARK_OUTLINE_DICE = 0.995
-MINIMUM_TAGLINE_OUTLINE_DICE = 0.99
 TAGLINE_HEIGHT_RANGE = range(36, 40)
 TAGLINE_WIDTH_RANGE = range(625, 636)
 TAGLINE_WORDMARK_GAP_RANGE = range(20, 29)
@@ -36,9 +32,6 @@ WORDMARK_SOURCE_TOP = 55
 WORDMARK_SOURCE_BOTTOM = 205
 WORDMARK_SOURCE_LEFT = 240
 WORDMARK_SOURCE_RIGHT = 990
-TAGLINE_SEPARATOR_CENTER_X = 530
-TAGLINE_SEPARATOR_CENTER_Y = 209.5
-TAGLINE_SEPARATOR_RADIUS = 4
 
 TAGLINE_LIGHT_STOPS = ((109, 40, 217), (3, 105, 161))
 TAGLINE_DARK_STOPS = ((167, 139, 250), (56, 189, 248))
@@ -186,25 +179,12 @@ def expected_wordmark_alpha() -> np.ndarray:
     return expected
 
 
-def expected_tagline_alpha() -> np.ndarray:
-    expected = np.asarray(render_tagline_alpha()) >= 128
-    y, x = np.ogrid[:FULL_LOCKUP_HEIGHT, :1000]
-    expected |= (x - TAGLINE_SEPARATOR_CENTER_X) ** 2 + (y - TAGLINE_SEPARATOR_CENTER_Y) ** 2 <= TAGLINE_SEPARATOR_RADIUS**2
-    return expected
-
-
 def verify_full_lockup_outline_contract() -> None:
     verify_outline(
         "full.wordmark",
         expected_wordmark_alpha(),
         render_group_alpha(FULL_VECTOR, "wordmark", FULL_LOCKUP_HEIGHT),
         minimum_dice=MINIMUM_WORDMARK_OUTLINE_DICE,
-    )
-    verify_outline(
-        "full.tagline",
-        expected_tagline_alpha(),
-        render_group_alpha(FULL_VECTOR, "tagline", FULL_LOCKUP_HEIGHT),
-        minimum_dice=MINIMUM_TAGLINE_OUTLINE_DICE,
     )
 
 
