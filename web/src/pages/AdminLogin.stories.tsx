@@ -3,7 +3,9 @@ import { expect, within } from 'storybook/test'
 
 import type { Profile } from '../api'
 import { installDemoRuntime } from '../api/demo'
+import UpdateAvailableBanner from '../components/UpdateAvailableBanner'
 import { LanguageProvider } from '../i18n'
+import { ZH } from '../i18n/translations/zh'
 import { ThemeProvider } from '../theme'
 import AdminLogin from './AdminLogin'
 
@@ -11,6 +13,7 @@ interface AdminLoginStoryProps {
   path?: string
   profile?: Profile
   profileUnavailable?: boolean
+  showUpdateBanner?: boolean
 }
 
 const baseProfile: Profile = {
@@ -56,6 +59,7 @@ function AdminLoginStory({
   path = '/login',
   profile = baseProfile,
   profileUnavailable = false,
+  showUpdateBanner = false,
 }: AdminLoginStoryProps): JSX.Element {
   window.localStorage.setItem('tavily-hikari-demo-mode', 'true')
   window.history.replaceState({}, '', path)
@@ -63,7 +67,22 @@ function AdminLoginStory({
   return (
     <LanguageProvider>
       <ThemeProvider>
-        <AdminLogin />
+        <AdminLogin
+          updateBanner={showUpdateBanner
+            ? (
+              <UpdateAvailableBanner
+                className="auth-page-update-banner"
+                strings={ZH.public.updateBanner}
+                currentVersion="0.83.8"
+                availableVersion="0.83.9"
+                status="ready"
+                loading={false}
+                onUpdate={() => undefined}
+                onDismiss={() => undefined}
+              />
+            )
+            : undefined}
+        />
       </ThemeProvider>
     </LanguageProvider>
   )
@@ -97,6 +116,41 @@ const noLoginMethodsProfile: Profile = {
   builtinAuthEnabled: false,
   passkeyAuthEnabled: false,
   adminLoginTotpRequired: false,
+}
+
+async function showUpdateBanner(canvasElement: HTMLElement): Promise<void> {
+  const canvas = within(canvasElement)
+  const banner = await canvas.findByRole('status')
+  const main = canvas.getByRole('main')
+  await expect(banner).toHaveClass('auth-page-update-banner')
+  await expect(banner.compareDocumentPosition(main)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+}
+
+export const UpdateAvailableBelowHeader: Story = {
+  args: {
+    showUpdateBanner: true,
+  },
+  globals: {
+    language: 'zh',
+  },
+  parameters: desktopViewport,
+  play: async ({ canvasElement }) => {
+    await showUpdateBanner(canvasElement)
+  },
+}
+
+export const UpdateAvailableBelowHeaderMobile: Story = {
+  name: 'Update available below header / mobile',
+  args: {
+    showUpdateBanner: true,
+  },
+  globals: {
+    language: 'zh',
+  },
+  parameters: mobileViewport,
+  play: async ({ canvasElement }) => {
+    await showUpdateBanner(canvasElement)
+  },
 }
 
 export const PasskeyLogin: Story = {

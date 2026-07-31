@@ -6,6 +6,7 @@ import { Button } from './ui/button'
 import useUpdateAvailable from '../hooks/useUpdateAvailable'
 
 interface UpdateAvailableBannerProps {
+  className?: string
   strings: PublicTranslations['updateBanner']
   currentVersion: string | null
   availableVersion: string | null
@@ -16,6 +17,7 @@ interface UpdateAvailableBannerProps {
 }
 
 export default function UpdateAvailableBanner({
+  className,
   strings,
   currentVersion,
   availableVersion,
@@ -38,7 +40,11 @@ export default function UpdateAvailableBanner({
         : strings.readyFallback
 
   return (
-    <section className={`surface update-banner${isFailed ? ' update-banner-failed' : ''}`} role="status" aria-live="polite">
+    <section
+      className={`surface update-banner${isFailed ? ' update-banner-failed' : ''}${className ? ` ${className}` : ''}`}
+      role="status"
+      aria-live="polite"
+    >
       <div className="update-banner-status" aria-hidden="true">
         {loading
           ? <Loader2 className="update-banner-spinner" size={19} />
@@ -69,8 +75,10 @@ export default function UpdateAvailableBanner({
 }
 
 export function ConnectedUpdateAvailableBanner({
+  className,
   strings,
 }: {
+  className?: string
   strings: PublicTranslations['updateBanner']
 }): JSX.Element | null {
   const updateBanner = useUpdateAvailable()
@@ -81,6 +89,7 @@ export function ConnectedUpdateAvailableBanner({
 
   return (
     <UpdateAvailableBanner
+      className={className}
       strings={strings}
       currentVersion={updateBanner.currentVersion}
       availableVersion={updateBanner.availableVersion}

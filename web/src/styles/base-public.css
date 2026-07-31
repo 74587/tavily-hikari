@@ -841,8 +841,8 @@ body:has(.user-console-cli-skills-guide-proof) #storybook-root {
 }
 
 .update-banner-status {
-  width: 2.25rem;
-  height: 2.25rem;
+  width: 2.5rem;
+  height: 2.5rem;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
@@ -870,13 +870,15 @@ body:has(.user-console-cli-skills-guide-proof) #storybook-root {
 }
 
 .update-banner-text strong {
-  font-size: 0.95rem;
+  font-size: 1.125rem;
+  line-height: 1.3;
+  font-weight: 700;
   color: hsl(var(--foreground));
 }
 
 .update-banner-text span {
   color: hsl(var(--muted-foreground));
-  font-size: 0.85rem;
+  font-size: 0.875rem;
 }
 
 /* Reusable segmented tabs */
@@ -1021,9 +1023,18 @@ body:has(.user-console-cli-skills-guide-proof) #storybook-root {
 .update-banner-actions {
   display: flex;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   margin-left: auto;
+}
+
+.update-banner-actions button {
+  height: 2.75rem;
+  padding-inline: 1rem;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .update-banner-spinner,
@@ -1046,12 +1057,19 @@ body:has(.user-console-cli-skills-guide-proof) #storybook-root {
 @media (max-width: 680px) {
   .update-banner {
     align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .update-banner-text {
+    min-width: 0;
+    flex-basis: 0;
   }
 
   .update-banner-actions {
     flex: 1 0 100%;
     margin-left: 0;
     justify-content: flex-start;
+    width: 100%;
   }
 }
 

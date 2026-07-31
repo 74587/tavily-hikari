@@ -105,6 +105,7 @@
 - 若用户不点击“立即刷新”，页面在下一次离开当前页或手动刷新时，会静默请求 waiting worker `skipWaiting()`，使下一次导航直接进入新版本。
 - 首次安装 identity 时以当前 registration 是否已有 active worker 判定是否属于更新；public 根作用域 controller 不得让 admin 首次安装误报“有新版本”，此时 admin waiting worker 应静默激活。
 - 更新提示必须覆盖 `/`、`/console`、`/login`、`/registration-paused` 与 `/admin/**`，但继续保持 public/admin 双 service worker 边界。
+- 登录页的更新提示属于页面级运行状态，必须位于品牌/全局控件组成的页头之后、登录主内容之前；不得嵌入登录凭据或表单流程。桌面端使用页头级宽度，移动端操作按钮保持同行且不得造成横向溢出。
 - 提示形态为 inline banner，不使用 modal，不强制用户立即刷新。
 
 ## 离线行为合同
@@ -267,6 +268,18 @@
   PR: include
 
   ![PWA 更新激活失败暗色态](./assets/update-banner-activation-failed-dark-storybook.png)
+
+- `2026-07-31` 管理员登录页更新提示位于页头下方（Storybook canvas，mock-only，无敏感数据）：
+
+  PR: include
+
+  ![管理员登录页更新提示位于页头下方](./assets/update-banner-login-header-desktop.png)
+
+- `2026-07-31` 管理员登录页更新提示移动端布局（Storybook canvas，mock-only，无敏感数据）：
+
+  PR: include
+
+  ![管理员登录页更新提示移动端布局](./assets/update-banner-login-header-mobile.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
