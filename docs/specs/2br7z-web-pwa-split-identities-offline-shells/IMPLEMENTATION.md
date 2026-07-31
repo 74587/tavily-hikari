@@ -19,6 +19,7 @@
 - `/api/version.frontend` 变化只触发 `registration.update()`，不直接展示可更新提示；安装/缓存中的中间态继续静默，只有 waiting worker 已 ready 或用户触发后的失败态才展示 banner。
 - 更新横幅的“当前版本”现在由当前 bundle 的编译期版本常量提供；“目标版本”会在初始版本探测、waiting worker ready、以及失败重试态重新向 `/api/version` 校准，避免回退到 `latest` 或把服务器版本误认成当前页版本。
 - 更新提示由共享 runtime/hook 与 `UpdateAvailableBanner` 承载，覆盖 public、console、login、registration-paused 与 admin app shell。
+- 管理员登录页将更新提示提升为页头后的页面级状态：桌面宽度独立于 `36rem` 登录表单，移动端保持操作按钮同行且无横向溢出；提示标题、版本信息和操作按钮按阅读优先级分层。
 - 用户触发激活后以 `controllerchange` 或 waiting worker 的 `activated` 状态确认成功；后者使用单次 reload guard 兼容浏览器漏发当前页接管事件的情况。
 - 激活请求以 10 秒 watchdog 收口；超时、worker `redundant` 或激活消息发送异常都会进入 `activation-failed`，退出 loading 并允许用户重试或暂不提醒。
 - 如果用户暂不点击“立即刷新”，runtime 会在 `pagehide` 时静默向 waiting worker 发送激活消息，让下一次导航直接进入新版本，而不在当前页强制打断操作。
@@ -117,6 +118,8 @@
 - `docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-dark-ready-storybook.png`
 - `docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-activation-failed-storybook.png`
 - `docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-activation-failed-dark-storybook.png`
+- `docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-login-header-desktop.png`
+- `docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-login-header-mobile.png`
 
 ## 后续微调
 
@@ -126,6 +129,7 @@
 - 2026-06-25: 品牌导出链追加 light/dark/mono 变体、主题感知 favicon 与 `64..1024 + maskable` 全尺寸 PWA icon 覆盖。
 - 2026-06-27: 品牌公开路径从根路径裸文件收敛到 `/assets/*`，并补齐 `/assets/* + /favicon.svg` 的服务合同测试。
 - 2026-07-08: 将更新检测从 PublicHome 局部版本比较升级为共享 PWA update runtime；新 worker precache 完成后进入 waiting，用户确认时才激活并 reload。
+- 2026-07-31: 管理员登录页更新提示移至全局页头下方，采用页头级宽度并修正移动端按钮同行、信息层级和横向溢出。
 
 ## 已知未完成验证
 

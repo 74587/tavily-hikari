@@ -1,4 +1,4 @@
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 import { KeyRound } from 'lucide-react'
 
@@ -22,7 +22,7 @@ import { useOfflineState } from '../pwa/useOfflineState'
 type LoginState = 'checking' | 'ready' | 'submitting'
 type SubmitAction = 'password' | 'passkey' | 'reset'
 
-function AdminLogin(): JSX.Element {
+function AdminLogin({ updateBanner }: { updateBanner?: ReactNode } = {}): JSX.Element {
   const strings = useTranslate()
   const ui = strings.public.adminLogin
   const offline = useOfflineState()
@@ -174,6 +174,13 @@ function AdminLogin(): JSX.Element {
           <LanguageSwitcher />
         </div>
 
+        {updateBanner ?? (
+          <ConnectedUpdateAvailableBanner
+            className="auth-page-update-banner"
+            strings={strings.public.updateBanner}
+          />
+        )}
+
         <main className="auth-login-main">
           <div className="auth-page-header flex flex-col gap-4">
             <div className="auth-page-header-main min-w-0 space-y-1">
@@ -181,8 +188,6 @@ function AdminLogin(): JSX.Element {
               <p className="auth-subtitle text-base text-muted-foreground">{ui.description}</p>
             </div>
           </div>
-
-          <ConnectedUpdateAvailableBanner strings={strings.public.updateBanner} />
 
           {offline.isOffline ? (
             <OfflineStatusBanner
