@@ -202,7 +202,7 @@ export const NoLoginMethodsMobile: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const mobileMark = await canvas.findByRole('img', { name: 'Tavily Hikari' })
-    await expect(mobileMark).toHaveAttribute('src', '/assets/relay-mesh-mark-light.svg')
+    await expect(mobileMark).toHaveAttribute('src', '/assets/relay-mesh-mobile-logo-light.svg')
     await expect(mobileMark).toBeVisible()
     await expect(canvas.getByRole('button', { name: /theme|主题/i })).toBeVisible()
     await expect(canvas.getByRole('button', { name: /language|语言/i })).toBeVisible()

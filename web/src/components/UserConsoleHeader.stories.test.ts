@@ -80,8 +80,8 @@ describe('UserConsoleHeader Storybook proofs', () => {
     const markup = renderStory(headerStories.MobileCollapsedActions)
 
     expect(markup).not.toContain('用户控制台')
-    expect(markup).toContain('/assets/relay-mesh-mobile-logo-light.png')
-    expect(markup).toContain('/assets/relay-mesh-mobile-logo-dark.png')
+    expect(markup).toContain('/assets/relay-mesh-mobile-logo-light.svg')
+    expect(markup).toContain('/assets/relay-mesh-mobile-logo-dark.svg')
     expect(markup).not.toContain('/relay-mesh-mobile-brand-light.png')
     expect(markup).not.toContain('/relay-mesh-mobile-brand-dark.png')
     expect(markup).toContain('偏好')

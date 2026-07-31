@@ -1,0 +1,140 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="310" viewBox="0 0 1000 310" color-interpolation="sRGB">
+  <defs>
+    <radialGradient id="node-top-gradient" cx="58%" cy="48%" r="60%">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="35%" stop-color="#F2EEFB" />
+      <stop offset="55%" stop-color="#F2EEFB" />
+      <stop offset="70%" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </radialGradient>
+    <linearGradient id="node-top-lighting" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="50%" stop-color="#F2EEFB" stop-opacity="0" />
+      <stop offset="100%" stop-color="#F2EEFB" stop-opacity="0.12" />
+    </linearGradient>
+    <radialGradient id="node-upper-left-gradient" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </radialGradient>
+    <radialGradient id="node-upper-right-gradient" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </radialGradient>
+    <radialGradient id="node-lower-left-gradient" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </radialGradient>
+    <radialGradient id="node-lower-right-gradient" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </radialGradient>
+    <radialGradient id="node-bottom-gradient" cx="35%" cy="30%" r="75%">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </radialGradient>
+    <linearGradient id="edge-top-right-gradient" x1="127" y1="41" x2="172" y2="69" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </linearGradient>
+    <linearGradient id="search-gradient" x1="72" y1="96" x2="157" y2="184" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="45%" stop-color="#F2EEFB" />
+      <stop offset="72%" stop-color="#F2EEFB" />
+      <stop offset="100%" stop-color="#F2EEFB" />
+    </linearGradient>
+    <filter id="soft-depth" x="-20%" y="-20%" width="140%" height="145%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="1.2" stdDeviation="1.8" flood-color="#F2EEFB" flood-opacity="0.2" />
+    </filter>
+    <linearGradient id="wordmark-tavily-gradient" x1="2520" y1="0" x2="6150" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="1" stop-color="#F2EEFB" />
+    </linearGradient>
+    <linearGradient id="wordmark-hikari-gradient" x1="6510" y1="0" x2="9790" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="0.48" stop-color="#F2EEFB" />
+      <stop offset="1" stop-color="#F2EEFB" />
+    </linearGradient>
+    <linearGradient id="tagline-primary-gradient" x1="3310" y1="0" x2="4890" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="1" stop-color="#F2EEFB" />
+    </linearGradient>
+    <linearGradient id="tagline-secondary-gradient" x1="5650" y1="0" x2="9300" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F2EEFB" />
+      <stop offset="1" stop-color="#F2EEFB" />
+    </linearGradient>
+  </defs>
+  <g id="mark-artwork">
+    <g id="outer-network" fill="none" stroke-width="5" stroke-linecap="butt">
+      <g id="edge-top-left">
+        <line x1="70.4" y1="47.6" x2="82.15" y2="40.2" stroke="#F2EEFB" />
+        <line x1="53.3" y1="58.5" x2="66.7" y2="49.4" stroke="#F2EEFB" />
+        <line x1="37.9" y1="67.6" x2="49.8" y2="60.1" stroke="#F2EEFB" stroke-width="5.5" />
+      </g>
+      <g id="edge-top-right" stroke="url(#edge-top-right-gradient)">
+        <line x1="127.415" y1="40.2" x2="139.165" y2="47.6" />
+        <line x1="142.865" y1="49.4" x2="156.265" y2="58.5" />
+        <line x1="159.765" y1="60.1" x2="171.665" y2="67.6" stroke-width="5.5" />
+      </g>
+      <g id="edge-right" stroke-width="4.2">
+        <line x1="191.5" y1="107" x2="191.75" y2="118" stroke="#F2EEFB" stroke-width="5.2" stroke-linecap="round" />
+        <line x1="191.5" y1="125" x2="191.5" y2="139.5" stroke="#F2EEFB" stroke-linecap="round" />
+        <line x1="191.5" y1="144.5" x2="191.625" y2="160" stroke="#F2EEFB" />
+      </g>
+      <g id="edge-bottom-right" stroke-width="5.5">
+        <line x1="172.425" y1="196.3" x2="159.725" y2="204" stroke="#F2EEFB" />
+        <line x1="156.75" y1="205.6" x2="142.575" y2="214.05" stroke="#F2EEFB" />
+        <line x1="138.9" y1="216" x2="126.96875" y2="223.4" stroke="#F2EEFB" />
+      </g>
+      <g id="edge-bottom-left" stroke-width="5.5">
+        <line x1="38" y1="196.1" x2="50.25" y2="203.75" stroke="#F2EEFB" />
+        <line x1="53.3" y1="205.3" x2="67.8" y2="214.3" stroke="#F2EEFB" stroke-width="5.25" />
+        <line x1="70.75" y1="215.9" x2="83.05" y2="223.2" stroke="#F2EEFB" />
+      </g>
+      <g id="edge-left" stroke-width="4.5">
+        <line x1="18.5" y1="107.3" x2="18.5" y2="117.3" stroke="#F2EEFB" stroke-linecap="square" />
+        <line x1="18.5552" y1="122.6147" x2="17.723" y2="140.5206" stroke="#F2EEFB" stroke-width="5.605" />
+        <line x1="17.4965" y1="144.8054" x2="18.4517" y2="159.59" stroke="#F2EEFB" stroke-width="6.0262" />
+      </g>
+    </g>
+    <g id="center-spokes" fill="none" stroke-linecap="butt">
+      <line id="spoke-top" x1="104.7" y1="57.5" x2="104.7" y2="77" stroke="#F2EEFB" stroke-width="7" stroke-linecap="square" />
+      <line id="spoke-upper-right" x1="171.12" y1="92.74" x2="148.04" y2="106.2" stroke="#F2EEFB" stroke-width="6.48" />
+      <line id="spoke-lower-right" x1="171.93" y1="170.895" x2="155.8" y2="161.555" stroke="#F2EEFB" stroke-width="6.33" />
+      <line id="spoke-bottom" x1="104.7" y1="186" x2="104.7" y2="206" stroke="#F2EEFB" stroke-width="7" stroke-linecap="square" />
+      <line id="spoke-lower-left" x1="38.515" y1="171.54" x2="62.16" y2="157.4825" stroke="#F2EEFB" stroke-width="6.52" />
+      <line id="spoke-upper-left" x1="38.78" y1="92.64" x2="61.5725" y2="106.035" stroke="#F2EEFB" stroke-width="6.52" />
+    </g>
+    <g id="nodes" stroke="none" filter="url(#soft-depth)">
+      <circle id="node-top" cx="104.7825" cy="27.66" r="16.7" fill="url(#node-top-gradient)" />
+      <circle id="node-top-lighting" cx="104.7825" cy="27.66" r="16.7" fill="url(#node-top-lighting)" />
+      <circle id="node-upper-right" cx="191.2975" cy="81.66" r="16.7" fill="url(#node-upper-right-gradient)" />
+      <circle id="node-lower-right" cx="191.6" cy="182.54" r="16.7" fill="url(#node-lower-right-gradient)" />
+      <circle id="node-bottom" cx="104.825" cy="233.69" r="16.7" fill="url(#node-bottom-gradient)" />
+      <circle id="node-lower-left" cx="18.64125" cy="182.6" r="16.7" fill="url(#node-lower-left-gradient)" />
+      <circle id="node-upper-left" cx="18.6425" cy="81.62" r="16.7" fill="url(#node-upper-left-gradient)" />
+    </g>
+    <g id="search-symbol" fill="none" stroke="url(#search-gradient)" stroke-linecap="round" filter="url(#soft-depth)">
+      <circle id="search-ring" cx="104.7656" cy="131.1432" r="33.4502" stroke-width="15.3074" />
+      <line id="search-handle" x1="129.9407" y1="155.0973" x2="154.214" y2="179.9828" stroke-width="12.43" />
+    </g>
+  </g>
+  <g id="wordmark">
+    <g transform="translate(0.000000,310.000000) scale(0.100000,-0.100000)" id="wordmark-tavily" fill="url(#wordmark-tavily-gradient)">
+      <path d="M4846 2414 l-29 -14 -13 -18 -13 -17 -1 -41 0 -41 25 -26 26 -25 24 -6 25 -6 35 14 36 15 14 34 14 34 -10 37 -10 36 -22 14 -22 14 -25 5 -26 6 -28 -15z M2520 2340 l0 -80 160 0 160 0 0 -445 0 -445 80 0 80 0 1 438 1 437 -1 8 -1 7 160 0 160 0 0 80 0 80 -400 0 -400 0 0 -80z M5188 2413 l-48 -4 0 -520 0 -519 80 0 80 0 -2 523 -3 522 -30 1 -30 1 -47 -4z M3473 2103 l-43 -15 -49 -44 -50 -45 -17 -45 -17 -44 6 -6 6 -6 68 -14 68 -15 2 8 3 8 20 33 20 33 35 15 34 14 41 0 41 0 34 -14 34 -14 15 -31 16 -30 0 -41 0 -40 -115 0 -114 0 -51 -11 -50 -11 -47 -31 -47 -32 -19 -38 -20 -38 -4 -42 -5 -42 11 -43 12 -42 31 -36 31 -35 41 -22 41 -22 85 0 85 0 51 27 51 27 27 31 26 32 0 -21 0 -21 28 -31 28 -31 39 -6 40 -7 33 3 32 3 0 59 0 58 -30 11 -30 10 0 189 0 188 -16 55 -16 54 -48 47 -49 47 -52 15 -53 16 -75 -1 -76 -1 -42 -15z m267 -440 l0 -34 -14 -34 -14 -34 -41 -29 -41 -30 -45 -7 -46 -6 -34 11 -35 11 -20 26 -20 26 0 23 0 23 11 24 10 23 22 14 22 14 100 6 100 5 23 1 22 0 0 -33z M3970 2091 l0 -10 130 -333 130 -333 10 -23 10 -23 87 3 86 3 142 360 142 360 -75 3 -75 3 -12 -4 -11 -5 -99 -266 -99 -265 -1 2 -2 2 -98 268 -98 267 -83 0 -84 0 0 -9z M4800 1735 l0 -365 80 0 80 0 0 365 0 365 -80 0 -80 0 0 -365z M5400 2087 l0 -13 59 -145 59 -144 81 -194 81 -194 0 -13 0 -13 -56 -128 -56 -128 -5 -13 -5 -13 87 3 88 3 63 150 63 150 145 345 144 345 -5 8 -4 7 -80 0 -79 0 -9 -22 -9 -23 -96 -245 -95 -245 -9 25 -10 25 -86 224 -87 224 -10 18 -10 19 -79 0 -80 0 0 -13z" />
+    </g>
+    <g transform="translate(0.000000,310.000000) scale(0.100000,-0.100000)" id="wordmark-hikari" fill="url(#wordmark-hikari-gradient)">
+      <path d="M6512 1873 l3 -508 68 -3 67 -3 0 221 0 220 255 0 255 0 2 -217 3 -218 68 -3 67 -3 0 511 0 511 -67 -3 -68 -3 -3 -222 -2 -223 -255 0 -255 0 0 225 0 225 -70 0 -70 0 2 -507z M7459 2351 l-29 -29 0 -35 0 -34 26 -27 27 -26 32 0 32 0 26 20 25 20 6 26 7 27 -12 29 -12 29 -28 14 -28 15 -21 0 -22 0 -29 -29z M7740 1870 l0 -510 65 0 65 0 0 160 0 160 13 0 14 0 138 -160 139 -160 83 0 83 0 0 5 0 6 -127 142 -128 142 -42 45 -41 45 154 161 154 162 0 4 0 4 -77 3 -78 3 -142 -149 -142 -148 -1 298 0 297 -65 0 -65 0 0 -510z M9661 2366 l-24 -13 -13 -24 -13 -24 -1 -22 0 -21 26 -31 26 -31 38 0 38 0 26 31 26 31 0 30 0 30 -29 29 -29 29 -24 0 -23 -1 -24 -13z M8599 2077 l-45 -13 -30 -21 -29 -21 -27 -29 -27 -28 -10 -28 -11 -28 0 -18 0 -17 63 -11 62 -11 10 15 10 16 23 28 23 28 36 12 35 11 44 -6 44 -6 26 -17 27 -17 13 -33 14 -32 0 -31 0 -30 -98 0 -98 0 -59 -11 -59 -11 -36 -18 -35 -18 -21 -24 -22 -23 -16 -32 -16 -32 0 -53 0 -53 19 -42 19 -42 41 -29 41 -30 51 -12 51 -13 53 6 52 5 41 21 40 20 30 30 30 30 6 -25 7 -26 24 -24 24 -24 61 0 60 0 0 59 0 60 -22 3 -23 3 -5 210 -5 210 -22 40 -21 40 -34 32 -33 32 -40 17 -40 16 -75 4 -75 4 -46 -13z m247 -444 l-6 -47 -22 -32 -23 -33 -35 -20 -36 -20 -40 -6 -39 -6 -40 13 -40 13 -19 36 -19 35 6 25 6 24 13 18 13 18 40 14 40 14 104 1 104 0 -7 -47z M7468 2073 l-18 -4 0 -355 0 -355 68 3 67 3 0 355 0 355 -50 2 -50 1 -17 -5z M9148 2066 l-3 -11 3 -347 3 -348 64 0 65 0 0 194 0 193 10 52 10 53 21 29 21 29 31 17 32 16 55 6 55 6 3 63 3 62 -56 0 -56 0 -38 -20 -38 -19 -26 -31 -26 -30 -3 46 -3 46 -62 3 -62 3 -3 -12z M9630 1715 l0 -356 68 3 67 3 3 353 2 352 -70 0 -70 0 0 -355z" />
+    </g>
+  </g>
+  <g id="tagline">
+    <g transform="translate(0.000000,310.000000) scale(0.100000,-0.100000)" id="tagline-primary" fill="url(#tagline-primary-gradient)">
+      <path d="M3312 853 l3 -78 15 0 15 0 -1 43 -1 42 6 -6 6 -5 11 -32 11 -32 15 -3 16 -3 15 43 15 43 1 -42 1 -43 15 0 15 0 0 75 0 75 -19 0 -18 0 -20 -52 -20 -52 -17 52 -18 52 -24 0 -25 0 3 -77z M3560 908 l-20 -22 0 -33 0 -34 25 -24 24 -25 18 0 19 0 22 16 22 15 0 15 0 14 -11 0 -10 0 -15 -15 -15 -15 -9 0 -9 0 -16 16 -16 17 3 25 3 25 17 11 18 11 20 -13 20 -12 10 0 10 0 0 15 0 14 -19 11 -20 10 -25 0 -25 0 -21 -22z M3742 853 l3 -78 10 0 10 0 3 28 3 27 28 0 27 0 12 12 12 12 0 22 0 23 -16 15 -15 16 -40 0 -40 0 3 -77z m73 27 l0 -15 -22 -3 -23 -3 0 21 0 21 23 -3 22 -3 0 -15z M4029 918 l-1 -13 -4 -62 -5 -63 21 0 20 0 0 25 0 25 24 0 25 0 15 16 16 15 0 12 0 13 -16 22 -15 22 -40 0 -39 0 -1 -12z m71 -38 l0 -20 -20 0 -20 0 0 20 0 20 20 0 20 0 0 -20z M4200 856 l0 -76 15 0 15 0 0 25 0 25 13 0 14 0 11 -25 12 -25 20 0 20 0 -15 23 -15 23 12 32 13 33 -11 17 -11 17 -47 3 -46 3 0 -75z m75 24 l0 -15 -22 -3 -23 -3 0 21 0 21 23 -3 22 -3 0 -15z M4398 913 l-16 -18 -7 -23 -7 -23 12 -29 12 -28 27 -12 28 -11 26 12 26 12 11 32 11 32 -7 19 -7 19 -15 18 -15 17 -32 0 -32 0 -15 -17z m70 -25 l12 -12 0 -28 0 -27 -21 -11 -20 -11 -15 12 -14 11 0 33 0 32 7 6 6 7 17 0 16 0 12 -12z M4570 925 l0 -6 22 -30 23 -30 -23 -40 -23 -39 18 0 18 0 14 21 13 22 24 -27 25 -26 9 0 10 0 0 13 0 12 -20 25 -20 25 0 10 0 10 20 25 20 25 0 8 0 7 -14 0 -14 0 -19 -26 -19 -25 -14 25 -13 26 -19 0 -18 0 0 -5z M4760 922 l0 -7 25 -37 25 -37 0 -30 0 -31 15 0 15 0 0 28 1 27 24 40 25 40 0 8 0 7 -15 0 -14 0 -17 -32 -17 -33 -15 33 -16 32 -18 0 -18 0 0 -8z" />
+    </g>
+    <g transform="translate(0.000000,310.000000) scale(0.100000,-0.100000)" id="tagline-separator" fill="#F2EEFB">
+      <path d="M5274 850 l0 -95 3 48 4 47 -4 48 -3 47 0 -95z" />
+    </g>
+    <g transform="translate(0.000000,310.000000) scale(0.100000,-0.100000)" id="tagline-secondary" fill="url(#tagline-secondary-gradient)">
+      <path d="M5650 855 l0 -75 15 0 15 0 0 25 0 25 13 0 14 0 11 -25 12 -25 15 0 15 0 0 5 0 4 -12 26 -11 26 11 11 12 12 0 17 0 18 -16 15 -15 16 -40 0 -39 0 0 -75z m75 25 l0 -15 -22 -3 -23 -3 0 21 0 21 23 -3 22 -3 0 -15z M5840 910 l-20 -20 0 -35 0 -36 25 -24 24 -25 21 0 21 0 24 25 25 24 0 29 0 29 -21 27 -20 26 -30 0 -29 0 -20 -20z m80 -36 l10 -25 -10 -20 -11 -19 -23 0 -24 0 -6 16 -6 16 0 17 0 17 12 12 12 12 18 0 18 0 10 -26z M6020 874 l0 -55 10 -19 9 -18 27 -6 26 -7 24 16 24 15 0 65 0 65 -15 0 -15 0 0 -54 0 -54 -15 -12 -15 -12 -15 12 -15 12 0 54 0 54 -15 0 -15 0 0 -56z M6200 915 l0 -15 20 0 20 0 0 -29 0 -28 6 -32 7 -31 13 0 14 0 0 60 0 60 20 0 20 0 0 15 0 15 -60 0 -60 0 0 -15z M6390 856 l0 -73 42 -7 41 -7 10 10 9 9 -5 9 -6 10 -31 -5 -30 -4 0 21 0 21 30 0 30 0 0 15 0 15 -30 0 -30 0 0 15 0 15 35 0 35 0 0 15 0 15 -50 0 -50 0 0 -74z M6758 905 l-11 -25 18 -20 18 -20 18 0 18 0 7 -11 6 -11 -11 -11 -11 -11 -25 14 -25 13 -7 -7 -8 -8 24 -19 23 -19 12 0 12 0 22 16 22 15 0 25 0 24 -22 9 -23 9 -19 7 -19 6 12 12 11 11 21 -12 20 -13 9 6 10 6 -10 20 -11 19 -35 0 -34 0 -12 -25z M6920 856 l0 -74 48 -4 47 -5 10 9 10 9 -15 10 -15 9 -22 -3 -23 -4 0 18 0 19 31 0 31 0 -4 13 -5 12 -26 3 -27 3 0 15 0 14 30 0 30 0 0 15 0 15 -50 0 -50 0 0 -74z M7129 909 l-11 -21 -18 -54 -19 -54 20 0 19 0 0 15 0 15 29 0 29 0 6 -15 5 -15 16 0 16 0 -7 23 -7 22 -19 53 -19 52 -14 0 -14 0 -12 -21z m29 -68 l-9 -3 -5 5 -4 4 7 18 6 19 7 -20 7 -19 -9 -4z M7280 855 l0 -75 15 0 15 0 0 25 0 25 13 0 14 0 11 -25 12 -25 21 0 21 0 -17 26 -17 26 11 11 11 11 0 26 0 26 -12 12 -12 12 -43 0 -43 0 0 -75z m78 28 l-3 -18 -22 -3 -22 -3 2 20 1 21 24 0 23 0 -3 -17z M7472 907 l-22 -23 0 -33 0 -32 25 -24 24 -25 18 0 19 0 22 16 22 15 0 15 0 14 -12 0 -11 0 -17 -15 -17 -15 -17 6 -16 6 -6 24 -6 24 6 15 6 15 15 7 16 6 25 -13 24 -13 7 6 6 7 -18 20 -18 20 -27 0 -27 0 -21 -23z M7640 855 l0 -75 15 0 15 0 0 30 0 30 29 0 30 0 3 -32 3 -33 10 0 10 0 3 78 3 77 -16 0 -15 0 0 -30 0 -30 -30 0 -30 0 0 30 0 30 -15 0 -15 0 0 -75z M8040 910 l-20 -20 0 -39 0 -40 26 -20 27 -21 18 0 19 0 21 21 21 21 -11 11 -11 11 -20 -19 -21 -19 -17 11 -17 10 0 33 0 33 17 10 17 11 25 -14 26 -13 5 4 5 5 -16 22 -15 22 -30 0 -29 0 -20 -20z M8220 908 l-20 -22 0 -37 0 -38 26 -20 27 -21 19 0 19 0 24 25 25 24 0 26 0 26 -11 22 -12 22 -11 7 -11 8 -27 0 -27 0 -21 -22z m80 -29 l12 -21 -6 -23 -6 -23 -15 -6 -15 -5 -15 5 -15 6 -6 23 -6 23 12 21 11 21 19 0 19 0 11 -21z M8400 855 l0 -75 15 0 15 0 0 48 0 47 27 -47 26 -48 19 0 18 0 0 75 0 75 -15 0 -15 0 0 -47 0 -47 -30 47 -30 47 -15 0 -15 0 0 -75z M8580 915 l0 -15 20 0 19 0 3 -62 3 -63 15 0 15 0 -4 63 -3 62 26 0 26 0 0 15 0 15 -60 0 -60 0 0 -15z M8750 855 l0 -75 20 0 20 0 0 25 0 25 8 0 9 0 11 -25 12 -25 21 0 21 0 -17 26 -17 26 11 11 11 11 0 26 0 26 -12 12 -12 12 -43 0 -43 0 0 -75z m78 28 l-3 -18 -23 -3 -22 -3 0 20 0 21 26 0 25 0 -3 -17z M8940 910 l-20 -20 0 -39 0 -40 26 -20 27 -21 17 0 18 0 21 18 22 17 5 35 6 35 -22 28 -21 27 -30 0 -29 0 -20 -20z m75 -54 l0 -39 -18 -11 -18 -11 -15 19 -14 20 0 21 0 21 12 12 13 13 20 -3 20 -3 0 -39z M9120 856 l0 -73 42 -7 41 -7 10 10 9 9 -5 9 -6 10 -31 -5 -30 -4 0 66 0 66 -15 0 -15 0 0 -74z M9271 807 l-11 -14 15 -13 15 -12 6 17 7 16 -10 10 -10 10 -12 -14z M6552 793 l3 -18 15 0 15 0 3 18 3 17 -21 0 -21 0 3 -17z M7820 796 l0 -14 14 -5 14 -6 6 6 6 6 0 14 0 13 -20 0 -20 0 0 -14z" />
+    </g>
+  </g>
+</svg>

@@ -39,6 +39,29 @@ fn relay_mesh_mark_geometry_is_semantically_decomposed() {
     assert!(svg.contains("id=\"edge-top-right\""));
 }
 
+#[test]
+fn relay_mesh_lockup_svgs_are_true_vectors() {
+    for svg in [
+        include_str!("../../../web/public/assets/relay-mesh-lockup-light.svg"),
+        include_str!("../../../web/public/assets/relay-mesh-lockup-dark.svg"),
+        include_str!("../../../web/public/assets/relay-mesh-mobile-logo-light.svg"),
+        include_str!("../../../web/public/assets/relay-mesh-mobile-logo-dark.svg"),
+    ] {
+        assert!(svg.contains("<path"), "lockup SVG should contain outlined text paths");
+        assert!(svg.contains("id=\"mark-artwork\""));
+        assert!(svg.contains("id=\"wordmark\""));
+        assert!(!svg.contains("<text"), "lockup SVG must not depend on installed fonts");
+        assert!(!svg.contains("<image"), "lockup SVG must not embed an image");
+        assert!(!svg.contains("data:"), "lockup SVG must not embed raster data");
+        assert!(!svg.contains("href="), "lockup SVG must not link raster data");
+    }
+
+    let full = include_str!("../../../web/public/assets/relay-mesh-lockup-light.svg");
+    let compact = include_str!("../../../web/public/assets/relay-mesh-mobile-logo-light.svg");
+    assert!(full.contains("id=\"tagline\""));
+    assert!(!compact.contains("id=\"tagline\""));
+}
+
 #[tokio::test]
 async fn branded_assets_are_served_from_assets_contract_and_favicon_remains_available() {
     let db_path = temp_db_path("branded-assets-contract");
@@ -80,8 +103,9 @@ async fn branded_assets_are_served_from_assets_contract_and_favicon_remains_avai
     let client = Client::new();
 
     for path in [
-        "/assets/relay-mesh-lockup-light.png",
-        "/assets/relay-mesh-lockup-dark.png",
+        "/assets/relay-mesh-lockup-light.svg",
+        "/assets/relay-mesh-lockup-dark.svg",
+        "/assets/relay-mesh-mobile-logo-light.svg",
         "/assets/relay-mesh-mark-light.svg",
         "/assets/linuxdo-logo.svg",
         "/favicon.svg",

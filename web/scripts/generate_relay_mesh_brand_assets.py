@@ -194,17 +194,15 @@ def write_svg_wrapper(href: str, width: int, height: int, path: Path) -> None:
     )
 
 
-def write_mark_svg(
+def write_vector_svg(
+    source: Path,
     path: Path,
     *,
     color: tuple[int, int, int] | None = None,
     lighten_ratio: float | None = None,
+    dark_lockup: bool = False,
 ) -> None:
-    source = REFERENCE_DIR / "approved-mark-vector-light.svg"
     root = ET.parse(source).getroot()
-    artwork = root.find(".//*[@id='mark-artwork']")
-    if artwork is None:
-        raise ValueError(f"missing #mark-artwork in {source}")
 
     for element in root.iter():
         for attribute in ("fill", "stroke", "stop-color", "flood-color"):
@@ -212,15 +210,54 @@ def write_mark_svg(
             if not value or not value.startswith("#") or len(value) != 7:
                 continue
             source_color = tuple(int(value[index:index + 2], 16) for index in (1, 3, 5))
-            output_color = color or (
-                blend(source_color, WHITE, lighten_ratio)
-                if lighten_ratio is not None
-                else source_color
-            )
+            if color is not None:
+                output_color = color
+            elif dark_lockup:
+                if chroma(source_color) <= 44 and luminance(source_color) < 205:
+                    output_color = (
+                        LIGHT_CLAY
+                        if luminance(source_color) < 150
+                        else blend(LIGHT_CLAY, CLAY_BG, 0.35)
+                    )
+                else:
+                    output_color = blend(source_color, WHITE, 0.24)
+            elif lighten_ratio is not None:
+                output_color = blend(source_color, WHITE, lighten_ratio)
+            else:
+                output_color = source_color
             element.set(attribute, "#" + "".join(f"{channel:02X}" for channel in output_color))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
+
+
+def write_mark_svg(
+    path: Path,
+    *,
+    color: tuple[int, int, int] | None = None,
+    lighten_ratio: float | None = None,
+) -> None:
+    write_vector_svg(
+        REFERENCE_DIR / "approved-mark-vector-light.svg",
+        path,
+        color=color,
+        lighten_ratio=lighten_ratio,
+    )
+
+
+def write_lockup_svgs(assets_dir: Path, *, compact: bool = False) -> None:
+    source_name = (
+        "approved-lockup-compact-vector-light.svg"
+        if compact
+        else "approved-lockup-vector-light.svg"
+    )
+    output_stem = "relay-mesh-mobile-logo" if compact else "relay-mesh-lockup"
+    source = REFERENCE_DIR / source_name
+    write_vector_svg(source, assets_dir / f"{output_stem}.svg")
+    write_vector_svg(source, assets_dir / f"{output_stem}-light.svg")
+    write_vector_svg(source, assets_dir / f"{output_stem}-dark.svg", dark_lockup=True)
+    write_vector_svg(source, assets_dir / f"{output_stem}-mono-dark.svg", color=CLAY_INK)
+    write_vector_svg(source, assets_dir / f"{output_stem}-mono-light.svg", color=LIGHT_CLAY)
 
 
 def write_theme_svg(
@@ -370,6 +407,8 @@ def export_static_assets(public_dir: Path) -> None:
     write_mark_svg(assets_dir / "relay-mesh-mark-dark.svg", lighten_ratio=0.14)
     write_mark_svg(assets_dir / "relay-mesh-mark-mono-dark.svg", color=CLAY_INK)
     write_mark_svg(assets_dir / "relay-mesh-mark-mono-light.svg", color=LIGHT_CLAY)
+    write_lockup_svgs(assets_dir)
+    write_lockup_svgs(assets_dir, compact=True)
     write_svg_wrapper(
         local_asset_path("relay-mesh-icon-mono-dark.png"),
         launcher_mono_dark.width,
@@ -405,6 +444,16 @@ def export_static_assets(public_dir: Path) -> None:
         "relay-mesh-mark-dark.svg",
         "relay-mesh-mark-mono-dark.svg",
         "relay-mesh-mark-mono-light.svg",
+        "relay-mesh-lockup.svg",
+        "relay-mesh-lockup-light.svg",
+        "relay-mesh-lockup-dark.svg",
+        "relay-mesh-lockup-mono-dark.svg",
+        "relay-mesh-lockup-mono-light.svg",
+        "relay-mesh-mobile-logo.svg",
+        "relay-mesh-mobile-logo-light.svg",
+        "relay-mesh-mobile-logo-dark.svg",
+        "relay-mesh-mobile-logo-mono-dark.svg",
+        "relay-mesh-mobile-logo-mono-light.svg",
         "relay-mesh-icon-mono-dark.svg",
         "relay-mesh-icon-mono-light.svg",
         "favicon-16x16.png",

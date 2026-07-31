@@ -162,20 +162,11 @@ function AdminLogin(): JSX.Element {
             className="auth-brand-lockup"
             markClassName="auth-brand-mark"
           />
-          <img
-            src="/assets/relay-mesh-mark-light.svg"
-            alt="Tavily Hikari"
-            className="auth-brand-mobile-mark auth-brand-mobile-mark-light"
-            loading="eager"
-            decoding="async"
-          />
-          <img
-            src="/assets/relay-mesh-mark-dark.svg"
-            alt=""
-            aria-hidden="true"
-            className="auth-brand-mobile-mark auth-brand-mobile-mark-dark"
-            loading="eager"
-            decoding="async"
+          <BrandLockup
+            title="Tavily Hikari"
+            compact
+            className="auth-brand-mobile-lockup"
+            markClassName="auth-brand-mobile-logo"
           />
         </div>
         <div className="auth-page-header-controls flex items-center gap-2">

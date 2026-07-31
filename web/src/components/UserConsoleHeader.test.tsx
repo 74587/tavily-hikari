@@ -59,8 +59,8 @@ describe('UserConsoleHeader', () => {
     )
 
     expect(html).toContain('User Workspace')
-    expect(html).toContain('/assets/relay-mesh-lockup-light.png')
-    expect(html).toContain('/assets/relay-mesh-lockup-dark.png')
+    expect(html).toContain('/assets/relay-mesh-mobile-logo-light.svg')
+    expect(html).toContain('/assets/relay-mesh-mobile-logo-dark.svg')
     expect(html).toContain('Your account dashboard and token management')
     expect(html).toContain('Signed in as: Ivan')
     expect(html).toContain('user-console-header-main')

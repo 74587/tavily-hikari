@@ -856,7 +856,7 @@ body.not-found-page-body,
   height: auto;
 }
 
-.auth-brand-mobile-mark {
+.auth-brand-mobile-lockup {
   display: none;
 }
 
@@ -884,22 +884,13 @@ body.not-found-page-body,
     display: none;
   }
 
-  .auth-brand-mobile-mark {
-    display: block;
-    width: 42px;
+  .auth-brand-mobile-lockup {
+    display: inline-flex;
+  }
+
+  .auth-brand-mobile-logo {
+    width: min(168px, calc(100vw - 3rem));
     height: auto;
-  }
-
-  .auth-brand-mobile-mark-dark {
-    display: none;
-  }
-
-  .dark .auth-brand-mobile-mark-light {
-    display: none;
-  }
-
-  .dark .auth-brand-mobile-mark-dark {
-    display: block;
   }
 
   .auth-page-header-controls {
