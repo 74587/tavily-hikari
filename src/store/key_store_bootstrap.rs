@@ -3196,7 +3196,6 @@ impl KeyStore {
             conn.commit().await?;
             return Ok(());
         }
-
         match state {
             RequestKindCanonicalMigrationState::Done(done_at) => {
                 write_meta_string_with_connection(
@@ -3271,7 +3270,6 @@ impl KeyStore {
         ] {
             sqlx::query(sql).execute(&self.pool).await?;
         }
-
         Ok(())
     }
 }
