@@ -13,6 +13,10 @@
 - Recent alerts now derive grouped rate-limit window badges from the latest alert event's semantic
   window before falling back to legacy group metadata, so the dashboard no longer renders a stale
   `5m window` label for rolling `60m` business-call cap alerts.
+- Dashboard freshness probes and rebuilds are throttled to a 10-second minimum interval while the
+  2-second SSE loop reuses the in-memory generation and shared singleflight last-good snapshot.
+- Alert candidate indexing is installed by an idempotent post-ready maintenance job rather than the
+  startup schema path.
 
 ## Notes
 

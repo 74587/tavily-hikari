@@ -108,6 +108,15 @@
 
 ## 性能约束
 
+### 分层刷新预算
+
+- admin SSE 的 2 秒循环只比较内存中的 dirty generation；完整 freshness probe 与 snapshot
+  rebuild 在业务变化后最短间隔为 10 秒。
+- HTTP 与 SSE 共用同一个 singleflight snapshot。并发刷新、刷新超时或可选数据源失败时优先返回
+  last-good；只有没有 last-good 的冷启动允许一次有界同步构建。
+- 无业务变化时最多每 60 秒执行一次安全 freshness probe，响应结构与 SSE 事件结构保持不变。
+- recent-alert 候选读取使用 ready 后后台创建的 partial time index；索引维护不得阻塞服务 ready。
+
 - 新增内部表 `dashboard_request_rollup_buckets`：
   - 主键 `(bucket_start, bucket_secs)`
   - `bucket_secs=60` 用于 UTC 分钟桶

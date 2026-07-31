@@ -309,6 +309,19 @@ export const GlobalBackoff: Story = {
   },
 }
 
+export const BudgetExhausted: Story = {
+  args: {
+    status: {
+      ...compareStatus,
+      reconciliationLastDurationMs: 20_000,
+      reconciliationLastAttempted: 20,
+      reconciliationLastSettled: 0,
+      reconciliationLastUpstream429: 16,
+      reconciliationLastBudgetExhausted: true,
+    },
+  },
+}
+
 export const EmptyState: Story = {
   render: () => renderWithStatus(null),
 }

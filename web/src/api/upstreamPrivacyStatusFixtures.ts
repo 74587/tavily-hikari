@@ -100,6 +100,11 @@ function createUpstreamPrivacyStatus(diagnostics: ActivityDiagnostics): Upstream
     lastReconciliationEnqueueErrorAt: 1_783_957_900,
     lastResearchSweepAt: 1_783_958_320,
     lastResearchTerminalAt: 1_783_958_300,
+    reconciliationLastDurationMs: 19_842,
+    reconciliationLastAttempted: 20,
+    reconciliationLastSettled: 0,
+    reconciliationLastUpstream429: 16,
+    reconciliationLastBudgetExhausted: true,
     ...diagnostics,
     recentAdjustments: [
       {

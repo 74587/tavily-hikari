@@ -129,6 +129,16 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 ## UI Contract
 
+### Per-channel GC health
+
+The administrator-only peer detail exposes `gcState`, `oldestAgeSecs`, `lastProgressAt`,
+`lastDeferReason`, `nextRetryAt`, and `batchSize` beside the existing ACK watermark fields for
+control, billing, and runtime. The public `/api/ha/status` response remains unchanged.
+
+Online GC persists per-channel attempt and progress state. Normal slices are DEBUG-level events;
+stalled, deferred, and recovered states are logged only on transitions. A failed continuation
+write does not start an unbounded retry task: the stale-job reaper owns eventual recovery.
+
 - 用户控制台在 failover、provisional、recovery、同步滞后时显示降级警告。
 - 管理员控制台的完整 HA 服务节点管理面板只出现在系统设置的高可用二级界面，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。
 - 管理员控制台的 HA 页面必须稳定分成三块：真实节点清单、`planned cutover` 操作区、7 天时间线；dual-active 模式下还要显示当前 leader key 语义下的控制面写节点。
@@ -147,30 +157,25 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 ## Visual Evidence
 
-![HA node detail replication ACK and GC health](./assets/ha-node-detail-channel-health-final.png)
+PR: include
 
-![HA node detail baseline-required channel health](./assets/ha-node-detail-channel-health-baseline-required.png)
+![HA channel ACK and GC health](./assets/ha-channel-gc-health-desktop.png)
+
+- source_type: `storybook_docs`
+- docs_entry_or_title: `Admin/HaNodeDetailPanel / Docs`
+- scenario: healthy, draining, and deferred channels
+- evidence_note: The current mock-only peer panel shows ACK watermark, retention, GC state, oldest
+  event, adaptive batch, progress, defer reason, and retry time for all three channels.
 
 PR: include
 
-![Peer-scoped HA node detail desktop](./assets/ha-node-detail-peer-scope-desktop.png)
+![HA channel stalled GC state](./assets/ha-channel-gc-health-stalled.png)
 
-- evidence_note: The mock-only HA web demo now shows only the URL-selected peer, its channel
-  health, and its interaction history with the current management node. The current node's EdgeOne
-  and source-setting controls are absent; their only configuration entry remains on the HA overview.
-  The desktop capture is `1748x1337`; `trim_whitespace.py` reported `action=unchanged` with
-  `reason=ambiguous_border`, so its raw crop remains canonical.
-
-PR: include
-
-![Peer-scoped HA node detail mobile](./assets/ha-node-detail-peer-scope-mobile.png)
-
-- mobile_evidence: Captured from the same mock-only HA web demo with Chrome's supported `viewport`
-  override set to `390x844`. The rendered page reports that the target node detail is present and
-  the current-node EdgeOne card and source-configuration entry are absent. `trim_whitespace.py`
-  reported `action=unchanged` with `reason=ambiguous_border`, so its raw crop remains canonical.
-- publish_state: Both peer-scope screenshots are committed on the PR branch and included in the
-  PR visual evidence.
+- source_type: `storybook_docs`
+- docs_entry_or_title: `Admin/HaNodeDetailPanel / Docs`
+- scenario: runtime channel consecutive no progress
+- evidence_note: The stalled transition is visually distinct and retains the last progress,
+  no-progress reason, retry time, and reduced batch size needed for diagnosis.
 
 ## Acceptance
 

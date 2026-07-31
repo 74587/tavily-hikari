@@ -14,6 +14,9 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::log::LevelFilter;
 use tracing::{error, info, warn};
 
+mod immediate_transaction;
+pub(crate) use immediate_transaction::ImmediateSqliteTransaction;
+
 pub(crate) struct ObservabilityOfflineGuard {
     _lock_file: File,
 }
@@ -246,7 +249,7 @@ pub fn emit_perf_log(
     elapsed: Duration,
     scope: PerfLogScope<'_>,
 ) {
-    let memory = capture_runtime_memory_snapshot();
+    let memory = perf_log_memory_snapshot(level);
     let log = |f: &dyn Fn()| f();
     match level {
         DbLogStatus::Info => log(&|| {
@@ -268,8 +271,13 @@ pub fn emit_perf_log(
                 outbox_ack_lag = scope.outbox_ack_lag.unwrap_or_default(),
                 memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
                 memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
+                cgroup_anon_bytes = memory.cgroup_anon_bytes.unwrap_or_default(),
+                cgroup_file_bytes = memory.cgroup_file_bytes.unwrap_or_default(),
+                cgroup_swap_bytes = memory.cgroup_swap_bytes.unwrap_or_default(),
                 headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
                 process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
+                process_rss_anon_bytes = memory.process_rss_anon_bytes.unwrap_or_default(),
+                process_rss_file_bytes = memory.process_rss_file_bytes.unwrap_or_default(),
                 child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
                 process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
                 process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
@@ -296,8 +304,13 @@ pub fn emit_perf_log(
                 outbox_ack_lag = scope.outbox_ack_lag.unwrap_or_default(),
                 memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
                 memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
+                cgroup_anon_bytes = memory.cgroup_anon_bytes.unwrap_or_default(),
+                cgroup_file_bytes = memory.cgroup_file_bytes.unwrap_or_default(),
+                cgroup_swap_bytes = memory.cgroup_swap_bytes.unwrap_or_default(),
                 headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
                 process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
+                process_rss_anon_bytes = memory.process_rss_anon_bytes.unwrap_or_default(),
+                process_rss_file_bytes = memory.process_rss_file_bytes.unwrap_or_default(),
                 child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
                 process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
                 process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
@@ -324,8 +337,13 @@ pub fn emit_perf_log(
                 outbox_ack_lag = scope.outbox_ack_lag.unwrap_or_default(),
                 memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
                 memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
+                cgroup_anon_bytes = memory.cgroup_anon_bytes.unwrap_or_default(),
+                cgroup_file_bytes = memory.cgroup_file_bytes.unwrap_or_default(),
+                cgroup_swap_bytes = memory.cgroup_swap_bytes.unwrap_or_default(),
                 headroom_bytes = memory.headroom_bytes.unwrap_or_default(),
                 process_rss_bytes = memory.process_rss_bytes.unwrap_or_default(),
+                process_rss_anon_bytes = memory.process_rss_anon_bytes.unwrap_or_default(),
+                process_rss_file_bytes = memory.process_rss_file_bytes.unwrap_or_default(),
                 child_process_rss_bytes = memory.child_process_rss_bytes.unwrap_or_default(),
                 process_group_rss_bytes = memory.process_group_rss_bytes.unwrap_or_default(),
                 process_hwm_bytes = memory.process_hwm_bytes.unwrap_or_default(),
@@ -334,6 +352,27 @@ pub fn emit_perf_log(
             );
         }),
     }
+}
+
+fn perf_log_memory_snapshot(level: DbLogStatus) -> RuntimeMemorySnapshot {
+    static CACHE: StdOnceLock<StdMutex<Option<(Instant, RuntimeMemorySnapshot)>>> =
+        StdOnceLock::new();
+    if !matches!(level, DbLogStatus::Info) {
+        return capture_runtime_memory_snapshot();
+    }
+    let now = Instant::now();
+    let mut cache = CACHE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((captured_at, snapshot)) = *cache
+        && now.saturating_duration_since(captured_at) < Duration::from_secs(5 * 60)
+    {
+        return snapshot;
+    }
+    let snapshot = capture_runtime_memory_snapshot();
+    *cache = Some((now, snapshot));
+    snapshot
 }
 
 pub fn emit_low_memory_protection_decision(component: &'static str, scope: PerfLogScope<'_>) {
@@ -1088,14 +1127,9 @@ pub(crate) fn sqlite_qualified_table_name(table: &str) -> String {
 
 pub(crate) async fn begin_immediate_sqlite_connection(
     pool: &SqlitePool,
-) -> Result<sqlx::pool::PoolConnection<Sqlite>, ProxyError> {
+) -> Result<ImmediateSqliteTransaction, ProxyError> {
     instrument_db_operation("sqlite begin immediate", None, async {
-        let mut conn = pool.acquire().await?;
-        if let Err(err) = sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            return Err(ProxyError::Database(err));
-        }
-        Ok(conn)
+        ImmediateSqliteTransaction::begin(pool.acquire().await?).await
     })
     .await
 }
@@ -1105,7 +1139,7 @@ pub(crate) async fn begin_immediate_sqlite_connection_with_retry(
     backend_time: &BackendTime,
     operation: &str,
     retry_window: Duration,
-) -> Result<sqlx::pool::PoolConnection<Sqlite>, ProxyError> {
+) -> Result<ImmediateSqliteTransaction, ProxyError> {
     let deadline = backend_time.instant_now() + retry_window;
     let mut attempt = 0;
     loop {
@@ -1130,7 +1164,7 @@ pub(crate) async fn begin_immediate_sqlite_connection_with_retry(
 
 pub(crate) async fn begin_immediate_sqlite_connection_for_monthly_quota_rebase(
     pool: &SqlitePool,
-) -> Result<sqlx::pool::PoolConnection<Sqlite>, ProxyError> {
+) -> Result<ImmediateSqliteTransaction, ProxyError> {
     begin_immediate_sqlite_connection_with_retry(
         pool,
         &BackendTime::system(),
@@ -1548,18 +1582,18 @@ fn request_kind_canonical_migration_state_blocks_reentry(
 }
 
 async fn read_meta_string_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     key: &str,
 ) -> Result<Option<String>, ProxyError> {
     sqlx::query_scalar::<_, String>("SELECT value FROM meta WHERE key = ? LIMIT 1")
         .bind(key)
-        .fetch_optional(&mut **conn)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(ProxyError::Database)
 }
 
 async fn write_meta_string_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     key: &str,
     value: &str,
 ) -> Result<(), ProxyError> {
@@ -1572,13 +1606,13 @@ async fn write_meta_string_with_connection(
     )
     .bind(key)
     .bind(value)
-    .execute(&mut **conn)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
 
 async fn read_meta_i64_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     key: &str,
 ) -> Result<Option<i64>, ProxyError> {
     read_meta_string_with_connection(conn, key)
@@ -1587,12 +1621,12 @@ async fn read_meta_i64_with_connection(
 }
 
 async fn delete_meta_key_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     key: &str,
 ) -> Result<(), ProxyError> {
     sqlx::query("DELETE FROM meta WHERE key = ?")
         .bind(key)
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
@@ -1619,7 +1653,7 @@ async fn read_request_kind_canonical_migration_status(
 }
 
 async fn read_request_kind_canonical_migration_status_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
 ) -> Result<Option<RequestKindCanonicalMigrationState>, ProxyError> {
     if let Some(done_at) =
         read_meta_i64_with_connection(conn, META_KEY_REQUEST_KIND_CANONICAL_MIGRATION_V1_DONE)
@@ -1659,7 +1693,7 @@ async fn read_request_kind_canonical_backfill_upper_bounds(
 }
 
 async fn read_request_kind_canonical_backfill_upper_bounds_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
 ) -> Result<Option<RequestKindCanonicalBackfillUpperBounds>, ProxyError> {
     let request_logs = read_meta_i64_with_connection(
         conn,
@@ -1683,18 +1717,18 @@ async fn read_request_kind_canonical_backfill_upper_bounds_with_connection(
 }
 
 async fn fetch_table_max_id_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     table: &str,
 ) -> Result<i64, ProxyError> {
     let sql = format!("SELECT COALESCE(MAX(id), 0) FROM {table}");
     sqlx::query_scalar::<_, i64>(&sql)
-        .fetch_one(&mut **conn)
+        .fetch_one(&mut *conn)
         .await
         .map_err(ProxyError::Database)
 }
 
 async fn capture_request_kind_canonical_backfill_upper_bounds_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
 ) -> Result<RequestKindCanonicalBackfillUpperBounds, ProxyError> {
     Ok(RequestKindCanonicalBackfillUpperBounds {
         request_logs: fetch_table_max_id_with_connection(conn, "request_logs").await?,
@@ -1703,7 +1737,7 @@ async fn capture_request_kind_canonical_backfill_upper_bounds_with_connection(
 }
 
 async fn write_request_kind_canonical_backfill_upper_bounds_with_connection(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut SqliteConnection,
     upper_bounds: RequestKindCanonicalBackfillUpperBounds,
 ) -> Result<(), ProxyError> {
     write_meta_string_with_connection(
@@ -2529,6 +2563,7 @@ impl KeyStore {
 
 include!("key_store_bootstrap.rs");
 include!("key_store_bootstrap_legacy.rs");
+include!("key_store_ha_schema.rs");
 include!("key_store_quota_schema_semantic_migration.rs");
 include!("key_store_observability_sidecar.rs");
 include!("key_store_public_metrics_freshness.rs");

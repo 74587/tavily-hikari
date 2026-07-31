@@ -23,7 +23,7 @@ where
     )
     .await;
 
-    finish_monthly_quota_rebase_transaction(&mut conn, result).await
+    finish_monthly_quota_rebase_transaction(conn, result).await
 }
 
 pub(crate) async fn maybe_rebase_current_month_business_quota_with_pool<F>(
@@ -40,7 +40,7 @@ where
     let windows = monthly_quota_rebase_windows(now);
     let previous_rebase_month_start = get_meta_i64_executor(&mut *conn, meta_key).await?;
     if previous_rebase_month_start == Some(windows.month_window_start) {
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        conn.commit().await?;
         return Ok(None);
     }
 
@@ -53,49 +53,42 @@ where
     )
     .await;
 
-    finish_monthly_quota_rebase_transaction(&mut conn, result)
+    finish_monthly_quota_rebase_transaction(conn, result)
         .await
         .map(Some)
 }
 
 async fn rebase_current_month_business_quota_locked(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: &mut sqlx::SqliteConnection,
     windows: BillingLedgerWindows,
     meta_key: &str,
     update_meta: bool,
     previous_rebase_month_start: Option<i64>,
 ) -> Result<MonthlyQuotaRebaseReport, ProxyError> {
-    ensure_charged_subjects_are_valid(
-        conn.as_mut(),
-        windows.month_window_start,
-        windows.generated_at,
-    )
-    .await?;
+    ensure_charged_subjects_are_valid(&mut *conn, windows.month_window_start, windows.generated_at)
+        .await?;
 
     let (current_month_charged_rows, current_month_charged_credits) =
         fetch_current_month_charged_totals(
-            conn.as_mut(),
+            &mut *conn,
             windows.month_window_start,
             windows.generated_at,
         )
         .await?;
-    let rebased_subjects = fetch_charged_ledger_window(
-        conn.as_mut(),
-        windows.month_window_start,
-        windows.generated_at,
-    )
-    .await?;
+    let rebased_subjects =
+        fetch_charged_ledger_window(&mut *conn, windows.month_window_start, windows.generated_at)
+            .await?;
 
     let cleared_token_rows =
         sqlx::query("UPDATE auth_token_quota SET month_start = ?, month_count = 0")
             .bind(windows.month_window_start)
-            .execute(conn.as_mut())
+            .execute(&mut *conn)
             .await?
             .rows_affected() as i64;
     let cleared_account_rows =
         sqlx::query("UPDATE account_monthly_quota SET month_start = ?, month_count = 0")
             .bind(windows.month_window_start)
-            .execute(conn.as_mut())
+            .execute(&mut *conn)
             .await?
             .rows_affected() as i64;
 
@@ -116,7 +109,7 @@ async fn rebase_current_month_business_quota_locked(
                 .bind(&token_id)
                 .bind(windows.month_window_start)
                 .bind(*total_credits)
-                .execute(conn.as_mut())
+                .execute(&mut *conn)
                 .await?;
                 rebased_token_subjects += 1;
             }
@@ -133,7 +126,7 @@ async fn rebase_current_month_business_quota_locked(
                 .bind(&user_id)
                 .bind(windows.month_window_start)
                 .bind(*total_credits)
-                .execute(conn.as_mut())
+                .execute(&mut *conn)
                 .await?;
                 rebased_account_subjects += 1;
             }
@@ -142,7 +135,7 @@ async fn rebase_current_month_business_quota_locked(
     let meta_updated =
         update_meta && previous_rebase_month_start != Some(windows.month_window_start);
     if update_meta {
-        set_meta_i64_executor(conn.as_mut(), meta_key, windows.month_window_start).await?;
+        set_meta_i64_executor(&mut *conn, meta_key, windows.month_window_start).await?;
     }
 
     Ok(MonthlyQuotaRebaseReport {
@@ -160,22 +153,17 @@ async fn rebase_current_month_business_quota_locked(
 }
 
 async fn finish_monthly_quota_rebase_transaction(
-    conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+    conn: ImmediateSqliteTransaction,
     result: Result<MonthlyQuotaRebaseReport, ProxyError>,
 ) -> Result<MonthlyQuotaRebaseReport, ProxyError> {
     let report = match result {
         Ok(report) => report,
         Err(err) => {
-            let _ = sqlx::query("ROLLBACK").execute(conn.as_mut()).await;
+            let _ = conn.rollback().await;
             return Err(err);
         }
     };
-
-    if let Err(err) = sqlx::query("COMMIT").execute(conn.as_mut()).await {
-        let _ = sqlx::query("ROLLBACK").execute(conn.as_mut()).await;
-        return Err(ProxyError::Database(err));
-    }
-
+    conn.commit().await?;
     Ok(report)
 }
 

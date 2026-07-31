@@ -490,3 +490,11 @@
   non-blocking GC lease serializes only GC slices, while scheduler diagnostics distinguish queue age,
   scheduled delay, and eligible wait. A scheduled continuation therefore does not produce a false
   queue-wait alert before its `available_at` time.
+
+## Transaction and claim lifecycle
+
+- Raw immediate transactions use an owning guard that commits or rolls back explicitly and detaches
+  the physical connection if cancellation drops an open transaction.
+- Scheduled jobs increment `claim_generation` when claimed. All scheduler completion paths and
+  atomic continuations match the generation, while the periodic stale reaper safely requeues only
+  the currently running generation.

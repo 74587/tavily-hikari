@@ -12,7 +12,7 @@ impl KeyStore {
         ] {
             delete_meta_key_with_connection(&mut conn, key).await?;
         }
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        conn.commit().await?;
         Ok(())
     }
 

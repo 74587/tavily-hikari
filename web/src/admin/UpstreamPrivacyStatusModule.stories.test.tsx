@@ -7,7 +7,7 @@ import UpstreamPrivacyStatusModule from './UpstreamPrivacyStatusModule'
 import { translations } from '../i18n'
 
 describe('SystemStatusModule Storybook proofs', () => {
-  it('keeps the pending, blocked-session, compare, active, degraded, backoff, empty, error, and gallery stories available', () => {
+  it('keeps the pending, blocked-session, compare, active, degraded, backoff, budget, empty, error, and gallery stories available', () => {
     expect(meta).toMatchObject({
       title: 'Admin/Modules/SystemStatusModule',
     })
@@ -18,6 +18,7 @@ describe('SystemStatusModule Storybook proofs', () => {
     expect(systemStatusStories.Active).toMatchObject({})
     expect(systemStatusStories.Degraded).toMatchObject({})
     expect(systemStatusStories.GlobalBackoff).toMatchObject({})
+    expect(systemStatusStories.BudgetExhausted).toMatchObject({})
     expect(systemStatusStories.EmptyState).toMatchObject({})
     expect(systemStatusStories.ErrorState).toMatchObject({})
     expect(systemStatusStories.LoadingState).toMatchObject({})
@@ -65,5 +66,14 @@ describe('SystemStatusModule Storybook proofs', () => {
 
     expect(markup).toContain('对账全局退避')
     expect(markup).toContain('级别 1')
+  })
+
+  it('renders reconciliation budget exhaustion with the last round aggregate', () => {
+    const args = { ...meta.args, ...systemStatusStories.BudgetExhausted.args }
+    const markup = renderToStaticMarkup(createElement(UpstreamPrivacyStatusModule, args))
+
+    expect(markup).toContain('20,000 ms')
+    expect(markup).toContain('20 / 0 / 16')
+    expect(markup).toContain('已耗尽')
   })
 })

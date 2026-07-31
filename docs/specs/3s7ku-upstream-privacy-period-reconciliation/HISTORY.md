@@ -4,6 +4,9 @@
 
 ## Decision Trace
 
+- 2026-07-31: reconciliation 纳入 remote-I/O slot 与 20 秒总预算；全局 429 退避和 delayed
+  representative job 作为同一持久化生命周期恢复。
+
 - 2026-07-14: 默认模式锁定为 `accessToken`，不支持原始项目派生或按项目查询用量。
 - 2026-07-14: 业务日采用服务器现有业务时区，并固定三个窗口 `00-11 / 11-22 / 22-24`。
 - 2026-07-14: 结算只执行一次；Research 最长等待 24 小时，超时后 degraded 结算且不自动复核。

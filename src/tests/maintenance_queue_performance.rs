@@ -50,7 +50,7 @@ async fn ha_gc_continuation_finishes_job_and_requeues_atomically() {
         .scheduled_job_enqueue("ha_outbox_gc", "scheduler", None, 1)
         .await
         .expect("enqueue HA GC");
-    proxy
+    let claimed = proxy
         .scheduled_job_mark_running(job.job_id)
         .await
         .expect("mark HA GC running")
@@ -59,6 +59,7 @@ async fn ha_gc_continuation_finishes_job_and_requeues_atomically() {
     let continuation = proxy
         .scheduled_job_finish_and_enqueue_auto_at(
             job.job_id,
+            claimed.claim_generation,
             "ha_outbox_gc",
             None,
             1,
@@ -256,6 +257,106 @@ async fn running_ha_gc_is_requeued_after_restart() {
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn stale_claim_generation_cannot_finish_reclaimed_job() {
+    let db_path = temp_db_path("scheduled-job-stale-generation");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
+    let queued = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "auto", None, 1)
+        .await
+        .expect("enqueue HA GC");
+    let first = proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim first generation")
+        .expect("first claim exists");
+    sqlx::query(
+        "UPDATE scheduled_jobs SET status = 'queued', started_at = NULL, available_at = 0, claim_generation = claim_generation + 1 WHERE id = ?",
+    )
+    .bind(queued.job_id)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("simulate stale recovery");
+    let second = proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim second generation")
+        .expect("second claim exists");
+    assert!(second.claim_generation > first.claim_generation);
+    let stale = proxy
+        .scheduled_job_finish_claimed(
+            queued.job_id,
+            first.claim_generation,
+            "success",
+            Some("stale"),
+        )
+        .await;
+    assert!(stale.is_err());
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(queued.job_id)
+            .await
+            .expect("read job")
+            .expect("job exists")
+            .status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn stale_reaper_recovers_ha_gc_once_with_delay() {
+    let db_path = temp_db_path("scheduled-job-stale-reaper");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
+    let queued = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "auto", None, 1)
+        .await
+        .expect("enqueue HA GC");
+    proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim HA GC")
+        .expect("claim exists");
+    sqlx::query("UPDATE scheduled_jobs SET started_at = ? WHERE id = ?")
+        .bind(Utc::now().timestamp() - 121)
+        .bind(queued.job_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("age running job");
+    assert_eq!(
+        proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover stale"),
+        1
+    );
+    assert_eq!(
+        proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("repeat reaper"),
+        0
+    );
+    let recovered = proxy
+        .scheduled_job_by_id(queued.job_id)
+        .await
+        .expect("read recovered job")
+        .expect("recovered job exists");
+    assert_eq!(recovered.status, "queued");
+    let available_at: i64 =
+        sqlx::query_scalar("SELECT available_at FROM scheduled_jobs WHERE id = ?")
+            .bind(queued.job_id)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read retry time");
+    assert!(available_at >= Utc::now().timestamp() + 29);
 }
 
 #[tokio::test]

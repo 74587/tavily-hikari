@@ -107,6 +107,11 @@ export interface UpstreamPrivacyStatus {
   reconciliationPressureStreak?: number
   reconciliationBackoffLevel?: number
   reconciliationBackoffUntil?: number | null
+  reconciliationLastDurationMs?: number | null
+  reconciliationLastAttempted?: number
+  reconciliationLastSettled?: number
+  reconciliationLastUpstream429?: number
+  reconciliationLastBudgetExhausted?: boolean
   retryBuckets: UpstreamReconciliationRetryBuckets
   currentPeriodBoundUsersByKey: UpstreamKeyActivityPoint[]
   currentPeriodPendingProjectIdsByKey: UpstreamKeyActivityPoint[]

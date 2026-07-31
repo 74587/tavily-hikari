@@ -26,6 +26,8 @@
 - Research 记录已加入持久化 poll 元数据；每轮现有 reconciliation job 先执行最多 20 条、每 Key 最多 4 条的 terminal sweep，历史 pending 自动进入恢复队列。终态写入与 settlement 均保持幂等。
 - 对账限流已改用 `period_reconciliation` 独立 Key cooldown：429 不再扇出写入同 Key 的全部窗口，其他 Key 可继续结算；状态 API/页面提供今日账号与账期覆盖、Research 收敛和 per-Key cooldown 进度。
 - `/api/users` compare-only 项新增 observed/standard-settled/degraded period count，用户列表和用量页在 hybrid 值旁展示标准对账覆盖及降级数。
+- reconciliation 运行于 remote-I/O slot，并受 20 秒总预算约束；全局 429 压力状态与 delayed
+  representative job 持久化，避免持续限流时每分钟空转并占用本地维护队列。
 
 ## Remaining Gaps
 

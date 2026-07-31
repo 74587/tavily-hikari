@@ -1,5 +1,10 @@
 # Admin Dashboard Overview History
 
+## 2026-07-31
+
+- Bounded expensive freshness probes and rebuilds to a 10-second minimum interval and added the
+  post-ready partial alert index maintenance path.
+
 ## 2026-07-17
 
 - Corrected recent-alert grouped window wording so rolling `60m` business-call cap alerts no longer

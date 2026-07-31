@@ -633,8 +633,7 @@ impl KeyStore {
             "#,
             upstream_rate_limited_429 = FAILURE_KIND_UPSTREAM_RATE_LIMITED_429
         );
-        let mut conn = pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let mut conn = ImmediateSqliteTransaction::begin(pool.acquire().await?).await?;
         let result = async {
             sqlx::query("DELETE FROM observability.api_key_usage_buckets")
                 .execute(&mut *conn)
@@ -643,14 +642,16 @@ impl KeyStore {
                 .bind(updated_at)
                 .execute(&mut *conn)
                 .await?;
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
             Ok::<(), ProxyError>(())
         }
         .await;
-        if result.is_err() {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        match result {
+            Ok(()) => conn.commit().await,
+            Err(err) => {
+                let _ = conn.rollback().await;
+                Err(err)
+            }
         }
-        result
     }
 
     async fn rebuild_observability_sidecar_dashboard_request_rollup_buckets_sql(
@@ -731,8 +732,7 @@ impl KeyStore {
             {day_select}
             "#
         );
-        let mut conn = pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let mut conn = ImmediateSqliteTransaction::begin(pool.acquire().await?).await?;
         let result = async {
             sqlx::query("DELETE FROM observability.dashboard_request_rollup_buckets")
                 .execute(&mut *conn)
@@ -742,14 +742,16 @@ impl KeyStore {
                 .bind(updated_at)
                 .execute(&mut *conn)
                 .await?;
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
             Ok::<(), ProxyError>(())
         }
         .await;
-        if result.is_err() {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        match result {
+            Ok(()) => conn.commit().await,
+            Err(err) => {
+                let _ = conn.rollback().await;
+                Err(err)
+            }
         }
-        result
     }
 
     async fn rename_main_table_if_exists_in_pool(

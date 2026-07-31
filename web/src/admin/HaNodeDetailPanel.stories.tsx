@@ -22,9 +22,9 @@ const detail: HaNodeDetail = {
     roleHint: 'standby_candidate',
     plannedCutoverEligible: true,
     channelHealth: [
-      { channel: 'control', ackedSeq: 812, highWatermark: 812, ackLag: 0, cursorState: 'healthy', retentionSecs: 72 * 60 * 60, expiredBacklog: false },
-      { channel: 'billing', ackedSeq: 490, highWatermark: 512, ackLag: 22, cursorState: 'catching_up', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: false },
-      { channel: 'runtime', ackedSeq: null, highWatermark: 900, ackLag: null, cursorState: 'expired_backlog', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: true },
+      { channel: 'control', ackedSeq: 812, highWatermark: 812, ackLag: 0, cursorState: 'healthy', retentionSecs: 72 * 60 * 60, expiredBacklog: false, gcState: 'idle', oldestAgeSecs: 640, lastProgressAt: 1_700_000_010, lastDeferReason: null, nextRetryAt: null, batchSize: 250 },
+      { channel: 'billing', ackedSeq: 490, highWatermark: 512, ackLag: 22, cursorState: 'catching_up', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: false, gcState: 'draining', oldestAgeSecs: 93_200, lastProgressAt: 1_700_000_016, lastDeferReason: null, nextRetryAt: 1_700_000_050, batchSize: 125 },
+      { channel: 'runtime', ackedSeq: null, highWatermark: 900, ackLag: null, cursorState: 'expired_backlog', retentionSecs: 14 * 24 * 60 * 60, expiredBacklog: true, gcState: 'deferred', oldestAgeSecs: 192_000, lastProgressAt: 1_699_999_800, lastDeferReason: 'foreground_activity', nextRetryAt: 1_700_000_050, batchSize: 62 },
     ],
   },
   timeline: {
@@ -77,11 +77,19 @@ const meta = {
         style={{
           minHeight: '100vh',
           boxSizing: 'border-box',
-          padding: '28px 33.5px 34px 28px',
-          background: '#f7f5fb',
+          padding: 'clamp(16px, 3vw, 48px)',
+          background: '#eef0f4',
         }}
       >
-        <Story />
+        <div
+          style={{
+            boxSizing: 'border-box',
+            padding: 'clamp(16px, 2vw, 28px)',
+            background: '#f7f5fb',
+          }}
+        >
+          <Story />
+        </div>
       </div>
     ),
   ],
@@ -107,6 +115,20 @@ export const BaselineRequired: Story = {
         ...detail.node,
         channelHealth: detail.node.channelHealth?.map((health) => health.channel === 'runtime'
           ? { ...health, cursorState: 'baseline_required', expiredBacklog: false }
+          : health),
+      },
+    },
+  },
+}
+
+export const Stalled: Story = {
+  args: {
+    detail: {
+      ...detail,
+      node: {
+        ...detail.node,
+        channelHealth: detail.node.channelHealth?.map((health) => health.channel === 'runtime'
+          ? { ...health, gcState: 'stalled', lastDeferReason: 'consecutive_no_progress', nextRetryAt: 1_700_000_080 }
           : health),
       },
     },

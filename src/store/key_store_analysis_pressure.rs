@@ -249,7 +249,6 @@ impl KeyStore {
             if !should_continue() {
                 return Ok(ServerPressureBucketsRebuildOutcome::Cancelled);
             }
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
             Ok(ServerPressureBucketsRebuildOutcome::Completed {
                 upper_bound_request_log_id,
             })
@@ -259,16 +258,17 @@ impl KeyStore {
             Ok(ServerPressureBucketsRebuildOutcome::Completed {
                 upper_bound_request_log_id,
             }) => {
+                conn.commit().await?;
                 Ok(ServerPressureBucketsRebuildOutcome::Completed {
                     upper_bound_request_log_id,
                 })
             }
             Ok(ServerPressureBucketsRebuildOutcome::Cancelled) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = conn.rollback().await;
                 Ok(ServerPressureBucketsRebuildOutcome::Cancelled)
             }
             Err(err) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = conn.rollback().await;
                 Err(err)
             }
         }

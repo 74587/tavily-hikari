@@ -2326,7 +2326,8 @@ impl KeyStore {
                     j.message,
                     j.queued_at,
                     j.started_at,
-                    j.finished_at
+                    j.finished_at,
+                    j.claim_generation
                 FROM scheduled_jobs j
                 LEFT JOIN api_keys k ON k.id = j.key_id
                 ORDER BY COALESCE(j.started_at, j.queued_at) DESC, j.id DESC
@@ -2350,6 +2351,7 @@ impl KeyStore {
                     queued_at: row.try_get("queued_at")?,
                     started_at: row.try_get("started_at")?,
                     finished_at: row.try_get::<Option<i64>, _>("finished_at")?,
+                    claim_generation: row.try_get("claim_generation")?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -2407,7 +2409,8 @@ impl KeyStore {
                 j.message,
                 j.queued_at,
                 j.started_at,
-                j.finished_at
+                j.finished_at,
+                j.claim_generation
             FROM scheduled_jobs j
             LEFT JOIN api_keys k ON k.id = j.key_id
             {}
@@ -2438,6 +2441,7 @@ impl KeyStore {
                     queued_at: row.try_get("queued_at")?,
                     started_at: row.try_get("started_at")?,
                     finished_at: row.try_get::<Option<i64>, _>("finished_at")?,
+                    claim_generation: row.try_get("claim_generation")?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;

@@ -1,5 +1,7 @@
 impl TavilyProxy {
     const RECONCILIATION_BACKOFF_SCOPE: &'static str = "period_reconciliation";
+    // Leave one second of completion headroom after the request's 8-second timeout.
+    const RECONCILIATION_REQUEST_START_BUDGET_SECS: u64 = 11;
     const RESEARCH_SWEEP_LIMIT: usize = 20;
     const RESEARCH_SWEEP_PER_KEY_LIMIT: usize = 4;
 
@@ -88,6 +90,16 @@ impl TavilyProxy {
             .key_store
             .upstream_reconciliation_global_backoff_state()
             .await?;
+        let (
+            reconciliation_last_duration_ms,
+            reconciliation_last_attempted,
+            reconciliation_last_settled,
+            reconciliation_last_upstream_429,
+            reconciliation_last_budget_exhausted,
+        ) = self
+            .key_store
+            .upstream_reconciliation_last_run_stats()
+            .await?;
         let next_epoch_at = if shadow_ready && settings.upstream_precise_reconciliation_enabled && sessions_ready {
             Some(if stored_epoch > 0 {
                 stored_epoch
@@ -153,6 +165,11 @@ impl TavilyProxy {
             reconciliation_backoff_level,
             reconciliation_backoff_until: (reconciliation_backoff_until > now)
                 .then_some(reconciliation_backoff_until),
+            reconciliation_last_duration_ms,
+            reconciliation_last_attempted,
+            reconciliation_last_settled,
+            reconciliation_last_upstream_429,
+            reconciliation_last_budget_exhausted,
             retry_buckets,
             current_period_bound_users_by_key,
             current_period_pending_project_ids_by_key,
@@ -412,7 +429,7 @@ impl TavilyProxy {
         &self,
         usage_base: &str,
         started_at: &std::time::Instant,
-    ) -> Result<(i64, i64, i64, i64, i64), ProxyError> {
+    ) -> Result<(i64, i64, i64, i64, i64, bool), ProxyError> {
         let now = self.backend_time.now_ts();
         let candidates = self
             .key_store
@@ -433,8 +450,15 @@ impl TavilyProxy {
         let mut pending = 0_i64;
         let mut retries = 0_i64;
         let mut skipped_cooldown = 0_i64;
+        let mut budget_exhausted = false;
         for candidate in candidates {
             if polled as usize >= Self::RESEARCH_SWEEP_LIMIT {
+                break;
+            }
+            if started_at.elapsed().as_secs()
+                >= Self::RECONCILIATION_REQUEST_START_BUDGET_SECS
+            {
+                budget_exhausted = true;
                 break;
             }
             if cooling_keys.contains(&candidate.key_id)
@@ -536,8 +560,16 @@ impl TavilyProxy {
             pending_count = pending,
             retry_count = retries,
             skipped_cooldown_count = skipped_cooldown,
+            budget_exhausted,
         );
-        Ok((polled, terminal, pending, retries, skipped_cooldown))
+        Ok((
+            polled,
+            terminal,
+            pending,
+            retries,
+            skipped_cooldown,
+            budget_exhausted,
+        ))
     }
 
     pub async fn run_upstream_reconciliation_once(
@@ -602,6 +634,7 @@ impl TavilyProxy {
             research_pending_count,
             research_retry_count,
             research_skipped_cooldown_count,
+            research_budget_exhausted,
         ) = self.run_research_terminal_sweep(usage_base, &started_at).await?;
         let candidate_batch = self
             .key_store
@@ -641,6 +674,8 @@ impl TavilyProxy {
             let mut other_retry_windows = 0_i64;
             let mut key_backoff_window_count = 0_i64;
             let mut skipped_by_key_backoff = 0_i64;
+            let mut attempted_candidate_count = 0_i64;
+            let mut budget_exhausted = research_budget_exhausted;
             let mut cooling_keys = HashSet::<String>::new();
             for (index, candidate) in candidates.into_iter().enumerate() {
                 let in_recent_lane = index < recent_candidate_count as usize;
@@ -672,7 +707,14 @@ impl TavilyProxy {
                 let mut retry_at = None;
                 let mut retry_reason = None;
                 let mut retry_key_id = None;
+                let mut candidate_attempted = false;
                 for key_id in key_ids {
+                    if started_at.elapsed().as_secs()
+                        >= Self::RECONCILIATION_REQUEST_START_BUDGET_SECS
+                    {
+                        budget_exhausted = true;
+                        break;
+                    }
                     match self
                         .key_store
                         .reserve_upstream_usage_attempt(&key_id)
@@ -687,6 +729,10 @@ impl TavilyProxy {
                             break;
                         }
                     }
+                    if !candidate_attempted {
+                        attempted_candidate_count += 1;
+                        candidate_attempted = true;
+                    }
                     match self
                         .fetch_upstream_project_usage(&key_id, usage_base, &candidate.project_id)
                         .await
@@ -699,6 +745,9 @@ impl TavilyProxy {
                             break;
                         }
                     }
+                }
+                if budget_exhausted {
+                    break;
                 }
                 if let (Some(retry_reason), Some(retry_key_id)) = (retry_reason, retry_key_id) {
                         let reason_kind =
@@ -771,7 +820,7 @@ impl TavilyProxy {
                     }
                 }
             }
-            Ok::<(i64, i64, i64, i64, i64, i64, i64, i64), ProxyError>((
+            Ok::<(i64, i64, i64, i64, i64, i64, i64, i64, i64, bool), ProxyError>((
                 settled,
                 settled_recent,
                 settled_backlog,
@@ -780,6 +829,8 @@ impl TavilyProxy {
                 other_retry_windows,
                 key_backoff_window_count,
                 skipped_by_key_backoff,
+                attempted_candidate_count,
+                budget_exhausted,
             ))
         }
         .await;
@@ -798,6 +849,8 @@ impl TavilyProxy {
                 other_retry_windows,
                 key_backoff_window_count,
                 skipped_by_key_backoff,
+                attempted_candidate_count,
+                budget_exhausted,
             )) => {
                 tracing::info!(
                     component = "reconciliation",
@@ -825,13 +878,21 @@ impl TavilyProxy {
                     research_pending_count,
                     research_retry_count,
                     research_skipped_cooldown_count,
+                    budget_exhausted,
                 );
-                let attempted_candidate_count = candidate_count
-                    .saturating_sub(skipped_by_key_backoff)
-                    .max(1);
+                self.key_store
+                    .record_upstream_reconciliation_run_stats(
+                        started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                        attempted_candidate_count,
+                        settled,
+                        upstream_429_retry_windows,
+                        budget_exhausted,
+                    )
+                    .await?;
                 let pressure = settled == 0
                     && upstream_429_retry_windows > 0
-                    && upstream_429_retry_windows.saturating_mul(2) >= attempted_candidate_count;
+                    && upstream_429_retry_windows.saturating_mul(2)
+                        >= attempted_candidate_count.max(1);
                 let (pressure_streak, backoff_level, backoff_until) = self
                     .key_store
                     .update_upstream_reconciliation_global_backoff(
@@ -1429,9 +1490,11 @@ impl TavilyProxy {
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn scheduled_job_finish_and_enqueue_auto_at(
         &self,
         job_id: i64,
+        claim_generation: i64,
         job_type: &str,
         key_id: Option<&str>,
         attempt: i64,
@@ -1441,12 +1504,48 @@ impl TavilyProxy {
         self.key_store
             .scheduled_job_finish_and_enqueue_auto_at(
                 job_id,
+                claim_generation,
                 job_type,
                 key_id,
                 attempt,
                 message,
                 available_at,
             )
+            .await
+    }
+
+    pub async fn scheduled_job_finish_claimed(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+        status: &str,
+        message: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .scheduled_job_finish_claimed(job_id, claim_generation, status, message)
+            .await
+    }
+
+    pub async fn ensure_auth_token_logs_alert_time_index(&self) -> Result<(), ProxyError> {
+        self.key_store
+            .ensure_auth_token_logs_alert_time_index()
+            .await
+    }
+
+    pub async fn upstream_reconciliation_backoff_until(&self) -> Result<i64, ProxyError> {
+        let (_, _, backoff_until) = self
+            .key_store
+            .upstream_reconciliation_global_backoff_state()
+            .await?;
+        Ok(backoff_until)
+    }
+
+    pub async fn record_upstream_reconciliation_budget_exhausted(
+        &self,
+        duration_ms: i64,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .record_upstream_reconciliation_run_stats(duration_ms, 0, 0, 0, true)
             .await
     }
 
@@ -1478,6 +1577,10 @@ impl TavilyProxy {
 
     pub async fn abandon_active_scheduled_jobs(&self) -> Result<u64, ProxyError> {
         self.key_store.abandon_active_scheduled_jobs().await
+    }
+
+    pub async fn recover_stale_scheduled_jobs(&self) -> Result<u64, ProxyError> {
+        self.key_store.recover_stale_scheduled_jobs().await
     }
 
     pub async fn sqlite_db_stats(&self) -> Result<SqliteDbStats, ProxyError> {

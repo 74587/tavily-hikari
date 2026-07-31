@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+type HaGcChannelStateRow = (Option<i64>, i64, Option<String>, Option<i64>, i64, i64);
+
 impl KeyStore {
     pub(crate) async fn persist_ha_node_state(
         &self,
@@ -368,6 +370,38 @@ impl KeyStore {
                 && high_watermark > acked
                 && (!has_retained_after_ack || has_retained_gap_after_ack)
         });
+        let oldest_created_at: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT created_at FROM {table} ORDER BY created_at ASC, seq ASC LIMIT 1"
+        ))
+        .fetch_optional(&mut *conn)
+        .await?;
+        let gc_state_row: Option<HaGcChannelStateRow> =
+            sqlx::query_as(
+                r#"SELECT last_progress_at, last_deleted_rows, last_defer_reason,
+                          next_retry_at, batch_size, consecutive_no_progress
+                   FROM ha_outbox_gc_channel_state WHERE channel = ?"#,
+            )
+            .bind(channel.as_str())
+            .fetch_optional(&mut *conn)
+            .await?;
+        let (
+            last_progress_at,
+            last_deleted_rows,
+            last_defer_reason,
+            next_retry_at,
+            batch_size,
+            consecutive_no_progress,
+        ) = gc_state_row.unwrap_or((None, 0, None, None, 250, 0));
+        let now = self.backend_time.now_ts();
+        let gc_state = if consecutive_no_progress >= 3 {
+            "stalled"
+        } else if last_deleted_rows > 0 {
+            "draining"
+        } else if last_defer_reason.is_some() {
+            "deferred"
+        } else {
+            "idle"
+        };
         let cursor_state = if expired_backlog {
             "expired_backlog"
         } else if acked_seq == Some(0) && high_watermark > 0 {
@@ -387,6 +421,12 @@ impl KeyStore {
             cursor_state: cursor_state.to_string(),
             retention_secs: ha_channel_retention_secs(channel),
             expired_backlog,
+            gc_state: gc_state.to_string(),
+            oldest_age_secs: oldest_created_at.map(|created_at| now.saturating_sub(created_at).max(0)),
+            last_progress_at,
+            last_defer_reason,
+            next_retry_at,
+            batch_size,
         })
     }
 
@@ -960,7 +1000,7 @@ impl KeyStore {
     }
 
     async fn table_exists_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut SqliteConnection,
         table: &str,
     ) -> Result<bool, ProxyError> {
         let sql = if is_observability_table(table) {
@@ -970,7 +1010,7 @@ impl KeyStore {
         };
         Ok(sqlx::query_scalar::<_, i64>(sql)
             .bind(table)
-            .fetch_one(&mut **conn)
+            .fetch_one(&mut *conn)
             .await?
             != 0)
     }
@@ -1103,7 +1143,7 @@ impl KeyStore {
         sqlx::query("PRAGMA foreign_keys = OFF")
             .execute(&mut *conn)
             .await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let mut conn = ImmediateSqliteTransaction::begin(conn).await?;
         let init_result = async {
             insert_ha_outbox_suppression_on_conn(&mut conn).await?;
             if mode == HaBaselineApplyMode::Replace {
@@ -1126,10 +1166,7 @@ impl KeyStore {
         }
         .await;
         if let Err(err) = init_result {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            let _ = sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&mut *conn)
-                .await;
+            let _ = conn.rollback().await;
             return Err(err);
         }
         Ok(HaBaselineApplySession {
@@ -1147,10 +1184,10 @@ impl KeyStore {
         &self,
         channel: HaSyncChannel,
     ) -> Result<HaEventsApplySession, ProxyError> {
-        let mut conn = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let conn = self.pool.acquire().await?;
+        let mut conn = ImmediateSqliteTransaction::begin(conn).await?;
         if let Err(err) = insert_ha_outbox_suppression_on_conn(&mut conn).await {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            let _ = conn.rollback().await;
             return Err(err);
         }
         Ok(HaEventsApplySession {
@@ -1323,19 +1360,19 @@ impl KeyStore {
 }
 
 async fn insert_ha_outbox_suppression_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
 ) -> Result<(), ProxyError> {
     sqlx::query("INSERT OR IGNORE INTO ha_outbox_suppression (id) VALUES ('local')")
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
 
 async fn clear_ha_outbox_suppression_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
 ) -> Result<(), ProxyError> {
     sqlx::query("DELETE FROM ha_outbox_suppression WHERE id = 'local'")
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
@@ -1811,7 +1848,7 @@ fn ha_trigger_resource_id(alias: &str, columns: &[String]) -> String {
 }
 
 async fn lookup_peer_billing_ledger_local_id_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     peer_node_id: &str,
     peer_auth_token_log_id: i64,
 ) -> Result<Option<i64>, ProxyError> {
@@ -1825,13 +1862,13 @@ async fn lookup_peer_billing_ledger_local_id_on_conn(
     )
     .bind(peer_node_id)
     .bind(peer_auth_token_log_id)
-    .fetch_optional(&mut **conn)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(ProxyError::from)
 }
 
 async fn get_or_create_peer_billing_ledger_local_id_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     peer_node_id: &str,
     peer_auth_token_log_id: i64,
 ) -> Result<i64, ProxyError> {
@@ -1848,7 +1885,7 @@ async fn get_or_create_peer_billing_ledger_local_id_on_conn(
         )
         .bind(peer_node_id)
         .bind(peer_auth_token_log_id)
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         return Ok(local_id);
     }
@@ -1856,13 +1893,13 @@ async fn get_or_create_peer_billing_ledger_local_id_on_conn(
     let min_ledger_id = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MIN(auth_token_log_id) FROM billing_ledger WHERE auth_token_log_id < 0",
     )
-    .fetch_one(&mut **conn)
+    .fetch_one(&mut *conn)
     .await?
     .unwrap_or(0);
     let min_mapping_id = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MIN(local_auth_token_log_id) FROM ha_billing_ledger_imports",
     )
-    .fetch_one(&mut **conn)
+    .fetch_one(&mut *conn)
     .await?
     .unwrap_or(0);
     let min_existing_id = min_ledger_id.min(min_mapping_id).min(0);
@@ -1883,13 +1920,13 @@ async fn get_or_create_peer_billing_ledger_local_id_on_conn(
     .bind(peer_node_id)
     .bind(peer_auth_token_log_id)
     .bind(local_id)
-    .execute(&mut **conn)
+    .execute(&mut *conn)
     .await?;
     Ok(local_id)
 }
 
 async fn prepare_peer_billing_ledger_row_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     peer_node_id: &str,
     op: &str,
     row: serde_json::Value,
@@ -1940,7 +1977,7 @@ async fn prepare_peer_billing_ledger_row_on_conn(
 }
 
 async fn prepare_peer_import_row_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     peer_node_id: Option<&str>,
     channel: HaSyncChannel,
     table: &str,
@@ -1957,7 +1994,7 @@ async fn prepare_peer_import_row_on_conn(
 }
 
 async fn insert_json_row_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     channel: HaSyncChannel,
     table: &str,
     row: &serde_json::Value,
@@ -2052,12 +2089,12 @@ async fn insert_json_row_on_conn(
     for (_, value) in selected {
         query = bind_json_value(query, value);
     }
-    query.execute(&mut **conn).await?;
+    query.execute(&mut *conn).await?;
     Ok(())
 }
 
 async fn delete_json_row_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     channel: HaSyncChannel,
     table: &str,
     resource_id: &str,
@@ -2105,7 +2142,7 @@ async fn delete_json_row_on_conn(
             })?;
             query = bind_json_value(query, value);
         }
-        query.execute(&mut **conn).await?;
+        query.execute(&mut *conn).await?;
         return Ok(());
     }
     let key_column = if columns.iter().any(|column| column.name == "id") {
@@ -2119,7 +2156,7 @@ async fn delete_json_row_on_conn(
     );
     sqlx::query(&sql)
         .bind(resource_id)
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
@@ -2131,11 +2168,11 @@ struct SqliteColumnInfo {
 }
 
 async fn table_column_info_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     table: &str,
 ) -> Result<Vec<SqliteColumnInfo>, ProxyError> {
     let rows = sqlx::query(&format!("PRAGMA table_info({})", quote_sqlite_identifier(table)))
-        .fetch_all(&mut **conn)
+        .fetch_all(&mut *conn)
         .await?;
     rows.into_iter()
         .map(|row| {
@@ -2315,7 +2352,7 @@ fn ha_runtime_counter_import_for_row(
 }
 
 async fn merge_peer_runtime_counter_on_conn(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: &mut SqliteConnection,
     peer_node_id: &str,
     channel: HaSyncChannel,
     table: &str,
@@ -2346,7 +2383,7 @@ async fn merge_peer_runtime_counter_on_conn(
     .bind(table)
     .bind(&counter.resource_id)
     .bind(&counter.counter_scope)
-    .fetch_optional(&mut **conn)
+    .fetch_optional(&mut *conn)
     .await?
     .unwrap_or(0);
     let delta = counter.counter_value.saturating_sub(previous).max(0);
@@ -2367,7 +2404,7 @@ async fn merge_peer_runtime_counter_on_conn(
     .bind(&counter.resource_id)
     .bind(&counter.counter_scope)
     .bind(shadow_value)
-    .execute(&mut **conn)
+    .execute(&mut *conn)
     .await?;
     if delta <= 0 {
         return Ok(true);
@@ -2396,7 +2433,7 @@ async fn merge_peer_runtime_counter_on_conn(
             .bind(token_id)
             .bind(month_start)
             .bind(delta)
-            .execute(&mut **conn)
+            .execute(&mut *conn)
             .await?;
         }
         HaRuntimeCounterFields::AccountMonthlyQuota {
@@ -2422,7 +2459,7 @@ async fn merge_peer_runtime_counter_on_conn(
             .bind(user_id)
             .bind(month_start)
             .bind(delta)
-            .execute(&mut **conn)
+            .execute(&mut *conn)
             .await?;
         }
         HaRuntimeCounterFields::TokenUsageBucket {
@@ -2442,7 +2479,7 @@ async fn merge_peer_runtime_counter_on_conn(
             .bind(bucket_start)
             .bind(granularity)
             .bind(delta)
-            .execute(&mut **conn)
+            .execute(&mut *conn)
             .await?;
         }
         HaRuntimeCounterFields::AccountUsageBucket {
@@ -2462,7 +2499,7 @@ async fn merge_peer_runtime_counter_on_conn(
             .bind(bucket_start)
             .bind(granularity)
             .bind(delta)
-            .execute(&mut **conn)
+            .execute(&mut *conn)
             .await?;
         }
     }
@@ -2568,24 +2605,18 @@ impl HaBaselineApplySession {
 
     pub async fn finish(mut self) -> Result<HaApplyResult, ProxyError> {
         if !self.saw_start || !self.saw_end {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *self.conn).await;
-            let _ = sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&mut *self.conn)
-                .await;
+            let _ = self.conn.rollback().await;
             return Err(ProxyError::Other(
                 "HA baseline must include baseline_start and baseline_end".to_string(),
             ));
         }
         if let Err(err) = clear_ha_outbox_suppression_on_conn(&mut self.conn).await {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *self.conn).await;
-            let _ = sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&mut *self.conn)
-                .await;
+            let _ = self.conn.rollback().await;
             return Err(err);
         }
-        sqlx::query("COMMIT").execute(&mut *self.conn).await?;
+        let mut conn = self.conn.commit_connection().await?;
         sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&mut *self.conn)
+            .execute(&mut *conn)
             .await?;
         Ok(HaApplyResult {
             channel: self.channel,
@@ -2595,16 +2626,8 @@ impl HaBaselineApplySession {
         })
     }
 
-    pub async fn abort(mut self) -> Result<(), ProxyError> {
-        let rollback_result = sqlx::query("ROLLBACK").execute(&mut *self.conn).await;
-        let foreign_keys_result = sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&mut *self.conn)
-            .await;
-        match (rollback_result, foreign_keys_result) {
-            (Err(err), _) => Err(err.into()),
-            (_, Err(err)) => Err(err.into()),
-            (Ok(_), Ok(_)) => Ok(()),
-        }
+    pub async fn abort(self) -> Result<(), ProxyError> {
+        self.conn.rollback().await
     }
 }
 
@@ -2730,16 +2753,16 @@ impl HaEventsApplySession {
 
     pub async fn finish(mut self) -> Result<HaApplyResult, ProxyError> {
         if !self.saw_start || !self.saw_end {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *self.conn).await;
+            let _ = self.conn.rollback().await;
             return Err(ProxyError::Other(
                 "HA events must include events_start and events_end".to_string(),
             ));
         }
         if let Err(err) = clear_ha_outbox_suppression_on_conn(&mut self.conn).await {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *self.conn).await;
+            let _ = self.conn.rollback().await;
             return Err(err);
         }
-        sqlx::query("COMMIT").execute(&mut *self.conn).await?;
+        self.conn.commit().await?;
         Ok(HaApplyResult {
             channel: self.channel,
             high_watermark: self.high_watermark,
@@ -2748,9 +2771,8 @@ impl HaEventsApplySession {
         })
     }
 
-    pub async fn abort(mut self) -> Result<(), ProxyError> {
-        sqlx::query("ROLLBACK").execute(&mut *self.conn).await?;
-        Ok(())
+    pub async fn abort(self) -> Result<(), ProxyError> {
+        self.conn.rollback().await
     }
 }
 
@@ -3030,7 +3052,7 @@ impl KeyStore {
         channel: HaSyncChannel,
         batch_size: i64,
         updated_at: i64,
-    ) -> Result<(i64, bool), ProxyError> {
+    ) -> Result<(i64, bool, bool), ProxyError> {
         let table = quote_sqlite_identifier(ha_channel_event_table(channel));
         let cursor_column = Self::ha_outbox_gc_legacy_cursor_column(channel);
         let last_seq: i64 = sqlx::query_scalar(&format!(
@@ -3088,7 +3110,7 @@ impl KeyStore {
             )
             .await?;
         }
-        Ok((invalid_seqs.len() as i64, !reached_end))
+        Ok((invalid_seqs.len() as i64, !reached_end, scanned_len > 0))
     }
 
     fn ha_outbox_gc_channel_mask(channel: HaSyncChannel) -> i64 {
@@ -3134,6 +3156,58 @@ impl KeyStore {
             .await
     }
 
+    pub(crate) async fn record_ha_outbox_gc_deferred(
+        &self,
+        reason: &str,
+    ) -> Result<(), ProxyError> {
+        let mut conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
+            .await
+            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
+        sqlx::query("PRAGMA busy_timeout = 100")
+            .execute(&mut *conn)
+            .await?;
+        let result = async {
+            let (next_channel, pending_channel_mask): (String, i64) = sqlx::query_as(
+                "SELECT next_channel, pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+            )
+            .fetch_one(&mut *conn)
+            .await?;
+            let pending_channel_mask = if pending_channel_mask == 0 {
+                7
+            } else {
+                pending_channel_mask & 7
+            };
+            let channel = Self::select_ha_outbox_gc_channel(
+                Self::ha_outbox_gc_channel_from_name(&next_channel),
+                pending_channel_mask,
+            );
+            let now = self.backend_time.now_ts();
+            sqlx::query(
+                r#"UPDATE ha_outbox_gc_channel_state
+                   SET last_attempt_at = ?, last_defer_reason = ?, next_retry_at = ?,
+                       consecutive_no_progress = consecutive_no_progress + 1
+                   WHERE channel = ?"#,
+            )
+            .bind(now)
+            .bind(reason)
+            .bind(now.saturating_add(30))
+            .bind(channel.as_str())
+            .execute(&mut *conn)
+            .await?;
+            Ok::<(), ProxyError>(())
+        }
+        .await;
+        let restore_result = sqlx::query(&format!(
+            "PRAGMA busy_timeout = {}",
+            SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+        ))
+        .execute(&mut *conn)
+        .await;
+        result?;
+        restore_result?;
+        Ok(())
+    }
+
     async fn gc_ha_outbox_online_with_options(
         &self,
         options: HaOutboxGcOptions,
@@ -3176,11 +3250,12 @@ impl KeyStore {
             let mut invalid_legacy_deleted_rows = 0_i64;
             let mut retention_deleted_rows = 0_i64;
             let mut legacy_has_more = false;
+            let mut legacy_cursor_advanced = false;
 
             // A slice owns one persisted channel. Advancing the cursor after every
             // slice keeps a hot control stream from monopolizing online maintenance.
             while batches < max_batches && Instant::now() < deadline {
-                let (deleted_invalid, scanned_more_legacy) =
+                let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
                     Self::delete_ha_invalid_legacy_events_bounded_on_conn(
                     &mut conn,
                     channel,
@@ -3189,6 +3264,7 @@ impl KeyStore {
                 )
                 .await?;
                 legacy_has_more = scanned_more_legacy;
+                legacy_cursor_advanced |= scanned_legacy_rows;
                 invalid_legacy_deleted_rows += deleted_invalid;
                 deleted_rows += deleted_invalid;
                 batches += 1;
@@ -3255,6 +3331,36 @@ impl KeyStore {
             .execute(&mut *conn)
             .await?;
             let completed = next_pending_channel_mask == 0;
+            let now = self.backend_time.now_ts();
+            let defer_reason = channel_has_more.then_some("has_more");
+            sqlx::query(
+                r#"UPDATE ha_outbox_gc_channel_state
+                   SET last_attempt_at = ?,
+                       last_progress_at = CASE WHEN ? > 0 OR ? THEN ? ELSE last_progress_at END,
+                       last_deleted_rows = ?,
+                       last_defer_reason = ?,
+                       next_retry_at = ?,
+                       consecutive_no_progress = CASE
+                           WHEN ? > 0 OR ? OR ? = 0 THEN 0
+                           ELSE consecutive_no_progress + 1
+                       END,
+                       batch_size = ?
+                   WHERE channel = ?"#,
+            )
+            .bind(now)
+            .bind(deleted_rows)
+            .bind(legacy_cursor_advanced)
+            .bind(now)
+            .bind(deleted_rows)
+            .bind(defer_reason)
+            .bind(channel_has_more.then_some(now.saturating_add(30)))
+            .bind(deleted_rows)
+            .bind(legacy_cursor_advanced)
+            .bind(i64::from(channel_has_more))
+            .bind(batch_size)
+            .bind(channel.as_str())
+            .execute(&mut *conn)
+            .await?;
             Ok::<HaOutboxGcReport, ProxyError>(HaOutboxGcReport {
                 batch_size: options.batch_size,
                 max_batches: options.max_batches,

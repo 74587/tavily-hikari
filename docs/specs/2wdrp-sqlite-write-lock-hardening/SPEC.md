@@ -242,6 +242,18 @@ source when a usable persisted runtime already exists.
 
 ## Acceptance
 
+### Cancellation-safe maintenance transactions
+
+- Production code that uses raw `BEGIN IMMEDIATE` must own the pooled physical connection through a
+  guard. Successful work commits explicitly; handled failures roll back explicitly; cancellation or
+  guard drop detaches and closes the physical connection so an open transaction cannot return to the
+  pool.
+- Scheduled-job claims carry a monotonically increasing `claim_generation`. Completion, failure,
+  and atomic continuation persistence must match both job id and generation.
+- The stale-job reaper may recover an HA GC claim after 120 seconds or an upstream reconciliation
+  claim after 60 seconds. Recovery increments the generation and applies the existing 30-second
+  delay, making repeated reaper passes idempotent.
+
 - Under a competing SQLite writer, acquiring a quota subject lock eventually succeeds after the
   writer releases within the existing wait budget.
 - Under a competing SQLite writer that outlives SQLite's builtin busy timeout but releases before

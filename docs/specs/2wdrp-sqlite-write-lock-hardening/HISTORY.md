@@ -211,3 +211,9 @@
 - Added lock-holding regression coverage proving those admin reads return promptly under write
   contention and expose the queued delta after the lock clears, while the healthy-path
   flush-before-read semantics remain intact.
+
+## 2026-07-31
+
+- Added cancellation-safe immediate transactions, generation-bound scheduled-job completion, and
+  threshold-based stale recovery so cancelled work cannot pollute the pool or complete a reclaimed
+  job.

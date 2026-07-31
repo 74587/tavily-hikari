@@ -406,7 +406,13 @@ async fn attach_internal_source_channel_health(
                 tavily_hikari::HaSyncChannel::Billing
                 | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
             },
-            expired_backlog: peer_health.is_some_and(|health| health.expired_backlog),
+            expired_backlog: peer_health.as_ref().is_some_and(|health| health.expired_backlog),
+            gc_state: peer_health.as_ref().map(|health| health.gc_state.clone()).unwrap_or_else(|| "unknown".to_string()),
+            oldest_age_secs: peer_health.as_ref().and_then(|health| health.oldest_age_secs),
+            last_progress_at: peer_health.as_ref().and_then(|health| health.last_progress_at),
+            last_defer_reason: peer_health.as_ref().and_then(|health| health.last_defer_reason.clone()),
+            next_retry_at: peer_health.as_ref().and_then(|health| health.next_retry_at),
+            batch_size: peer_health.as_ref().map(|health| health.batch_size).unwrap_or(250),
         });
     }
     status.peer_nodes = vec![tavily_hikari::HaPeerNodeView {
@@ -492,6 +498,12 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                         | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
                     },
                     expired_backlog: false,
+                    gc_state: "unknown".to_string(),
+                    oldest_age_secs: None,
+                    last_progress_at: None,
+                    last_defer_reason: None,
+                    next_retry_at: None,
+                    batch_size: 250,
                 })
             } else if status.role == tavily_hikari::HaNodeRole::Standby {
                 let source_health = peer
@@ -564,6 +576,12 @@ async fn build_admin_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaStatus
                         | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
                     },
                     expired_backlog: source_expired_backlog,
+                    gc_state: source_health.as_ref().map(|health| health.gc_state.clone()).unwrap_or_else(|| "unknown".to_string()),
+                    oldest_age_secs: source_health.as_ref().and_then(|health| health.oldest_age_secs),
+                    last_progress_at: source_health.as_ref().and_then(|health| health.last_progress_at),
+                    last_defer_reason: source_health.as_ref().and_then(|health| health.last_defer_reason.clone()),
+                    next_retry_at: source_health.as_ref().and_then(|health| health.next_retry_at),
+                    batch_size: source_health.as_ref().map(|health| health.batch_size).unwrap_or(250),
                 })
             } else {
                 state.proxy.ha_peer_channel_health(channel, &peer.node_id).await.ok()

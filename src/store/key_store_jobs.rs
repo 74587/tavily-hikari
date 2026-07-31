@@ -112,7 +112,7 @@ impl KeyStore {
     }
 
     async fn create_scheduled_jobs_indexes_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
     ) -> Result<(), ProxyError> {
         sqlx::query(
             r#"
@@ -120,7 +120,7 @@ impl KeyStore {
             ON scheduled_jobs(COALESCE(started_at, queued_at) DESC, id DESC)
             "#,
         )
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         sqlx::query(
             r#"
@@ -128,7 +128,7 @@ impl KeyStore {
             ON scheduled_jobs(status, available_at ASC, queued_at ASC, id ASC)
             "#,
         )
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         sqlx::query(
             r#"
@@ -137,7 +137,7 @@ impl KeyStore {
             WHERE status = 'queued' OR status = 'running'
             "#,
         )
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
@@ -153,14 +153,22 @@ impl KeyStore {
             .execute(&self.pool)
             .await?;
         }
+        if !self.table_column_exists("scheduled_jobs", "claim_generation").await? {
+            sqlx::query(
+                "ALTER TABLE scheduled_jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
         self.create_scheduled_jobs_indexes().await
     }
 
     async fn rebuild_scheduled_jobs_table(&self) -> Result<(), ProxyError> {
-        let mut conn = begin_immediate_sqlite_connection(&self.pool).await?;
+        let mut raw_conn = self.pool.acquire().await?;
         sqlx::query("PRAGMA foreign_keys = OFF")
-            .execute(&mut *conn)
+            .execute(&mut *raw_conn)
             .await?;
+        let mut conn = ImmediateSqliteTransaction::begin(raw_conn).await?;
 
         let rebuild_result = async {
             sqlx::query("DROP TABLE IF EXISTS scheduled_jobs_new")
@@ -178,6 +186,7 @@ impl KeyStore {
                     message TEXT,
                     queued_at INTEGER NOT NULL,
                     available_at INTEGER NOT NULL DEFAULT 0,
+                    claim_generation INTEGER NOT NULL DEFAULT 0,
                     started_at INTEGER,
                     finished_at INTEGER,
                     FOREIGN KEY (key_id) REFERENCES api_keys(id)
@@ -198,6 +207,7 @@ impl KeyStore {
                     message,
                     queued_at,
                     available_at,
+                    claim_generation,
                     started_at,
                     finished_at
                 )
@@ -210,7 +220,8 @@ impl KeyStore {
                     attempt,
                     message,
                     started_at,
-                    started_at,
+                    0,
+                    0,
                     started_at,
                     finished_at
                 FROM scheduled_jobs
@@ -240,18 +251,19 @@ impl KeyStore {
         }
         .await;
 
-        let reenable_result = sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&mut *conn)
-            .await;
-        if rebuild_result.is_ok() {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-        } else {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        match rebuild_result {
+            Ok(()) => {
+                let mut raw_conn = conn.commit_connection().await?;
+                sqlx::query("PRAGMA foreign_keys = ON")
+                    .execute(&mut *raw_conn)
+                    .await?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = conn.rollback().await;
+                Err(err)
+            }
         }
-        if let Err(err) = reenable_result {
-            return Err(ProxyError::Database(err));
-        }
-        rebuild_result
     }
 
     fn sqlite_wal_path(&self) -> String {
@@ -332,7 +344,7 @@ impl KeyStore {
                     Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id).await?
                     && status == "running"
                 {
-                    sqlx::query("COMMIT").execute(&mut *conn).await?;
+                    conn.commit().await?;
                     return Ok::<i64, ProxyError>(job_id);
                 }
 
@@ -360,7 +372,7 @@ impl KeyStore {
                 .bind(started_at)
                 .execute(&mut *conn)
                 .await?;
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(res.last_insert_rowid())
             }
             .await;
@@ -393,7 +405,7 @@ impl KeyStore {
     }
 
     async fn abandon_stale_quota_sync_job_locked(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         job_type: &str,
         key_id: Option<&str>,
         now: i64,
@@ -426,13 +438,13 @@ impl KeyStore {
         .bind(stale_group)
         .bind(key_id)
         .bind(key_id)
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
     async fn scheduled_job_lookup_active_locked(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         job_type: &str,
         key_id: Option<&str>,
     ) -> Result<Option<(i64, String, String)>, ProxyError> {
@@ -450,7 +462,7 @@ impl KeyStore {
         .bind(job_type)
         .bind(key_id)
         .bind(key_id)
-        .fetch_optional(&mut **conn)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(ProxyError::from)
     }
@@ -551,7 +563,7 @@ impl KeyStore {
                         .execute(&mut *conn)
                         .await?;
                     }
-                    sqlx::query("COMMIT").execute(&mut *conn).await?;
+                    conn.commit().await?;
                     let effective_trigger_source = if promoted {
                         trigger_source.to_string()
                     } else {
@@ -590,7 +602,7 @@ impl KeyStore {
                 .bind(available_at)
                 .execute(&mut *conn)
                 .await?;
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(ScheduledJobEnqueueResult {
                     job_id: res.last_insert_rowid(),
                     created: true,
@@ -622,9 +634,11 @@ impl KeyStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn scheduled_job_finish_and_enqueue_auto_at(
         &self,
         job_id: i64,
+        claim_generation: i64,
         job_type: &str,
         key_id: Option<&str>,
         attempt: i64,
@@ -632,36 +646,70 @@ impl KeyStore {
         available_at: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
         let finished_at = self.backend_time.now_ts();
-        let mut conn = tokio::time::timeout(
+        let mut raw_conn = tokio::time::timeout(
             Duration::from_millis(100),
             self.pool.acquire(),
         )
         .await
         .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
+        sqlx::query("PRAGMA busy_timeout = 100")
+            .execute(&mut *raw_conn)
+            .await?;
+        let mut conn = ImmediateSqliteTransaction::begin(raw_conn).await?;
         let result = async {
             // A deferred online slice must not turn a short SQLite writer conflict
             // into the scheduler's long retry window.
-            sqlx::query("PRAGMA busy_timeout = 100")
-                .execute(&mut *conn)
-                .await?;
-            sqlx::query("BEGIN IMMEDIATE")
-                .execute(&mut *conn)
-                .await?;
             let updated = sqlx::query(
                 r#"UPDATE scheduled_jobs
                    SET status = 'success', message = ?, finished_at = ?
-                   WHERE id = ? AND status = 'running'"#,
+                   WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
             )
             .bind(message)
             .bind(finished_at)
             .bind(job_id)
+            .bind(claim_generation)
             .execute(&mut *conn)
             .await?;
             if updated.rows_affected() == 0 {
-                sqlx::query("ROLLBACK").execute(&mut *conn).await?;
                 return Err(ProxyError::Other(format!(
                     "scheduled job {job_id} was not running"
                 )));
+            }
+
+            if job_type == "ha_outbox_gc"
+                && let Some(defer_reason) = message.and_then(|value| {
+                    value
+                        .split_whitespace()
+                        .find_map(|part| part.strip_prefix("deferred="))
+                        .map(|value| value.split_once('=').map_or(value, |(head, _)| head))
+                })
+            {
+                let (next_channel, pending_channel_mask): (String, i64) = sqlx::query_as(
+                    "SELECT next_channel, pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+                )
+                .fetch_one(&mut *conn)
+                .await?;
+                let pending_channel_mask = if pending_channel_mask == 0 {
+                    7
+                } else {
+                    pending_channel_mask & 7
+                };
+                let channel = Self::select_ha_outbox_gc_channel(
+                    Self::ha_outbox_gc_channel_from_name(&next_channel),
+                    pending_channel_mask,
+                );
+                sqlx::query(
+                    r#"UPDATE ha_outbox_gc_channel_state
+                       SET last_attempt_at = ?, last_defer_reason = ?, next_retry_at = ?,
+                           consecutive_no_progress = consecutive_no_progress + 1
+                       WHERE channel = ?"#,
+                )
+                .bind(finished_at)
+                .bind(defer_reason)
+                .bind(available_at)
+                .bind(channel.as_str())
+                .execute(&mut *conn)
+                .await?;
             }
 
             if let Some((continuation_id, status, current_trigger_source)) =
@@ -676,7 +724,6 @@ impl KeyStore {
                     .execute(&mut *conn)
                     .await?;
                 }
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
                 return Ok(ScheduledJobEnqueueResult {
                     job_id: continuation_id,
                     created: false,
@@ -706,7 +753,6 @@ impl KeyStore {
             .bind(available_at)
             .execute(&mut *conn)
             .await?;
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
             Ok(ScheduledJobEnqueueResult {
                 job_id: inserted.last_insert_rowid(),
                 created: true,
@@ -716,16 +762,22 @@ impl KeyStore {
             })
         }
         .await;
-        if result.is_err() {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        match result {
+            Ok(result) => {
+                sqlx::query(&format!(
+                    "PRAGMA busy_timeout = {}",
+                    SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+                ))
+                .execute(&mut *conn)
+                .await?;
+                conn.commit().await?;
+                Ok(result)
+            }
+            Err(err) => {
+                let _ = conn.rollback().await;
+                Err(err)
+            }
         }
-        let _ = sqlx::query(&format!(
-            "PRAGMA busy_timeout = {}",
-            crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
-        ))
-        .execute(&mut *conn)
-        .await;
-        result
     }
 
     pub(crate) async fn fetch_queued_scheduled_jobs(
@@ -801,7 +853,8 @@ impl KeyStore {
                     r#"
                     UPDATE scheduled_jobs
                     SET status = 'running',
-                        started_at = ?
+                        started_at = ?,
+                        claim_generation = claim_generation + 1
                     WHERE id = ?
                       AND status = 'queued'
                       AND available_at <= ?
@@ -813,7 +866,7 @@ impl KeyStore {
                 .execute(&mut *conn)
                 .await?;
                 if updated.rows_affected() == 0 {
-                    sqlx::query("COMMIT").execute(&mut *conn).await?;
+                    conn.commit().await?;
                     return Ok::<Option<JobLog>, ProxyError>(None);
                 }
                 let row = sqlx::query_as::<
@@ -830,6 +883,7 @@ impl KeyStore {
                         i64,
                         Option<i64>,
                         Option<i64>,
+                        i64,
                     ),
                 >(
                     r#"
@@ -844,7 +898,8 @@ impl KeyStore {
                         j.message,
                         j.queued_at,
                         j.started_at,
-                        j.finished_at
+                        j.finished_at,
+                        j.claim_generation
                     FROM scheduled_jobs j
                     LEFT JOIN api_keys k ON k.id = j.key_id
                     WHERE j.id = ?
@@ -854,7 +909,7 @@ impl KeyStore {
                 .bind(job_id)
                 .fetch_optional(&mut *conn)
                 .await?;
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(row.map(
                     |(
                         id,
@@ -868,6 +923,7 @@ impl KeyStore {
                         queued_at,
                         started_at,
                         finished_at,
+                        claim_generation,
                     )| JobLog {
                         id,
                         job_type,
@@ -880,6 +936,7 @@ impl KeyStore {
                         queued_at,
                         started_at,
                         finished_at,
+                        claim_generation,
                     },
                 ))
             }
@@ -924,6 +981,7 @@ impl KeyStore {
                 i64,
                 Option<i64>,
                 Option<i64>,
+                i64,
             ),
         >(
             r#"
@@ -938,7 +996,8 @@ impl KeyStore {
                 j.message,
                 j.queued_at,
                 j.started_at,
-                j.finished_at
+                j.finished_at,
+                j.claim_generation
             FROM scheduled_jobs j
             LEFT JOIN api_keys k ON k.id = j.key_id
             WHERE j.id = ?
@@ -962,6 +1021,7 @@ impl KeyStore {
                     queued_at,
                     started_at,
                     finished_at,
+                    claim_generation,
                 )| JobLog {
                     id,
                     job_type,
@@ -974,6 +1034,7 @@ impl KeyStore {
                     queued_at,
                     started_at,
                     finished_at,
+                    claim_generation,
                 },
             )
         })
@@ -998,7 +1059,7 @@ impl KeyStore {
                     .await?
                     .is_some()
                 {
-                    sqlx::query("COMMIT").execute(&mut *conn).await?;
+                    conn.commit().await?;
                     return Ok::<Option<i64>, ProxyError>(None);
                 }
                 let res = sqlx::query(
@@ -1011,10 +1072,11 @@ impl KeyStore {
                         attempt,
                         queued_at,
                         available_at,
+                        claim_generation,
                         started_at,
                         finished_at
                     )
-                    VALUES (?, ?, ?, 'running', ?, ?, ?, ?, NULL)
+                    VALUES (?, ?, ?, 'running', ?, ?, ?, 1, ?, NULL)
                     "#,
                 )
                 .bind(job_type)
@@ -1026,7 +1088,7 @@ impl KeyStore {
                 .bind(now)
                 .execute(&mut *conn)
                 .await?;
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(Some(res.last_insert_rowid()))
             }
             .await;
@@ -1129,6 +1191,34 @@ impl KeyStore {
         self.abandon_active_scheduled_jobs().await
     }
 
+    pub(crate) async fn recover_stale_scheduled_jobs(&self) -> Result<u64, ProxyError> {
+        let now = self.backend_time.now_ts();
+        let result = sqlx::query(
+            r#"UPDATE scheduled_jobs
+               SET status = 'queued',
+                   started_at = NULL,
+                   finished_at = NULL,
+                   available_at = ?,
+                   claim_generation = claim_generation + 1,
+                   message = CASE
+                       WHEN job_type = 'ha_outbox_gc' THEN 'deferred=stale_recovery'
+                       ELSE 'deferred=stale_reconciliation_recovery'
+                   END
+               WHERE status = 'running'
+                 AND started_at IS NOT NULL
+                 AND (
+                     (job_type = 'ha_outbox_gc' AND started_at <= ?)
+                     OR (job_type = 'upstream_reconciliation' AND started_at <= ?)
+                 )"#,
+        )
+        .bind(now.saturating_add(30))
+        .bind(now.saturating_sub(120))
+        .bind(now.saturating_sub(60))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub(crate) async fn scheduled_job_finish(
         &self,
         job_id: i64,
@@ -1169,6 +1259,56 @@ impl KeyStore {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn scheduled_job_finish_claimed(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+        status: &str,
+        message: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        let finished_at = self.backend_time.now_ts();
+        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
+        let mut retry_attempt = 0usize;
+        loop {
+            match sqlx::query(
+                r#"UPDATE scheduled_jobs
+                   SET status = ?, message = ?, finished_at = ?
+                   WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
+            )
+            .bind(status)
+            .bind(message)
+            .bind(finished_at)
+            .bind(job_id)
+            .bind(claim_generation)
+            .execute(&self.pool)
+            .await
+            {
+                Ok(updated) if updated.rows_affected() == 0 => {
+                    return Err(ProxyError::Other(format!(
+                        "scheduled job {job_id} claim generation {claim_generation} is stale"
+                    )));
+                }
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    let err = ProxyError::Database(err);
+                    if sleep_before_sqlite_transient_write_retry(
+                        &self.backend_time,
+                        "scheduled job finish claimed",
+                        retry_attempt,
+                        deadline,
+                        &err,
+                    )
+                    .await
+                    {
+                        retry_attempt += 1;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
     }
 
     pub(crate) async fn scheduled_job_update_message(
