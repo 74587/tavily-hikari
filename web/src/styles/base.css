@@ -578,7 +578,8 @@
 .brand-lockup {
   display: inline-flex;
   align-items: flex-start;
-  inline-size: min(100%, 260px);
+  inline-size: 260px;
+  max-inline-size: 100%;
   min-inline-size: 0;
   container-type: inline-size;
 }
@@ -589,6 +590,10 @@
 
 .brand-lockup-assets-compact {
   display: none;
+}
+
+.brand-lockup-compact .brand-lockup-assets-compact {
+  display: contents;
 }
 
 .brand-lockup-image {

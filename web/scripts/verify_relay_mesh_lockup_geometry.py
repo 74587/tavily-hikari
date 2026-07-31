@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from generate_relay_mesh_brand_assets import remove_background
+from vectorize_relay_mesh_lockups import render_tagline_alpha
 
 
 WEB_ROOT = Path(__file__).resolve().parent.parent
@@ -22,12 +23,22 @@ COMPACT_VECTOR = REFERENCE_DIR / "approved-lockup-compact-vector-light.svg"
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 MINIMUM_EXACT_RATIO = 0.995
 MINIMUM_FOREGROUND_DICE = 0.995
+MINIMUM_WORDMARK_OUTLINE_DICE = 0.995
+MINIMUM_TAGLINE_OUTLINE_DICE = 0.99
 TAGLINE_HEIGHT_RANGE = range(36, 40)
 TAGLINE_WIDTH_RANGE = range(625, 636)
 TAGLINE_WORDMARK_GAP_RANGE = range(20, 29)
 TAGLINE_CENTER_RANGE = range(610, 621)
 FULL_LOCKUP_HEIGHT = 310
+WORDMARK_SHIFT_Y = -34
 WORDMARK_TRANSLATE = "translate(0 -34)"
+WORDMARK_SOURCE_TOP = 55
+WORDMARK_SOURCE_BOTTOM = 205
+WORDMARK_SOURCE_LEFT = 240
+WORDMARK_SOURCE_RIGHT = 990
+TAGLINE_SEPARATOR_CENTER_X = 530
+TAGLINE_SEPARATOR_CENTER_Y = 209.5
+TAGLINE_SEPARATOR_RADIUS = 4
 
 TAGLINE_LIGHT_STOPS = ((109, 40, 217), (3, 105, 161))
 TAGLINE_DARK_STOPS = ((167, 139, 250), (56, 189, 248))
@@ -133,8 +144,6 @@ def approved_correction_mask(shape: tuple[int, int], *, compact: bool) -> np.nda
     mask |= (x >= 122) & (x <= 177) & (y >= 34) & (y <= 74)
     if compact:
         mask |= (x >= 210) & (y >= 205)
-    else:
-        mask |= (x >= 240) & (y >= 30) & (y <= 260)
     return mask
 
 
@@ -149,6 +158,54 @@ def relative_luminance(rgb: tuple[int, int, int]) -> float:
 def contrast_ratio(left: tuple[int, int, int], right: tuple[int, int, int]) -> float:
     lighter, darker = sorted((relative_luminance(left), relative_luminance(right)), reverse=True)
     return (lighter + 0.05) / (darker + 0.05)
+
+
+def foreground_dice(expected: np.ndarray, actual: np.ndarray) -> float:
+    total = int(expected.sum()) + int(actual.sum())
+    if total == 0:
+        return 1.0
+    return 2 * int(np.count_nonzero(expected & actual)) / total
+
+
+def verify_outline(label: str, expected: np.ndarray, actual: np.ndarray, *, minimum_dice: float) -> None:
+    dice = foreground_dice(expected, actual)
+    print(f"{label}.foreground_dice={dice * 100:.8f}%")
+    if dice < minimum_dice:
+        raise SystemExit(f"{label} foreground Dice is below {minimum_dice * 100:.1f}%")
+
+
+def expected_wordmark_alpha() -> np.ndarray:
+    source = reference_alpha(FULL_LOCKUP_HEIGHT)
+    expected = np.zeros_like(source)
+    target_top = WORDMARK_SOURCE_TOP + WORDMARK_SHIFT_Y
+    target_bottom = WORDMARK_SOURCE_BOTTOM + WORDMARK_SHIFT_Y
+    expected[target_top:target_bottom, WORDMARK_SOURCE_LEFT:WORDMARK_SOURCE_RIGHT] = source[
+        WORDMARK_SOURCE_TOP:WORDMARK_SOURCE_BOTTOM,
+        WORDMARK_SOURCE_LEFT:WORDMARK_SOURCE_RIGHT,
+    ]
+    return expected
+
+
+def expected_tagline_alpha() -> np.ndarray:
+    expected = np.asarray(render_tagline_alpha()) >= 128
+    y, x = np.ogrid[:FULL_LOCKUP_HEIGHT, :1000]
+    expected |= (x - TAGLINE_SEPARATOR_CENTER_X) ** 2 + (y - TAGLINE_SEPARATOR_CENTER_Y) ** 2 <= TAGLINE_SEPARATOR_RADIUS**2
+    return expected
+
+
+def verify_full_lockup_outline_contract() -> None:
+    verify_outline(
+        "full.wordmark",
+        expected_wordmark_alpha(),
+        render_group_alpha(FULL_VECTOR, "wordmark", FULL_LOCKUP_HEIGHT),
+        minimum_dice=MINIMUM_WORDMARK_OUTLINE_DICE,
+    )
+    verify_outline(
+        "full.tagline",
+        expected_tagline_alpha(),
+        render_group_alpha(FULL_VECTOR, "tagline", FULL_LOCKUP_HEIGHT),
+        minimum_dice=MINIMUM_TAGLINE_OUTLINE_DICE,
+    )
 
 
 def verify_tagline_contract() -> None:
@@ -190,28 +247,30 @@ def verify_tagline_contract() -> None:
 def verify(vector_path: Path, *, height: int, compact: bool) -> None:
     validate_structure(vector_path, compact=compact)
     legacy_expected = reference_alpha(height)
-    actual = render_alpha(vector_path, height)
+    actual = render_alpha(vector_path, height) if compact else render_group_alpha(vector_path, "mark-artwork", height)
     expected = legacy_expected.copy()
+    if not compact:
+        expected[:, WORDMARK_SOURCE_LEFT:] = False
     correction_mask = approved_correction_mask(expected.shape, compact=compact)
     expected[correction_mask] = actual[correction_mask]
 
     exact = expected == actual
-    intersection = int(np.count_nonzero(expected & actual))
-    foreground_dice = 2 * intersection / (int(expected.sum()) + int(actual.sum()))
+    actual_dice = foreground_dice(expected, actual)
     exact_ratio = float(np.mean(exact))
     legacy_exact_ratio = float(np.mean(legacy_expected == actual))
     print(f"{vector_path.name}.legacy_exact_ratio={legacy_exact_ratio * 100:.8f}%")
     print(f"{vector_path.name}.corrected_exact_ratio={exact_ratio * 100:.8f}%")
-    print(f"{vector_path.name}.foreground_dice={foreground_dice * 100:.8f}%")
+    print(f"{vector_path.name}.foreground_dice={actual_dice * 100:.8f}%")
     if exact_ratio < MINIMUM_EXACT_RATIO:
         raise SystemExit(f"{vector_path.name} exact ratio is below 99.5%")
-    if foreground_dice < MINIMUM_FOREGROUND_DICE:
+    if actual_dice < MINIMUM_FOREGROUND_DICE:
         raise SystemExit(f"{vector_path.name} foreground Dice is below 99.5%")
 
 
 def main() -> None:
     verify(FULL_VECTOR, height=FULL_LOCKUP_HEIGHT, compact=False)
     verify(COMPACT_VECTOR, height=260, compact=True)
+    verify_full_lockup_outline_contract()
     verify_tagline_contract()
 
 
