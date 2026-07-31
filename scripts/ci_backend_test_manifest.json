@@ -503,6 +503,7 @@
         "server::tests::alerts_and_ha_event_exports::legacy_",
         "server::tests::alerts_and_ha_event_exports::dual_active_",
         "server::tests::alerts_and_ha_serving_modes::ha_",
+        "server::upstream_reconciliation_does_not_wait_for_db_execution_gate",
         "server::serve_tests::",
         "server::tests::system_settings_and_forward_proxy::startup_",
         "server::tests::admin_token_filters_and_maintenance::maintenance_",
