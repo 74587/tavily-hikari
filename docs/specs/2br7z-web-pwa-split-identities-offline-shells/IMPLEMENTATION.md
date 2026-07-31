@@ -36,7 +36,8 @@
 
 - 2026-07-31 品牌可读性修复：
   - 前置依赖：Python 侧执行 `python3 -m pip install --user Pillow fonttools numpy`；安装
-    `rsvg-convert`（macOS 使用 `brew install librsvg`，Debian/Ubuntu 使用 `sudo apt-get install librsvg2-bin`）。
+    `rsvg-convert` 与 `potrace`（macOS 使用 `brew install librsvg potrace`，Debian/Ubuntu 使用
+    `sudo apt-get install librsvg2-bin potrace`）。
   - `python3 web/scripts/vectorize_relay_mesh_lockups.py`
   - `python3 web/scripts/verify_relay_mesh_lockup_geometry.py`
   - `python3 web/scripts/generate_relay_mesh_brand_assets.py`
