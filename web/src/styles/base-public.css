@@ -1073,6 +1073,17 @@ body:has(.user-console-cli-skills-guide-proof) #storybook-root {
   }
 }
 
+@media (max-width: 359px) {
+  .update-banner-actions {
+    gap: 0.25rem;
+  }
+
+  .update-banner-actions button {
+    padding-inline: 0.5rem;
+    font-size: 0.75rem;
+  }
+}
+
 .public-home-footer {
   margin-top: 8px;
   padding: 18px 20px;
