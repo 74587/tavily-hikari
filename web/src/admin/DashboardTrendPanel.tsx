@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import type { DashboardHourlyRequestWindow } from '../api'
+import type { DashboardHourlyRequestWindow, DashboardRollupIntegrityStatus } from '../api'
 import SegmentedTabs from '../components/ui/SegmentedTabs'
 import { Bar, Line } from 'react-chartjs-2'
 import {
@@ -222,6 +222,7 @@ export default function DashboardTrendPanel({
   strings,
   overviewReady,
   hourlyRequestWindow,
+  rollupIntegrity,
   initialChartMode = 'results',
   initialVisibleResultSeries = DEFAULT_VISIBLE_RESULT_SERIES,
   initialVisibleTypeSeries = DEFAULT_VISIBLE_TYPE_SERIES,
@@ -232,6 +233,7 @@ export default function DashboardTrendPanel({
   strings: DashboardOverviewStrings
   overviewReady: boolean
   hourlyRequestWindow: DashboardHourlyRequestWindow
+  rollupIntegrity: DashboardRollupIntegrityStatus
   initialChartMode?: DashboardHourlyChartMode
   initialVisibleResultSeries?: ReadonlyArray<DashboardResultSeriesId>
   initialVisibleTypeSeries?: ReadonlyArray<DashboardTypeSeriesId>
@@ -579,6 +581,14 @@ export default function DashboardTrendPanel({
     rangeSlots.length,
     hourlyRequestWindow,
   )
+  const integrityLabel = rollupIntegrity.state === 'healthy'
+    ? strings.chartIntegrityHealthy
+    : rollupIntegrity.state === 'degraded'
+      ? strings.chartIntegrityDegraded
+      : strings.chartIntegrityRepairing
+  const integrityTimestamp = rollupIntegrity.lastVerifiedAt == null
+    ? null
+    : new Date(rollupIntegrity.lastVerifiedAt * 1000).toLocaleString()
 
   return (
     <section className="surface panel dashboard-trend-panel">
@@ -587,7 +597,13 @@ export default function DashboardTrendPanel({
           <h2>{strings.trendsTitle}</h2>
           <p className="panel-description">{strings.trendsDescription}</p>
         </div>
-        <div className="dashboard-trend-meta">{chartMeta}</div>
+        <div className="dashboard-trend-meta">
+          <span>{chartMeta}</span>
+          <span className={`dashboard-rollup-integrity is-${rollupIntegrity.state}`}>
+            {integrityLabel}
+            {integrityTimestamp && ` · ${strings.chartIntegrityLastVerified.replace('{time}', integrityTimestamp)}`}
+          </span>
+        </div>
       </div>
 
       <SegmentedTabs<DashboardHourlyChartMode>

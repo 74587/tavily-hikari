@@ -53,6 +53,38 @@ impl KeyStore {
         }
     }
 
+    pub(crate) async fn best_effort_flush_request_stats_writes_for_maintenance(
+        &self,
+        operation: &'static str,
+    ) -> Result<RequestStatsReadFreshness, ProxyError> {
+        const RETRY_BUDGET: Duration = Duration::from_millis(100);
+        let inflight_wait_deadline = self.backend_time.instant_now() + RETRY_BUDGET;
+        match self
+            .flush_request_stats_writes_with_wait_policy(
+                &self.read_flush_pool,
+                RETRY_BUDGET,
+                Some(inflight_wait_deadline),
+            )
+            .await
+        {
+            Ok(()) => Ok(RequestStatsReadFreshness::Fresh),
+            Err(err)
+                if is_transient_sqlite_write_error(&err)
+                    || is_request_stats_flush_wait_budget_exhausted(&err) =>
+            {
+                tracing::debug!(
+                    component = "dashboard_rollup_integrity",
+                    operation,
+                    retry_budget_ms = RETRY_BUDGET.as_millis() as u64,
+                    error = %err,
+                    "deferring integrity work until request statistics are durable"
+                );
+                Ok(RequestStatsReadFreshness::DurableFallback)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn flush_request_stats_writes_with_wait_policy(
         &self,
         pool: &SqlitePool,

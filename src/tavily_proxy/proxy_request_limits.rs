@@ -1338,14 +1338,15 @@ impl TavilyProxy {
         }
         self.key_store
             .request_stats_coalescer
-            .enqueue_request_log_rollups(
+            .enqueue_request_log_rollups(crate::store::RequestLogRollupInput {
                 api_key_id,
-                "test-auth-token",
-                None,
+                auth_token_id: "test-auth-token",
+                request_user_id: None,
+                request_log_id: None,
                 created_at,
-                counts,
-                None,
-            )
+                dashboard_counts: counts,
+                request_log_catalog_key: None,
+            })
             .await;
     }
 

@@ -8,7 +8,7 @@ use axum::{
     routing::{any, post},
 };
 use nanoid::nanoid;
-use sqlx::Connection;
+use sqlx::{Connection, SqlitePool};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -587,6 +587,52 @@ pub(super) async fn hold_sqlite_write_lock_for_test_for_with_release(
             .await
             .expect("rollback immediate transaction");
     })
+}
+
+pub(super) async fn seal_request_log_day_for_gc(pool: &SqlitePool, created_at: i64) {
+    let empty_seal = serde_json::to_string(&DashboardRequestRollupCounts::default())
+        .expect("serialize empty day seal");
+    sqlx::query(
+        r#"
+        INSERT INTO dashboard_rollup_daily_seals (bucket_start, counts_json, verified_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bucket_start) DO UPDATE SET
+            counts_json = excluded.counts_json, verified_at = excluded.verified_at
+        "#,
+    )
+    .bind(local_day_bucket_start_utc_ts(created_at))
+    .bind(empty_seal)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .expect("seal request-log day for GC");
+}
+
+pub(super) async fn seed_request_log_rollup_for_gc(pool: &SqlitePool, bucket_start: i64) {
+    sqlx::query(
+        r#"
+        INSERT INTO observability.request_log_catalog_rollups (
+            bucket_start,
+            request_kind_key,
+            request_kind_label,
+            result_bucket,
+            key_effect_code,
+            binding_effect_code,
+            selection_effect_code,
+            auth_token_id,
+            api_key_id,
+            operational_class,
+            request_count,
+            updated_at
+        )
+        VALUES (?, 'search', 'Search', 'success', 'none', 'none', 'none', '', '', 'api', 1, ?)
+        "#,
+    )
+    .bind(bucket_start)
+    .bind(chrono::Utc::now().timestamp())
+    .execute(pool)
+    .await
+    .expect("seed request log rollup");
 }
 
 pub(super) async fn ensure_quota_subject_lock_schema_for_test(pool: &SqlitePool) {

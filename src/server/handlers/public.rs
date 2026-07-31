@@ -132,6 +132,7 @@ struct DashboardHourlyRequestWindowView {
     visible_buckets: i64,
     retained_buckets: i64,
     buckets: Vec<DashboardHourlyRequestBucketView>,
+    unverified_bucket_starts: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,6 +164,7 @@ impl From<tavily_hikari::DashboardHourlyRequestWindow> for DashboardHourlyReques
             bucket_seconds: window.bucket_seconds,
             visible_buckets: window.visible_buckets,
             retained_buckets: window.retained_buckets,
+            unverified_bucket_starts: window.unverified_bucket_starts,
             buckets: window
                 .buckets
                 .into_iter()
@@ -850,6 +852,8 @@ struct DashboardOverviewPayload {
     summary_windows: SummaryWindowsView,
     #[serde(rename = "hourlyRequestWindow")]
     hourly_request_window: DashboardHourlyRequestWindowView,
+    #[serde(rename = "rollupIntegrity")]
+    rollup_integrity: tavily_hikari::DashboardRollupIntegrityStatus,
     #[serde(rename = "monthSeries")]
     month_series: DashboardMonthSeriesView,
     #[serde(rename = "siteStatus")]
@@ -1209,6 +1213,7 @@ async fn build_dashboard_overview_payload(
         dashboard_rollup_signature,
         pending_dashboard_rollup_signature,
     ) = state.proxy.dashboard_overview_read_components_at(now_local).await?;
+    let rollup_integrity = state.proxy.dashboard_rollup_integrity_status().await?;
     let month_series = state.proxy.dashboard_month_series(&summary_windows).await?;
     let dashboard_api_key_lifecycle_signature = state
         .proxy
@@ -1309,6 +1314,7 @@ async fn build_dashboard_overview_payload(
             summary: summary.clone().into(),
             summary_windows: SummaryWindowsView::from(summary_windows.clone()),
             hourly_request_window: DashboardHourlyRequestWindowView::from(hourly_request_window),
+            rollup_integrity: rollup_integrity.clone(),
             month_series: DashboardMonthSeriesView::from(month_series.clone()),
             site_status: DashboardSiteStatusView {
                 remaining_quota: summary.total_quota_remaining,
@@ -1351,6 +1357,12 @@ async fn build_dashboard_overview_payload(
             ],
             dashboard_rollup_signature,
             pending_dashboard_rollup_signature,
+            rollup_integrity: (
+                rollup_integrity.state,
+                rollup_integrity.last_verified_at,
+                rollup_integrity.next_attempt_at,
+                rollup_integrity.unverified_bucket_count,
+            ),
             dashboard_api_key_lifecycle_signature,
             dashboard_quarantine_lifecycle_signature,
             dashboard_exhausted_lifecycle_signature,
@@ -1542,6 +1554,7 @@ async fn compute_dashboard_overview_freshness(
         .proxy
         .pending_dashboard_rollup_freshness_signature()
         .await;
+    let rollup_integrity = state.proxy.dashboard_rollup_integrity_status().await?;
     let dashboard_api_key_lifecycle_signature = state
         .proxy
         .dashboard_api_key_lifecycle_signature(previous_month_start)
@@ -1615,6 +1628,12 @@ async fn compute_dashboard_overview_freshness(
         summary_window_starts,
         dashboard_rollup_signature,
         pending_dashboard_rollup_signature,
+        rollup_integrity: (
+            rollup_integrity.state,
+            rollup_integrity.last_verified_at,
+            rollup_integrity.next_attempt_at,
+            rollup_integrity.unverified_bucket_count,
+        ),
         dashboard_api_key_lifecycle_signature,
         dashboard_quarantine_lifecycle_signature,
         dashboard_exhausted_lifecycle_signature,

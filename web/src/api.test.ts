@@ -368,6 +368,7 @@ describe('admin user tag api helpers', () => {
               bucketSeconds: 300,
               visibleBuckets: 73,
               retainedBuckets: 589,
+              unverifiedBucketStarts: [],
               buckets: Array.from({ length: 589 }, (_, index) => ({
                 bucketStart: 1_775_534_400 + index * 300,
                 secondarySuccess: 0,
@@ -381,6 +382,12 @@ describe('admin user tag api helpers', () => {
                 apiNonBillable: 0,
                 apiBillable: index === 588 ? 1 : 0,
               })),
+            },
+            rollupIntegrity: {
+              state: 'healthy',
+              lastVerifiedAt: 1_775_711_100,
+              nextAttemptAt: 1_775_711_115,
+              unverifiedBucketCount: 0,
             },
             monthSeries: {
               current: Array.from({ length: 31 }, (_, index) => ({

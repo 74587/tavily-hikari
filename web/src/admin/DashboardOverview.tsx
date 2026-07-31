@@ -3,6 +3,7 @@ import { useId, useMemo } from 'react'
 import type {
   AlertGroup,
   DashboardHourlyRequestWindow,
+  DashboardRollupIntegrityStatus,
   DashboardMonthSeries,
   JobLogView,
   RecentAlertsSummary,
@@ -101,6 +102,10 @@ export interface DashboardOverviewStrings {
   chartEmpty: string
   chartUtcWindow: string
   chartRollingWindow: string
+  chartIntegrityHealthy: string
+  chartIntegrityRepairing: string
+  chartIntegrityDegraded: string
+  chartIntegrityLastVerified: string
   chartResultSecondarySuccess: string
   chartResultPrimarySuccess: string
   chartResultSecondaryFailure: string
@@ -165,6 +170,7 @@ interface DashboardOverviewProps {
   statusMetrics: DashboardMetricCard[]
   summaryWindows?: SummaryWindowsResponse | null
   hourlyRequestWindow: DashboardHourlyRequestWindow
+  rollupIntegrity: DashboardRollupIntegrityStatus
   monthSeries?: DashboardMonthSeries | null
   logs: RequestLog[]
   jobs: JobLogView[]
@@ -548,6 +554,7 @@ export default function DashboardOverview({
   statusMetrics,
   summaryWindows,
   hourlyRequestWindow,
+  rollupIntegrity,
   monthSeries,
   logs,
   jobs,
@@ -993,6 +1000,7 @@ export default function DashboardOverview({
         strings={strings}
         overviewReady={overviewReady}
         hourlyRequestWindow={hourlyRequestWindow}
+        rollupIntegrity={rollupIntegrity}
         initialChartMode={initialChartMode}
         initialVisibleResultSeries={initialVisibleResultSeries}
         initialVisibleTypeSeries={initialVisibleTypeSeries}

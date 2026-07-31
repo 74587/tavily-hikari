@@ -1107,33 +1107,6 @@ async fn seed_request_log_for_gc(pool: &SqlitePool, created_at: i64, path: &str)
     .expect("seed request log")
 }
 
-async fn seed_request_log_rollup_for_gc(pool: &SqlitePool, bucket_start: i64) {
-    sqlx::query(
-        r#"
-        INSERT INTO observability.request_log_catalog_rollups (
-            bucket_start,
-            request_kind_key,
-            request_kind_label,
-            result_bucket,
-            key_effect_code,
-            binding_effect_code,
-            selection_effect_code,
-            auth_token_id,
-            api_key_id,
-            operational_class,
-            request_count,
-            updated_at
-        )
-        VALUES (?, 'search', 'Search', 'success', 'none', 'none', 'none', '', '', 'api', 1, ?)
-        "#,
-    )
-    .bind(bucket_start)
-    .bind(Utc::now().timestamp())
-    .execute(pool)
-    .await
-    .expect("seed request log rollup");
-}
-
 async fn seed_auth_token_log_reference_for_gc(
     pool: &SqlitePool,
     token_id: &str,
@@ -1808,6 +1781,7 @@ async fn request_logs_gc_skips_body_cleanup_for_rows_past_row_retention() {
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("seed request log beyond row retention");
+    seal_request_log_day_for_gc(&proxy.key_store.pool, old_ts).await;
 
     let report = proxy
         .gc_request_logs_with_options(RequestLogsGcOptions {
@@ -2739,7 +2713,7 @@ async fn standalone_request_logs_gc_upgrades_legacy_body_metadata_columns() {
 }
 
 #[tokio::test]
-async fn standalone_request_logs_gc_initializes_meta_for_legacy_table() {
+async fn standalone_request_logs_gc_initializes_meta_and_blocks_unsealed_legacy_rows() {
     let db_path = temp_db_path("request-log-retention-standalone-gc-legacy-meta");
     let db_str = db_path.to_string_lossy().to_string();
     let layout = SqliteDatabaseLayout::from_database_path(&db_str);
@@ -2786,7 +2760,8 @@ async fn standalone_request_logs_gc_initializes_meta_for_legacy_table() {
     )
     .await
     .expect("standalone request logs gc initializes meta");
-    assert_eq!(report.deleted_request_logs, 1);
+    assert_eq!(report.deleted_request_logs, 0);
+    assert!(!report.completed);
 
     let pool = open_sqlite_pool_with_observability(
         &layout.core_database_path,
@@ -2806,13 +2781,13 @@ async fn standalone_request_logs_gc_initializes_meta_for_legacy_table() {
         .fetch_one(&pool)
         .await
         .expect("count remaining request logs");
-    assert_eq!(remaining, 0);
+    assert_eq!(remaining, 1);
 
     let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
-async fn standalone_request_logs_gc_uses_large_legacy_single_db_layout() {
+async fn standalone_request_logs_gc_blocks_unsealed_large_legacy_single_db_layout() {
     let db_path = temp_db_path("request-log-retention-standalone-gc-large-legacy-layout");
     let db_str = db_path.to_string_lossy().to_string();
     let layout = SqliteDatabaseLayout::from_database_path(&db_str);
@@ -2860,7 +2835,8 @@ async fn standalone_request_logs_gc_uses_large_legacy_single_db_layout() {
     )
     .await
     .expect("standalone request logs gc initializes meta against large legacy layout");
-    assert_eq!(report.deleted_request_logs, 1);
+    assert_eq!(report.deleted_request_logs, 0);
+    assert!(!report.completed);
 
     let pool = sqlx::SqlitePool::connect_with(
         sqlx::sqlite::SqliteConnectOptions::new()
@@ -2873,7 +2849,7 @@ async fn standalone_request_logs_gc_uses_large_legacy_single_db_layout() {
         .fetch_one(&pool)
         .await
         .expect("count remaining legacy request logs");
-    assert_eq!(remaining, 0);
+    assert_eq!(remaining, 1);
     let observability_path = layout
         .observability_database_path
         .as_deref()
@@ -2900,6 +2876,7 @@ async fn request_logs_gc_bounded_deletes_old_rows_and_preserves_recent_rows() {
     let old_ts = now - 40 * 24 * 60 * 60;
     let recent_ts = now - 2 * 24 * 60 * 60;
     let old_id = seed_request_log_for_gc(&proxy.key_store.pool, old_ts, "/api/tavily/search").await;
+    seal_request_log_day_for_gc(&proxy.key_store.pool, old_ts).await;
     let recent_id =
         seed_request_log_for_gc(&proxy.key_store.pool, recent_ts, "/api/tavily/search").await;
     seed_auth_token_log_reference_for_gc(&proxy.key_store.pool, "tok-gc-ref", old_id, recent_ts)
@@ -2962,6 +2939,7 @@ async fn request_logs_gc_bounded_reports_partial_and_resumes() {
         seed_request_log_for_gc(&proxy.key_store.pool, old_ts + idx, "/mcp").await;
         seed_request_log_rollup_for_gc(&proxy.key_store.pool, old_ts + idx).await;
     }
+    seal_request_log_day_for_gc(&proxy.key_store.pool, old_ts).await;
 
     let first = proxy
         .gc_request_logs_with_options(RequestLogsGcOptions {
@@ -3007,6 +2985,7 @@ async fn request_logs_gc_retries_transient_sqlite_write_lock() {
         .expect("proxy created");
     let old_ts = Utc::now().timestamp() - 40 * 24 * 60 * 60;
     let old_id = seed_request_log_for_gc(&proxy.key_store.pool, old_ts, "/mcp").await;
+    seal_request_log_day_for_gc(&proxy.key_store.pool, old_ts).await;
     let threshold =
         request_logs_retention_threshold_utc_ts(effective_request_logs_retention_days());
     assert!(old_ts < threshold);

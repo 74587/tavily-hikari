@@ -58,6 +58,8 @@ const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
 const HA_OUTBOX_GC_CONTINUATION_DELAY_SECS: i64 = 30;
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
+const DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE: &str = "dashboard_rollup_integrity";
+const DASHBOARD_ROLLUP_INTEGRITY_FAILURE_BACKOFF_SECS: i64 = 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
@@ -471,6 +473,142 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
             ),
         }
     }
+}
+
+fn spawn_dashboard_rollup_integrity_scheduler(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let _ = enqueue_scheduled_job_logged(
+            state.as_ref(),
+            DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
+            None,
+            TRIGGER_SOURCE_SCHEDULER,
+            "dashboard-rollup-integrity",
+        )
+        .await;
+    });
+}
+
+async fn finish_dashboard_rollup_integrity_and_enqueue(
+    state: &AppState,
+    job_id: i64,
+    message: &str,
+    available_at: i64,
+) -> bool {
+    match state
+        .proxy
+        .scheduled_job_finish_and_enqueue_auto_at(
+            job_id,
+            DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
+            None,
+            1,
+            Some(message),
+            available_at,
+        )
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            // The integrity slice already stopped at its short write budget. Use
+            // the scheduler's normal retry path only to avoid stranding a running
+            // job when a transient writer lock prevented the atomic handoff.
+            tracing::warn!(
+                component = "dashboard_rollup_integrity",
+                event = "scheduler_handoff_short_write_failed",
+                job_id,
+                err = %err,
+                "falling back to the durable scheduled-job handoff"
+            );
+            let fallback_message = format!("{message}; scheduler handoff fallback: {err}");
+            if let Err(finish_err) = state
+                .proxy
+                .scheduled_job_finish(job_id, "error", Some(&fallback_message))
+                .await
+            {
+                tracing::error!(
+                    component = "dashboard_rollup_integrity",
+                    event = "scheduler_handoff_fallback_failed",
+                    job_id,
+                    err = %finish_err,
+                    "dashboard integrity job could not be released for retry"
+                );
+                return false;
+            }
+            enqueue_scheduled_job_at(
+                state,
+                DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
+                None,
+                TRIGGER_SOURCE_AUTO,
+                available_at,
+            )
+            .await
+            .is_ok()
+        }
+    }
+}
+
+async fn run_dashboard_rollup_integrity_claimed_job(
+    state: Arc<AppState>,
+    claimed_job: ClaimedScheduledJob,
+) -> bool {
+    let ClaimedScheduledJob {
+        job_id,
+        _job_execution_gate: existing_gate,
+    } = claimed_job;
+    let _job_execution_gate = match existing_gate {
+        Some(gate) => gate,
+        None => acquire_db_job_execution_gate_for_state(state.as_ref()).await,
+    };
+    let _maintenance = acquire_db_maintenance_read_gate().await;
+    let now = state.proxy.backend_time().now_ts();
+    let (message, next_delay_secs) = match state.proxy.run_dashboard_rollup_integrity_slice().await {
+        Ok(result) => (format!("state={}", result.state), result.next_delay_secs),
+        Err(err) => {
+            let available_at = now.saturating_add(DASHBOARD_ROLLUP_INTEGRITY_FAILURE_BACKOFF_SECS);
+            let _ = state
+                .proxy
+                .mark_dashboard_rollup_integrity_failure(&err, available_at)
+                .await;
+            let degraded = state
+                .proxy
+                .dashboard_rollup_integrity_status()
+                .await
+                .map(|status| status.state == "degraded")
+                .unwrap_or(false);
+            if degraded {
+                let _ = state
+                    .proxy
+                    .scheduled_job_finish(
+                        job_id,
+                        "error",
+                        Some(&format!("state=degraded error={err}")),
+                    )
+                    .await;
+                let _ = enqueue_scheduled_job_at(
+                    state.as_ref(),
+                    DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
+                    None,
+                    TRIGGER_SOURCE_AUTO,
+                    available_at,
+                )
+                .await;
+                return false;
+            }
+            return finish_dashboard_rollup_integrity_and_enqueue(
+                state.as_ref(),
+                job_id,
+                &format!("state=deferred error={err}"),
+                available_at,
+            )
+            .await;
+        }
+    };
+    finish_dashboard_rollup_integrity_and_enqueue(
+        state.as_ref(),
+        job_id,
+        &message,
+        now.saturating_add(next_delay_secs),
+    )
+    .await
 }
 
 fn spawn_maintenance_worker(state: Arc<AppState>) {
@@ -2066,6 +2204,9 @@ async fn run_manual_claimed_job(
     }
     if job_type == LINUXDO_USER_STATUS_SYNC_JOB_TYPE {
         return run_linuxdo_user_status_sync_claimed_job(state, claimed_job).await;
+    }
+    if job_type == DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE {
+        return run_dashboard_rollup_integrity_claimed_job(state, claimed_job).await;
     }
 
     if claimed_job._job_execution_gate.is_none() {

@@ -25,11 +25,18 @@ describe('DashboardOverview Storybook coverage', () => {
     expect(dashboardStories.TypesAreaHiddenMiddleSeries).toMatchObject({})
     expect(dashboardStories.CreditsAreaLocalOnly).toMatchObject({})
     expect(dashboardStories.CreditsAreaNoUpstreamSamples).toMatchObject({})
+    expect(dashboardStories.IntegrityRepairing).toMatchObject({})
     expect(dashboardStories.CreditsEmptyData).toMatchObject({})
     expect(dashboardStories.HiddenSeriesEmpty).toMatchObject({})
     expect(dashboardStories.RecentAlertsDesktopEvidence).toMatchObject({})
     expect(dashboardStories.RecentAlertsBusinessHourWindow).toMatchObject({})
     expect(dashboardStories.NoPreviousMonthComparison).toMatchObject({})
+  })
+
+  it('renders a repair state and leaves the affected chart interval unverified', () => {
+    const args = dashboardStories.IntegrityRepairing.args
+    const markup = renderToStaticMarkup(createElement(meta.component, args as never))
+    expect(markup).toContain('Repairing statistics')
   })
 
   it('renders the empty-selection story with the updated server-time copy', () => {

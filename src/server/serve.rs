@@ -564,6 +564,8 @@ pub async fn serve(
     spawn_background_tasks_for_current_role(state.clone()).await;
     let _ = spawn_post_ready_serving_tasks_for_status(state.clone(), &startup_ha_status);
 
+    let shutdown_proxy = state.proxy.clone();
+    let post_shutdown_state = state.clone();
     axum::serve(
         listener,
         router
@@ -571,8 +573,23 @@ pub async fn serve(
             .with_state(state)
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        shutdown_proxy.nudge_request_stats_flush().await;
+    })
     .await?;
+    if let Err(err) = post_shutdown_state
+        .proxy
+        .shutdown_request_stats_coalescer(Duration::from_secs(20))
+        .await
+    {
+        tracing::warn!(
+            component = "shutdown",
+            event = "request_stats_drain_timeout",
+            err = %err,
+            "request stats coalescer did not drain before shutdown grace period"
+        );
+    }
     tracing::info!(
         component = "shutdown",
         event = "server_shutdown_complete",
@@ -1507,6 +1524,7 @@ fn spawn_business_background_tasks(state: Arc<AppState>) {
     spawn_mcp_session_init_backoffs_gc_scheduler(state.clone());
     spawn_request_logs_gc_scheduler(state.clone());
     spawn_request_logs_body_gc_index_ensure_scheduler(state.clone());
+    spawn_dashboard_rollup_integrity_scheduler(state.clone());
     if state.linuxdo_oauth.is_user_sync_scheduler_enabled() {
         spawn_linuxdo_user_status_sync_scheduler(state.clone());
     }
