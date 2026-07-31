@@ -1480,6 +1480,22 @@ pub struct DashboardHourlyRequestWindow {
     pub visible_buckets: i64,
     pub retained_buckets: i64,
     pub buckets: Vec<DashboardHourlyRequestBucket>,
+    pub unverified_bucket_starts: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardRollupIntegrityStatus {
+    pub state: String,
+    pub last_verified_at: Option<i64>,
+    pub next_attempt_at: Option<i64>,
+    pub unverified_bucket_count: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DashboardRollupIntegrityRun {
+    pub state: String,
+    pub next_delay_secs: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

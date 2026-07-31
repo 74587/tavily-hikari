@@ -128,7 +128,10 @@ export interface DashboardHourlyRequestWindow {
   visibleBuckets: number
   retainedBuckets: number
   buckets: DashboardHourlyRequestBucket[]
+  unverifiedBucketStarts: number[]
 }
+
+export interface DashboardRollupIntegrityStatus { state: 'healthy' | 'repairing' | 'degraded' | string; lastVerifiedAt: number | null; nextAttemptAt: number | null; unverifiedBucketCount: number }
 
 export interface DashboardMonthSeriesPoint {
   bucketStart: number
@@ -153,6 +156,7 @@ export interface DashboardOverviewResponse {
   summary: Summary
   summaryWindows: SummaryWindowsResponse
   hourlyRequestWindow: DashboardHourlyRequestWindow
+  rollupIntegrity: DashboardRollupIntegrityStatus
   monthSeries: DashboardMonthSeries
   siteStatus: DashboardSiteStatusSnapshot
   forwardProxy: DashboardForwardProxySnapshot

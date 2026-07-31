@@ -347,6 +347,9 @@ impl KeyStore {
                     entry.key_id,
                 )
             });
+        let source_mutation = self
+            .request_stats_coalescer
+            .begin_dashboard_rollup_source_mutation(created_at);
         let request_log_id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO observability.request_logs (
@@ -449,15 +452,20 @@ impl KeyStore {
         .fetch_one(&self.pool)
         .await?;
         self.request_stats_coalescer
-            .enqueue_request_log_rollups(
-                entry.key_id,
-                entry.auth_token_id.unwrap_or_default(),
-                request_user_id.as_deref(),
+            .enqueue_request_log_rollups(RequestLogRollupInput {
+                api_key_id: entry.key_id,
+                auth_token_id: entry.auth_token_id.unwrap_or_default(),
+                request_user_id: request_user_id.as_deref(),
+                request_log_id: Some(request_log_id),
                 created_at,
-                dashboard_rollup_counts,
+                dashboard_counts: dashboard_rollup_counts,
                 request_log_catalog_key,
-            )
+            })
             .await;
+        // Keep the source mutation live until the corresponding incremental
+        // rollup is visible. An integrity slice must never replace from the
+        // new source row and then receive this original delta afterward.
+        source_mutation.commit().await;
         Ok(request_log_id)
     }
 

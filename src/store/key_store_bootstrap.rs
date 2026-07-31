@@ -690,6 +690,7 @@ impl KeyStore {
             store.initialize_schema(),
         )
         .await?;
+        store.reset_dashboard_rollup_integrity_pending_work_on_startup().await?;
         log_slow_db_operation(
             "sqlite startup total",
             startup_started.elapsed(),
@@ -697,7 +698,6 @@ impl KeyStore {
         );
         Ok(store)
     }
-
     pub(crate) async fn open_for_request_logs_gc(
         database_path: &str,
     ) -> Result<Self, ProxyError> {
@@ -828,6 +828,19 @@ impl KeyStore {
                 store.migrate_legacy_observability_tables_to_sidecar().await?;
                 store.upgrade_request_logs_schema().await?;
                 store.ensure_request_logs_gc_support_indexes().await?;
+                // Standalone GC must fail closed before it can remove source logs,
+                // including when it runs against a legacy single-database layout.
+                sqlx::query(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_daily_seals (
+                        bucket_start INTEGER PRIMARY KEY,
+                        counts_json TEXT NOT NULL,
+                        verified_at INTEGER NOT NULL
+                    )
+                    "#,
+                )
+                .execute(&store.pool)
+                .await?;
                 Ok(())
             },
         )
@@ -1028,6 +1041,7 @@ impl KeyStore {
         )
         .execute(&self.pool)
         .await?;
+        Self::ensure_observability_sidecar_derived_schema_in_pool(&self.pool).await?;
 
         // Access tokens for /mcp authentication
         sqlx::query(

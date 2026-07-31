@@ -3,11 +3,15 @@ impl TavilyProxy {
         let store = self.key_store.clone();
         let coalescer = self.key_store.request_stats_coalescer.clone();
         tokio::spawn(async move {
+            {
+                let mut state = coalescer.state.lock().await;
+                state.worker_stopped = false;
+            }
             loop {
                 let (should_flush_now, wait_duration) = {
                     let state = coalescer.state.lock().await;
                     let pending_key_count = RequestStatsCoalescer::pending_key_count(&state);
-                    let should_flush_now = state.shutdown
+                    let should_flush_now = (state.shutdown && state.dashboard_rollup_repairs.is_empty())
                         || pending_key_count >= RequestStatsCoalescer::MAX_PENDING_KEYS
                         || state
                             .flush_deadline
@@ -38,7 +42,7 @@ impl TavilyProxy {
                     {
                         continue;
                     }
-                    state.shutdown
+                    state.shutdown && state.dashboard_rollup_repairs.is_empty()
                 };
 
                 let flush_started = Instant::now();
@@ -60,19 +64,79 @@ impl TavilyProxy {
                 }
 
                 {
-                    let state = coalescer.state.lock().await;
+                    let mut state = coalescer.state.lock().await;
                     if shutdown_after_flush
                         && state.pending_dashboard_rollups.is_empty()
                         && state.pending_api_key_usage.is_empty()
                         && state.pending_auth_token_activity.is_empty()
                         && state.pending_account_request_rollups.is_empty()
                         && state.pending_request_log_catalog.is_empty()
+                        && state.dashboard_rollup_repairs.is_empty()
                     {
+                        state.worker_stopped = true;
+                        coalescer.flushed.notify_waiters();
                         break;
                     }
                 }
             }
         });
+    }
+
+    pub async fn nudge_request_stats_flush(&self) {
+        self.key_store.request_stats_coalescer.nudge_flush().await;
+    }
+
+    pub async fn shutdown_request_stats_coalescer(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), ProxyError> {
+        let coalescer = self.key_store.request_stats_coalescer.clone();
+        coalescer.begin_shutdown().await;
+        tokio::time::timeout(timeout, coalescer.wait_until_worker_stopped())
+            .await
+            .map_err(|_| {
+                ProxyError::Other(format!(
+                    "request stats coalescer did not drain within {}ms",
+                    timeout.as_millis()
+                ))
+            })
+    }
+
+    pub async fn run_dashboard_rollup_integrity_slice(
+        &self,
+    ) -> Result<DashboardRollupIntegrityRun, ProxyError> {
+        let result = self.key_store.run_dashboard_rollup_integrity_slice().await?;
+        let (state, next_delay_secs) = match result {
+            crate::store::DashboardRollupIntegritySlice::Verified { next_delay_secs } => {
+                ("verified", next_delay_secs)
+            }
+            crate::store::DashboardRollupIntegritySlice::Deferred { next_delay_secs } => {
+                ("deferred", next_delay_secs)
+            }
+            crate::store::DashboardRollupIntegritySlice::Repaired { next_delay_secs } => {
+                ("repaired", next_delay_secs)
+            }
+        };
+        Ok(DashboardRollupIntegrityRun {
+            state: state.to_string(),
+            next_delay_secs,
+        })
+    }
+
+    pub async fn dashboard_rollup_integrity_status(
+        &self,
+    ) -> Result<DashboardRollupIntegrityStatus, ProxyError> {
+        self.key_store.dashboard_rollup_integrity_status().await
+    }
+
+    pub async fn mark_dashboard_rollup_integrity_failure(
+        &self,
+        err: &ProxyError,
+        next_attempt_at: i64,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .mark_dashboard_rollup_integrity_failure(err, next_attempt_at)
+            .await
     }
 
     fn spawn_ha_state_coalescer(&self) {

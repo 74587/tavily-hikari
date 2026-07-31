@@ -3564,6 +3564,7 @@ export function DashboardPageCanvas({ beforeIntro }: { beforeIntro?: ReactNode }
         monthMetrics={monthMetrics}
         statusMetrics={statusMetrics}
         hourlyRequestWindow={defaultDashboardHourlyRequestWindow}
+        rollupIntegrity={{ state: 'healthy', lastVerifiedAt: 1_776_003_600, nextAttemptAt: null, unverifiedBucketCount: 0 }}
         monthSeries={{
           current: Array.from({ length: 31 }, (_, index) => {
             const visible = index < 7

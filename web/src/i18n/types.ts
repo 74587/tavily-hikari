@@ -289,6 +289,10 @@ export interface AdminTranslationsShape {
     chartEmpty: string
     chartUtcWindow: string
     chartRollingWindow: string
+    chartIntegrityHealthy: string
+    chartIntegrityRepairing: string
+    chartIntegrityDegraded: string
+    chartIntegrityLastVerified: string
     chartResultSecondarySuccess: string
     chartResultPrimarySuccess: string
     chartResultSecondaryFailure: string

@@ -1402,6 +1402,22 @@ body.not-found-page-body,
   font-size: 0.82rem;
   color: hsl(var(--muted-foreground));
   white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.dashboard-rollup-integrity {
+  font-size: 0.78rem;
+}
+
+.dashboard-rollup-integrity.is-repairing {
+  color: hsl(var(--warning-foreground));
+}
+
+.dashboard-rollup-integrity.is-degraded {
+  color: hsl(var(--destructive));
 }
 
 .dashboard-trend-segmented {
@@ -1637,6 +1653,7 @@ body.not-found-page-body,
 
   .dashboard-trend-meta {
     margin-left: 0;
+    align-items: flex-start;
   }
 
   .dashboard-chart-toolbar {

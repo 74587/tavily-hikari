@@ -608,6 +608,7 @@ impl KeyStore {
                 visible_buckets,
                 retained_buckets,
                 buckets: Vec::new(),
+                unverified_bucket_starts: Vec::new(),
             });
         }
 
@@ -771,11 +772,67 @@ impl KeyStore {
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
+        let gap_rows = sqlx::query(
+            r#"
+            SELECT range_start, range_end FROM dashboard_rollup_integrity_gaps
+            WHERE range_start < ? AND range_end > ?
+            UNION
+            SELECT range_start, range_end FROM dashboard_rollup_integrity_work_items
+            WHERE status = 'pending' AND range_start < ? AND range_end > ?
+            UNION
+            SELECT hot_cursor AS range_start, hot_fence AS range_end
+            FROM dashboard_rollup_integrity_state
+            WHERE hot_cursor < hot_fence AND hot_cursor < ? AND hot_fence > ?
+            UNION
+            SELECT MIN(log.created_at) AS range_start, state.history_cursor AS range_end
+            FROM dashboard_rollup_integrity_state AS state
+            JOIN request_logs AS log
+                ON log.visibility = ? AND log.created_at < state.history_cursor
+            WHERE state.history_cursor > ? AND log.created_at < ?
+            UNION
+            SELECT bucket_start AS range_start, bucket_end AS range_end
+            FROM dashboard_rollup_integrity_day_reaudits
+            WHERE status = 'pending' AND bucket_start < ? AND bucket_end > ?
+            UNION
+            SELECT ? AS range_start, ? AS range_end
+            WHERE NOT EXISTS (
+                SELECT 1 FROM dashboard_rollup_integrity_state WHERE id = 1
+            )
+            ORDER BY range_start ASC
+            "#,
+        )
+        .bind(series_end_exclusive)
+        .bind(series_start)
+        .bind(series_end_exclusive)
+        .bind(series_start)
+        .bind(series_end_exclusive)
+        .bind(series_start)
+        .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+        .bind(series_start)
+        .bind(series_end_exclusive)
+        .bind(series_end_exclusive)
+        .bind(series_start)
+        .bind(series_start)
+        .bind(series_end_exclusive)
+        .fetch_all(&mut **tx)
+        .await?;
+        let mut unverified_bucket_starts = Vec::new();
+        for bucket_start in (series_start..series_end_exclusive).step_by(bucket_seconds as usize) {
+            if gap_rows.iter().any(|gap| {
+                let gap_start: i64 = gap.try_get("range_start").unwrap_or_default();
+                let gap_end: i64 = gap.try_get("range_end").unwrap_or_default();
+                gap_start < bucket_start.saturating_add(bucket_seconds) && gap_end > bucket_start
+            }) {
+                unverified_bucket_starts.push(bucket_start);
+            }
+        }
+
         Ok(DashboardHourlyRequestWindow {
             bucket_seconds,
             visible_buckets,
             retained_buckets,
             buckets,
+            unverified_bucket_starts,
         })
     }
 

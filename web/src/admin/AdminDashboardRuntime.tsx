@@ -222,6 +222,7 @@ import {
   type DashboardMonthSeries,
   type DashboardSnapshotEvent,
   type DashboardHourlyRequestWindow,
+  type DashboardRollupIntegrityStatus,
   type DashboardSiteStatusSnapshot,
   type DashboardTrendBuckets,
   type Profile,
@@ -495,6 +496,16 @@ function createEmptyDashboardHourlyRequestWindow(): DashboardHourlyRequestWindow
     visibleBuckets: 73,
     retainedBuckets: 589,
     buckets: [],
+    unverifiedBucketStarts: [],
+  }
+}
+
+function createEmptyDashboardRollupIntegrity(): DashboardRollupIntegrityStatus {
+  return {
+    state: 'repairing',
+    lastVerifiedAt: null,
+    nextAttemptAt: null,
+    unverifiedBucketCount: 0,
   }
 }
 
@@ -1810,6 +1821,9 @@ function AdminDashboard(): JSX.Element {
   const [dashboardHourlyRequestWindow, setDashboardHourlyRequestWindow] = useState<DashboardHourlyRequestWindow>(
     () => createEmptyDashboardHourlyRequestWindow(),
   )
+  const [dashboardRollupIntegrity, setDashboardRollupIntegrity] = useState<DashboardRollupIntegrityStatus>(
+    () => createEmptyDashboardRollupIntegrity(),
+  )
   const [dashboardRecentAlerts, setDashboardRecentAlerts] = useState<RecentAlertsSummary>({
     windowHours: 24,
     totalEvents: 0,
@@ -2824,6 +2838,7 @@ function AdminDashboard(): JSX.Element {
           setDashboardSiteStatusSnapshot(overview.siteStatus)
           setDashboardTrend(overview.trend)
           setDashboardHourlyRequestWindow(overview.hourlyRequestWindow)
+          setDashboardRollupIntegrity(overview.rollupIntegrity)
           setDashboardLogs(overview.recentLogs)
           setDashboardJobs(overview.recentJobs)
           setDashboardRecentAlerts(overview.recentAlerts)
@@ -2844,6 +2859,7 @@ function AdminDashboard(): JSX.Element {
         setDashboardSiteStatusSnapshot(null)
         setDashboardTrend(createEmptyDashboardTrend())
         setDashboardHourlyRequestWindow(createEmptyDashboardHourlyRequestWindow())
+        setDashboardRollupIntegrity(createEmptyDashboardRollupIntegrity())
         setDashboardLogs([])
         setDashboardJobs([])
         setDashboardRecentAlerts({
@@ -4619,6 +4635,7 @@ function AdminDashboard(): JSX.Element {
             setDashboardSiteStatusSnapshot(data.siteStatus)
             setDashboardTrend(data.trend)
             setDashboardHourlyRequestWindow(data.hourlyRequestWindow)
+            setDashboardRollupIntegrity(data.rollupIntegrity)
             setDashboardLogs(data.recentLogs)
             setDashboardJobs(data.recentJobs)
             setDashboardOverviewLoaded(true)
@@ -10630,6 +10647,7 @@ function AdminDashboard(): JSX.Element {
           statusMetrics={statusMetrics}
           summaryWindows={dashboardSummaryWindows}
           hourlyRequestWindow={dashboardHourlyRequestWindow}
+          rollupIntegrity={dashboardRollupIntegrity}
           monthSeries={dashboardMonthSeries}
           chartPersistenceKey={DASHBOARD_HOURLY_CHART_PERSISTENCE_KEY}
           logs={dashboardLogs}

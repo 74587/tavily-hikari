@@ -1119,6 +1119,7 @@ function demoSummaryWindows(
 
 function demoDashboardOverview(now = Date.now()) {
   const pulse = demoPulse(now)
+  const nowSeconds = Math.floor(now / 1000)
   const currentHourStart = Math.floor(Date.now() / 3_600_000) * 3_600
   const currentRealtimeBucketStart = Math.floor(Date.now() / 300_000) * 300
   const summaryWindows = demoSummaryWindows(currentHourStart, now)
@@ -1165,6 +1166,7 @@ function demoDashboardOverview(now = Date.now()) {
       bucketSeconds: 300,
       visibleBuckets: 73,
       retainedBuckets: 589,
+      unverifiedBucketStarts: [],
       buckets: range(589).map((index) => ({
         bucketStart: currentRealtimeBucketStart - (588 - index) * 300,
         secondarySuccess: 2 + (index % 5) + (index >= 576 ? pulse % 4 : 0),
@@ -1181,6 +1183,12 @@ function demoDashboardOverview(now = Date.now()) {
         upstreamActualCredits:
           index % 4 === 0 ? null : 3 + (index % 7) + (index >= 580 ? pulse % 3 : 0),
       })),
+    },
+    rollupIntegrity: {
+      state: 'healthy',
+      lastVerifiedAt: nowSeconds,
+      nextAttemptAt: nowSeconds + 15,
+      unverifiedBucketCount: 0,
     },
     monthSeries: {
       current: monthSeriesCurrent,

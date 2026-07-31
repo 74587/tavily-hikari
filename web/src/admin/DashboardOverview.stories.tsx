@@ -80,6 +80,10 @@ const strings = {
   chartEmpty: 'No visible chart series for the current selection.',
   chartUtcWindow: 'Local time axis · 24 full hours + current hour ({count} slots)',
   chartRollingWindow: 'Local time axis · Last {range} · {bucket} buckets ({count} current buckets)',
+  chartIntegrityHealthy: 'Verified',
+  chartIntegrityRepairing: 'Repairing statistics',
+  chartIntegrityDegraded: 'Statistics repair delayed',
+  chartIntegrityLastVerified: 'Last verified {time}',
   chartResultSecondarySuccess: 'Secondary success',
   chartResultPrimarySuccess: 'Primary success',
   chartResultSecondaryFailure: 'Secondary failure',
@@ -552,6 +556,10 @@ const zhStrings = {
   chartEmpty: '当前选择下没有可显示的图表系列。',
   chartUtcWindow: '本地时间横轴 · 24 个完整小时 + 当前小时（{count} 槽）',
   chartRollingWindow: '本地时间横轴 · 最近 {range} · {bucket} 粒度（当前 {count} 组）',
+  chartIntegrityHealthy: '统计已验证',
+  chartIntegrityRepairing: '统计修复中',
+  chartIntegrityDegraded: '统计修复延迟',
+  chartIntegrityLastVerified: '最后验证 {time}',
   chartResultSecondarySuccess: '次要成功',
   chartResultPrimarySuccess: '主要成功',
   chartResultSecondaryFailure: '次要失败',
@@ -758,6 +766,12 @@ export const Default: Story = {
     statusMetrics,
     summaryWindows,
     hourlyRequestWindow: defaultHourlyRequestWindow,
+    rollupIntegrity: {
+      state: 'healthy',
+      lastVerifiedAt: 1_775_535_700,
+      nextAttemptAt: 1_775_535_715,
+      unverifiedBucketCount: 0,
+    },
     monthSeries,
     chartLabelTimeZone: 'Asia/Shanghai',
     logs: [
@@ -773,6 +787,25 @@ export const Default: Story = {
     recentAlerts,
     onOpenRecentAlerts: () => {},
     onOpenUser: () => {},
+  },
+}
+
+export const IntegrityRepairing: Story = {
+  args: {
+    ...Default.args,
+    hourlyRequestWindow: buildDashboardHourlyRequestWindowFixture({
+      currentHourStart: Date.UTC(2026, 3, 7, 12, 0, 0) / 1000,
+      unverifiedBucketStarts: [
+        Date.UTC(2026, 3, 7, 10, 10, 0) / 1000,
+        Date.UTC(2026, 3, 7, 10, 15, 0) / 1000,
+      ],
+    }),
+    rollupIntegrity: {
+      state: 'repairing',
+      lastVerifiedAt: Date.UTC(2026, 3, 7, 10, 5, 0) / 1000,
+      nextAttemptAt: Date.UTC(2026, 3, 7, 12, 0, 15) / 1000,
+      unverifiedBucketCount: 2,
+    },
   },
 }
 

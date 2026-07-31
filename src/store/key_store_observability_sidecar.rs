@@ -312,6 +312,135 @@ impl KeyStore {
         .execute(pool)
         .await?;
 
+        // Integrity metadata stays small and lives beside derived rollups. It
+        // deliberately does not add another index to the raw request log table.
+        for sql in [
+            r#"
+            CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_integrity_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                hot_cursor INTEGER,
+                hot_fence INTEGER,
+                hot_reaudit_cursor INTEGER,
+                history_cursor INTEGER,
+                last_history_attempt_at INTEGER,
+                last_day_reaudit_attempt_at INTEGER,
+                last_seal_attempt_at INTEGER,
+                seal_cursor INTEGER,
+                last_verified_at INTEGER,
+                stalled_since INTEGER,
+                last_error TEXT,
+                next_attempt_at INTEGER,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_integrity_work_items (
+                range_start INTEGER PRIMARY KEY,
+                range_end INTEGER NOT NULL,
+                source_fence INTEGER NOT NULL,
+                source_version INTEGER NOT NULL DEFAULT 0,
+                cursor_created_at INTEGER,
+                cursor_id INTEGER,
+                counts_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_integrity_gaps (
+                range_start INTEGER PRIMARY KEY,
+                range_end INTEGER NOT NULL,
+                detected_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                reason TEXT NOT NULL
+            )
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_daily_seals (
+                bucket_start INTEGER PRIMARY KEY,
+                counts_json TEXT NOT NULL,
+                verified_at INTEGER NOT NULL
+            )
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_integrity_day_reaudits (
+                bucket_start INTEGER PRIMARY KEY,
+                bucket_end INTEGER NOT NULL,
+                cursor INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+            r#"CREATE INDEX IF NOT EXISTS observability.idx_dashboard_rollup_integrity_work_status
+               ON dashboard_rollup_integrity_work_items(status, updated_at ASC, range_start ASC)"#,
+            r#"CREATE INDEX IF NOT EXISTS observability.idx_dashboard_rollup_integrity_gaps_range
+               ON dashboard_rollup_integrity_gaps(range_start ASC, range_end ASC)"#,
+            r#"CREATE INDEX IF NOT EXISTS observability.idx_dashboard_rollup_integrity_day_reaudits_status
+               ON dashboard_rollup_integrity_day_reaudits(status, updated_at ASC, bucket_start ASC)"#,
+        ] {
+            sqlx::query(sql).execute(pool).await?;
+        }
+        let has_history_schedule_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_state') WHERE name = 'last_history_attempt_at' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_history_schedule_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_state ADD COLUMN last_history_attempt_at INTEGER",
+            )
+            .execute(pool)
+            .await?;
+        }
+        let has_day_reaudit_schedule_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_state') WHERE name = 'last_day_reaudit_attempt_at' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_day_reaudit_schedule_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_state ADD COLUMN last_day_reaudit_attempt_at INTEGER",
+            )
+            .execute(pool)
+            .await?;
+        }
+        let has_hot_reaudit_cursor_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_state') WHERE name = 'hot_reaudit_cursor' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_hot_reaudit_cursor_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_state ADD COLUMN hot_reaudit_cursor INTEGER",
+            )
+            .execute(pool)
+            .await?;
+        }
+        let has_seal_schedule_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_state') WHERE name = 'last_seal_attempt_at' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_seal_schedule_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_state ADD COLUMN last_seal_attempt_at INTEGER",
+            )
+            .execute(pool)
+            .await?;
+        }
+        let has_source_version_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_work_items') WHERE name = 'source_version' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_source_version_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_work_items ADD COLUMN source_version INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await?;
+        }
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS observability.request_log_catalog_rollups (

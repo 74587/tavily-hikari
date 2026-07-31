@@ -27,7 +27,7 @@
 
 ## Non-goals
 
-- 不调整 `request_logs` 的长期保留或 GC 策略。
+- 不延长 `request_logs` 的长期保留期，也不提供管理员任意日期全量重建按钮。
 - 不修改 public/user console 页面与 `/mcp` 外部协议。
 - 不把调用类型拆到每个单独工具名；v1 只统计 `protocol × billing` 四类。
 
@@ -63,6 +63,33 @@
 
 - `snapshot.overview.hourlyRequestWindow` 与 `GET /api/dashboard/overview` 完全一致。
 - SSE 变更检测必须覆盖小时窗口锚点变化与小时桶内容变化，避免整点翻小时后图表不刷新。
+
+## 统计完整性与自愈
+
+- `request_logs` 是保留期内本地请求统计的事实源。审计必须使用既有
+  `(visibility, created_at, id)` 索引分页读取，固定每个工作项的源数据 fence；不得在请求热路径新增
+  写入，也不得在启动阶段重建原始日志。
+- 审计工作项最多读取 500 条日志或消耗 150ms 读取预算。高密度时间片必须将游标和累计结果持久化，未
+  完成前不得写入任何部分 rollup。
+- 聚合完成后才允许打开短写事务，精确替换受影响的分钟 rollup。写入目标为 100ms；超过 250ms 必须记
+  录慢操作并延后下一片。SQLite `busy` / `locked` 或预算耗尽必须保持工作项和缺口，退避后重试。
+- 替换前必须在 100ms 内尝试 flush 已在内存中的请求统计，并安装按源 fence 划分的 coalescer 修复栅栏。
+  栅栏内已被源聚合覆盖的迟到增量在替换成功后丢弃；fence 后的增量暂存、重新入队并重审，不得重复累加。
+- 热窗口首次扫描优先；历史片仅在首次热窗口完成后启动，之后最多每 60 秒插入一片。循环重审只把当前
+  5 分钟工作项标为待验证，不能把整段已验证热窗口重新显示为缺口。
+- 已封存日的逐片回审同样最多每 60 秒执行一次，且不得抢占新闭合或首次热窗口片。源行更新 guard 被取消时
+  必须使对应片的版本失效，强制重新读取，不能将可能已提交的旧行改动标为已验证。
+- 每个本地日结束且分钟桶已验证时，写入日级 seal。源日志仍保留时，迟到数据修复会同步刷新对应日级
+  rollup 与 seal；源日志过期后，seal 成为日级恢复基线。原始日志 GC 在删除候选日之前必须确认 seal
+  存在且与分钟、日级 rollup 完全一致；只含被抑制日志的日期不参与 dashboard 统计，也不得要求 seal
+  或永久阻塞 GC。
+- `hourlyRequestWindow.unverifiedBucketStarts` 表示与未验证分钟范围相交的 5 分钟槽；前端必须把这些槽
+  渲染为缺口。完整性状态尚未创建时，整个返回窗口都必须是缺口；已验证的零值仍然显示为零。
+- overview 与 SSE snapshot 同时返回 `rollupIntegrity`：`healthy`、`repairing` 或 `degraded`，以及最后
+  验证时间、下次尝试时间和未验证桶数量。修复连续两小时无法推进时应进入既有 job-failure 告警视图。
+- 请求统计 coalescer 的关闭顺序是：停止接受新连接、等待在途请求、标记 shutdown、唤醒并等待 flush
+  worker。应用 drain 上限为 20 秒，Compose stop grace period 为 30 秒。这个保护只覆盖进程终止尾部，连续
+  缺口始终由完整性审计发现和修复。
 
 ## 统计口径
 
@@ -144,6 +171,7 @@
 - [x] M3: DashboardOverview 图表模式、图例切换与 i18n
 - [x] M4: Storybook / 前端测试 / 后端测试补齐
 - [x] M5: 趋势窗口纠偏、面积图补充、缺口留空视觉证据、review-loop 与快车道收敛
+- [x] M6: 本地统计完整性审计、日级 seal、在线修复状态与关闭收口
 
 ## 风险与假设
 
@@ -152,6 +180,22 @@
 - 风险：`mcp:batch` 的计费/非计费判定依赖 request body 解析；rollup 写入与 rebuild 必须复用现有 canonicalization 规则，否则会和请求日志页面口径漂移。
 
 ## Visual Evidence
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: default desktop canvas
+  viewport_strategy: storybook-viewport
+  margin_policy: trim_only
+  evidence_surface: page
+  sensitive_exclusion: N/A
+  submission_gate: approved
+  story_id_or_title: `admin-components-dashboardoverview--integrity-repairing`
+  state: `repairing`
+  evidence_note: 未验证的 5 分钟槽在小时聚合后仍为空缺；同时显示统计修复状态和最后验证时间，未将缺口伪装为零流量。
+  PR: include
+  image:
+  ![管理员仪表盘统计修复中趋势图](./assets/dashboard-rollup-integrity-repairing.png)
 
 - source_type: storybook_canvas
   target_program: mock-only

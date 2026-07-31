@@ -349,6 +349,38 @@ month-tail public metrics scan.
   batch on redundant aggregate updates.
 - If an owner-facing read surface depends on coalesced rollups, flush the batcher before reading
   or rebuild from source rows when a legacy/manual path bypasses the coalescer.
+- For a derived rollup repair, never retain a SQLite write transaction while scanning the raw source
+  table. Persist a bounded work item with a fixed source fence and `(created_at, id)` cursor, read at
+  most 500 rows or 150ms per slice, then replace only the confirmed-different bucket rows in a short
+  write transaction. A dense slice may carry its in-memory aggregate into the next work item, but it
+  must not publish a partial replacement.
+- Treat `busy`/`locked`, a queue backlog, and a write above the 250ms slow threshold as deferral
+  signals for observability repair. Record the gap, release the writer, and retry through the single
+  persisted maintenance queue; do not increase the pool or compete with the request path.
+- Preserve a compact, verified day-level seal before raw observability logs become eligible for
+  deletion. This keeps post-retention daily rollups auditable and recoverable without extending raw
+  retention or adding a wide raw-log index.
+- Coordinate a source-derived replacement with an in-memory coalescer. A bounded flush alone is not
+  sufficient because a request log can commit just before its additive delta is enqueued. Install a
+  source-fence repair barrier before replacement: discard delayed deltas already represented by the
+  source aggregate, hold post-fence deltas until the replacement commits, then requeue and re-audit
+  those later changes. On any replacement failure, release every held delta normally.
+- Treat an in-progress aggregate checkpoint as process-local. On startup, reset its cursor, aggregate,
+  and fence instead of trusting an in-memory mutation generation that a hard stop erased. A retained
+  source day whose minute total no longer matches its recovery seal must enter the same bounded
+  source-backed repair queue; do not silently advance its seal cursor or unblock GC.
+- Do not let a long historical audit monopolize a small maintenance worker. Finish the first hot
+  window before starting history, cap historical slices at one per minute afterwards, and represent
+  repeated hot checks as individual pending work items rather than reclassifying the whole hot
+  window as unverified.
+- Apply the same interleaving rule to retained-source sealed-day repairs: no more than one
+  historical day slice per minute, and never ahead of a newly closed or initial hot slice. A source
+  mutation guard that is dropped after a database update must pessimistically invalidate that
+  range's generation before releasing its in-flight marker, otherwise a read that began before the
+  cancellation can certify stale data.
+- Gate dashboard seal retention on the oldest visible source day, not the oldest raw log row.
+  Suppressed retry-shadow rows contribute no dashboard aggregates, so requiring a dashboard seal
+  for a suppressed-only day can permanently stop raw-log GC without improving recoverability.
 
 ## References
 

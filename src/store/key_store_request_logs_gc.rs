@@ -740,11 +740,25 @@ impl KeyStore {
                     &mut retention_contexts,
                 )
                 .await?;
-            self.unlink_old_request_log_references_batch(threshold, batch_size)
+            let raw_delete_cutoff = self
+                .dashboard_rollup_integrity_request_log_gc_cutoff(threshold)
                 .await?;
-            let request_deleted = self
-                .delete_old_request_logs_batch(threshold, batch_size)
-                .await?;
+            let request_deleted = if let Some(raw_delete_cutoff) = raw_delete_cutoff {
+                // Delete only the earliest sealed local day. This prevents one large
+                // batch from crossing into a later day that has not been sealed yet.
+                self.unlink_old_request_log_references_batch(raw_delete_cutoff, batch_size)
+                    .await?;
+                self.delete_old_request_logs_batch(raw_delete_cutoff, batch_size)
+                    .await?
+            } else {
+                tracing::warn!(
+                    component = "dashboard_rollup_integrity",
+                    event = "request_logs_gc_blocked_unsealed_day",
+                    threshold,
+                    "request log deletion and reference unlinking delayed until its local-day recovery seal exists"
+                );
+                0
+            };
             let rollup_deleted = self
                 .delete_old_request_log_rollups_batch(threshold, batch_size)
                 .await?;

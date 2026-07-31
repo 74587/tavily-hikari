@@ -2074,7 +2074,10 @@ impl KeyStore {
         let day_bucket = local_day_bucket_start_utc_ts(charge_ts);
         let month_start = start_of_month(charge_time).timestamp();
 
-        if let Some(request_log_id) = request_log_id {
+        let source_mutation = if let Some(request_log_id) = request_log_id {
+            let source_mutation = self
+                .request_stats_coalescer
+                .begin_dashboard_rollup_source_mutation(charge_ts);
             sqlx::query(
                 r#"
                 UPDATE request_logs
@@ -2086,7 +2089,10 @@ impl KeyStore {
             .bind(request_log_id)
             .execute(&mut *tx)
             .await?;
-        }
+            Some(source_mutation)
+        } else {
+            None
+        };
 
         if let Some(user_id) = billing_subject.strip_prefix("account:") {
             sqlx::query(
@@ -2332,8 +2338,13 @@ impl KeyStore {
         .await?;
         tx.commit().await?;
         self.request_stats_coalescer
-            .enqueue_dashboard_credit_rollups(charge_ts, credits)
+            .enqueue_dashboard_credit_rollups_for_request_log(charge_ts, credits, request_log_id)
             .await;
+        if let Some(source_mutation) = source_mutation {
+            // The source row and its coalesced delta become visible as one
+            // integrity boundary; see the request-log insertion path.
+            source_mutation.commit().await;
+        }
         Ok(PendingBillingSettleOutcome::Charged)
     }
 

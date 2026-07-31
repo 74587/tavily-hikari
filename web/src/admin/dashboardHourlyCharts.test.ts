@@ -173,6 +173,7 @@ describe('dashboardHourlyCharts helpers', () => {
       visibleBuckets: DASHBOARD_REALTIME_VISIBLE_BUCKETS,
       retainedBuckets: DASHBOARD_REALTIME_RETAINED_BUCKETS,
       buckets: [],
+      unverifiedBucketStarts: [],
     })
   })
 
@@ -361,6 +362,31 @@ describe('dashboardHourlyCharts helpers', () => {
     expect(aggregated.slots[0]?.bucket?.upstreamActualCredits).toBe(5)
     expect(aggregated.slots[1]?.bucket?.localEstimatedCredits).toBe(2)
     expect(aggregated.slots[1]?.bucket?.upstreamActualCredits).toBeNull()
+  })
+
+  it('renders an unverified source interval as a gap while retaining verified zero buckets', () => {
+    const currentHourStart = Date.UTC(2026, 3, 7, 12, 0, 0) / 1000
+    const gapStart = currentHourStart - 10 * 60
+    const window = buildDashboardHourlyRequestWindowFixture({
+      currentHourStart,
+      retainedBuckets: 13,
+      visibleBuckets: 13,
+      unverifiedBucketStarts: [gapStart],
+      mapBucket: ({ bucketStart }) => ({
+        primarySuccess: bucketStart === currentHourStart - 5 * 60 ? 0 : 4,
+      }),
+    })
+
+    const slots = buildHourlyRangeSlots(window, currentHourStart - 60 * 60, currentHourStart + 5 * 60)
+    expect(slots.find((slot) => slot.bucketStart === gapStart)?.bucket).toBeNull()
+    expect(slots.find((slot) => slot.bucketStart === currentHourStart - 5 * 60)?.bucket?.primarySuccess).toBe(0)
+
+    const aggregated = buildAggregatedHourlySlots(
+      window,
+      currentHourStart - 60 * 60,
+      currentHourStart + 5 * 60,
+    )
+    expect(aggregated.slots[0]?.bucket).toBeNull()
   })
 
   it('builds the rolling visible window directly from visibleBuckets metadata', () => {

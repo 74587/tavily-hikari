@@ -254,6 +254,7 @@ export function createEmptyDashboardHourlyRequestWindow(): DashboardHourlyReques
     visibleBuckets: DASHBOARD_REALTIME_VISIBLE_BUCKETS,
     retainedBuckets: DASHBOARD_REALTIME_RETAINED_BUCKETS,
     buckets: [],
+    unverifiedBucketStarts: [],
   }
 }
 
@@ -383,6 +384,7 @@ export function buildHourlyRangeSlots(
     ? Math.trunc(window.bucketSeconds)
     : 3600
   const lookup = buildHourlyBucketLookup(window.buckets)
+  const unverified = new Set(window.unverifiedBucketStarts ?? [])
   const alignmentOffset = window.buckets[0]
     ? positiveModulo(window.buckets[0].bucketStart, bucketSeconds)
     : positiveModulo(rangeStart, bucketSeconds)
@@ -394,7 +396,7 @@ export function buildHourlyRangeSlots(
   for (let bucketStart = firstBucketStart; bucketStart < rangeEnd; bucketStart += bucketSeconds) {
     slots.push({
       bucketStart,
-      bucket: lookup.get(bucketStart) ?? null,
+      bucket: unverified.has(bucketStart) ? null : lookup.get(bucketStart) ?? null,
     })
   }
   return slots
@@ -456,6 +458,12 @@ export function buildAggregatedHourlySlots(
   const firstBucketStart = rangeStart
   const buckets = new Map<number, DashboardHourlyRequestBucket>()
   const hasValues = new Set<number>()
+  const unverified = new Set<number>()
+  for (const bucketStart of window.unverifiedBucketStarts ?? []) {
+    if (bucketStart < rangeStart || bucketStart >= rangeEnd) continue
+    const outputStart = rangeStart + Math.floor((bucketStart - rangeStart) / bucketSeconds) * bucketSeconds
+    unverified.add(outputStart)
+  }
   for (const bucket of window.buckets) {
     if (bucket.bucketStart < rangeStart || bucket.bucketStart >= rangeEnd) continue
     const bucketStart = rangeStart + Math.floor((bucket.bucketStart - rangeStart) / bucketSeconds) * bucketSeconds
@@ -468,7 +476,9 @@ export function buildAggregatedHourlySlots(
   for (let bucketStart = firstBucketStart; bucketStart < rangeEnd; bucketStart += bucketSeconds) {
     slots.push({
       bucketStart,
-      bucket: hasValues.has(bucketStart) ? buckets.get(bucketStart) ?? createEmptyBucket(bucketStart) : null,
+      bucket: unverified.has(bucketStart)
+        ? null
+        : hasValues.has(bucketStart) ? buckets.get(bucketStart) ?? createEmptyBucket(bucketStart) : null,
     })
   }
   return {
@@ -561,12 +571,14 @@ export function buildDashboardHourlyRequestWindowFixture({
   bucketSeconds = DASHBOARD_REALTIME_BUCKET_SECONDS,
   visibleBuckets = DASHBOARD_REALTIME_VISIBLE_BUCKETS,
   retainedBuckets = DASHBOARD_REALTIME_RETAINED_BUCKETS,
+  unverifiedBucketStarts = [],
   mapBucket,
 }: {
   currentHourStart?: number
   bucketSeconds?: number
   visibleBuckets?: number
   retainedBuckets?: number
+  unverifiedBucketStarts?: number[]
   mapBucket?: (args: { index: number; bucketStart: number; bucket: DashboardHourlyRequestBucket }) => Partial<DashboardHourlyRequestBucket>
 } = {}): DashboardHourlyRequestWindow {
   const seriesStart = currentHourStart - bucketSeconds * (retainedBuckets - 1)
@@ -599,5 +611,6 @@ export function buildDashboardHourlyRequestWindowFixture({
     visibleBuckets,
     retainedBuckets,
     buckets,
+    unverifiedBucketStarts,
   }
 }
