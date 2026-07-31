@@ -362,6 +362,20 @@ fn scheduled_job_uses_remote_io(job_type: &str) -> bool {
     )
 }
 
+fn scheduled_job_uses_db_execution_gate(job_type: &str) -> bool {
+    job_type != "upstream_reconciliation"
+}
+
+#[cfg(test)]
+#[test]
+fn upstream_reconciliation_does_not_wait_for_db_execution_gate() {
+    assert!(scheduled_job_uses_remote_io("upstream_reconciliation"));
+    assert!(!scheduled_job_uses_db_execution_gate(
+        "upstream_reconciliation"
+    ));
+    assert!(scheduled_job_uses_db_execution_gate("ha_outbox_gc"));
+}
+
 async fn dequeue_next_scheduled_job(
     state: &AppState,
 ) -> Result<Option<(JobLog, Option<tokio::sync::OwnedSemaphorePermit>)>, ProxyError> {
@@ -2347,7 +2361,9 @@ async fn run_manual_claimed_job(
         return run_dashboard_rollup_integrity_claimed_job(state, claimed_job).await;
     }
 
-    if claimed_job._job_execution_gate.is_none() {
+    if claimed_job._job_execution_gate.is_none()
+        && scheduled_job_uses_db_execution_gate(&job_type)
+    {
         claimed_job._job_execution_gate =
             Some(acquire_db_job_execution_gate_for_state(state.as_ref()).await);
     }
