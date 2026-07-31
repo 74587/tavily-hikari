@@ -169,6 +169,11 @@ not for routine maintenance operations.
   but only the eligible standby candidate can take planned cutover, and raw operator-visible
   control-plane events are retained for 7 days.
 
+## 2026-07-31
+
+- Persisted per-channel GC progress and surfaced it in administrator peer details; generation-safe
+  stale recovery replaced unbounded continuation retries.
+
 ## Streaming HA Memory Contract Revision
 
 Observed 101 memory growth showed that HA sync still had one large-object pipeline even after the

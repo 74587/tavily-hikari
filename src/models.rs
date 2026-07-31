@@ -1525,6 +1525,8 @@ pub struct JobLog {
     pub queued_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// Internal lease generation; never exposed by HTTP view models.
+    pub claim_generation: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

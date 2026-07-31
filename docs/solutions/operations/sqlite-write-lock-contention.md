@@ -314,6 +314,17 @@ month-tail public metrics scan.
 
 ## Guardrails / Reuse Notes
 
+- A raw SQLite transaction on a pooled connection needs cancellation ownership, not only an error
+  branch with `ROLLBACK`. Hold the physical connection in a guard, commit or roll back explicitly,
+  and detach/close it on drop while the transaction may still be open. Otherwise cancellation can
+  return a transaction-polluted connection and the next borrower sees a false nested transaction.
+- A durable scheduler claim needs a generation as well as a status. Increment it on claim and stale
+  recovery, then require `(id, generation, running)` for finish and continuation writes; this closes
+  the ABA window where a timed-out future completes a newly reclaimed job.
+- Continuation persistence must have one owner. A short atomic attempt plus a periodic stale reaper
+  is bounded and observable; spawning an unbounded retry task per failed continuation amplifies
+  writer contention.
+
 - Do not enable full SQL debug logging in production by default. Slow-statement logging is enough
   for this contention class and avoids dumping every statement or bind-heavy traffic path.
 - Treat runtime DB operation logs and `sqlx::query` slow warnings as complementary:

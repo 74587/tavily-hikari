@@ -178,6 +178,14 @@ reads:
 
 ## Guardrails / Reuse Notes
 
+- A fast SSE cadence does not require the same cadence for database freshness. Keep a cheap dirty
+  generation in memory, share one singleflight snapshot between HTTP and SSE, and enforce a minimum
+  rebuild/probe interval. Last-good data is preferable to multiplying expensive reads during a
+  writer incident.
+- Partial indexes for retained operational logs should be created by an idempotent post-ready
+  maintenance task. Add an `EXPLAIN QUERY PLAN` regression proving the bounded candidate query can
+  use the index, and preserve last-good coverage while the index is pending.
+
 - Do not fix SQLite worker saturation by increasing the worker pool first; that often makes the
   database do more concurrent work and increases lock pressure.
 - New admin list endpoints should define a default time window or a small page/cursor contract

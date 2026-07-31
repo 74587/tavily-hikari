@@ -812,6 +812,18 @@ fn alert_group_id(event: &AlertEventRecord) -> String {
 }
 
 impl KeyStore {
+    pub(crate) async fn ensure_auth_token_logs_alert_time_index(&self) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_auth_token_logs_alert_time
+               ON auth_token_logs(created_at DESC, id DESC)
+               WHERE failure_kind = 'upstream_rate_limited_429'
+                  OR result_status = 'quota_exhausted'"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn fetch_recent_alerts_summary_token(
         &self,
         window_hours: i64,
@@ -2887,5 +2899,52 @@ mod alert_grouping_tests {
             .collect::<Vec<_>>();
         assert_eq!(mother_groups.len(), 2);
         assert!(mother_groups.iter().all(|group| group.children.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn alert_candidate_query_uses_partial_time_index() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let db_path = temp_dir.path().join("alerts-partial-index.db");
+        let store = KeyStore::new_with_time(
+            &db_path.to_string_lossy(),
+            BackendTime::system(),
+        )
+        .await
+        .expect("create key store");
+
+        store
+            .ensure_auth_token_logs_alert_time_index()
+            .await
+            .expect("ensure alert index");
+        store
+            .ensure_auth_token_logs_alert_time_index()
+            .await
+            .expect("ensure alert index idempotently");
+
+        let rows = sqlx::query(
+            r#"EXPLAIN QUERY PLAN
+               SELECT id
+               FROM auth_token_logs INDEXED BY idx_auth_token_logs_alert_time
+               WHERE created_at >= ?
+                 AND (failure_kind = 'upstream_rate_limited_429'
+                      OR result_status = 'quota_exhausted')
+               ORDER BY created_at DESC, id DESC
+               LIMIT 100"#,
+        )
+        .bind(1_700_000_000_i64)
+        .fetch_all(&store.pool)
+        .await
+        .expect("explain alert candidate query");
+        let details = rows
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            details.contains("idx_auth_token_logs_alert_time"),
+            "query plan did not use partial alert index: {details}"
+        );
+        assert!(!details.contains("SCAN auth_token_logs"), "{details}");
     }
 }

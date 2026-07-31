@@ -141,3 +141,9 @@ consecutive pressure runs, skip further candidate work for 2, 5, 10, then 30 min
 settlement or a lower pressure ratio clears the state. Emit per-key cooldowns at DEBUG and reserve
 WARN for entering, escalating, or recovering the global state so diagnosis does not become the
 dominant write or log workload.
+
+Run reconciliation in a remote-I/O concurrency class with a total wall-clock budget. Before each
+new upstream request, verify that enough budget remains for the request deadline; a timeout around
+the entire worker alone still permits the last request to consume the full remainder. Persist the
+pressure transition and the single delayed representative job atomically so restarts neither lose
+backoff nor enqueue minute-by-minute no-op work.

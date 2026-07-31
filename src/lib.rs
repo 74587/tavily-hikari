@@ -1265,6 +1265,15 @@ const META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1: &str =
     "upstream_reconciliation_backoff_level_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1: &str =
     "upstream_reconciliation_backoff_until_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LAST_DURATION_MS_V1: &str =
+    "upstream_reconciliation_last_duration_ms_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LAST_ATTEMPTED_V1: &str =
+    "upstream_reconciliation_last_attempted_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LAST_SETTLED_V1: &str =
+    "upstream_reconciliation_last_settled_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LAST_429_V1: &str = "upstream_reconciliation_last_429_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LAST_BUDGET_EXHAUSTED_V1: &str =
+    "upstream_reconciliation_last_budget_exhausted_v1";
 const META_KEY_USER_BLOCKED_KEY_BASE_LIMIT_V1: &str = "user_blocked_key_base_limit_v1";
 const META_KEY_GLOBAL_IP_LIMIT_V1: &str = "global_ip_limit_v1";
 const META_KEY_TRUSTED_PROXY_CIDRS_V1: &str = "trusted_proxy_cidrs_v1";

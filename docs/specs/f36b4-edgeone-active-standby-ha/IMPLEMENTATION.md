@@ -241,3 +241,6 @@
 - Control retention remains 72 hours while billing/runtime retention is 14 days. Peer-less export
   diagnostics report a null ACK lag, and the admin node view now exposes per-channel ACK and GC
   health without a `COUNT(*)` query.
+- Per-channel GC state now persists attempts, progress, batch size, defer reason, and retry time.
+  Administrator peer details expose those fields beside ACK health; continuation persistence has no
+  unbounded retry task and relies on generation-safe stale recovery.

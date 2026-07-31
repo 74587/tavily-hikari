@@ -87,6 +87,14 @@
 
 ### 对账与 adjustment
 
+- `upstream_reconciliation` 使用 remote-I/O slot，并具有 20 秒单轮总预算；剩余预算不足时不得发起
+  新的上游请求，因此本地 HA GC 等维护任务不被长时间远程 I/O 占用。
+- 全局 429 压力状态与 job continuation 原子持久化。连续三轮零结算且 429 占比至少一半后，按
+  `2/5/10/30` 分钟退避，并采用 `max(退避, Retry-After)`；退避期间只保留一个 delayed
+  representative job。
+- 成功结算或压力比例恢复后清零全局压力状态。逐 key 429 为采样 DEBUG，进入、升级和恢复全局
+  退避才产生状态跃迁日志。
+
 - 请求入口固定 period code；实际上游后记录所用 token、key、匿名 project id、业务 credits 与 Research 终态。
 - 每个 token/period 汇总实际使用过的 key；以该匿名 project id 调用每把 key 的 `/usage`，只采用 `key.usage` 并跨 key 求和。
 - `delta = upstream_usage - local_billed_credits`；正值补扣，负值返还，零值只记录 settled 状态。
@@ -174,114 +182,15 @@
 
 ## Visual Evidence
 
-- source: mock-only admin stories / Storybook captures (`web/storybook-static`, `AdminPages` + component stories)
-
-### PR subset
-
 PR: include
 
-- desktop system settings warning entry
-- verifies: when active `upstream_mcp` sessions still exist, the “启用 Rebalance MCP” row exposes a focused warning entry while the hidden management route stays out of navigation.
+![Reconciliation budget exhausted state](./assets/reconciliation-budget-exhausted.png)
 
-  ![System settings warning entry](./assets/system-settings-rebalance-warning.png)
-
-PR: include
-
-- desktop system status session blocker card
-- verifies: the system status page foregrounds active `upstream_mcp` sessions as a precise-cutover blocker while keeping the top phase in “仅对比”.
-
-  ![System status blocked by sessions](./assets/system-status-blocked-by-sessions.png)
-
-PR: include
-
-- desktop MCP session bindings management page
-- verifies: the hidden `/admin/system-settings/mcp-session-bindings` route defaults to active rows, uses two date-range filters with inline apply/reset actions, keeps revoke actions separate from filtering, and does not surface raw upstream session ids.
-
-  ![MCP session bindings page](./assets/mcp-session-bindings-page.png)
-
-PR: include
-
-- desktop users list confirmed/projected comparison column
-- verifies: `/admin/users` keeps the `新方案 24h` absolute value visible even when confirmed shadow usage equals the current 24h value, still shows `较当前 ...` only for non-zero deltas, and marks projected rows with “含未对账估算” instead of collapsing to `—`.
-
-  ![Users list confirmed and unavailable comparison column](./assets/admin-users-compare-shadow-desktop.png)
-
-PR: include
-
-- desktop users usage confirmed/projected comparison column
-- verifies: `/admin/users/usage` mirrors the same confirmed-vs-projected contract, preserving the absolute compare-only value for equal confirmed rows and rendering projected rows with the explicit estimate hint instead of a silent dash.
-
-  ![Users usage confirmed and unavailable comparison column](./assets/admin-users-usage-compare-shadow-desktop.png)
-
-PR: include
-
-- desktop system status reconciliation diagnostics
-- verifies: `/admin/system-settings/status` exposes the new runtime summary timestamps for the latest reconciliation run, latest shadow adjustment, and latest enqueue failure while preserving the existing phase / queue summaries.
-
-  ![System status reconciliation diagnostics](./assets/admin-system-status-reconciliation-diagnostics.png)
-
-PR: include
-
-- desktop system status key activity charts
-- verifies: `/admin/system-settings/status` now adds the current-period per-upstream-key activity charts and rate-limited retry breakdown, so operators can see which keys bind more users and which keys still have the largest pending Project ID queues.
-
-  ![System status key activity desktop](./assets/admin-system-status-key-activity-desktop.png)
-
-PR: include
-
-- mobile system status key activity charts
-- verifies: the same diagnostic charts remain readable on narrow screens without collapsing the key labels or the retry breakdown.
-
-  ![System status key activity mobile](./assets/admin-system-status-key-activity-mobile.png)
-
-PR: include
-
-- desktop reconciliation convergence progress
-- verifies: the system status page exposes account standard coverage, terminal period and Research progress, plus per-Key pending Research, Project ID backlog, and reconciliation cooldown.
-
-  ![Reconciliation progress desktop](./assets/reconciliation-progress-desktop.png)
-
-- mobile reconciliation convergence progress
-- verifies: the same progress cards stack without overlap at the narrow mobile viewport, while retaining the per-Key diagnostic entry point.
-
-  ![Reconciliation progress mobile](./assets/reconciliation-progress-mobile.png)
-
-### Supporting evidence
-
-Owner-facing only.
-
-- desktop system settings reconciliation controls
-- verifies: system settings now groups upstream identity controls and the new reconciliation enable switch under the same admin surface; `X-Project-ID` defaults to `accessToken`, Control MCP UA stays blank-by-default, and precise reconciliation remains disabled by default.
-
-  ![System settings reconciliation controls](./assets/system-settings-reconciliation-controls-desktop.png)
-
-Owner-facing only.
-
-- desktop users list comparison column
-- verifies: when precise reconciliation stays disabled, `/admin/users` renders the dedicated `新方案 24h` comparison column next to the live 24h column, keeps equal-value confirmed rows visible, and marks projected rows with the explicit estimate hint.
-
-  ![Users list comparison column](./assets/users-list-shadow-comparison-desktop.png)
-
-Owner-facing only.
-
-- desktop users usage comparison column
-- verifies: `/admin/users/usage` shows the same `新方案 24h` comparison column without collapsing the existing 5m / 1h / success-rate hierarchy, while preserving equal confirmed values and explicit projected states.
-
-  ![Users usage comparison column](./assets/users-usage-shadow-comparison-desktop.png)
-
-Owner-facing only.
-
-- desktop system status page
-- verifies: `/admin/system-settings/status` uses the shared “系统状态” route, foregrounds only live gates / queues / counters, and keeps the detailed header allowlist + reconciliation disclosure below the fold.
-
-  ![System status desktop](./assets/system-status-desktop.png)
-
-Owner-facing only.
-
-- mobile system status page
-- verifies: the same system-status route keeps the switch, counters, gate chips, and summary cards readable on narrow screens without the previously broken switch layout.
-
-  ![System status mobile](./assets/system-status-mobile.png)
+- source_type: `storybook_docs`
+- docs_entry_or_title: `Admin/Modules/SystemStatusModule / Docs`
+- scenario: reconciliation budget exhausted
+- evidence_note: The current mock-only system status surface shows the bounded 20-second round,
+  attempted/settled/429 aggregate, and explicit exhausted budget state without per-key warning noise.
 
 ## Related PRs
 

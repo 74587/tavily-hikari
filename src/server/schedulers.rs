@@ -57,10 +57,13 @@ const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
 const HA_OUTBOX_GC_CONTINUATION_DELAY_SECS: i64 = 30;
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
+const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE: &str =
+    "auth_token_logs_alert_index_ensure";
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE: &str = "dashboard_rollup_integrity";
 const DASHBOARD_ROLLUP_INTEGRITY_FAILURE_BACKOFF_SECS: i64 = 60;
 const DASHBOARD_ROLLUP_INTEGRITY_WATCHDOG_SECS: u64 = 60;
+const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
@@ -89,6 +92,7 @@ fn should_warn_scheduled_job_queue_wait(job_type: &str) -> bool {
 
 struct ClaimedScheduledJob {
     job_id: i64,
+    claim_generation: i64,
     _job_execution_gate: Option<OwnedMutexGuard<()>>,
 }
 
@@ -240,6 +244,7 @@ async fn claim_scheduled_job_with_gate(
     {
         Ok(Some(job_id)) => Ok(Some(ClaimedScheduledJob {
             job_id,
+            claim_generation: 1,
             _job_execution_gate: Some(job_execution_gate),
         })),
         Ok(None) => Ok(None),
@@ -352,8 +357,23 @@ fn scheduled_job_uses_remote_io(job_type: &str) -> bool {
             | "quota_sync/hot"
             | LINUXDO_USER_STATUS_SYNC_JOB_TYPE
             | LINUXDO_CREDIT_RECHARGE_LIFECYCLE_JOB_TYPE
+            | "upstream_reconciliation"
             | "forward_proxy_geo_refresh"
     )
+}
+
+fn scheduled_job_uses_db_execution_gate(job_type: &str) -> bool {
+    job_type != "upstream_reconciliation"
+}
+
+#[cfg(test)]
+#[test]
+fn upstream_reconciliation_does_not_wait_for_db_execution_gate() {
+    assert!(scheduled_job_uses_remote_io("upstream_reconciliation"));
+    assert!(!scheduled_job_uses_db_execution_gate(
+        "upstream_reconciliation"
+    ));
+    assert!(scheduled_job_uses_db_execution_gate("ha_outbox_gc"));
 }
 
 async fn dequeue_next_scheduled_job(
@@ -428,6 +448,7 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
     let trigger_source = job.trigger_source.clone();
     let claimed_job = ClaimedScheduledJob {
         job_id: job.id,
+        claim_generation: job.claim_generation,
         _job_execution_gate: None,
     };
     let completed = run_manual_claimed_job(
@@ -503,6 +524,7 @@ fn spawn_dashboard_rollup_integrity_scheduler(state: Arc<AppState>) {
 async fn finish_dashboard_rollup_integrity_and_enqueue(
     state: &AppState,
     job_id: i64,
+    claim_generation: i64,
     message: &str,
     available_at: i64,
 ) -> bool {
@@ -510,6 +532,7 @@ async fn finish_dashboard_rollup_integrity_and_enqueue(
         .proxy
         .scheduled_job_finish_and_enqueue_auto_at(
             job_id,
+            claim_generation,
             DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
             None,
             1,
@@ -533,7 +556,12 @@ async fn finish_dashboard_rollup_integrity_and_enqueue(
             let fallback_message = format!("{message}; scheduler handoff fallback: {err}");
             if let Err(finish_err) = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&fallback_message))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&fallback_message),
+                )
                 .await
             {
                 tracing::error!(
@@ -564,6 +592,7 @@ async fn run_dashboard_rollup_integrity_claimed_job(
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate: existing_gate,
     } = claimed_job;
     let _job_execution_gate = match existing_gate {
@@ -594,6 +623,7 @@ async fn run_dashboard_rollup_integrity_claimed_job(
             let handed_off = finish_dashboard_rollup_integrity_and_enqueue(
                 state.as_ref(),
                 job_id,
+                claim_generation,
                 &message,
                 available_at,
             )
@@ -604,6 +634,7 @@ async fn run_dashboard_rollup_integrity_claimed_job(
     finish_dashboard_rollup_integrity_and_enqueue(
         state.as_ref(),
         job_id,
+        claim_generation,
         &message,
         now.saturating_add(next_delay_secs),
     )
@@ -647,6 +678,31 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
                     eprintln!("maintenance-worker: dequeue error: {err}");
                     state.proxy.backend_time().sleep(Duration::from_secs(1)).await;
                 }
+            }
+        }
+    });
+}
+
+fn spawn_scheduled_job_stale_reaper(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            state.proxy.backend_time().sleep(Duration::from_secs(30)).await;
+            match state.proxy.recover_stale_scheduled_jobs().await {
+                Ok(0) => {}
+                Ok(recovered) => {
+                    tracing::warn!(
+                        component = "scheduler",
+                        event = "stale_jobs_recovered",
+                        recovered,
+                        continuation_delay_secs = 30_i64,
+                    );
+                    maintenance_worker_wake_for_state(state.as_ref()).notify_one();
+                }
+                Err(err) => tracing::error!(
+                    component = "scheduler",
+                    event = "stale_job_reaper_failed",
+                    err = %err,
+                ),
             }
         }
     });
@@ -905,12 +961,26 @@ fn spawn_request_logs_body_gc_index_ensure_scheduler(state: Arc<AppState>) {
     });
 }
 
+fn spawn_auth_token_logs_alert_index_ensure_scheduler(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let _ = enqueue_scheduled_job_logged(
+            state.as_ref(),
+            AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE,
+            None,
+            TRIGGER_SOURCE_SCHEDULER,
+            "auth-token-logs-alert-index",
+        )
+        .await;
+    });
+}
+
 async fn run_request_logs_gc_catchup_claimed_job(
     state: Arc<AppState>,
     claimed_job: ClaimedScheduledJob,
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
@@ -961,14 +1031,19 @@ async fn run_request_logs_gc_catchup_claimed_job(
                 .await;
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "success", Some(&msg))
+                .scheduled_job_finish_claimed(job_id, claim_generation, "success", Some(&msg))
                 .await;
             report.completed
         }
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
             false
         }
@@ -981,6 +1056,7 @@ async fn run_request_logs_body_gc_index_ensure_claimed_job(
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
@@ -994,14 +1070,24 @@ async fn run_request_logs_body_gc_index_ensure_claimed_job(
         Ok(()) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "success", Some("partial_index_ready"))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "success",
+                    Some("partial_index_ready"),
+                )
                 .await;
             true
         }
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
             let available_at = state
                 .proxy
@@ -1045,6 +1131,7 @@ async fn run_request_logs_body_gc_index_ensure_claimed_job(
 async fn finish_ha_gc_with_continuation(
     state: &Arc<AppState>,
     job_id: i64,
+    claim_generation: i64,
     message: String,
 ) -> bool {
     let available_at = state
@@ -1056,6 +1143,7 @@ async fn finish_ha_gc_with_continuation(
         .proxy
         .scheduled_job_finish_and_enqueue_auto_at(
             job_id,
+            claim_generation,
             "ha_outbox_gc",
             None,
             1,
@@ -1076,85 +1164,16 @@ async fn finish_ha_gc_with_continuation(
             );
         }
         Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {
-            tracing::warn!(
+            tracing::debug!(
                 component = "ha_outbox_gc",
-                event = "continuation_retry_scheduled",
+                event = "continuation_persist_deferred",
                 job_id,
+                claim_generation,
                 continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
                 err = %err,
-                "HA outbox GC continuation hit a transient SQLite conflict; retrying asynchronously"
+                "HA outbox GC continuation hit a transient SQLite conflict; stale reaper will recover it"
             );
-            let retry_state = state.clone();
-            tokio::spawn(async move {
-                loop {
-                    retry_state
-                        .proxy
-                        .backend_time()
-                        .sleep(Duration::from_secs(
-                            HA_OUTBOX_GC_CONTINUATION_DELAY_SECS as u64,
-                        ))
-                        .await;
-                    let retry_available_at = retry_state
-                        .proxy
-                        .backend_time()
-                        .now_ts()
-                        .saturating_add(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS);
-                    match retry_state
-                        .proxy
-                        .scheduled_job_finish_and_enqueue_auto_at(
-                            job_id,
-                            "ha_outbox_gc",
-                            None,
-                            1,
-                            Some(&message),
-                            retry_available_at,
-                        )
-                        .await
-                    {
-                        Ok(result) => {
-                            tracing::debug!(
-                                component = "ha_outbox_gc",
-                                event = "continuation_queued_after_retry",
-                                job_id,
-                                continuation_job_id = result.job_id,
-                                continuation_created = result.created,
-                                continuation_delay_secs =
-                                    HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
-                                available_at = retry_available_at,
-                            );
-                            maintenance_worker_wake_for_state(retry_state.as_ref()).notify_one();
-                            break;
-                        }
-                        Err(retry_err)
-                            if tavily_hikari::is_transient_sqlite_write_error(&retry_err) =>
-                        {
-                            tracing::warn!(
-                                component = "ha_outbox_gc",
-                                event = "continuation_retry_deferred",
-                                job_id,
-                                continuation_delay_secs =
-                                    HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
-                                err = %retry_err,
-                                "HA outbox GC continuation remains blocked by SQLite"
-                            );
-                        }
-                        Err(retry_err) => {
-                            tracing::error!(
-                                component = "ha_outbox_gc",
-                                event = "continuation_retry_failed",
-                                job_id,
-                                err = %retry_err,
-                                "HA outbox GC continuation could not be persisted"
-                            );
-                            let _ = retry_state
-                                .proxy
-                                .scheduled_job_finish(job_id, "error", Some(&retry_err.to_string()))
-                                .await;
-                            break;
-                        }
-                    }
-                }
-            });
+            return false;
         }
         Err(err) => {
             tracing::error!(
@@ -1165,9 +1184,13 @@ async fn finish_ha_gc_with_continuation(
                 err = %err,
                 "HA outbox GC could not persist its deferred continuation"
             );
+            let _ = state
+                .proxy
+                .record_ha_outbox_gc_deferred("continuation_persist_failed")
+                .await;
             if let Err(finish_err) = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&message))
+                .scheduled_job_finish_claimed(job_id, claim_generation, "error", Some(&message))
                 .await
             {
                 tracing::error!(
@@ -1190,21 +1213,24 @@ async fn run_ha_outbox_gc_claimed_job(
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
 
     let Some(_gc_lease) = try_acquire_online_ha_gc_lease() else {
-        tracing::warn!(
+        tracing::debug!(
             component = "ha_outbox_gc",
             event = "deferred",
             job_id,
+            claim_generation,
             defer_reason = "gc_lease_busy",
             continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
         );
         return finish_ha_gc_with_continuation(
             &state,
             job_id,
+            claim_generation,
             "deferred=gc_lease_busy".to_string(),
         )
         .await;
@@ -1215,10 +1241,11 @@ async fn run_ha_outbox_gc_claimed_job(
         Ok(report) => {
             let needs_continuation = report.has_more || !report.completed;
             if needs_continuation {
-                tracing::warn!(
+                tracing::debug!(
                     component = "ha_outbox_gc",
                     event = "deferred",
                     job_id,
+                    claim_generation,
                     defer_reason = if report.has_more {
                         "has_more"
                     } else {
@@ -1230,6 +1257,7 @@ async fn run_ha_outbox_gc_claimed_job(
                 return finish_ha_gc_with_continuation(
                     &state,
                     job_id,
+                    claim_generation,
                     format_ha_outbox_gc_report_message(&report, 1),
                 )
                 .await;
@@ -1237,13 +1265,19 @@ async fn run_ha_outbox_gc_claimed_job(
                 let message = format_ha_outbox_gc_report_message(&report, 1);
                 if let Err(err) = state
                     .proxy
-                    .scheduled_job_finish(job_id, "success", Some(&message))
+                    .scheduled_job_finish_claimed(
+                        job_id,
+                        claim_generation,
+                        "success",
+                        Some(&message),
+                    )
                     .await
                 {
                     tracing::warn!(
                         component = "ha_outbox_gc",
                         event = "deferred",
                         job_id,
+                        claim_generation,
                         defer_reason = "job_finish_failed",
                         err = %err,
                         "HA outbox GC completion could not be persisted; retaining a durable continuation"
@@ -1251,6 +1285,7 @@ async fn run_ha_outbox_gc_claimed_job(
                     return finish_ha_gc_with_continuation(
                         &state,
                         job_id,
+                        claim_generation,
                         format!("deferred=job_finish_failed error={err}"),
                     )
                     .await;
@@ -1258,16 +1293,18 @@ async fn run_ha_outbox_gc_claimed_job(
             }
         }
         Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {
-            tracing::warn!(
+            tracing::debug!(
                 component = "ha_outbox_gc",
                 event = "deferred",
                 job_id,
+                claim_generation,
                 defer_reason = "sqlite_busy",
                 err = %err,
             );
             return finish_ha_gc_with_continuation(
                 &state,
                 job_id,
+                claim_generation,
                 format!("deferred=sqlite_busy error={err}"),
             )
             .await;
@@ -1276,7 +1313,7 @@ async fn run_ha_outbox_gc_claimed_job(
             let message = err.to_string();
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&message))
+                .scheduled_job_finish_claimed(job_id, claim_generation, "error", Some(&message))
                 .await;
         }
     }
@@ -1321,6 +1358,7 @@ async fn record_linuxdo_user_sync_failure_in_db_window(
 async fn finish_scheduled_job_with_db_gate(
     state: &AppState,
     job_id: i64,
+    claim_generation: i64,
     status: &str,
     message: &str,
 ) {
@@ -1328,7 +1366,7 @@ async fn finish_scheduled_job_with_db_gate(
     let _maintenance = acquire_db_maintenance_read_gate().await;
     let _ = state
         .proxy
-        .scheduled_job_finish(job_id, status, Some(message))
+        .scheduled_job_finish_claimed(job_id, claim_generation, status, Some(message))
         .await;
 }
 
@@ -1369,6 +1407,7 @@ async fn run_linuxdo_user_status_sync_claimed_job(
     }
 
     let job_id = claimed_job.job_id;
+    let claim_generation = claimed_job.claim_generation;
     let cfg = &state.linuxdo_oauth;
 
     let records = {
@@ -1380,8 +1419,9 @@ async fn run_linuxdo_user_status_sync_claimed_job(
         if !cfg.is_enabled_and_configured() {
             let _ = state
                 .proxy
-                .scheduled_job_finish(
+                .scheduled_job_finish_claimed(
                     job_id,
+                    claim_generation,
                     "success",
                     Some("attempted=0 success=0 skipped=0 failure=0 reason=linuxdo_oauth_not_configured"),
                 )
@@ -1391,8 +1431,9 @@ async fn run_linuxdo_user_status_sync_claimed_job(
         if !cfg.has_refresh_token_crypt_key() {
             let _ = state
                 .proxy
-                .scheduled_job_finish(
+                .scheduled_job_finish_claimed(
                     job_id,
+                    claim_generation,
                     "success",
                     Some("attempted=0 success=0 skipped=0 failure=0 reason=missing_refresh_token_crypt_key"),
                 )
@@ -1409,7 +1450,12 @@ async fn run_linuxdo_user_status_sync_claimed_job(
             Err(err) => {
                 let _ = state
                     .proxy
-                    .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                    .scheduled_job_finish_claimed(
+                        job_id,
+                        claim_generation,
+                        "error",
+                        Some(&err.to_string()),
+                    )
                     .await;
                 return false;
             }
@@ -1418,8 +1464,9 @@ async fn run_linuxdo_user_status_sync_claimed_job(
         if records.is_empty() {
             let _ = state
                 .proxy
-                .scheduled_job_finish(
+                .scheduled_job_finish_claimed(
                     job_id,
+                    claim_generation,
                     "success",
                     Some("attempted=0 success=0 skipped=0 failure=0 reason=no_eligible_accounts"),
                 )
@@ -1600,7 +1647,14 @@ async fn run_linuxdo_user_status_sync_claimed_job(
         message.push_str(&format!(" first_failure={first_failure}"));
     }
     let final_status = if failure > 0 { "error" } else { "success" };
-    finish_scheduled_job_with_db_gate(state.as_ref(), job_id, final_status, &message).await;
+    finish_scheduled_job_with_db_gate(
+        state.as_ref(),
+        job_id,
+        claim_generation,
+        final_status,
+        &message,
+    )
+    .await;
     final_status == "success"
 }
 
@@ -1639,6 +1693,7 @@ async fn run_linuxdo_user_tag_binding_refresh_job_with_source(
 ) {
     let Some(ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     }) = claim_scheduled_job(
         state.as_ref(),
@@ -1658,13 +1713,18 @@ async fn run_linuxdo_user_tag_binding_refresh_job_with_source(
             let msg = format!("refreshed={refreshed}");
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "success", Some(&msg))
+                .scheduled_job_finish_claimed(job_id, claim_generation, "success", Some(&msg))
                 .await;
         }
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
         }
     }
@@ -1935,6 +1995,7 @@ async fn run_linuxdo_credit_recharge_lifecycle_claimed_job(
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
@@ -1949,7 +2010,12 @@ async fn run_linuxdo_credit_recharge_lifecycle_claimed_job(
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
             return false;
         }
@@ -1963,7 +2029,12 @@ async fn run_linuxdo_credit_recharge_lifecycle_claimed_job(
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
             return false;
         }
@@ -1977,7 +2048,12 @@ async fn run_linuxdo_credit_recharge_lifecycle_claimed_job(
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
             return false;
         }
@@ -2108,7 +2184,7 @@ async fn run_linuxdo_credit_recharge_lifecycle_claimed_job(
     let final_status = if refund_failure > 0 { "error" } else { "success" };
     let _ = state
         .proxy
-        .scheduled_job_finish(job_id, final_status, Some(&message))
+        .scheduled_job_finish_claimed(job_id, claim_generation, final_status, Some(&message))
         .await;
     final_status == "success"
 }
@@ -2146,6 +2222,7 @@ async fn run_forward_proxy_geo_refresh_claimed_job(
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
@@ -2159,7 +2236,12 @@ async fn run_forward_proxy_geo_refresh_claimed_job(
         Err(err) => {
             let _ = state
                 .proxy
-                .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+                .scheduled_job_finish_claimed(
+                    job_id,
+                    claim_generation,
+                    "error",
+                    Some(&err.to_string()),
+                )
                 .await;
             return false;
         }
@@ -2173,7 +2255,12 @@ async fn run_forward_proxy_geo_refresh_claimed_job(
     {
         let _ = state
             .proxy
-            .scheduled_job_finish(job_id, "error", Some(&err.to_string()))
+            .scheduled_job_finish_claimed(
+                job_id,
+                claim_generation,
+                "error",
+                Some(&err.to_string()),
+            )
             .await;
         return false;
     }
@@ -2181,7 +2268,7 @@ async fn run_forward_proxy_geo_refresh_claimed_job(
     let msg = format!("refreshed_candidates={refreshed}");
     let _ = state
         .proxy
-        .scheduled_job_finish(job_id, "success", Some(&msg))
+        .scheduled_job_finish_claimed(job_id, claim_generation, "success", Some(&msg))
         .await;
     true
 }
@@ -2201,6 +2288,72 @@ async fn run_manual_claimed_job(
     if job_type == REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE {
         return run_request_logs_body_gc_index_ensure_claimed_job(state, claimed_job).await;
     }
+    if job_type == AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE {
+        let ClaimedScheduledJob {
+            job_id,
+            claim_generation,
+            _job_execution_gate,
+        } = claimed_job;
+        drop(_job_execution_gate);
+        let _maintenance = acquire_db_maintenance_write_gate().await;
+        let result = state.proxy.ensure_auth_token_logs_alert_time_index().await;
+        return match result {
+            Ok(()) => {
+                let _ = state
+                    .proxy
+                    .scheduled_job_finish_claimed(
+                        job_id,
+                        claim_generation,
+                        "success",
+                        Some("partial_index_ready"),
+                    )
+                    .await;
+                true
+            }
+            Err(err) => {
+                let _ = state
+                    .proxy
+                    .scheduled_job_finish_claimed(
+                        job_id,
+                        claim_generation,
+                        "error",
+                        Some(&err.to_string()),
+                    )
+                    .await;
+                let available_at = state.proxy.backend_time().now_ts().saturating_add(
+                    AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_RETRY_DELAY_SECS,
+                );
+                match enqueue_scheduled_job_at(
+                    state.as_ref(),
+                    AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE,
+                    None,
+                    TRIGGER_SOURCE_AUTO,
+                    available_at,
+                )
+                .await
+                {
+                    Ok(retry_job_id) => tracing::warn!(
+                        component = "dashboard_alerts",
+                        event = "alert_index_retry_queued",
+                        failed_job_id = job_id,
+                        retry_job_id,
+                        retry_delay_secs = AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_RETRY_DELAY_SECS,
+                        available_at,
+                        err = %err,
+                    ),
+                    Err(retry_err) => tracing::warn!(
+                        component = "dashboard_alerts",
+                        event = "alert_index_retry_enqueue_failed",
+                        failed_job_id = job_id,
+                        retry_delay_secs = AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_RETRY_DELAY_SECS,
+                        err = %err,
+                        retry_err = %retry_err,
+                    ),
+                }
+                false
+            }
+        };
+    }
     if job_type == LINUXDO_USER_STATUS_SYNC_JOB_TYPE {
         return run_linuxdo_user_status_sync_claimed_job(state, claimed_job).await;
     }
@@ -2208,20 +2361,23 @@ async fn run_manual_claimed_job(
         return run_dashboard_rollup_integrity_claimed_job(state, claimed_job).await;
     }
 
-    if claimed_job._job_execution_gate.is_none() {
+    if claimed_job._job_execution_gate.is_none()
+        && scheduled_job_uses_db_execution_gate(&job_type)
+    {
         claimed_job._job_execution_gate =
             Some(acquire_db_job_execution_gate_for_state(state.as_ref()).await);
     }
 
     let ClaimedScheduledJob {
         job_id,
+        claim_generation,
         _job_execution_gate,
     } = claimed_job;
     let finish = |state: Arc<AppState>, status: &'static str, message: String| async move {
         let succeeded = status == "success";
         let _ = state
             .proxy
-            .scheduled_job_finish(job_id, status, Some(&message))
+            .scheduled_job_finish_claimed(job_id, claim_generation, status, Some(&message))
             .await;
         succeeded
     };
@@ -2267,13 +2423,56 @@ async fn run_manual_claimed_job(
         }
         "upstream_reconciliation" => {
             drop(_job_execution_gate);
-            match state
-                .proxy
-                .run_upstream_reconciliation_once(&state.usage_base)
-                .await
+            match tokio::time::timeout(
+                Duration::from_secs(20),
+                state
+                    .proxy
+                    .run_upstream_reconciliation_once(&state.usage_base),
+            )
+            .await
             {
-                Ok(settled) => finish(state, "success", format!("settled={settled}")).await,
-                Err(err) => finish(state, "error", err.to_string()).await,
+                Ok(Ok(settled)) => {
+                    let now = state.proxy.backend_time().now_ts();
+                    match state.proxy.upstream_reconciliation_backoff_until().await {
+                        Ok(available_at) if available_at > now => state
+                            .proxy
+                            .scheduled_job_finish_and_enqueue_auto_at(
+                                job_id,
+                                claim_generation,
+                                "upstream_reconciliation",
+                                None,
+                                1,
+                                Some(&format!("settled={settled} backoff_until={available_at}")),
+                                available_at,
+                            )
+                            .await
+                            .is_ok(),
+                        Ok(_) => finish(state, "success", format!("settled={settled}")).await,
+                        Err(err) => finish(state, "error", err.to_string()).await,
+                    }
+                }
+                Ok(Err(err)) => finish(state, "error", err.to_string()).await,
+                Err(_) => {
+                    tracing::warn!(
+                        component = "reconciliation",
+                        event = "run_budget_exhausted",
+                        budget_ms = 20_000_u64,
+                        "upstream reconciliation stopped at its total runtime budget"
+                    );
+                    if let Err(err) = state
+                        .proxy
+                        .record_upstream_reconciliation_budget_exhausted(20_000)
+                        .await
+                    {
+                        tracing::warn!(
+                            component = "reconciliation",
+                            event = "run_budget_stats_persist_failed",
+                            err = %err,
+                        );
+                    }
+                    finish(state, "success", "settled=unknown budget_exhausted=true".to_string())
+                        .await
+                }
             }
         }
         "auth_token_logs_gc" => {
@@ -2312,6 +2511,7 @@ async fn run_manual_claimed_job(
                 state,
                 ClaimedScheduledJob {
                     job_id,
+                    claim_generation,
                     _job_execution_gate: None,
                 },
             )
@@ -2323,22 +2523,29 @@ async fn run_manual_claimed_job(
                 state,
                 ClaimedScheduledJob {
                     job_id,
+                    claim_generation,
                     _job_execution_gate: None,
                 },
             )
             .await
         },
-        "db_compaction" => run_db_compaction_claimed_job(state, job_id).await,
+        "db_compaction" => {
+            run_db_compaction_claimed_job(state, job_id, claim_generation).await
+        }
         _ => finish(state, "error", format!("unsupported manual job type: {job_type}")).await,
     }
 }
 
-async fn finish_db_compaction_claimed_job(state: Arc<AppState>, job_id: i64) -> bool {
+async fn finish_db_compaction_claimed_job(
+    state: Arc<AppState>,
+    job_id: i64,
+    claim_generation: i64,
+) -> bool {
     let finish = |state: Arc<AppState>, status: &'static str, message: String| async move {
         let succeeded = status == "success";
         let _ = state
             .proxy
-            .scheduled_job_finish(job_id, status, Some(&message))
+            .scheduled_job_finish_claimed(job_id, claim_generation, status, Some(&message))
             .await;
         succeeded
     };
@@ -2379,9 +2586,13 @@ async fn finish_db_compaction_claimed_job(state: Arc<AppState>, job_id: i64) -> 
     }
 }
 
-async fn run_db_compaction_claimed_job(state: Arc<AppState>, job_id: i64) -> bool {
+async fn run_db_compaction_claimed_job(
+    state: Arc<AppState>,
+    job_id: i64,
+    claim_generation: i64,
+) -> bool {
     let _maintenance = acquire_db_maintenance_write_gate().await;
-    finish_db_compaction_claimed_job(state, job_id).await
+    finish_db_compaction_claimed_job(state, job_id, claim_generation).await
 }
 
 fn spawn_db_compaction_scheduler(state: Arc<AppState>) {

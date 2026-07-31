@@ -57,6 +57,7 @@ struct DashboardOverviewCacheState {
     loading: bool,
     loading_started_at: Option<tokio::time::Instant>,
     loading_generation: u64,
+    last_freshness_probe_at: Option<tokio::time::Instant>,
     notify: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     build_count: usize,
@@ -69,6 +70,7 @@ impl Default for DashboardOverviewCacheState {
             loading: false,
             loading_started_at: None,
             loading_generation: 0,
+            last_freshness_probe_at: None,
             notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             build_count: 0,

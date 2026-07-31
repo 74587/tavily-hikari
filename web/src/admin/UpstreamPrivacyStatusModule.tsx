@@ -502,6 +502,18 @@ export default function UpstreamPrivacyStatusModule({
                   value={formatOptionalTimestamp(status.lastReconciliationRunAt, timestampFormatter, strings.statusMissing)}
                 />
                 <PrivacyStat
+                  label={language === 'zh' ? '最近轮耗时' : 'Last run duration'}
+                  value={status.reconciliationLastDurationMs == null ? strings.statusMissing : `${numberFormatter.format(status.reconciliationLastDurationMs)} ms`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '尝试 / 结算 / 429' : 'Attempted / settled / 429'}
+                  value={`${numberFormatter.format(status.reconciliationLastAttempted ?? 0)} / ${numberFormatter.format(status.reconciliationLastSettled ?? 0)} / ${numberFormatter.format(status.reconciliationLastUpstream429 ?? 0)}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '预算状态' : 'Budget status'}
+                  value={status.reconciliationLastBudgetExhausted ? (language === 'zh' ? '已耗尽' : 'Exhausted') : (language === 'zh' ? '正常' : 'Within budget')}
+                />
+                <PrivacyStat
                   label={diagnosticsLabels.lastShadowAdjustment}
                   value={formatOptionalTimestamp(status.lastShadowAdjustmentAt, timestampFormatter, strings.statusMissing)}
                 />

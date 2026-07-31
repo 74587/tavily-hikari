@@ -320,6 +320,7 @@ async fn dashboard_overview_snapshot_keeps_one_stale_boundary_when_background_fl
         "emitted freshness must keep the pre-flush pending signature for a stale snapshot",
     );
 
+    reset_dashboard_overview_build_count(&state).await;
     let refreshed = load_dashboard_overview_snapshot(&state)
         .await
         .expect("refreshed overview snapshot");
@@ -835,6 +836,7 @@ async fn dashboard_overview_freshness_notices_same_second_rollup_updates() {
     .await
     .expect("upsert initial rollup row");
 
+    expire_dashboard_overview_freshness_probe(&state).await;
     let after_insert = load_dashboard_overview_snapshot(&state)
         .await
         .expect("overview snapshot after insert");
@@ -866,6 +868,7 @@ async fn dashboard_overview_freshness_notices_same_second_rollup_updates() {
     .await
     .expect("update same bucket within same second");
 
+    expire_dashboard_overview_freshness_probe(&state).await;
     let after_update = load_dashboard_overview_snapshot(&state)
         .await
         .expect("overview snapshot after update");
@@ -934,6 +937,7 @@ async fn dashboard_overview_freshness_tracks_time_driven_stale_key_transitions()
     );
 
     tokio::time::sleep(Duration::from_secs(2)).await;
+    reset_dashboard_overview_build_count(&state).await;
     let second = load_dashboard_overview_snapshot(&state)
         .await
         .expect("second overview snapshot");

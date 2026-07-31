@@ -2411,6 +2411,7 @@ impl KeyStore {
                 message TEXT,
                 queued_at INTEGER NOT NULL,
                 available_at INTEGER NOT NULL DEFAULT 0,
+                claim_generation INTEGER NOT NULL DEFAULT 0,
                 started_at INTEGER,
                 finished_at INTEGER,
                 FOREIGN KEY (key_id) REFERENCES api_keys(id)
@@ -2968,6 +2969,7 @@ impl KeyStore {
         )
         .execute(&self.pool)
         .await?;
+        self.ensure_ha_outbox_gc_channel_state().await?;
         for (column, definition) in [
             ("last_legacy_control_seq", "INTEGER NOT NULL DEFAULT 0"),
             ("last_legacy_billing_seq", "INTEGER NOT NULL DEFAULT 0"),
@@ -3111,14 +3113,14 @@ impl KeyStore {
                     &RequestKindCanonicalMigrationState::Done(done_at).as_meta_value(),
                 )
                 .await?;
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(RequestKindCanonicalMigrationClaim::AlreadyDone(done_at))
             }
             Some(state)
                 if request_kind_canonical_migration_state_blocks_reentry(now_ts, state)
                     .is_some() =>
             {
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(RequestKindCanonicalMigrationClaim::RunningElsewhere(
                     request_kind_canonical_migration_state_blocks_reentry(now_ts, state)
                         .expect("running state should expose heartbeat"),
@@ -3165,7 +3167,7 @@ impl KeyStore {
                     META_KEY_REQUEST_KIND_CANONICAL_MIGRATION_V1_DONE,
                 )
                 .await?;
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(RequestKindCanonicalMigrationClaim::Claimed)
             }
         }
@@ -3191,10 +3193,9 @@ impl KeyStore {
                 &done_state.as_meta_value(),
             )
             .await?;
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            conn.commit().await?;
             return Ok(());
         }
-
         match state {
             RequestKindCanonicalMigrationState::Done(done_at) => {
                 write_meta_string_with_connection(
@@ -3221,7 +3222,7 @@ impl KeyStore {
             }
         }
 
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        conn.commit().await?;
         Ok(())
     }
 
@@ -3269,7 +3270,6 @@ impl KeyStore {
         ] {
             sqlx::query(sql).execute(&self.pool).await?;
         }
-
         Ok(())
     }
 }

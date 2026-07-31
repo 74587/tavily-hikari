@@ -555,7 +555,7 @@ pub(super) async fn hold_sqlite_write_lock_for_test(
 
 pub(super) async fn begin_held_sqlite_write_lock_for_test(
     pool: &SqlitePool,
-) -> sqlx::pool::PoolConnection<sqlx::Sqlite> {
+) -> crate::store::ImmediateSqliteTransaction {
     begin_immediate_sqlite_connection(pool)
         .await
         .expect("begin immediate transaction")

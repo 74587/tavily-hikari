@@ -522,6 +522,7 @@ use super::upstream_support_and_manual_jobs::*;
                 state.clone(),
                 ClaimedScheduledJob {
                     job_id,
+                    claim_generation: 1,
                     _job_execution_gate: None,
                 },
             )

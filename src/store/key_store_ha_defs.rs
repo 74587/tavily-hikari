@@ -37,7 +37,7 @@ pub enum HaBaselineApplyMode {
 #[derive(Debug)]
 pub struct HaBaselineApplySession {
     channel: HaSyncChannel,
-    conn: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: ImmediateSqliteTransaction,
     high_watermark: i64,
     row_count: usize,
     payload_bytes: usize,
@@ -62,7 +62,7 @@ pub struct HaEventsReadSession {
 #[derive(Debug)]
 pub struct HaEventsApplySession {
     channel: HaSyncChannel,
-    conn: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    conn: ImmediateSqliteTransaction,
     high_watermark: i64,
     row_count: usize,
     payload_bytes: usize,

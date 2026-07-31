@@ -1515,6 +1515,7 @@ async fn run_ha_sync_once_for_peer(
 
 fn spawn_business_background_tasks(state: Arc<AppState>) {
     spawn_maintenance_worker(state.clone());
+    spawn_scheduled_job_stale_reaper(state.clone());
     spawn_quota_sync_scheduler(state.clone());
     spawn_token_usage_rollup_scheduler(state.clone());
     spawn_upstream_reconciliation_scheduler(state.clone());
@@ -1525,6 +1526,7 @@ fn spawn_business_background_tasks(state: Arc<AppState>) {
     spawn_request_logs_gc_scheduler(state.clone());
     spawn_request_logs_body_gc_index_ensure_scheduler(state.clone());
     spawn_dashboard_rollup_integrity_scheduler(state.clone());
+    spawn_auth_token_logs_alert_index_ensure_scheduler(state.clone());
     if state.linuxdo_oauth.is_user_sync_scheduler_enabled() {
         spawn_linuxdo_user_status_sync_scheduler(state.clone());
     }

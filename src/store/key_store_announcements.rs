@@ -276,9 +276,8 @@ impl KeyStore {
             "NULL".to_string()
         };
 
-        let mut conn = self.pool.acquire().await?;
+        let mut conn = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
         let rebuild_result = async {
-            sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
             sqlx::query("DROP TABLE IF EXISTS announcements_new")
                 .execute(&mut *conn)
                 .await?;
@@ -329,16 +328,17 @@ impl KeyStore {
             sqlx::query("ALTER TABLE announcements_new RENAME TO announcements")
                 .execute(&mut *conn)
                 .await?;
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok::<(), sqlx::Error>(())
+            Ok::<(), ProxyError>(())
         }
         .await;
 
-        if rebuild_result.is_err() {
-            sqlx::query("ROLLBACK").execute(&mut *conn).await.ok();
+        match rebuild_result {
+            Ok(()) => conn.commit().await,
+            Err(err) => {
+                let _ = conn.rollback().await;
+                Err(err)
+            }
         }
-
-        rebuild_result.map_err(ProxyError::Database)
     }
 
     pub(crate) async fn ensure_announcements_schema(&self) -> Result<(), ProxyError> {

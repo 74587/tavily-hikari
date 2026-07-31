@@ -31,6 +31,13 @@
 
 ## Runtime Logging Contract
 
+- 普通 Dashboard phase、HA GC slice、逐 key 429 与 enqueue reuse 使用 DEBUG；聚合运行摘要最多每
+  60 秒输出一次 INFO。
+- 内存 INFO 快照最多每 5 分钟真实读取一次 `/proc` 与 cgroup；slow/error 事件立即采集。
+- 内存字段同时报告 cgroup `anon/file/swap` 与进程 `RssAnon/RssFile/VmSwap`，避免把文件页缓存
+  误诊为堆泄漏。
+- 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
+
 - 继续使用默认 `RUNTIME_LOG_FORMAT=json` + `stderr` 输出，保留 `text` fallback。
 - 新增的性能事件必须使用现有 `tracing` 结构化字段，至少包含：
   - `component`

@@ -98,6 +98,13 @@
   state transition is summarized once at WARN. The administrative system-status surface exposes the
   current pressure streak, level, and retry time.
 
+## Low-cost memory and transition telemetry
+
+- INFO memory collection is cached for five minutes; slow and error paths bypass the cache.
+- cgroup anon/file/swap and process RssAnon/RssFile/VmSwap are reported separately.
+- Normal HA slices, dashboard phases, and per-key rate limits are DEBUG; actionable states emit only
+  enter, escalation, and recovery transitions.
+
 ## Visual Evidence
 
 PR: include

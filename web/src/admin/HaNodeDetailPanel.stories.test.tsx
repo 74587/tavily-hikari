@@ -48,6 +48,7 @@ describe('HaNodeDetailPanel Storybook proofs', () => {
     expect(markup).toContain('追赶中')
     expect(markup).toContain('存在过期积压')
     expect(stories.BaselineRequired).toBeDefined()
+    expect(stories.Stalled).toBeDefined()
     expect(stories.Mobile).toBeDefined()
   })
 })

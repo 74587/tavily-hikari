@@ -540,6 +540,18 @@ pub struct HaChannelHealthView {
     pub cursor_state: String,
     pub retention_secs: i64,
     pub expired_backlog: bool,
+    #[serde(default)]
+    pub gc_state: String,
+    #[serde(default)]
+    pub oldest_age_secs: Option<i64>,
+    #[serde(default)]
+    pub last_progress_at: Option<i64>,
+    #[serde(default)]
+    pub last_defer_reason: Option<String>,
+    #[serde(default)]
+    pub next_retry_at: Option<i64>,
+    #[serde(default)]
+    pub batch_size: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

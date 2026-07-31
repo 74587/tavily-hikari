@@ -2094,7 +2094,7 @@ async fn begin_immediate_sqlite_connection_takes_write_lock_up_front() {
         .await
         .expect("proxy created");
 
-    let mut immediate_conn = begin_immediate_sqlite_connection(&proxy.key_store.pool)
+    let immediate_conn = begin_immediate_sqlite_connection(&proxy.key_store.pool)
         .await
         .expect("begin immediate transaction");
 
@@ -2117,14 +2117,43 @@ async fn begin_immediate_sqlite_connection_takes_write_lock_up_front() {
         write_err
     )));
 
-    sqlx::query("ROLLBACK")
-        .execute(&mut *immediate_conn)
+    immediate_conn
+        .rollback()
         .await
         .expect("rollback immediate transaction");
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn dropped_immediate_transaction_never_returns_polluted_connection_to_pool() {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("create single-connection pool");
+
+    let transaction = begin_immediate_sqlite_connection(&pool)
+        .await
+        .expect("begin immediate transaction");
+    drop(transaction);
+
+    let mut replacement = tokio::time::timeout(Duration::from_secs(1), pool.acquire())
+        .await
+        .expect("pool replaces detached connection")
+        .expect("acquire replacement connection");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *replacement)
+        .await
+        .expect("replacement connection is not inside a transaction");
+    sqlx::query("ROLLBACK")
+        .execute(&mut *replacement)
+        .await
+        .expect("rollback replacement transaction");
 }
 
 #[cfg(unix)]

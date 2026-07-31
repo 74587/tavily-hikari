@@ -37,7 +37,7 @@ async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     let old_ts = Utc::now().timestamp() - (15 * SECS_PER_DAY);
     let pool = connect_sqlite_test_pool(&db_str).await;
     let mut tx = pool.begin().await.expect("begin seed transaction");
-    for index in 0..1_000 {
+    for index in 0..250 {
         sqlx::query(
             r#"
             INSERT INTO ha_outbox
@@ -77,12 +77,12 @@ async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     pool.close().await;
 
     let report = proxy.gc_ha_outbox_online().await.expect("control gc");
-    assert_eq!(report.batches, 4);
-    assert_eq!(report.deleted_rows, 1_000);
+    assert_eq!(report.batches, 2);
+    assert_eq!(report.deleted_rows, 250);
     assert_eq!(report.channels.len(), 1);
     assert_eq!(report.channels[0].channel, HaSyncChannel::Control);
-    assert_eq!(report.channels[0].batches, 4);
-    assert_eq!(report.channels[0].deleted_rows, 1_000);
+    assert_eq!(report.channels[0].batches, 2);
+    assert_eq!(report.channels[0].deleted_rows, 250);
     assert!(!report.channels[0].has_more);
     assert!(report.has_more);
 

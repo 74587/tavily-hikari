@@ -131,6 +131,7 @@
       "serial_prefixes": [
         "tests::jobs_and_request_log_retention::request_",
         "tests::observability_and_lifecycle::request_",
+        "tests::request_rollup_public_metrics::admin_",
         "tests::request_kind_and_core::request_",
         "tests::request_rollup::request_",
         "tests::dashboard_rollup_integrity::",
@@ -296,6 +297,7 @@
         "tests::jobs_and_request_log_retention::auth_",
         "tests::account_quota_and_billing::begin_",
         "tests::account_quota_and_billing::billing_",
+        "tests::account_quota_and_billing::dropped_",
         "tests::ha_baseline_streaming_and_sessions::",
         "tests::ha_outbox_and_compaction::ha_outbox_",
         "tests::ha_outbox_and_compaction::ha_events_cursor_",
@@ -501,6 +503,7 @@
         "server::tests::alerts_and_ha_event_exports::legacy_",
         "server::tests::alerts_and_ha_event_exports::dual_active_",
         "server::tests::alerts_and_ha_serving_modes::ha_",
+        "server::upstream_reconciliation_does_not_wait_for_db_execution_gate",
         "server::serve_tests::",
         "server::tests::system_settings_and_forward_proxy::startup_",
         "server::tests::admin_token_filters_and_maintenance::maintenance_",

@@ -89,8 +89,13 @@ pub fn emit_legacy_stdio_event(
 pub struct RuntimeMemorySnapshot {
     pub memory_current_bytes: Option<u64>,
     pub memory_limit_bytes: Option<u64>,
+    pub cgroup_anon_bytes: Option<u64>,
+    pub cgroup_file_bytes: Option<u64>,
+    pub cgroup_swap_bytes: Option<u64>,
     pub headroom_bytes: Option<u64>,
     pub process_rss_bytes: Option<u64>,
+    pub process_rss_anon_bytes: Option<u64>,
+    pub process_rss_file_bytes: Option<u64>,
     pub process_hwm_bytes: Option<u64>,
     pub process_swap_bytes: Option<u64>,
     pub child_process_rss_bytes: Option<u64>,
@@ -122,6 +127,12 @@ impl RuntimePerfScope {
 
 pub fn capture_runtime_memory_snapshot() -> RuntimeMemorySnapshot {
     let process_stats = read_process_status("/proc/self/status").unwrap_or_default();
+    let cgroup_stats = cgroup_probe_file("memory.stat")
+        .and_then(read_cgroup_memory_stat)
+        .unwrap_or_default();
+    let cgroup_swap_bytes = cgroup_probe_file("memory.swap.current")
+        .and_then(read_u64_from_file)
+        .or_else(|| read_u64_from_file("/sys/fs/cgroup/memory.swap.current"));
     let child_process_rss_bytes = sum_child_rss_bytes(std::process::id());
     let memory_current_bytes = cgroup_probe_file("memory.current")
         .and_then(read_u64_from_file)
@@ -140,8 +151,13 @@ pub fn capture_runtime_memory_snapshot() -> RuntimeMemorySnapshot {
     RuntimeMemorySnapshot {
         memory_current_bytes,
         memory_limit_bytes,
+        cgroup_anon_bytes: cgroup_stats.anon_bytes,
+        cgroup_file_bytes: cgroup_stats.file_bytes,
+        cgroup_swap_bytes,
         headroom_bytes,
         process_rss_bytes: process_stats.rss_bytes,
+        process_rss_anon_bytes: process_stats.rss_anon_bytes,
+        process_rss_file_bytes: process_stats.rss_file_bytes,
         process_hwm_bytes: process_stats.hwm_bytes,
         process_swap_bytes: process_stats.swap_bytes,
         child_process_rss_bytes,
@@ -152,6 +168,8 @@ pub fn capture_runtime_memory_snapshot() -> RuntimeMemorySnapshot {
 #[derive(Debug, Default)]
 struct ProcessStatusSnapshot {
     rss_bytes: Option<u64>,
+    rss_anon_bytes: Option<u64>,
+    rss_file_bytes: Option<u64>,
     hwm_bytes: Option<u64>,
     swap_bytes: Option<u64>,
 }
@@ -162,6 +180,10 @@ fn read_process_status(path: impl AsRef<Path>) -> Option<ProcessStatusSnapshot> 
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("VmRSS:") {
             snapshot.rss_bytes = parse_kib_line(value);
+        } else if let Some(value) = line.strip_prefix("RssAnon:") {
+            snapshot.rss_anon_bytes = parse_kib_line(value);
+        } else if let Some(value) = line.strip_prefix("RssFile:") {
+            snapshot.rss_file_bytes = parse_kib_line(value);
         } else if let Some(value) = line.strip_prefix("VmHWM:") {
             snapshot.hwm_bytes = parse_kib_line(value);
         } else if let Some(value) = line.strip_prefix("VmSwap:") {
@@ -196,14 +218,40 @@ fn sum_child_rss_bytes(pid: u32) -> Option<u64> {
 fn cgroup_probe_file(file_name: &str) -> Option<&'static str> {
     static MEMORY_CURRENT_PATH: OnceLock<Option<String>> = OnceLock::new();
     static MEMORY_MAX_PATH: OnceLock<Option<String>> = OnceLock::new();
+    static MEMORY_STAT_PATH: OnceLock<Option<String>> = OnceLock::new();
+    static MEMORY_SWAP_CURRENT_PATH: OnceLock<Option<String>> = OnceLock::new();
     let store = match file_name {
         "memory.current" => &MEMORY_CURRENT_PATH,
         "memory.max" => &MEMORY_MAX_PATH,
+        "memory.stat" => &MEMORY_STAT_PATH,
+        "memory.swap.current" => &MEMORY_SWAP_CURRENT_PATH,
         _ => return None,
     };
     store
         .get_or_init(|| resolve_cgroup_file_path(file_name))
         .as_deref()
+}
+
+#[derive(Debug, Default)]
+struct CgroupMemoryStat {
+    anon_bytes: Option<u64>,
+    file_bytes: Option<u64>,
+}
+
+fn read_cgroup_memory_stat(path: impl AsRef<Path>) -> Option<CgroupMemoryStat> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut stats = CgroupMemoryStat::default();
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next()?;
+        let value = parts.next().and_then(|raw| raw.parse::<u64>().ok());
+        match key {
+            "anon" => stats.anon_bytes = value,
+            "file" => stats.file_bytes = value,
+            _ => {}
+        }
+    }
+    Some(stats)
 }
 
 fn resolve_cgroup_file_path(file_name: &str) -> Option<String> {

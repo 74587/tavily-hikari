@@ -836,6 +836,7 @@ const DASHBOARD_TREND_SOURCE_LIMIT: usize = 64;
 const DASHBOARD_TREND_WINDOW_SIZE: usize = 8;
 const DASHBOARD_RECENT_JOBS_LIMIT: usize = 5;
 const DASHBOARD_OVERVIEW_LOADING_STALE_AFTER: Duration = Duration::from_secs(30);
+const DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const DASHBOARD_RECENT_ALERTS_TOKEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
@@ -921,6 +922,7 @@ async fn reset_dashboard_overview_build_count(state: &Arc<AppState>) {
     let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
     let mut cache = cache_handle.lock().await;
     cache.build_count = 0;
+    cache.last_freshness_probe_at = None;
 }
 
 #[cfg(test)]
@@ -928,6 +930,17 @@ async fn dashboard_overview_build_count(state: &Arc<AppState>) -> usize {
     let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
     let cache = cache_handle.lock().await;
     cache.build_count
+}
+
+#[cfg(test)]
+async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
+    let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache_handle.lock().await;
+    cache.last_freshness_probe_at = Some(
+        tokio::time::Instant::now()
+            .checked_sub(DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL)
+            .expect("dashboard refresh interval fits in the monotonic clock"),
+    );
 }
 
 #[derive(Debug, Serialize)]
@@ -1714,6 +1727,16 @@ async fn load_dashboard_overview_snapshot(
             continue;
         }
 
+        {
+            let cache = cache_handle.lock().await;
+            if let (Some(cached), Some(last_probe)) =
+                (cache.cached.as_ref(), cache.last_freshness_probe_at)
+                && last_probe.elapsed() < DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
+            {
+                return Ok(cached.snapshot.clone());
+            }
+        }
+
         let freshness_started = Instant::now();
         let freshness = compute_dashboard_overview_freshness(state).await?;
         tavily_hikari::emit_perf_log(
@@ -1733,6 +1756,7 @@ async fn load_dashboard_overview_snapshot(
         let mut load_generation = None;
         let waiter = {
             let mut cache = cache_handle.lock().await;
+            cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
             if let Some(cached) = cache.cached.as_ref()
                 && cached.freshness == freshness
             {
@@ -1898,8 +1922,28 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySi
 async fn compute_signatures(
     state: &Arc<AppState>,
 ) -> Result<(Option<SummarySig>, Option<i64>), ()> {
+    let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+    {
+        let cache = cache_handle.lock().await;
+        if let (Some(cached), Some(last_probe)) =
+            (cache.cached.as_ref(), cache.last_freshness_probe_at)
+            && last_probe.elapsed() < DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
+        {
+            let freshness = cached.freshness.clone();
+            let latest_id = freshness.latest_request_log_id;
+            return Ok((Some(SummarySig { freshness }), latest_id));
+        }
+    }
     let freshness = compute_dashboard_overview_freshness(state).await.map_err(|_| ())?;
     let latest_id = freshness.latest_request_log_id;
+    {
+        let mut cache = cache_handle.lock().await;
+        let unchanged = cache
+            .cached
+            .as_ref()
+            .is_some_and(|cached| cached.freshness == freshness);
+        cache.last_freshness_probe_at = unchanged.then(tokio::time::Instant::now);
+    }
     let sig: Option<SummarySig> = Some(SummarySig { freshness });
     Ok((sig, latest_id))
 }

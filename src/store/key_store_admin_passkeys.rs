@@ -64,8 +64,7 @@ impl KeyStore {
         runtime_passkey_login_available: bool,
     ) -> Result<AdminPasswordSettingsRecord, ProxyError> {
         let now = self.backend_time.now_ts();
-        let mut conn = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let mut conn = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
 
         let result: Result<AdminPasswordSettingsRecord, ProxyError> = async {
             if !external_admin_login_available {
@@ -115,11 +114,11 @@ impl KeyStore {
 
         match result {
             Ok(settings) => {
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(settings)
             }
             Err(err) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = conn.rollback().await;
                 Err(err)
             }
         }
@@ -130,8 +129,7 @@ impl KeyStore {
         required: bool,
     ) -> Result<AdminPasswordSettingsRecord, ProxyError> {
         let now = self.backend_time.now_ts();
-        let mut conn = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let mut conn = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
 
         let result: Result<AdminPasswordSettingsRecord, ProxyError> = async {
         sqlx::query(
@@ -178,11 +176,11 @@ impl KeyStore {
 
         match result {
             Ok(settings) => {
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(settings)
             }
             Err(err) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = conn.rollback().await;
                 Err(err)
             }
         }
@@ -495,8 +493,7 @@ impl KeyStore {
         runtime_password_available: bool,
     ) -> Result<bool, ProxyError> {
         let now = self.backend_time.now_ts();
-        let mut conn = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        let mut conn = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
 
         let result: Result<bool, ProxyError> = async {
             let target_active: i64 = sqlx::query_scalar(
@@ -560,11 +557,11 @@ impl KeyStore {
 
         match result {
             Ok(revoked) => {
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                conn.commit().await?;
                 Ok(revoked)
             }
             Err(err) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = conn.rollback().await;
                 Err(err)
             }
         }
