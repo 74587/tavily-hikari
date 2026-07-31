@@ -8,6 +8,7 @@
     "preview": "rspress preview --host 127.0.0.1 --port ${DOCS_PORT:-56007}"
   },
   "devDependencies": {
+    "@rspress/theme-default": "1.47.1",
     "rspress": "^1.47.1"
   }
 }

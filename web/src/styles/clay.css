@@ -2379,9 +2379,11 @@
     }
 
     .public-home-brand-lockup {
-      max-width: 100%;
-      transform: scale(0.86);
-      transform-origin: center;
+      width: min(100%, 168px);
+    }
+
+    .public-home-brand-mark {
+      width: 100%;
     }
 
     .public-home-description {

@@ -21,6 +21,7 @@
 - 内置密码的持久化 hash 必须能独立支撑重启恢复，但显式启动禁用时旧 hash 不得重新启用；删除密码或撤销 passkey 的 fallback 判断必须以运行时可用的登录方式为准，不能只看数据库里是否残留 passkey 行或 password hash。
 - `/login` 的登录方式入口不能完全依赖 `/api/profile` 成功返回；profile 临时失败时仍要保留可尝试的 passkey/password 入口，避免 passkey-only 部署被前端 bootstrap 锁死。
 - 登录 TOTP 是 passkey/password 登录成功前的必要因子；更新 passkey counter、last-used 或撤销既有 session 这类状态变更必须排在 TOTP 和持久化设置成功之后，不能让失败操作产生安全状态副作用。
+- 登录页品牌响应式切换由共享 `BrandLockup` 负责，并按 `260px` 可用容器宽度选择完整或 compact 资产，页面不再并列渲染桌面与移动两套组件，避免断点和主题资产合同继续分叉。
 
 ## Key Reasons / Replacements
 

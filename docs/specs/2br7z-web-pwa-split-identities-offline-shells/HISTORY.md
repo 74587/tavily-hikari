@@ -12,3 +12,5 @@
 - 2026-07-14: 真实 Chromium A/B 更新复现确认 network-only 长连接被 Service Worker `respondWith` 接管会阻塞旧 worker 退场，并使新 worker停在 `activating`。network-only 请求改由浏览器直接处理，activate 阶段移除 `clients.claim()`，首次安装在下一次导航接管，版本更新由 `activated` 后 reload 完成。
 - 2026-07-15: 更新横幅改为只在 waiting worker ready 后通知用户，不再暴露 installing 中间态；当前/目标版本都改为具体版本号，且当前版本来自正在运行的 bundle。若用户暂不点击“立即刷新”，runtime 会在下一次刷新/离页前静默激活 waiting worker，使下次导航直接进入新版本。
 - 2026-07-31: 管理员登录页将更新提示从凭据流程中移出，固定在全局页头之后、登录主内容之前；桌面采用页头级宽度，移动端保持操作按钮同行，并重新建立标题、版本信息与操作按钮的视觉层级。
+- 2026-08-01: 完整 Relay Mesh lockup 将副标语固定为 `KEY POOL · BALANCE. ROUTE.` 的 weight 400 outline；右侧两行文字块与 Relay Mesh mark 共享光学中轴，字间点和单一连续渐变保留原始品牌语法。完整/compact 的选择改由 `260px` 容器宽度驱动，PWA 图标与 identity 不随文字可读性修复改变。
+- 2026-08-01: 文档站导航被确认为 utility 位而非品牌主视觉；Rspress 的品牌容器固定为 `180px`，按共享容器合同显示 compact lockup，避免将完整两行标志压入导航栏。

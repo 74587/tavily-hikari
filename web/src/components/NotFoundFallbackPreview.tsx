@@ -14,7 +14,7 @@ export default function NotFoundFallbackPreview({
       <main className="not-found-shell" role="main">
         <BrandLockup
           title="Tavily Hikari Proxy"
-          compact
+          variant="responsive"
           className="not-found-brand"
           markClassName="not-found-brand-mark"
         />

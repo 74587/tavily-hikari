@@ -113,6 +113,7 @@ function PublicHomeHeroCard({
       <div className="public-home-brand-wrap">
         <BrandLockup
           title="Tavily Hikari"
+          variant="responsive"
           className="public-home-brand-lockup"
           markClassName="public-home-brand-mark"
         />

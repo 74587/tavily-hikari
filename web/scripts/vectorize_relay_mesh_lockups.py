@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,21 @@ RASTER_SOURCE = REFERENCE_DIR / "approved-lockup-raster.png"
 MARK_SOURCE = REFERENCE_DIR / "approved-mark-vector-light.svg"
 FULL_OUTPUT = REFERENCE_DIR / "approved-lockup-vector-light.svg"
 COMPACT_OUTPUT = REFERENCE_DIR / "approved-lockup-compact-vector-light.svg"
+# The static instance is committed alongside the reviewed SVG master as the
+# provenance source for its permanently outlined tagline.
+TAGLINE_FONT_SOURCE = REFERENCE_DIR / "fonts" / "RobotoCondensed-Regular.ttf"
+WORDMARK_TRANSLATE_Y = -34
+TAGLINE_PRIMARY_LEFT = 297
+TAGLINE_SEPARATOR_CENTER_X = 530
+TAGLINE_SEPARATOR_CENTER_Y = 209.5
+TAGLINE_SEPARATOR_RADIUS = 4
+TAGLINE_SECONDARY_LEFT = 547
+TAGLINE_SECONDARY_RIGHT = 935
+CANONICAL_TAGLINE_PATH_HASHES = {
+    "tagline-primary": "d0fefc4c75401c4312292bdc4072dce7d21e06bf4587aa881cb1310c03b6c563",
+    "tagline-secondary": "29dbbfd1413843796fb4455e92df1bded56ea434a86fc8ebca2083085ddd5b1a",
+}
+FULL_LOCKUP_HEIGHT = 310
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
 ET.register_namespace("", SVG_NAMESPACE)
@@ -102,7 +118,7 @@ def build_lockup(
     *,
     include_tagline: bool,
 ) -> ET.Element:
-    height = "310" if include_tagline else "260"
+    height = str(FULL_LOCKUP_HEIGHT) if include_tagline else "260"
     root = ET.Element(
         svg_tag("svg"),
         {
@@ -135,24 +151,21 @@ def build_lockup(
         "9790",
         (("0", "#7939E7"), ("0.48", "#426FF4"), ("1", "#0398EF")),
     )
-    add_linear_gradient(
-        defs,
-        "tagline-primary-gradient",
-        "3310",
-        "4890",
-        (("0", "#7434EA"), ("1", "#5C45EE")),
-    )
-    add_linear_gradient(
-        defs,
-        "tagline-secondary-gradient",
-        "5650",
-        "9300",
-        (("0", "#268CEB"), ("1", "#078FE8")),
-    )
+    if include_tagline:
+        add_linear_gradient(
+            defs,
+            "tagline-flow-gradient",
+            str(TAGLINE_PRIMARY_LEFT * 10),
+            str(TAGLINE_SECONDARY_RIGHT * 10),
+            (("0", "#6D28D9"), ("1", "#0369A1")),
+        )
     root.append(defs)
     root.append(deepcopy(mark_artwork))
 
-    wordmark = ET.SubElement(root, svg_tag("g"), {"id": "wordmark"})
+    wordmark_attributes = {"id": "wordmark"}
+    if include_tagline:
+        wordmark_attributes["transform"] = f"translate(0 {WORDMARK_TRANSLATE_Y})"
+    wordmark = ET.SubElement(root, svg_tag("g"), wordmark_attributes)
     tavily = deepcopy(traced_groups["wordmark-tavily"])
     tavily.set("fill", "url(#wordmark-tavily-gradient)")
     hikari = deepcopy(traced_groups["wordmark-hikari"])
@@ -162,11 +175,26 @@ def build_lockup(
     if include_tagline:
         tagline = ET.SubElement(root, svg_tag("g"), {"id": "tagline"})
         primary = deepcopy(traced_groups["tagline-primary"])
-        primary.set("fill", "url(#tagline-primary-gradient)")
-        separator = deepcopy(traced_groups["tagline-separator"])
-        separator.set("fill", "#A6A1B0")
+        primary.set("fill", "url(#tagline-flow-gradient)")
+        separator = ET.Element(
+            svg_tag("g"),
+            {
+                "id": "tagline-separator",
+                "transform": f"translate(0 {FULL_LOCKUP_HEIGHT}) scale(0.1 -0.1)",
+                "fill": "url(#tagline-flow-gradient)",
+            },
+        )
+        ET.SubElement(
+            separator,
+            svg_tag("circle"),
+            {
+                "cx": str(TAGLINE_SEPARATOR_CENTER_X * 10),
+                "cy": str((FULL_LOCKUP_HEIGHT - TAGLINE_SEPARATOR_CENTER_Y) * 10),
+                "r": str(TAGLINE_SEPARATOR_RADIUS * 10),
+            },
+        )
         secondary = deepcopy(traced_groups["tagline-secondary"])
-        secondary.set("fill", "url(#tagline-secondary-gradient)")
+        secondary.set("fill", "url(#tagline-flow-gradient)")
         tagline.extend((primary, separator, secondary))
 
     return root
@@ -177,16 +205,41 @@ def write_svg(root: ET.Element, path: Path) -> None:
     ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
 
+def load_canonical_tagline_groups() -> dict[str, ET.Element]:
+    if not TAGLINE_FONT_SOURCE.exists():
+        raise RuntimeError(f"missing vendored tagline font source: {TAGLINE_FONT_SOURCE}")
+    if not FULL_OUTPUT.exists():
+        raise RuntimeError(f"missing canonical full lockup master: {FULL_OUTPUT}")
+
+    source_root = ET.parse(FULL_OUTPUT).getroot()
+    groups = {
+        element.get("id"): deepcopy(element)
+        for element in source_root.iter()
+        if element.get("id") in {"tagline-primary", "tagline-secondary"}
+    }
+    expected_groups = {"tagline-primary", "tagline-secondary"}
+    if set(groups) != expected_groups:
+        raise RuntimeError("canonical full lockup master is missing its outlined tagline groups")
+    for group_id, expected_hash in CANONICAL_TAGLINE_PATH_HASHES.items():
+        paths = groups[group_id].findall(svg_tag("path"))
+        if len(paths) != 1 or not paths[0].get("d"):
+            raise RuntimeError(f"canonical full lockup master has an invalid {group_id} outline")
+        actual_hash = hashlib.sha256(paths[0].get("d", "").encode("utf-8")).hexdigest()
+        if actual_hash != expected_hash:
+            raise RuntimeError(f"canonical full lockup master has drifted in {group_id}")
+    return groups
+
+
 def main() -> None:
     raster = Image.open(RASTER_SOURCE).convert("RGBA")
     alpha = remove_background(raster, fill_threshold=60, soft_threshold=84).getchannel("A")
     traced_groups = {
         "wordmark-tavily": trace_region(alpha, (240, 55, 630, 205), "wordmark-tavily"),
         "wordmark-hikari": trace_region(alpha, (640, 55, 990, 205), "wordmark-hikari"),
-        "tagline-primary": trace_region(alpha, (325, 208, 500, 242), "tagline-primary"),
-        "tagline-separator": trace_region(alpha, (518, 208, 537, 242), "tagline-separator"),
-        "tagline-secondary": trace_region(alpha, (555, 208, 945, 242), "tagline-secondary"),
     }
+    # The full SVG is the canonical vector master. Its reviewed tagline paths
+    # are kept verbatim so host FreeType rasterization cannot mutate the logo.
+    traced_groups.update(load_canonical_tagline_groups())
     mark_root = ET.parse(MARK_SOURCE).getroot()
     write_svg(build_lockup(mark_root, traced_groups, include_tagline=True), FULL_OUTPUT)
     write_svg(build_lockup(mark_root, traced_groups, include_tagline=False), COMPACT_OUTPUT)

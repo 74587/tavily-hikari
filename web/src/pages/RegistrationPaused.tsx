@@ -26,6 +26,7 @@ function RegistrationPaused(): JSX.Element {
           <div className="space-y-2">
             <BrandLockup
               title="Tavily Hikari"
+              variant="responsive"
               className="registration-paused-brand-lockup"
               markClassName="registration-paused-brand-mark"
             />

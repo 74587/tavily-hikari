@@ -54,14 +54,6 @@
       <stop offset="0.48" stop-color="#6F92F7" />
       <stop offset="1" stop-color="#3FB1F3" />
     </linearGradient>
-    <linearGradient id="tagline-primary-gradient" x1="3310" y1="0" x2="4890" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#9565EF" />
-      <stop offset="1" stop-color="#8372F2" />
-    </linearGradient>
-    <linearGradient id="tagline-secondary-gradient" x1="5650" y1="0" x2="9300" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#5AA8F0" />
-      <stop offset="1" stop-color="#43AAEE" />
-    </linearGradient>
   </defs>
   <g id="mark-artwork">
     <g id="outer-network" fill="none" stroke-width="5" stroke-linecap="butt">

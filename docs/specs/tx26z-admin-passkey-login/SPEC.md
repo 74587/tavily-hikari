@@ -145,6 +145,7 @@
 - Docs pages / state galleries to add/update: admin login state gallery。
 - `play` / interaction coverage to add/update: reset token 错误和登录按钮状态。
 - Visual regression baseline changes (if any): passkey login/reset UI 截图。
+- 登录页品牌位使用 `BrandLockup variant="responsive"`：可用品牌容器宽度 `>=260px` 显示完整 lockup，较窄容器显示无副标语 compact lockup；不得维护第二套页面级移动 Logo 分支。
 
 ### Quality checks
 
@@ -152,6 +153,14 @@
 - Web: `bun run build` and Storybook smoke where feasible.
 
 ## Visual Evidence
+
+- `2026-08-01` 登录页品牌位（ui_demo，mock-only，`trim_only`）：
+
+  PR: none
+
+  绝对定位品牌区显式保持 `260px` 可用宽度，桌面端显示完整 lockup；窄容器仍由组件切换到紧凑版本。
+
+  ![登录页桌面暗色完整 lockup](./assets/admin-login-brand-lockup-desktop-dark.png)
 
 - 无文字标记参数化彩色对照：[relay-mesh-mark-parametric-color-comparison.png](./assets/relay-mesh-mark-parametric-color-comparison.png)
 - 无文字标记参数化二值几何对齐：[relay-mesh-mark-geometry-mono-comparison.png](./assets/relay-mesh-mark-geometry-mono-comparison.png)
@@ -162,27 +171,21 @@
 - 暗色无底部小字真矢量标识：[relay-mesh-lockup-vector-compact-dark.png](./assets/relay-mesh-lockup-vector-compact-dark.png)
 - 桌面端无卡片登录布局：[admin-login-no-methods-desktop.png](./assets/admin-login-no-methods-desktop.png)
 - 移动端无卡片布局与参数化矢量标记：[admin-login-parametric-mark-mobile.png](./assets/admin-login-parametric-mark-mobile.png)
-  PR: include
   当前桌面端完整文字版登录布局。
   ![完整文字版桌面登录页](./assets/admin-login-full-logo-desktop.png)
 
-PR: include
 当前移动端紧凑文字版登录布局。
 ![紧凑文字版移动端登录页](./assets/admin-login-compact-logo-mobile.png)
 
-PR: include
 当前移动端暗色紧凑文字版登录布局。
 ![暗色紧凑文字版移动端登录页](./assets/admin-login-compact-logo-mobile-dark.png)
 
-PR: include
 移动端完整 TOTP、Passkey 与管理员口令流程，页脚图标在内容之后保持间距。
 ![移动端完整登录流程](./assets/admin-login-full-methods-mobile.png)
 
-PR: include
 短屏移动端将主题与语言图标置于登录内容之后，避免与凭据区域重叠。
 ![短屏移动端登录页](./assets/admin-login-compact-logo-short-mobile.png)
 
-PR: include
 短屏移动端暗色布局保持相同的内容与页脚间距。
 ![短屏移动端暗色登录页](./assets/admin-login-compact-logo-short-mobile-dark.png)
 
