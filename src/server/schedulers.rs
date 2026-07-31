@@ -574,32 +574,19 @@ async fn run_dashboard_rollup_integrity_claimed_job(
                 .await
                 .map(|status| status.state == "degraded")
                 .unwrap_or(false);
-            if degraded {
-                let _ = state
-                    .proxy
-                    .scheduled_job_finish(
-                        job_id,
-                        "error",
-                        Some(&format!("state=degraded error={err}")),
-                    )
-                    .await;
-                let _ = enqueue_scheduled_job_at(
-                    state.as_ref(),
-                    DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
-                    None,
-                    TRIGGER_SOURCE_AUTO,
-                    available_at,
-                )
-                .await;
-                return false;
-            }
-            return finish_dashboard_rollup_integrity_and_enqueue(
+            let message = if degraded {
+                format!("state=degraded error={err}")
+            } else {
+                format!("state=deferred error={err}")
+            };
+            let handed_off = finish_dashboard_rollup_integrity_and_enqueue(
                 state.as_ref(),
                 job_id,
-                &format!("state=deferred error={err}"),
+                &message,
                 available_at,
             )
             .await;
+            return handed_off && !degraded;
         }
     };
     finish_dashboard_rollup_integrity_and_enqueue(
