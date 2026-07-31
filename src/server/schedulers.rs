@@ -60,6 +60,7 @@ const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_i
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE: &str = "dashboard_rollup_integrity";
 const DASHBOARD_ROLLUP_INTEGRITY_FAILURE_BACKOFF_SECS: i64 = 60;
+const DASHBOARD_ROLLUP_INTEGRITY_WATCHDOG_SECS: u64 = 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
@@ -477,14 +478,25 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
 
 fn spawn_dashboard_rollup_integrity_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let _ = enqueue_scheduled_job_logged(
-            state.as_ref(),
-            DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
-            None,
-            TRIGGER_SOURCE_SCHEDULER,
-            "dashboard-rollup-integrity",
-        )
-        .await;
+        loop {
+            // The unique-active-job constraint turns this into a cheap liveness
+            // check while recovering both startup and handoff enqueue failures.
+            let _ = enqueue_scheduled_job_logged(
+                state.as_ref(),
+                DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE,
+                None,
+                TRIGGER_SOURCE_SCHEDULER,
+                "dashboard-rollup-integrity",
+            )
+            .await;
+            state
+                .proxy
+                .backend_time()
+                .sleep(Duration::from_secs(
+                    DASHBOARD_ROLLUP_INTEGRITY_WATCHDOG_SECS,
+                ))
+                .await;
+        }
     });
 }
 
