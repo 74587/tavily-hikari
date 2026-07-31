@@ -9,8 +9,6 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
-from fontTools.ttLib import TTFont
-from fontTools.varLib.instancer import instantiateVariableFont
 from PIL import Image, ImageDraw, ImageFont
 
 from generate_relay_mesh_brand_assets import remove_background
@@ -22,10 +20,11 @@ RASTER_SOURCE = REFERENCE_DIR / "approved-lockup-raster.png"
 MARK_SOURCE = REFERENCE_DIR / "approved-mark-vector-light.svg"
 FULL_OUTPUT = REFERENCE_DIR / "approved-lockup-vector-light.svg"
 COMPACT_OUTPUT = REFERENCE_DIR / "approved-lockup-compact-vector-light.svg"
-FONT_SOURCE = REFERENCE_DIR / "fonts" / "RobotoCondensed-wght.ttf"
+# The static instance is committed alongside the variable design source so the
+# traced outlines do not depend on the host's font-instancing implementation.
+TAGLINE_FONT_SOURCE = REFERENCE_DIR / "fonts" / "RobotoCondensed-Regular.ttf"
 TAGLINE_PRIMARY_COPY = "KEY POOL"
 TAGLINE_SECONDARY_COPY = "BALANCE. ROUTE."
-TAGLINE_WEIGHT = 400
 TAGLINE_FONT_SIZE = 52
 TAGLINE_TRACKING = 0.5
 WORDMARK_TRANSLATE_Y = -34
@@ -114,39 +113,34 @@ def draw_tracked_text(
 
 
 def render_tagline_alpha() -> Image.Image:
-    if not FONT_SOURCE.exists():
-        raise RuntimeError(f"missing vendored tagline font: {FONT_SOURCE}")
+    if not TAGLINE_FONT_SOURCE.exists():
+        raise RuntimeError(f"missing vendored tagline font: {TAGLINE_FONT_SOURCE}")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        static_font_path = Path(temp_dir) / "RobotoCondensed-Regular.ttf"
-        variable_font = TTFont(FONT_SOURCE)
-        instantiateVariableFont(variable_font, {"wght": TAGLINE_WEIGHT}).save(static_font_path)
-
-        scratch = Image.new("L", (1000, FULL_LOCKUP_HEIGHT), 0)
-        draw = ImageDraw.Draw(scratch)
-        font = ImageFont.truetype(static_font_path, size=TAGLINE_FONT_SIZE)
-        primary_bbox = draw_tracked_text(
-            draw,
-            TAGLINE_PRIMARY_COPY,
-            font,
-            TAGLINE_PRIMARY_LEFT,
-            TAGLINE_TOP,
-        )
-        secondary_bbox = draw_tracked_text(
-            draw,
-            TAGLINE_SECONDARY_COPY,
-            font,
-            TAGLINE_SECONDARY_LEFT,
-            TAGLINE_TOP,
-        )
-        print(f"[brand] tagline_primary_bbox={','.join(map(str, primary_bbox))}")
-        print(f"[brand] tagline_secondary_bbox={','.join(map(str, secondary_bbox))}")
-        height = max(primary_bbox[3], secondary_bbox[3]) - TAGLINE_TOP
-        if not TAGLINE_TARGET_HEIGHT[0] <= height <= TAGLINE_TARGET_HEIGHT[1]:
-            raise RuntimeError("unable to fit tagline inside the approved geometry contract")
-        if primary_bbox[2] > TAGLINE_PRIMARY_RIGHT or secondary_bbox[2] > TAGLINE_SECONDARY_RIGHT:
-            raise RuntimeError("tagline groups exceed their approved horizontal regions")
-        return scratch
+    scratch = Image.new("L", (1000, FULL_LOCKUP_HEIGHT), 0)
+    draw = ImageDraw.Draw(scratch)
+    font = ImageFont.truetype(TAGLINE_FONT_SOURCE, size=TAGLINE_FONT_SIZE)
+    primary_bbox = draw_tracked_text(
+        draw,
+        TAGLINE_PRIMARY_COPY,
+        font,
+        TAGLINE_PRIMARY_LEFT,
+        TAGLINE_TOP,
+    )
+    secondary_bbox = draw_tracked_text(
+        draw,
+        TAGLINE_SECONDARY_COPY,
+        font,
+        TAGLINE_SECONDARY_LEFT,
+        TAGLINE_TOP,
+    )
+    print(f"[brand] tagline_primary_bbox={','.join(map(str, primary_bbox))}")
+    print(f"[brand] tagline_secondary_bbox={','.join(map(str, secondary_bbox))}")
+    height = max(primary_bbox[3], secondary_bbox[3]) - TAGLINE_TOP
+    if not TAGLINE_TARGET_HEIGHT[0] <= height <= TAGLINE_TARGET_HEIGHT[1]:
+        raise RuntimeError("unable to fit tagline inside the approved geometry contract")
+    if primary_bbox[2] > TAGLINE_PRIMARY_RIGHT or secondary_bbox[2] > TAGLINE_SECONDARY_RIGHT:
+        raise RuntimeError("tagline groups exceed their approved horizontal regions")
+    return scratch
 
 
 def add_linear_gradient(

@@ -152,7 +152,7 @@
 - Vite build manifest 必须开启，供 post-build 读取 multipage output graph。
 - 生成脚本必须按 entrypoint 归类 public/admin asset graph，并输出两套 PWA 合同文件。
 - Relay Mesh 资产导出链必须显式产出 light / dark / mono 变体，并保留默认亮色别名文件用于现有入口兼容。
-- 完整 lockup 的 tagline 使用仓库固定的 Roboto Condensed weight 400 与 OFL 1.1 许可证作为 outline 生成输入；发布 SVG 不得包含 `<text>`、`<image>`、`href`、data URI 或运行时字体依赖。
+- 完整 lockup 的 tagline 使用仓库固定、预实例化的 Roboto Condensed weight 400 与 OFL 1.1 许可证作为 outline 生成输入；发布 SVG 不得包含 `<text>`、`<image>`、`href`、data URI 或运行时字体依赖。
 - 完整 lockup 必须保持批准稿的 `1000 × 310` 横向轮廓与品牌语法：Relay Mesh mark 位于左列，wordmark 与 tagline 组成共享光学中轴的右侧两行文字块；tagline 使用 `tagline-primary`、`tagline-separator`、`tagline-secondary` 三个逻辑组，其中 separator 是字间点而非竖线。Tagline outline 总高度必须保持在 `36–39` SVG units、总宽度保持在 `625–635` units，与上移后的 wordmark 保留 `20–28` units 的可见间距，水平中心限定在 `610–620` units；全文使用单一连续渐变，亮色端点为 `#6D28D9 → #0369A1`，暗色端点为 `#A78BFA → #38BDF8`，文字颜色在对应设计基准背景上必须达到 `4.5:1` 对比度。
 - Web 与 docs-site 的 SVG/PNG lockup 必须从同一矢量母版导出并保持内容哈希一致；compact 资产不得包含 tagline path 或未使用的 tagline gradient。
 
