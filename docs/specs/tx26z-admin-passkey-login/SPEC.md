@@ -174,6 +174,14 @@ PR: include
 当前移动端暗色紧凑文字版登录布局。
 ![暗色紧凑文字版移动端登录页](./assets/admin-login-compact-logo-mobile-dark.png)
 
+PR: include
+短屏移动端将主题与语言图标置于登录内容之后，避免与凭据区域重叠。
+![短屏移动端登录页](./assets/admin-login-compact-logo-short-mobile.png)
+
+PR: include
+短屏移动端暗色布局保持相同的内容与页脚间距。
+![短屏移动端暗色登录页](./assets/admin-login-compact-logo-short-mobile-dark.png)
+
 - Passkey 登录状态：[admin-login-passkey.png](./assets/admin-login-passkey.png)
 - Reset 注册状态：[admin-login-reset.png](./assets/admin-login-reset.png)
 - Reset URL 注册模式：[admin-login-reset-enrollment.png](./assets/admin-login-reset-enrollment.png)
