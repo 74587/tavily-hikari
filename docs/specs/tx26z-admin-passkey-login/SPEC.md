@@ -171,27 +171,21 @@
 - 暗色无底部小字真矢量标识：[relay-mesh-lockup-vector-compact-dark.png](./assets/relay-mesh-lockup-vector-compact-dark.png)
 - 桌面端无卡片登录布局：[admin-login-no-methods-desktop.png](./assets/admin-login-no-methods-desktop.png)
 - 移动端无卡片布局与参数化矢量标记：[admin-login-parametric-mark-mobile.png](./assets/admin-login-parametric-mark-mobile.png)
-  PR: include
   当前桌面端完整文字版登录布局。
   ![完整文字版桌面登录页](./assets/admin-login-full-logo-desktop.png)
 
-PR: include
 当前移动端紧凑文字版登录布局。
 ![紧凑文字版移动端登录页](./assets/admin-login-compact-logo-mobile.png)
 
-PR: include
 当前移动端暗色紧凑文字版登录布局。
 ![暗色紧凑文字版移动端登录页](./assets/admin-login-compact-logo-mobile-dark.png)
 
-PR: include
 移动端完整 TOTP、Passkey 与管理员口令流程，页脚图标在内容之后保持间距。
 ![移动端完整登录流程](./assets/admin-login-full-methods-mobile.png)
 
-PR: include
 短屏移动端将主题与语言图标置于登录内容之后，避免与凭据区域重叠。
 ![短屏移动端登录页](./assets/admin-login-compact-logo-short-mobile.png)
 
-PR: include
 短屏移动端暗色布局保持相同的内容与页脚间距。
 ![短屏移动端暗色登录页](./assets/admin-login-compact-logo-short-mobile-dark.png)
 

@@ -276,42 +276,32 @@
 - `97cccf60` 用户控制台离线壳：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/console-offline-shell.png`
 - `97cccf60` 管理员后台离线壳：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/admin-offline-shell.png`
 - 统一离线提示 banner 图标调整：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/offline-banner-web-off.png`
-- `95768005+` Relay Mesh public 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-public-home.png` PR: include
+- `95768005+` Relay Mesh public 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-public-home.png`
 - `95768005+` Relay Mesh console 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-console-header.png`
-- `95768005+` Relay Mesh admin 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-admin-shell.png` PR: include
+- `95768005+` Relay Mesh admin 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-admin-shell.png`
 - `95768005+` Relay Mesh admin login 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-admin-login.png`
 - `95768005+` Relay Mesh registration-paused 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-registration-paused.png`
 - `95768005+` Relay Mesh docs-site 品牌入口：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-docs-site.png`
-- `95768005+` Relay Mesh PWA/icon 导出预览：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-pwa-icons.png` PR: include
-- `2026-06-27` 品牌静态资源 `/assets` 路由校准后的 admin 壳验证：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-admin-shell-assets-route-fixed.png` PR: include
+- `95768005+` Relay Mesh PWA/icon 导出预览：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-pwa-icons.png`
+- `2026-06-27` 品牌静态资源 `/assets` 路由校准后的 admin 壳验证：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/relay-mesh-admin-shell-assets-route-fixed.png`
 - `2026-07-15` PWA 更新提示 ready 状态（Storybook canvas，静默更新完成后通知 + 具体版本号 + “立即刷新”按钮）：
-
-  PR: include
 
   ![PWA 更新提示 ready 状态](./assets/update-banner-ready-storybook.png)
 - `2026-07-08` PWA 更新提示 installing/loading 状态（Storybook canvas）：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-installing-storybook.png`
 - `2026-07-08` PWA 更新提示 dark ready 状态（Storybook canvas）：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/update-banner-dark-ready-storybook.png`
 - `2026-07-11` PWA 更新激活失败亮色态（Storybook canvas，mock-only，element capture，无敏感数据）：
 
-  PR: include
-
   ![PWA 更新激活失败亮色态](./assets/update-banner-activation-failed-storybook.png)
 
 - `2026-07-11` PWA 更新激活失败暗色态（Storybook canvas，mock-only，element capture，无敏感数据）：
-
-  PR: include
 
   ![PWA 更新激活失败暗色态](./assets/update-banner-activation-failed-dark-storybook.png)
 
 - `2026-07-31` 管理员登录页更新提示位于页头下方（Storybook canvas，mock-only，无敏感数据）：
 
-  PR: include
-
   ![管理员登录页更新提示位于页头下方](./assets/update-banner-login-header-desktop.png)
 
 - `2026-07-31` 管理员登录页更新提示移动端布局（Storybook canvas，mock-only，无敏感数据）：
-
-  PR: include
 
   ![管理员登录页更新提示移动端布局](./assets/update-banner-login-header-mobile.png)
 
