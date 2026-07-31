@@ -296,6 +296,7 @@
         "tests::jobs_and_request_log_retention::auth_",
         "tests::account_quota_and_billing::begin_",
         "tests::account_quota_and_billing::billing_",
+        "tests::account_quota_and_billing::dropped_",
         "tests::ha_baseline_streaming_and_sessions::",
         "tests::ha_outbox_and_compaction::ha_outbox_",
         "tests::ha_outbox_and_compaction::ha_events_cursor_",
