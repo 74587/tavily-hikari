@@ -88,11 +88,39 @@ export default meta
 
 type Story = StoryObj<typeof meta>
 
+const desktopViewport = { viewport: { defaultViewport: '1440-device-desktop' } } as const
+const mobileViewport = { viewport: { defaultViewport: '0390-device-iphone-14' } } as const
+const shortMobileViewport = { viewport: { defaultViewport: '0390-device-short' } } as const
+
+const noLoginMethodsProfile: Profile = {
+  ...baseProfile,
+  builtinAuthEnabled: false,
+  passkeyAuthEnabled: false,
+  adminLoginTotpRequired: false,
+}
+
 export const PasskeyLogin: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.findByRole('button', { name: /passkey/i })).resolves.toBeInTheDocument()
     await expect(canvas.findByLabelText(/totp|验证码/i)).resolves.toBeInTheDocument()
+  },
+}
+
+export const PasskeyLoginMobile: Story = {
+  name: 'Passkey login / mobile',
+  parameters: mobileViewport,
+  globals: {
+    language: 'zh',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const main = canvas.getByRole('main')
+    const footerControls = canvas.getByRole('button', { name: /theme|主题/i }).parentElement
+    await expect(canvas.findByLabelText(/totp|验证码/i)).resolves.toBeInTheDocument()
+    await expect(canvas.findByRole('button', { name: /passkey/i })).resolves.toBeInTheDocument()
+    await expect(footerControls).toHaveClass('auth-page-footer-controls')
+    await expect(main.compareDocumentPosition(footerControls!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   },
 }
 
@@ -164,17 +192,59 @@ export const PasskeyOnlyTotpRequired: Story = {
 }
 
 export const NoLoginMethods: Story = {
+  name: 'No login methods / desktop',
+  parameters: desktopViewport,
+  globals: {
+    language: 'zh',
+  },
   args: {
-    profile: {
-      ...baseProfile,
-      builtinAuthEnabled: false,
-      passkeyAuthEnabled: false,
-      adminLoginTotpRequired: false,
-    },
+    profile: noLoginMethodsProfile,
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.findByText(/disabled|未启用/i)).resolves.toBeInTheDocument()
+    await expect(canvas.findByRole('region', { name: /credentials|登录凭据/i })).resolves.toBeInTheDocument()
+    await expect(canvasElement.querySelector('.shadow-clayCard')).toBeNull()
+  },
+}
+
+export const NoLoginMethodsMobile: Story = {
+  name: 'No login methods / mobile',
+  parameters: mobileViewport,
+  globals: {
+    language: 'zh',
+  },
+  args: {
+    profile: noLoginMethodsProfile,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const mobileMark = await canvas.findByRole('img', { name: 'Tavily Hikari' })
+    await expect(mobileMark).toHaveAttribute('src', '/assets/relay-mesh-mobile-logo-light.svg')
+    await expect(mobileMark).toBeVisible()
+    await expect(canvas.getByRole('button', { name: /theme|主题/i })).toBeVisible()
+    await expect(canvas.getByRole('button', { name: /language|语言/i })).toBeVisible()
+    await expect(canvas.getByRole('region', { name: /credentials|登录凭据/i })).toBeInTheDocument()
+    await expect(canvasElement.querySelector('.shadow-clayCard')).toBeNull()
+  },
+}
+
+export const NoLoginMethodsShortMobile: Story = {
+  name: 'No login methods / short mobile',
+  parameters: shortMobileViewport,
+  globals: {
+    language: 'zh',
+  },
+  args: {
+    profile: noLoginMethodsProfile,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const credentials = await canvas.findByRole('region', { name: /credentials|登录凭据/i })
+    const footerControls = canvas.getByRole('button', { name: /theme|主题/i }).parentElement
+    await expect(credentials).toBeInTheDocument()
+    await expect(footerControls).toHaveClass('auth-page-footer-controls')
+    await expect(credentials.compareDocumentPosition(footerControls!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   },
 }
 

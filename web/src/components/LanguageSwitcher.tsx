@@ -28,6 +28,7 @@ function LanguageSwitcher(): JSX.Element {
           size="sm"
           className="language-switcher-trigger"
           aria-label={`${strings.common.languageLabel}: ${strings.common[language === 'en' ? 'englishLabel' : 'chineseLabel']}`}
+          title={strings.common.languageLabel}
         >
           <span className="sr-only">{strings.common.languageLabel}</span>
           <span className="language-flag" aria-hidden="true">

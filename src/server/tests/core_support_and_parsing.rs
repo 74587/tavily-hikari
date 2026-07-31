@@ -525,15 +525,20 @@
         )
         .expect("write registration paused");
         std::fs::write(
-            dir.join("assets/relay-mesh-lockup-light.png"),
-            b"fake-light-lockup",
+            dir.join("assets/relay-mesh-lockup-light.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         )
         .expect("write light lockup asset");
         std::fs::write(
-            dir.join("assets/relay-mesh-lockup-dark.png"),
-            b"fake-dark-lockup",
+            dir.join("assets/relay-mesh-lockup-dark.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
         )
         .expect("write dark lockup asset");
+        std::fs::write(
+            dir.join("assets/relay-mesh-mobile-logo-light.svg"),
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+        )
+        .expect("write compact lockup asset");
         std::fs::write(
             dir.join("assets/relay-mesh-mark-light.svg"),
             "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",

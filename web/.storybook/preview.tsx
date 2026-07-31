@@ -212,6 +212,11 @@ const viewportOptions = {
     ...(INITIAL_VIEWPORTS.iphone14 ?? INITIAL_VIEWPORTS.iphonex ?? {}),
     name: 'iPhone 14 portrait (390px)',
   },
+  '0390-device-short': {
+    name: 'Short mobile (390 x 640px)',
+    styles: { width: '390px', height: '640px' },
+    type: 'mobile',
+  },
   '0430-device-iphone-14-pro-max': {
     ...(INITIAL_VIEWPORTS.iphone14promax ?? INITIAL_VIEWPORTS.iphone12promax ?? {}),
     name: 'iPhone 14 Pro Max portrait (430px)',

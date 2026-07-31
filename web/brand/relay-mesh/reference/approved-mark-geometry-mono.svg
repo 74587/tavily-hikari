@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="230" height="280" viewBox="0 0 230 280"
+  color-interpolation="sRGB">
+  <g id="mark-geometry" fill="#000000" stroke="#000000">
+    <g id="outer-network" fill="none" stroke-width="5" stroke-linecap="butt">
+      <g id="edge-top-left">
+        <line x1="70.4" y1="47.6" x2="82.15" y2="40.2" />
+        <line x1="53.3" y1="58.5" x2="66.7" y2="49.4" />
+        <line x1="37.9" y1="67.6" x2="49.8" y2="60.1" stroke-width="5.5" />
+      </g>
+      <g id="edge-top-right">
+        <line x1="127.415" y1="40.2" x2="139.165" y2="47.6" />
+        <line x1="142.865" y1="49.4" x2="156.265" y2="58.5" />
+        <line x1="159.765" y1="60.1" x2="171.665" y2="67.6" stroke-width="5.5" />
+      </g>
+      <g id="edge-right" stroke-width="4.2">
+        <line x1="191.5" y1="107" x2="191.75" y2="118" stroke-width="5.2"
+          stroke-linecap="round" />
+        <line x1="191.5" y1="125" x2="191.5" y2="139.5" stroke-linecap="round" />
+        <line x1="191.5" y1="144.5" x2="191.625" y2="160" />
+      </g>
+      <g id="edge-bottom-right" stroke-width="5.5">
+        <line x1="172.425" y1="196.3" x2="159.725" y2="204" />
+        <line x1="156.75" y1="205.6" x2="142.575" y2="214.05" />
+        <line x1="138.9" y1="216" x2="126.96875" y2="223.4" />
+      </g>
+      <g id="edge-bottom-left" stroke-width="5.5">
+        <line x1="38" y1="196.1" x2="50.25" y2="203.75" />
+        <line x1="53.3" y1="205.3" x2="67.8" y2="214.3" stroke-width="5.25" />
+        <line x1="70.75" y1="215.9" x2="83.05" y2="223.2" />
+      </g>
+      <g id="edge-left" stroke-width="4.5">
+        <line x1="18.5" y1="107.3" x2="18.5" y2="117.3" stroke-linecap="square" />
+        <line x1="18.5552" y1="122.6147" x2="17.723" y2="140.5206"
+          stroke-width="5.605" />
+        <line x1="17.4965" y1="144.8054" x2="18.4517" y2="159.59"
+          stroke-width="6.0262" />
+      </g>
+    </g>
+
+    <g id="center-spokes" fill="none" stroke-linecap="butt">
+      <line id="spoke-top" x1="104.7" y1="57.5" x2="104.7" y2="77" stroke-width="7"
+        stroke-linecap="square" />
+      <line id="spoke-upper-right" x1="171.12" y1="92.74" x2="148.04" y2="106.2"
+        stroke-width="6.48" />
+      <line id="spoke-lower-right" x1="171.93" y1="170.895" x2="155.8" y2="161.555"
+        stroke-width="6.33" />
+      <line id="spoke-bottom" x1="104.7" y1="186" x2="104.7" y2="206" stroke-width="7"
+        stroke-linecap="square" />
+      <line id="spoke-lower-left" x1="38.515" y1="171.54" x2="62.16" y2="157.4825"
+        stroke-width="6.52" />
+      <line id="spoke-upper-left" x1="38.78" y1="92.64" x2="61.5725" y2="106.035"
+        stroke-width="6.52" />
+    </g>
+
+    <g id="nodes" stroke="none">
+      <circle id="node-top" cx="104.7825" cy="27.66" r="16.7" />
+      <circle id="node-upper-right" cx="191.2975" cy="81.66" r="16.7" />
+      <circle id="node-lower-right" cx="191.6" cy="182.54" r="16.7" />
+      <circle id="node-bottom" cx="104.825" cy="233.69" r="16.7" />
+      <circle id="node-lower-left" cx="18.64125" cy="182.6" r="16.7" />
+      <circle id="node-upper-left" cx="18.6425" cy="81.62" r="16.7" />
+    </g>
+
+    <g id="search-symbol" fill="none" stroke-linecap="round">
+      <circle id="search-ring" cx="104.7656" cy="131.1432" r="33.4502"
+        stroke-width="15.3074" />
+      <line id="search-handle" x1="129.9407" y1="155.0973" x2="154.214" y2="179.9828"
+        stroke-width="12.43" />
+    </g>
+  </g>
+</svg>

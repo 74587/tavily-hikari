@@ -372,7 +372,7 @@
         "server::tests::tavily_http_search::admin_",
         "server::tests::admin_logs_and_summary::api_",
         "server::tests::api_keys_and_registration::api_",
-        "server::tests::branded_assets_contract::branded_assets_are_served_from_assets_contract_and_favicon_remains_available",
+        "server::tests::branded_assets_contract::",
         "server::tests::linuxdo_oauth_and_admin_keys::api_",
         "server::tests::log_catalog_and_dashboard_sse::api_",
         "server::admin_resources_tests::",

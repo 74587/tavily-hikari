@@ -13,10 +13,12 @@ export default function BrandLockup({
   className,
   markClassName,
 }: BrandWordmarkProps): JSX.Element {
+  const assetStem = compact ? 'relay-mesh-mobile-logo' : 'relay-mesh-lockup'
+
   return (
     <span className={cn('brand-lockup', compact && 'brand-lockup-compact', className)}>
       <img
-        src="/assets/relay-mesh-lockup-light.png"
+        src={`/assets/${assetStem}-light.svg`}
         alt={title}
         className={cn(
           'brand-lockup-image',
@@ -28,7 +30,7 @@ export default function BrandLockup({
         decoding="async"
       />
       <img
-        src="/assets/relay-mesh-lockup-dark.png"
+        src={`/assets/${assetStem}-dark.svg`}
         alt=""
         aria-hidden="true"
         className={cn(
