@@ -175,6 +175,10 @@ PR: include
 ![暗色紧凑文字版移动端登录页](./assets/admin-login-compact-logo-mobile-dark.png)
 
 PR: include
+移动端完整 TOTP、Passkey 与管理员口令流程，页脚图标在内容之后保持间距。
+![移动端完整登录流程](./assets/admin-login-full-methods-mobile.png)
+
+PR: include
 短屏移动端将主题与语言图标置于登录内容之后，避免与凭据区域重叠。
 ![短屏移动端登录页](./assets/admin-login-compact-logo-short-mobile.png)
 

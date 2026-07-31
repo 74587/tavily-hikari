@@ -107,6 +107,23 @@ export const PasskeyLogin: Story = {
   },
 }
 
+export const PasskeyLoginMobile: Story = {
+  name: 'Passkey login / mobile',
+  parameters: mobileViewport,
+  globals: {
+    language: 'zh',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const main = canvas.getByRole('main')
+    const footerControls = canvas.getByRole('button', { name: /theme|主题/i }).parentElement
+    await expect(canvas.findByLabelText(/totp|验证码/i)).resolves.toBeInTheDocument()
+    await expect(canvas.findByRole('button', { name: /passkey/i })).resolves.toBeInTheDocument()
+    await expect(footerControls).toHaveClass('auth-page-footer-controls')
+    await expect(main.compareDocumentPosition(footerControls!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  },
+}
+
 export const ResetEnrollment: Story = {
   args: {
     path: '/login?adminPasskeyResetToken=story-reset-token',
