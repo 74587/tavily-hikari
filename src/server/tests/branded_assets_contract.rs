@@ -59,7 +59,24 @@ fn relay_mesh_lockup_svgs_are_true_vectors() {
     let full = include_str!("../../../web/public/assets/relay-mesh-lockup-light.svg");
     let compact = include_str!("../../../web/public/assets/relay-mesh-mobile-logo-light.svg");
     assert!(full.contains("id=\"tagline\""));
+    assert!(full.contains("id=\"tagline-flow-gradient\""));
+    assert!(full.contains("transform=\"translate(0 -34)\""));
+    for group in [
+        "tagline-primary",
+        "tagline-separator",
+        "tagline-secondary",
+    ] {
+        assert!(full.contains(&format!("id=\"{group}\"")));
+        assert!(!compact.contains(group));
+    }
+    assert!(full.contains("#6D28D9"));
+    assert!(full.contains("#0369A1"));
     assert!(!compact.contains("id=\"tagline\""));
+    assert!(!compact.contains("tagline-flow-gradient"));
+
+    let dark = include_str!("../../../web/public/assets/relay-mesh-lockup-dark.svg");
+    assert!(dark.contains("#A78BFA"));
+    assert!(dark.contains("#38BDF8"));
 }
 
 #[tokio::test]

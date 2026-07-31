@@ -4,7 +4,7 @@
 
 - Status: 已完成（快车道）
 - Created: 2026-06-24
-- Last: 2026-07-15
+- Last: 2026-08-01
 
 ## 背景 / 问题陈述
 
@@ -21,6 +21,7 @@
 - 所有业务数据请求、SSE、MCP、登录提交与保存/操作在离线时都保持明确失败语义，不伪造成功，不回显旧快照。
 - 非管理员不注册 admin service worker、不看到 admin manifest 安装入口、不在 public SW cache 中形成 admin 壳页长期缓存。
 - 将 public/admin 双身份 PWA 的图标、touch icon 与站点 favicon 收口到 repo-local 的经批准 Relay Mesh lockup/icon 导出链，不改变 identity/scope/start_url。
+- 将完整 Relay Mesh lockup 的副标语固定为 `KEY POOL · BALANCE. ROUTE.`；完整 lockup 只在可用品牌容器宽度不小于 `260px` 时显示，较窄容器统一使用无副标语 compact 版本。
 - 补齐测试、Storybook 状态、浏览器离线验证与视觉证据，并将合同冻结到本 spec。
 
 ### Non-goals
@@ -51,6 +52,7 @@
 - `web/src/user-console/runtime.tsx`
 - `web/src/admin/AdminDashboardRuntime.tsx`
 - `docs-site/rspress.config.ts`
+- `docs-site/theme/**`
 - `docs-site/docs/public/assets/relay-mesh-lockup*.png`
 - `docs-site/docs/public/assets/relay-mesh-icon*.png`
 - `docs-site/docs/public/assets/relay-mesh-mark*.{png,svg}`
@@ -150,6 +152,16 @@
 - Vite build manifest 必须开启，供 post-build 读取 multipage output graph。
 - 生成脚本必须按 entrypoint 归类 public/admin asset graph，并输出两套 PWA 合同文件。
 - Relay Mesh 资产导出链必须显式产出 light / dark / mono 变体，并保留默认亮色别名文件用于现有入口兼容。
+- 完整 lockup 的 tagline 使用仓库固定的 Roboto Condensed weight 400 与 OFL 1.1 许可证作为 outline 生成输入；发布 SVG 不得包含 `<text>`、`<image>`、`href`、data URI 或运行时字体依赖。
+- 完整 lockup 必须保持批准稿的 `1000 × 310` 横向轮廓与品牌语法：Relay Mesh mark 位于左列，wordmark 与 tagline 组成共享光学中轴的右侧两行文字块；tagline 使用 `tagline-primary`、`tagline-separator`、`tagline-secondary` 三个逻辑组，其中 separator 是字间点而非竖线。Tagline outline 总高度必须保持在 `36–39` SVG units、总宽度保持在 `625–635` units，与上移后的 wordmark 保留 `20–28` units 的可见间距，水平中心限定在 `610–620` units；全文使用单一连续渐变，亮色端点为 `#6D28D9 → #0369A1`，暗色端点为 `#A78BFA → #38BDF8`，文字颜色在对应设计基准背景上必须达到 `4.5:1` 对比度。
+- Web 与 docs-site 的 SVG/PNG lockup 必须从同一矢量母版导出并保持内容哈希一致；compact 资产不得包含 tagline path 或未使用的 tagline gradient。
+
+### 品牌组件合同
+
+- `BrandLockup.variant` 只允许 `full | compact | responsive`，默认 `full`；旧 `compact` 布尔接口不再保留。
+- `responsive` 按实际可用品牌容器宽度切换：`>=260px` 使用完整 lockup，`<260px` 使用无副标语 compact lockup；亮暗主题下通过单一可访问名称暴露品牌。
+- 公共首页、用户控制台、管理员后台、登录、暂停注册与 404 都使用 `responsive`；完整品牌位不小于 `260px`。
+- Rspress 通过 custom theme 的 `Layout.navTitle` 插槽复用同一容器查询与主题切换合同；文档导航属于 utility 位，品牌容器固定为 `180px`，因此选择 compact lockup 而不是把完整版缩进导航栏。
 - PWA manifest 必须覆盖 `64, 96, 128, 144, 152, 167, 180, 192, 256, 384, 512, 1024` 尺寸，并额外提供 `192/512` maskable 图标。
 
 ### 静态托管
@@ -237,6 +249,28 @@
 - Safari/iOS 至少做一次手工安装与离线重开验证，并将结论写入 spec evidence 或 implementation notes。
 
 ## Visual Evidence
+
+- `2026-08-01` 品牌组件容器阈值（Storybook canvas，mock-only，`require_margin`）：
+
+  PR: none
+
+  `260px` 容器显示完整 lockup，`220px` 容器切换到紧凑版且在自身容器内居中。
+
+  ![260px 容器的完整 lockup](./assets/brand-lockup-storybook-minimum-260.png)
+
+  ![220px 容器的紧凑 lockup](./assets/brand-lockup-storybook-compact-220.png)
+
+- `2026-08-01` 品牌消费面（ui_demo / Rspress preview，mock-only，`trim_only`）：
+
+  PR: none
+
+  公共首页使用桌面完整版本；后台侧栏因实际可用宽度为 `230px` 正确切换为紧凑版本；文档站作为导航 utility 位固定为 `180px`，正确使用紧凑版本。
+
+  ![公共首页桌面暗色完整 lockup](./assets/brand-lockup-public-home-desktop-dark.png)
+
+  ![后台侧栏桌面暗色紧凑 lockup](./assets/brand-lockup-admin-sidebar-desktop-dark.png)
+
+  ![文档站桌面暗色紧凑 lockup](./assets/brand-lockup-docs-desktop-dark.png)
 
 - `97cccf60` 公共首页离线壳：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/public-offline-shell.png`
 - `97cccf60` 用户控制台离线壳：`docs/specs/2br7z-web-pwa-split-identities-offline-shells/assets/console-offline-shell.png`

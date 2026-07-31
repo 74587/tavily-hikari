@@ -577,13 +577,23 @@
 
 .brand-lockup {
   display: inline-flex;
-  align-items: center;
-  min-width: 0;
+  align-items: flex-start;
+  inline-size: min(100%, 260px);
+  min-inline-size: 0;
+  container-type: inline-size;
+}
+
+.brand-lockup-assets {
+  display: contents;
+}
+
+.brand-lockup-assets-compact {
+  display: none;
 }
 
 .brand-lockup-image {
   display: block;
-  width: min(100%, 220px);
+  inline-size: 100%;
   height: auto;
   object-fit: contain;
 }
@@ -601,7 +611,19 @@
 }
 
 .brand-lockup-image-compact {
-  width: min(100%, 168px);
+  inline-size: min(100%, 168px);
+}
+
+@container (max-width: 259px) {
+  .brand-lockup-responsive .brand-lockup-assets-full {
+    display: none;
+  }
+
+  .brand-lockup-responsive .brand-lockup-assets-compact {
+    display: flex;
+    inline-size: 100%;
+    justify-content: center;
+  }
 }
 
 .brand-mark-image {
@@ -651,7 +673,7 @@ body.not-found-page-body,
 }
 
 .not-found-brand-mark {
-  width: min(100%, 200px);
+  width: min(100%, 260px);
   height: auto;
 }
 
@@ -763,7 +785,7 @@ body.not-found-page-body,
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px 14px;
+  padding: 8px 4px 14px;
 }
 
 .admin-sidebar-topbar {
@@ -774,11 +796,15 @@ body.not-found-page-body,
 }
 
 .admin-sidebar-brand-mark {
-  width: min(100%, 170px);
+  width: min(100%, 260px);
   height: auto;
 }
 
-.auth-brand-lockup,
+.auth-brand-lockup {
+  inline-size: 260px;
+  margin-bottom: 10px;
+}
+
 .registration-paused-brand-lockup {
   margin-bottom: 10px;
 }
@@ -865,12 +891,8 @@ body.not-found-page-body,
 
 .auth-brand-mark,
 .registration-paused-brand-mark {
-  width: min(100%, 220px);
+  width: min(100%, 260px);
   height: auto;
-}
-
-.auth-brand-mobile-lockup {
-  display: none;
 }
 
 .auth-credentials-title {
@@ -896,7 +918,7 @@ body.not-found-page-body,
   }
 }
 
-@media (max-width: 639px) {
+@media (max-width: 767px) {
   .auth-page-frame {
     flex-direction: column;
     align-items: center;
@@ -905,17 +927,13 @@ body.not-found-page-body,
     padding-bottom: 2rem;
   }
 
-  .auth-page-brand .auth-brand-lockup {
-    display: none;
-  }
-
-  .auth-brand-mobile-lockup {
-    display: inline-flex;
-  }
-
-  .auth-brand-mobile-logo {
-    width: min(168px, calc(100vw - 3rem));
+  .auth-brand-mark {
+    width: 100%;
     height: auto;
+  }
+
+  .auth-brand-lockup {
+    inline-size: min(168px, calc(100vw - 3rem));
   }
 
   .auth-page-header-controls {

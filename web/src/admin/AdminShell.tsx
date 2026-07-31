@@ -116,7 +116,7 @@ export default function AdminShell({
           <div className="admin-sidebar-topbar">
             <BrandLockup
               title="Tavily Hikari"
-              compact
+              variant="responsive"
               className="admin-sidebar-brand"
               markClassName="admin-sidebar-brand-mark"
             />

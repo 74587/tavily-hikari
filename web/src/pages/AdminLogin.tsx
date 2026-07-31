@@ -159,14 +159,9 @@ function AdminLogin({ updateBanner }: { updateBanner?: ReactNode } = {}): JSX.El
         <div className="auth-page-brand">
           <BrandLockup
             title="Tavily Hikari"
+            variant="responsive"
             className="auth-brand-lockup"
             markClassName="auth-brand-mark"
-          />
-          <BrandLockup
-            title="Tavily Hikari"
-            compact
-            className="auth-brand-mobile-lockup"
-            markClassName="auth-brand-mobile-logo"
           />
         </div>
         <div className="auth-page-header-controls flex items-center gap-2">

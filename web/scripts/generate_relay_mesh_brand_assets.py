@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 import shutil
+import subprocess
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -171,12 +172,25 @@ def recolor_monochrome(image: Image.Image, color: tuple[int, int, int]) -> Image
 
 def save_png(image: Image.Image, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = load_rgba(path)
+        candidate = image.convert("RGBA")
+        if existing.size == candidate.size and existing.tobytes() == candidate.tobytes():
+            return
     image.save(path)
 
 
 def save_resized(image: Image.Image, size: int, path: Path) -> None:
+    save_png(image.resize((size, size), Image.Resampling.LANCZOS), path)
+
+
+def render_vector_png(source: Path, path: Path) -> Image.Image:
+    renderer = shutil.which("rsvg-convert")
+    if renderer is None:
+        raise RuntimeError("rsvg-convert is required to export lockup PNG assets")
     path.parent.mkdir(parents=True, exist_ok=True)
-    image.resize((size, size), Image.Resampling.LANCZOS).save(path)
+    subprocess.run([renderer, str(source), "--output", str(path)], check=True)
+    return load_rgba(path)
 
 
 def write_svg_wrapper(href: str, width: int, height: int, path: Path) -> None:
@@ -212,6 +226,10 @@ def write_vector_svg(
             source_color = tuple(int(value[index:index + 2], 16) for index in (1, 3, 5))
             if color is not None:
                 output_color = color
+            elif dark_lockup and value.upper() == "#6D28D9":
+                output_color = (167, 139, 250)
+            elif dark_lockup and value.upper() == "#0369A1":
+                output_color = (56, 189, 248)
             elif dark_lockup:
                 if chroma(source_color) <= 44 and luminance(source_color) < 205:
                     output_color = (
@@ -346,13 +364,8 @@ def make_mono_square_icon(mark: Image.Image) -> Image.Image:
 
 def export_static_assets(public_dir: Path) -> None:
     assets_dir = public_dir / ASSETS_DIR_NAME
-    lockup_seed = load_rgba(REFERENCE_DIR / "approved-lockup-raster.png")
     mark_seed = load_rgba(REFERENCE_DIR / "approved-mark-raster.png")
 
-    lockup_light = remove_background(lockup_seed, fill_threshold=60, soft_threshold=84)
-    lockup_dark = recolor_lockup_for_dark(lockup_light)
-    lockup_mono_dark = recolor_monochrome(lockup_light, CLAY_INK)
-    lockup_mono_light = recolor_monochrome(lockup_light, LIGHT_CLAY)
     mark_light = remove_background(mark_seed, fill_threshold=62, soft_threshold=88)
     mark_dark = recolor_mark_for_dark(mark_light)
     mark_mono_dark = recolor_monochrome(mark_light, CLAY_INK)
@@ -370,14 +383,6 @@ def export_static_assets(public_dir: Path) -> None:
     )
     launcher_mono_dark = make_mono_square_icon(mark_mono_dark)
     launcher_mono_light = make_mono_square_icon(mark_mono_light)
-
-    save_png(lockup_light, assets_dir / "relay-mesh-lockup.png")
-    save_png(lockup_light, assets_dir / "relay-mesh-lockup-light.png")
-    save_png(lockup_dark, assets_dir / "relay-mesh-lockup-dark.png")
-    save_png(lockup_mono_dark, assets_dir / "relay-mesh-lockup-mono-dark.png")
-    save_png(lockup_mono_light, assets_dir / "relay-mesh-lockup-mono-light.png")
-    save_png(lockup_light, assets_dir / "relay-mesh-mobile-logo-light.png")
-    save_png(lockup_dark, assets_dir / "relay-mesh-mobile-logo-dark.png")
 
     save_png(mark_light, assets_dir / "relay-mesh-mark.png")
     save_png(mark_light, assets_dir / "relay-mesh-mark-light.png")
@@ -409,6 +414,16 @@ def export_static_assets(public_dir: Path) -> None:
     write_mark_svg(assets_dir / "relay-mesh-mark-mono-light.svg", color=LIGHT_CLAY)
     write_lockup_svgs(assets_dir)
     write_lockup_svgs(assets_dir, compact=True)
+    render_vector_png(
+        assets_dir / "relay-mesh-lockup-light.svg",
+        assets_dir / "relay-mesh-lockup-light.png",
+    )
+    shutil.copyfile(assets_dir / "relay-mesh-lockup-light.png", assets_dir / "relay-mesh-lockup.png")
+    render_vector_png(assets_dir / "relay-mesh-lockup-dark.svg", assets_dir / "relay-mesh-lockup-dark.png")
+    render_vector_png(assets_dir / "relay-mesh-lockup-mono-dark.svg", assets_dir / "relay-mesh-lockup-mono-dark.png")
+    render_vector_png(assets_dir / "relay-mesh-lockup-mono-light.svg", assets_dir / "relay-mesh-lockup-mono-light.png")
+    render_vector_png(assets_dir / "relay-mesh-mobile-logo-light.svg", assets_dir / "relay-mesh-mobile-logo-light.png")
+    render_vector_png(assets_dir / "relay-mesh-mobile-logo-dark.svg", assets_dir / "relay-mesh-mobile-logo-dark.png")
     write_svg_wrapper(
         local_asset_path("relay-mesh-icon-mono-dark.png"),
         launcher_mono_dark.width,

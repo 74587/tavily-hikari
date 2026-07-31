@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from math import ceil
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 
-from PIL import Image
+from fontTools.ttLib import TTFont
+from fontTools.varLib.instancer import instantiateVariableFont
+from PIL import Image, ImageDraw, ImageFont
 
 from generate_relay_mesh_brand_assets import remove_background
 
@@ -19,6 +22,22 @@ RASTER_SOURCE = REFERENCE_DIR / "approved-lockup-raster.png"
 MARK_SOURCE = REFERENCE_DIR / "approved-mark-vector-light.svg"
 FULL_OUTPUT = REFERENCE_DIR / "approved-lockup-vector-light.svg"
 COMPACT_OUTPUT = REFERENCE_DIR / "approved-lockup-compact-vector-light.svg"
+FONT_SOURCE = REFERENCE_DIR / "fonts" / "RobotoCondensed-wght.ttf"
+TAGLINE_PRIMARY_COPY = "KEY POOL"
+TAGLINE_SECONDARY_COPY = "BALANCE. ROUTE."
+TAGLINE_WEIGHT = 400
+TAGLINE_FONT_SIZE = 52
+TAGLINE_TRACKING = 0.5
+WORDMARK_TRANSLATE_Y = -34
+TAGLINE_TOP = 190
+TAGLINE_TARGET_HEIGHT = (37, 39)
+TAGLINE_PRIMARY_LEFT = 297
+TAGLINE_PRIMARY_RIGHT = 510
+TAGLINE_SEPARATOR_CENTER_X = 530
+TAGLINE_SEPARATOR_RADIUS = 4
+TAGLINE_SECONDARY_LEFT = 547
+TAGLINE_SECONDARY_RIGHT = 935
+FULL_LOCKUP_HEIGHT = 310
 SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 
 ET.register_namespace("", SVG_NAMESPACE)
@@ -69,6 +88,67 @@ def trace_region(alpha: Image.Image, box: tuple[int, int, int, int], group_id: s
     return traced_group
 
 
+def tracked_text_width(draw: ImageDraw.ImageDraw, copy: str, font: ImageFont.FreeTypeFont) -> int:
+    return ceil(draw.textlength(copy, font=font) + TAGLINE_TRACKING * (len(copy) - 1))
+
+
+def draw_tracked_text(
+    draw: ImageDraw.ImageDraw,
+    copy: str,
+    font: ImageFont.FreeTypeFont,
+    left: int,
+    top: int,
+) -> tuple[int, int, int, int]:
+    bbox = draw.textbbox((0, 0), copy, font=font)
+    width = tracked_text_width(draw, copy, font)
+    height = bbox[3] - bbox[1]
+    for index, character in enumerate(copy):
+        prefix_width = draw.textlength(copy[:index], font=font)
+        draw.text(
+            (left + prefix_width + TAGLINE_TRACKING * index, top - bbox[1]),
+            character,
+            font=font,
+            fill=255,
+        )
+    return left, top, left + width, top + height
+
+
+def render_tagline_alpha() -> Image.Image:
+    if not FONT_SOURCE.exists():
+        raise RuntimeError(f"missing vendored tagline font: {FONT_SOURCE}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        static_font_path = Path(temp_dir) / "RobotoCondensed-Regular.ttf"
+        variable_font = TTFont(FONT_SOURCE)
+        instantiateVariableFont(variable_font, {"wght": TAGLINE_WEIGHT}).save(static_font_path)
+
+        scratch = Image.new("L", (1000, FULL_LOCKUP_HEIGHT), 0)
+        draw = ImageDraw.Draw(scratch)
+        font = ImageFont.truetype(static_font_path, size=TAGLINE_FONT_SIZE)
+        primary_bbox = draw_tracked_text(
+            draw,
+            TAGLINE_PRIMARY_COPY,
+            font,
+            TAGLINE_PRIMARY_LEFT,
+            TAGLINE_TOP,
+        )
+        secondary_bbox = draw_tracked_text(
+            draw,
+            TAGLINE_SECONDARY_COPY,
+            font,
+            TAGLINE_SECONDARY_LEFT,
+            TAGLINE_TOP,
+        )
+        print(f"[brand] tagline_primary_bbox={','.join(map(str, primary_bbox))}")
+        print(f"[brand] tagline_secondary_bbox={','.join(map(str, secondary_bbox))}")
+        height = max(primary_bbox[3], secondary_bbox[3]) - TAGLINE_TOP
+        if not TAGLINE_TARGET_HEIGHT[0] <= height <= TAGLINE_TARGET_HEIGHT[1]:
+            raise RuntimeError("unable to fit tagline inside the approved geometry contract")
+        if primary_bbox[2] > TAGLINE_PRIMARY_RIGHT or secondary_bbox[2] > TAGLINE_SECONDARY_RIGHT:
+            raise RuntimeError("tagline groups exceed their approved horizontal regions")
+        return scratch
+
+
 def add_linear_gradient(
     defs: ET.Element,
     gradient_id: str,
@@ -102,7 +182,7 @@ def build_lockup(
     *,
     include_tagline: bool,
 ) -> ET.Element:
-    height = "310" if include_tagline else "260"
+    height = str(FULL_LOCKUP_HEIGHT) if include_tagline else "260"
     root = ET.Element(
         svg_tag("svg"),
         {
@@ -135,24 +215,21 @@ def build_lockup(
         "9790",
         (("0", "#7939E7"), ("0.48", "#426FF4"), ("1", "#0398EF")),
     )
-    add_linear_gradient(
-        defs,
-        "tagline-primary-gradient",
-        "3310",
-        "4890",
-        (("0", "#7434EA"), ("1", "#5C45EE")),
-    )
-    add_linear_gradient(
-        defs,
-        "tagline-secondary-gradient",
-        "5650",
-        "9300",
-        (("0", "#268CEB"), ("1", "#078FE8")),
-    )
+    if include_tagline:
+        add_linear_gradient(
+            defs,
+            "tagline-flow-gradient",
+            str(TAGLINE_PRIMARY_LEFT * 10),
+            str(TAGLINE_SECONDARY_RIGHT * 10),
+            (("0", "#6D28D9"), ("1", "#0369A1")),
+        )
     root.append(defs)
     root.append(deepcopy(mark_artwork))
 
-    wordmark = ET.SubElement(root, svg_tag("g"), {"id": "wordmark"})
+    wordmark_attributes = {"id": "wordmark"}
+    if include_tagline:
+        wordmark_attributes["transform"] = f"translate(0 {WORDMARK_TRANSLATE_Y})"
+    wordmark = ET.SubElement(root, svg_tag("g"), wordmark_attributes)
     tavily = deepcopy(traced_groups["wordmark-tavily"])
     tavily.set("fill", "url(#wordmark-tavily-gradient)")
     hikari = deepcopy(traced_groups["wordmark-hikari"])
@@ -162,11 +239,26 @@ def build_lockup(
     if include_tagline:
         tagline = ET.SubElement(root, svg_tag("g"), {"id": "tagline"})
         primary = deepcopy(traced_groups["tagline-primary"])
-        primary.set("fill", "url(#tagline-primary-gradient)")
-        separator = deepcopy(traced_groups["tagline-separator"])
-        separator.set("fill", "#A6A1B0")
+        primary.set("fill", "url(#tagline-flow-gradient)")
+        separator = ET.Element(
+            svg_tag("g"),
+            {
+                "id": "tagline-separator",
+                "transform": f"translate(0 {FULL_LOCKUP_HEIGHT}) scale(0.1 -0.1)",
+                "fill": "url(#tagline-flow-gradient)",
+            },
+        )
+        ET.SubElement(
+            separator,
+            svg_tag("circle"),
+            {
+                "cx": str(TAGLINE_SEPARATOR_CENTER_X * 10),
+                "cy": str((FULL_LOCKUP_HEIGHT - (TAGLINE_TOP + 19.5)) * 10),
+                "r": str(TAGLINE_SEPARATOR_RADIUS * 10),
+            },
+        )
         secondary = deepcopy(traced_groups["tagline-secondary"])
-        secondary.set("fill", "url(#tagline-secondary-gradient)")
+        secondary.set("fill", "url(#tagline-flow-gradient)")
         tagline.extend((primary, separator, secondary))
 
     return root
@@ -180,12 +272,12 @@ def write_svg(root: ET.Element, path: Path) -> None:
 def main() -> None:
     raster = Image.open(RASTER_SOURCE).convert("RGBA")
     alpha = remove_background(raster, fill_threshold=60, soft_threshold=84).getchannel("A")
+    tagline_alpha = render_tagline_alpha()
     traced_groups = {
         "wordmark-tavily": trace_region(alpha, (240, 55, 630, 205), "wordmark-tavily"),
         "wordmark-hikari": trace_region(alpha, (640, 55, 990, 205), "wordmark-hikari"),
-        "tagline-primary": trace_region(alpha, (325, 208, 500, 242), "tagline-primary"),
-        "tagline-separator": trace_region(alpha, (518, 208, 537, 242), "tagline-separator"),
-        "tagline-secondary": trace_region(alpha, (555, 208, 945, 242), "tagline-secondary"),
+        "tagline-primary": trace_region(tagline_alpha, (290, 160, 520, 230), "tagline-primary"),
+        "tagline-secondary": trace_region(tagline_alpha, (540, 160, 945, 230), "tagline-secondary"),
     }
     mark_root = ET.parse(MARK_SOURCE).getroot()
     write_svg(build_lockup(mark_root, traced_groups, include_tagline=True), FULL_OUTPUT)

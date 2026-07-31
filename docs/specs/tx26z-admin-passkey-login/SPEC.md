@@ -145,6 +145,7 @@
 - Docs pages / state galleries to add/update: admin login state gallery。
 - `play` / interaction coverage to add/update: reset token 错误和登录按钮状态。
 - Visual regression baseline changes (if any): passkey login/reset UI 截图。
+- 登录页品牌位使用 `BrandLockup variant="responsive"`：可用品牌容器宽度 `>=260px` 显示完整 lockup，较窄容器显示无副标语 compact lockup；不得维护第二套页面级移动 Logo 分支。
 
 ### Quality checks
 
@@ -152,6 +153,14 @@
 - Web: `bun run build` and Storybook smoke where feasible.
 
 ## Visual Evidence
+
+- `2026-08-01` 登录页品牌位（ui_demo，mock-only，`trim_only`）：
+
+  PR: none
+
+  绝对定位品牌区显式保持 `260px` 可用宽度，桌面端显示完整 lockup；窄容器仍由组件切换到紧凑版本。
+
+  ![登录页桌面暗色完整 lockup](./assets/admin-login-brand-lockup-desktop-dark.png)
 
 - 无文字标记参数化彩色对照：[relay-mesh-mark-parametric-color-comparison.png](./assets/relay-mesh-mark-parametric-color-comparison.png)
 - 无文字标记参数化二值几何对齐：[relay-mesh-mark-geometry-mono-comparison.png](./assets/relay-mesh-mark-geometry-mono-comparison.png)

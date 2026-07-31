@@ -273,9 +273,18 @@ export const NoLoginMethodsMobile: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    const mobileMark = await canvas.findByRole('img', { name: 'Tavily Hikari' })
-    await expect(mobileMark).toHaveAttribute('src', '/assets/relay-mesh-mobile-logo-light.svg')
-    await expect(mobileMark).toBeVisible()
+    const compactMark = canvasElement.querySelector<HTMLImageElement>(
+      '.auth-brand-lockup .brand-lockup-image-compact.brand-lockup-image-light',
+    )
+    const fullMark = canvasElement.querySelector<HTMLImageElement>(
+      '.auth-brand-lockup .brand-lockup-image-full.brand-lockup-image-light',
+    )
+    if (compactMark == null || fullMark == null) {
+      throw new Error('responsive brand lockup assets were not rendered')
+    }
+    await expect(compactMark).toHaveAttribute('src', '/assets/relay-mesh-mobile-logo-light.svg')
+    await expect(compactMark).toBeVisible()
+    await expect(fullMark).not.toBeVisible()
     await expect(canvas.getByRole('button', { name: /theme|主题/i })).toBeVisible()
     await expect(canvas.getByRole('button', { name: /language|语言/i })).toBeVisible()
     await expect(canvas.getByRole('region', { name: /credentials|登录凭据/i })).toBeInTheDocument()

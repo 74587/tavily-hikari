@@ -1,0 +1,52 @@
+.docs-brand-lockup {
+  display: inline-flex;
+  align-items: flex-start;
+  /* Documentation navigation is a utility bar, not a primary brand canvas. */
+  inline-size: min(100%, 180px);
+  min-inline-size: 0;
+  container-type: inline-size;
+  text-decoration: none;
+}
+
+.docs-brand-assets {
+  display: contents;
+}
+
+.docs-brand-assets-compact {
+  display: none;
+}
+
+.docs-brand-image {
+  display: block;
+  inline-size: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.docs-brand-image-dark {
+  display: none;
+}
+
+.dark .docs-brand-image-light {
+  display: none;
+}
+
+.dark .docs-brand-image-dark {
+  display: block;
+}
+
+@container (max-width: 259px) {
+  .docs-brand-assets-full {
+    display: none;
+  }
+
+  .docs-brand-assets-compact {
+    display: flex;
+    inline-size: 100%;
+    justify-content: center;
+  }
+
+  .docs-brand-image-compact {
+    inline-size: min(100%, 180px);
+  }
+}
