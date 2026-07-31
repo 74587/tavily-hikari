@@ -1096,7 +1096,10 @@ impl KeyStore {
         .fetch_optional(&self.pool)
         .await?;
         if sealed.is_some() {
-            self.seal_dashboard_rollup_day(day_start, now).await
+            // Preserve the last fully verified recovery baseline until every
+            // slice in the retained source day has been reaudited.
+            self.enqueue_dashboard_rollup_integrity_day_reaudit(day_start, now)
+                .await
         } else {
             self.maybe_seal_dashboard_rollup_day(day_start, now).await
         }

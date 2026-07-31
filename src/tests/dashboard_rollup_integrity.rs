@@ -991,7 +991,39 @@ async fn integrity_seal_restores_a_corrupted_daily_rollup() {
     proxy
         .run_dashboard_rollup_integrity_slice()
         .await
-        .expect("refresh sealed day after late source repair");
+        .expect("repair first slice of sealed day after late source data");
+    let preserved_seal_json: String = sqlx::query_scalar(
+        "SELECT counts_json FROM dashboard_rollup_daily_seals WHERE bucket_start = ?",
+    )
+    .bind(day_start)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read preserved day seal");
+    let preserved_seal: DashboardRequestRollupCounts =
+        serde_json::from_str(&preserved_seal_json).expect("parse preserved day seal");
+    assert_eq!(preserved_seal.total_requests, 1);
+    let reaudit_status: String = sqlx::query_scalar(
+        "SELECT status FROM dashboard_rollup_integrity_day_reaudits WHERE bucket_start = ?",
+    )
+    .bind(day_start)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read queued day reaudit");
+    assert_eq!(reaudit_status, "pending");
+
+    sqlx::query(
+        "UPDATE dashboard_rollup_integrity_day_reaudits SET cursor = ? WHERE bucket_start = ?",
+    )
+    .bind(day_end)
+    .bind(day_start)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("complete retained day reaudit cursor");
+    pin_integrity_hot_work(&proxy, range_start, day_end).await;
+    proxy
+        .run_dashboard_rollup_integrity_slice()
+        .await
+        .expect("seal retained day after full reaudit");
     let refreshed: i64 = sqlx::query_scalar(
         "SELECT total_requests FROM dashboard_request_rollup_buckets WHERE bucket_secs = 86400 AND bucket_start = ?",
     )
