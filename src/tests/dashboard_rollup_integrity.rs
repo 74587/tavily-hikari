@@ -633,6 +633,17 @@ async fn integrity_restarts_when_an_existing_source_row_changes_during_a_slice()
     .await
     .expect("read repaired credit rollup");
     assert_eq!(credits, 9);
+    let remaining_gaps: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dashboard_rollup_integrity_gaps WHERE range_start = ?",
+    )
+    .bind(range_start)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("count stale integrity gaps");
+    assert_eq!(
+        remaining_gaps, 0,
+        "successful verification must clear the gap"
+    );
 }
 
 #[tokio::test]

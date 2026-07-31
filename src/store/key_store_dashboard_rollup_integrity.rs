@@ -666,9 +666,7 @@ impl KeyStore {
                 next_delay_secs,
             });
         }
-        if mismatch {
-            self.clear_dashboard_rollup_integrity_gap(item.range_start).await?;
-        }
+        self.clear_dashboard_rollup_integrity_gap(item.range_start).await?;
         self.finish_dashboard_rollup_integrity_work_item(&item, now).await?;
         let day_start = local_day_bucket_start_utc_ts(item.range_start);
         if self
