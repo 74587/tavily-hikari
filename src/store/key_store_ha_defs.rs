@@ -70,17 +70,13 @@ pub struct HaEventsApplySession {
     saw_end: bool,
 }
 
-const HA_SCHEMA_VERSION: i64 = 2;
+const HA_SCHEMA_VERSION: i64 = 3;
 const HA_CONTROL_OUTBOX_RETENTION_SECS: i64 = 72 * 60 * 60;
 const HA_CHANNEL_EXPORT_RETENTION_SECS: i64 = 14 * 24 * 60 * 60;
 const HA_CONTROL_PLANE_EVENT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 const HA_CONTROL_BASELINE_TABLES: &[&str] = &[
     "admin_password_settings",
-    "admin_passkey_challenges",
-    "admin_passkey_credentials",
-    "admin_passkey_reset_tokens",
-    "admin_passkey_sessions",
     "announcements",
     "account_entitlements",
     "api_key_low_quota_depletions",
@@ -103,10 +99,6 @@ const HA_CONTROL_BASELINE_TABLES: &[&str] = &[
 
 const HA_CONTROL_EVENT_TABLES: &[&str] = &[
     "admin_password_settings",
-    "admin_passkey_challenges",
-    "admin_passkey_credentials",
-    "admin_passkey_reset_tokens",
-    "admin_passkey_sessions",
     "announcements",
     "account_entitlements",
     "api_key_low_quota_depletions",
@@ -212,6 +204,17 @@ fn ha_resource_allowed_for_channel(channel: HaSyncChannel, resource: &str) -> bo
         return true;
     }
     false
+}
+
+pub(crate) fn ha_resource_retired_for_channel(channel: HaSyncChannel, resource: &str) -> bool {
+    channel == HaSyncChannel::Control
+        && matches!(
+            resource,
+            "admin_passkey_challenges"
+                | "admin_passkey_credentials"
+                | "admin_passkey_reset_tokens"
+                | "admin_passkey_sessions"
+        )
 }
 
 fn ha_channel_event_table(channel: HaSyncChannel) -> &'static str {

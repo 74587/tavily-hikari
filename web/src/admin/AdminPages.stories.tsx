@@ -122,6 +122,39 @@ export const SystemSettingsMcpSessionBindings = {
   },
 }
 export const SystemSettingsAdmin = { ...RuntimeStories.SystemSettingsAdmin }
+export const SystemSettingsAdminCompact = {
+  ...RuntimeStories.SystemSettingsAdmin,
+  parameters: {
+    ...RuntimeStories.SystemSettingsAdmin.parameters,
+    viewport: { defaultViewport: '1200-device-laptop-13' },
+  },
+  play: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+    const passwordControls = canvasElement.ownerDocument.querySelector<HTMLElement>(
+      '.system-settings-password-controls',
+    )
+    if (!passwordControls || passwordControls.scrollWidth > passwordControls.clientWidth) {
+      throw new Error('Administrator password controls must wrap instead of overflowing.')
+    }
+    const passwordFields = passwordControls.querySelectorAll<HTMLElement>('label')
+    if (passwordFields.length !== 2 || passwordFields[0].offsetTop !== passwordFields[1].offsetTop) {
+      throw new Error('Administrator password fields must remain on one row when space permits.')
+    }
+    const passwordActions = passwordControls.querySelector<HTMLElement>(
+      '.system-settings-password-actions',
+    )
+    const lastPasswordAction = passwordActions?.lastElementChild as HTMLElement | null
+    if (
+      !lastPasswordAction ||
+      Math.abs(
+        passwordControls.getBoundingClientRect().right - lastPasswordAction.getBoundingClientRect().right,
+      ) > 1
+    ) {
+      throw new Error('Administrator password actions must align to the right edge.')
+    }
+  },
+}
+export const SystemSettingsAdminScopeMismatch = { ...RuntimeStories.SystemSettingsAdminScopeMismatch }
 export const SystemSettingsHa = { ...HaStories.SystemSettingsHa }
 export const DashboardHaAttention = { ...HaStories.DashboardHaAttention }
 export const SystemSettingsHaMobile = { ...HaStories.SystemSettingsHaMobile }

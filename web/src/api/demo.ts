@@ -2030,6 +2030,13 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
       configured: true,
       enabled: true,
       credentialCount: 1,
+      scope: {
+        nodeId: 'demo-node',
+        rpId: 'localhost',
+        rpOrigin: 'http://localhost:55174',
+        inactiveCredentialCount: 0,
+        legacyCredentialCount: 0,
+      },
       credentials: [{
         credentialId: 'demo-passkey-credential',
         label: 'Admin passkey',
@@ -2053,6 +2060,13 @@ async function handleDemoRoute(url: URL, method: string, init?: RequestInit): Pr
       configured: true,
       enabled: method !== 'DELETE',
       credentialCount: method === 'DELETE' ? 0 : 1,
+      scope: {
+        nodeId: 'demo-node',
+        rpId: 'localhost',
+        rpOrigin: 'http://localhost:55174',
+        inactiveCredentialCount: 0,
+        legacyCredentialCount: 0,
+      },
       credentials: method === 'DELETE' ? [] : [{
         credentialId: 'demo-passkey-credential',
         label: 'Updated passkey',

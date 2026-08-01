@@ -18,6 +18,7 @@ import type {
 } from './systemSettingsTypes'
 import type { AuthToken, AuthTokenSecret } from './tokens'
 import type { AdminUserEntitlements } from './accountEntitlements'
+import type { AdminPasskeyCredential, AdminPasskeyScope } from './adminPasskeyTypes'
 import {
   normalizeUserDashboard,
   normalizeUserDashboardOverview,
@@ -1998,19 +1999,14 @@ interface AdminPasskeyResult {
   ok: boolean
 }
 
-export interface AdminPasskeyCredential {
-  credentialId: string
-  label: string | null
-  createdAt: number
-  updatedAt: number
-  lastUsedAt: number | null
-}
+export type { AdminPasskeyCredential, AdminPasskeyScope } from './adminPasskeyTypes'
 
 export interface AdminPasskeys {
   configured: boolean
   enabled: boolean
   credentialCount: number
   credentials: AdminPasskeyCredential[]
+  scope: AdminPasskeyScope | null
 }
 
 export interface AdminPasswordStatus {

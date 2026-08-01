@@ -1,6 +1,90 @@
 use super::*;
 
 #[tokio::test]
+async fn retired_passkey_ha_resources_are_discarded_without_blocking_control_sync() {
+    let db_path = temp_db_path("ha-retired-passkey-resource");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-retired-passkey-resource".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let events = [
+        serde_json::json!({
+            "schemaVersion": 2,
+            "kind": "events_start",
+            "channel": "control",
+            "after": 0,
+            "limit": 1,
+        }),
+        serde_json::json!({
+            "schemaVersion": 2,
+            "kind": "event",
+            "channel": "control",
+            "event": {
+                "seq": 7,
+                "resource": "admin_passkey_credentials",
+                "resourceId": "legacy-credential",
+                "op": "upsert",
+                "payload": { "credential_id": "legacy-credential" },
+            },
+        }),
+        serde_json::json!({
+            "schemaVersion": 2,
+            "kind": "events_end",
+            "channel": "control",
+            "lastSeq": 7,
+            "eventCount": 1,
+        }),
+    ]
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let result = proxy
+        .apply_ha_events_ndjson(HaSyncChannel::Control, &events)
+        .await
+        .expect("retired passkey event should be accepted");
+    assert_eq!(result.high_watermark, 7);
+    assert_eq!(result.row_count, 0);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM admin_passkey_credentials WHERE credential_id = 'legacy-credential'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("count passkey rows");
+    assert_eq!(count, 0);
+
+    let baseline = proxy
+        .export_ha_baseline_ndjson(HaSyncChannel::Control, "new-node")
+        .await
+        .expect("export control baseline");
+    assert!(!baseline.ndjson.contains("admin_passkey_"));
+
+    let legacy_baseline = [
+        serde_json::json!({ "kind": "baseline_start", "highWatermark": 3 }),
+        serde_json::json!({
+            "kind": "resource",
+            "resource": "admin_passkey_sessions",
+            "data": { "token": "legacy-session" },
+        }),
+        serde_json::json!({ "kind": "baseline_end", "highWatermark": 3 }),
+    ]
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let baseline_result = proxy
+        .apply_ha_baseline_ndjson(HaSyncChannel::Control, &legacy_baseline)
+        .await
+        .expect("retired passkey baseline should be accepted");
+    assert_eq!(baseline_result.row_count, 0);
+}
+
+#[tokio::test]
 async fn baseline_apply_abort_restores_foreign_keys_on_reused_pool_connection() {
     let db_path = temp_db_path("ha-baseline-apply-abort-fk");
     let db_str = db_path.to_string_lossy().to_string();

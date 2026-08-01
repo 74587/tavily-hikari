@@ -236,17 +236,24 @@ npx skills add https://github.com/IvanLi-CN/tavily-hikari --global
 
 ```bash
 export ADMIN_AUTH_PASSKEY_ENABLED=true
-export ADMIN_PASSKEY_RP_ID=tavily.example.com
-export ADMIN_PASSKEY_RP_ORIGIN=https://tavily.example.com
+export NODE_ID=tavily-node-a
+export NODE_PUBLIC_SCHEME=https
+export NODE_PUBLIC_HOST=tavily-node-a.example.com
 ```
 
 部署后，在服务器上创建一次性注册 URL：
 
 ```bash
-tavily-hikari admin passkey reset-url --base-url https://tavily.example.com
+tavily-hikari admin passkey reset-url --base-url https://tavily-node-a.example.com
 ```
 
 打开输出的 URL 一次，注册第一个管理员 Passkey。
+
+在 HA 中，Passkey 是节点本地数据。每个节点都要配置不同的 `NODE_ID` 和
+`NODE_PUBLIC_*` 域名；先升级当前 `full_master`，再滚动升级 standby/recovery 节点。必须在目标
+节点本地执行 reset 命令，使用该节点的 HTTPS 域名并分别登记。`ADMIN_PASSKEY_RP_ID` 与
+`ADMIN_PASSKEY_RP_ORIGIN` 仍可显式覆盖自动推导；`--base-url` 的 origin 必须与实际 RP origin
+完全一致，否则命令会拒绝生成链接。
 
 ### 旧版 ForwardAuth 配置
 

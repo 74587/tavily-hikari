@@ -264,6 +264,15 @@ export default function AdminSecuritySettingsModule({
     () => copy.passkeyCredentialCount.replace('{count}', String(passkeyCredentialCount)),
     [copy.passkeyCredentialCount, passkeyCredentialCount],
   )
+  const passkeyScope = passkeys?.scope
+  const passkeySectionTitle = language === 'zh' ? '本节点 Passkey 管理' : 'Node passkey management'
+  const passkeyScopeSummary = passkeyScope
+    ? language === 'zh'
+      ? `节点 ${passkeyScope.nodeId} · RP ID ${passkeyScope.rpId} · ${passkeyScope.rpOrigin}`
+      : `Node ${passkeyScope.nodeId} · RP ID ${passkeyScope.rpId} · ${passkeyScope.rpOrigin}`
+    : null
+  const hasInactivePasskeys = (passkeyScope?.inactiveCredentialCount ?? 0) > 0
+    || (passkeyScope?.legacyCredentialCount ?? 0) > 0
 
   const openSecurityAction = (action: PendingSecurityAction) => {
     setPendingSecurityAction(action)
@@ -554,7 +563,7 @@ export default function AdminSecuritySettingsModule({
         </section>
 
         <section className="system-settings-config-section">
-          <h4>{copy.passkeySectionTitle}</h4>
+          <h4>{passkeySectionTitle}</h4>
           <AdminLoadingRegion
             loadState={passkeysLoading ? 'initial_loading' : passkeysError ? 'error' : 'ready'}
             loadingLabel={copy.passkeyLoading}
@@ -569,6 +578,14 @@ export default function AdminSecuritySettingsModule({
                   </span>
                   <p>{copy.passkeyDescription}</p>
                   <p className="text-xs text-muted-foreground">{passkeySummary}</p>
+                  {passkeyScopeSummary ? <p className="text-xs text-muted-foreground">{passkeyScopeSummary}</p> : null}
+                  {hasInactivePasskeys ? (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      {language === 'zh'
+                        ? `另有 ${passkeyScope?.inactiveCredentialCount ?? 0} 个其他作用域凭据和 ${passkeyScope?.legacyCredentialCount ?? 0} 个历史凭据暂时禁用；恢复匹配的节点与 RP 配置后会自动可用。`
+                        : `${passkeyScope?.inactiveCredentialCount ?? 0} credentials from another scope and ${passkeyScope?.legacyCredentialCount ?? 0} legacy credentials are temporarily disabled. Restore the matching node and RP configuration to use them.`}
+                    </p>
+                  ) : null}
                   {passkeysMessage ? <p className="text-xs text-emerald-600">{passkeysMessage}</p> : null}
                 </div>
                 <span className={`inline-flex rounded-full border px-3 py-1 text-sm font-semibold ${statusToneClass(passkeyEnabled)}`}>

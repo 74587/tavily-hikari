@@ -17,6 +17,7 @@
 - 支持通过本地 CLI 生成一次性 passkey reset/enroll URL。
 - reset URL 成功注册新 passkey 后必须单次消费，且可撤销旧 passkey 与旧 admin session。
 - passkey challenge、credential、reset token、admin session 必须服务端持久化。
+- Passkey 状态必须按规范化的 `node_id + RP ID + RP origin` 本地作用域隔离。
 - 生产认证不得依赖 `FORWARD_AUTH_HEADER` 这类可由错误反代配置伪造的用户头。
 
 ### Non-goals
@@ -25,6 +26,7 @@
 - 不把 ForwardAuth 重新作为公网管理员登录方案。
 - 不提供远程公开 API 来生成 reset URL。
 - 不在本主题中实现 LinuxDo OAuth 管理员登录。
+- 不支持跨节点 Passkey 登录回退或由主节点代发其他节点的 reset URL。
 
 ## 范围（Scope）
 
@@ -34,6 +36,7 @@
 - SQLite schema 与 store API。
 - admin session 持久化和 cookie 鉴权接入。
 - CLI reset URL 生成工具。
+- 节点本地 Passkey 管理、作用域失配状态和滚动升级运维契约。
 - 前端 `/login` passkey 登录和 reset enrollment UI。
 - Storybook 状态入口与视觉证据。
 
@@ -48,12 +51,14 @@
 ### MUST
 
 - MUST 使用 WebAuthn/passkey 作为管理员生产主登录能力。
-- MUST 通过显式 RP ID 与 origin 配置约束 passkey，默认从公开站点配置推导。
+- MUST 通过显式 RP ID 与 origin 配置约束 passkey；未显式配置时优先从 `NODE_PUBLIC_*` 推导，缺失时才回退 `EDGEONE_DOMAIN`。
 - MUST 将 WebAuthn registration/authentication state 存在服务端，并设置 TTL。
-- MUST 持久化 credential、credential counter、reset token 与 admin session。
+- MUST 将 credential、credential counter、reset token、challenge 与 admin session 绑定到规范化的本节点 scope。
+- MUST 保留不匹配的本地 scope；只有当前 scope 可列出、认证和恢复会话，恢复完全相同的配置后原凭据自动可用。
+- MUST 将升级前无 scope 的全局记录标为 legacy，legacy 记录不可认证且需要在每个节点重新登记。
 - MUST 在认证成功后按 WebAuthn 结果更新 credential counter。
 - MUST 让 reset token 单次可用、过期失效、成功后不可重放。
-- MUST 提供 CLI 生成 reset URL，CLI 需要直接访问目标 SQLite DB。
+- MUST 提供 CLI 生成 reset URL，CLI 需要直接访问目标 SQLite DB，且 `--base-url` origin 必须与当前 scope 的 RP origin 完全一致。
 - MUST 保持内置密码登录为显式启用的 break-glass 能力，不作为 passkey 必需依赖。
 
 ### SHOULD
@@ -61,7 +66,8 @@
 - SHOULD 在 reset 注册成功后撤销旧 passkey 与旧 admin session。
 - SHOULD 提供清晰的 profile capability 字段，例如 `passkeyAuthEnabled`。
 - SHOULD 记录 passkey 注册、登录和 reset 消费的结构化日志，避免写入密钥材料。
-- SHOULD 将 passkey 相关 HA 同步纳入控制面数据，避免 standby 切换后锁死。
+- SHOULD 允许所有 HA 角色完成本节点 Passkey 的登记、reset、备注、删除与会话撤销；内置密码、登录 TOTP 与业务写入继续受 `full_master` 栅栏保护。
+- SHOULD 从 HA baseline、outbox 和触发器中排除 Passkey 表，并兼容丢弃旧节点传来的对应资源。
 
 ### COULD
 
@@ -76,12 +82,14 @@
 - 运维人员在服务器上运行 CLI reset-url 子命令，生成带 token 的 URL。
 - 管理员打开 reset URL 后，前端请求 registration challenge，浏览器创建 passkey，后端验证并保存 credential，消费 reset token。
 - reset 注册成功后，默认撤销旧 passkey 与旧 admin session，并要求管理员使用新 passkey 重新登录。
+- 每个节点从本地命令行生成 reset URL，并在自己的 HTTPS 域名完成登记；`full_master` 先升级，再滚动升级其他节点。
 
 ### Edge cases / errors
 
 - 无 passkey credential 时，普通 passkey 登录 start 返回不可用错误；reset URL 是 bootstrap 入口。
 - reset token 过期、已消费或不存在时，前端显示不可继续注册。
 - WebAuthn origin/RP ID 不匹配时必须拒绝。
+- 节点、RP ID 或 RP origin 不匹配当前 scope 时，保留的凭据、reset token、challenge 与 session 必须暂时不可用；重新匹配后自动恢复。
 - credential counter 异常时必须拒绝认证，并记录可审计日志。
 - 服务重启不能让已持久化的 admin session 全部丢失。
 
@@ -124,6 +132,14 @@
   When 后端完成 authentication finish
   Then 后端拒绝登录且不创建 admin session。
 
+- Given 节点域名或 RP 配置临时错误
+  When 当前 scope 与已登记 scope 不匹配
+  Then 管理端不列出该凭据且认证、reset、challenge、session 都不可使用；恢复完全相同配置后凭据自动恢复。
+
+- Given 任意非 `full_master` HA 角色
+  When 管理员在本节点登记、reset、修改、删除 Passkey 或撤销其 session
+  Then 本节点操作成功，其他管理员写入仍保持受限。
+
 ## 验收清单（Acceptance checklist）
 
 - [x] 核心路径的长期行为已被明确描述。
@@ -135,13 +151,13 @@
 
 ### Testing
 
-- Unit tests: store API、token TTL/消费、counter 更新。
+- Unit tests: scope 隔离、legacy 禁用、token TTL/消费、counter 更新。
 - Integration tests: passkey API 的成功、失败、重放拒绝、cookie session。
 - E2E tests: 可控浏览器/fixture 验证 reset 页面与登录页面行为。
 
 ### UI / Storybook (if applicable)
 
-- Stories to add/update: 登录页 passkey 可用、未配置、reset 注册、token 过期/错误。
+- Stories to add/update: 登录页 passkey 可用、未配置、reset 注册、token 过期/错误，以及管理员设置页的本节点 scope 与作用域失配状态。
 - Docs pages / state galleries to add/update: admin login state gallery。
 - `play` / interaction coverage to add/update: reset token 错误和登录按钮状态。
 - Visual regression baseline changes (if any): passkey login/reset UI 截图。
@@ -153,6 +169,8 @@
 - Web: `bun run build` and Storybook smoke where feasible.
 
 ## Visual Evidence
+
+- 本节点 Passkey scope 失配状态：[admin-passkey-scope-mismatch.png](./assets/admin-passkey-scope-mismatch.png)
 
 - `2026-08-01` 登录页品牌位（ui_demo，mock-only，`trim_only`）：
 

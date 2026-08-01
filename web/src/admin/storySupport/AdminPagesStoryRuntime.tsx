@@ -72,6 +72,7 @@ import { translations, useLanguage, type AdminTranslations } from '../../i18n'
 import { KeyDetails } from '../../AdminDashboard'
 import { TokenDetailStoryCanvas } from '../../pages/TokenDetail.stories'
 import { useAdminStackedLayout } from '../../lib/responsive'
+import { buildStoryAdminPasskeyScope } from './adminPasskeyStoryFixture'
 import {
   buildRequestKindQuickFilterSelection,
   defaultTokenLogRequestKindQuickFilters,
@@ -6306,7 +6307,7 @@ function ProxySettingsPageCanvas(): JSX.Element {
   )
 }
 
-function installStoryAdminSecurityFetchMock(): () => void {
+function installStoryAdminSecurityFetchMock(scopeMismatch = false): () => void {
   const originalFetch = window.fetch.bind(window)
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin)
@@ -6327,6 +6328,7 @@ function installStoryAdminSecurityFetchMock(): () => void {
         configured: true,
         enabled: true,
         credentialCount: 1,
+        scope: buildStoryAdminPasskeyScope(scopeMismatch),
         credentials: [{
           credentialId: 'story-passkey-credential-01',
           label: 'Admin security key',
@@ -6352,6 +6354,7 @@ function installStoryAdminSecurityFetchMock(): () => void {
         configured: true,
         enabled: method !== 'DELETE',
         credentialCount: method === 'DELETE' ? 0 : 1,
+        scope: buildStoryAdminPasskeyScope(scopeMismatch),
         credentials: method === 'DELETE' ? [] : [{
           credentialId: 'story-passkey-credential-01',
           label: 'Updated security key',
@@ -6533,10 +6536,10 @@ function SystemSettingsMcpSessionBindingsPageCanvas(): JSX.Element {
   )
 }
 
-function SystemSettingsAdminPageCanvas(): JSX.Element {
+function SystemSettingsAdminPageCanvas({ scopeMismatch = false }: { scopeMismatch?: boolean } = {}): JSX.Element {
   const admin = useAdminTranslations()
 
-  useEffect(() => installStoryAdminSecurityFetchMock(), [])
+  useEffect(() => installStoryAdminSecurityFetchMock(scopeMismatch), [scopeMismatch])
 
   return (
     <AdminPageFrame activeModule="system-settings-admin">
@@ -6564,6 +6567,7 @@ function SystemSettingsAdminPageCanvas(): JSX.Element {
           configured: true,
           enabled: true,
           credentialCount: 1,
+          scope: buildStoryAdminPasskeyScope(scopeMismatch),
           credentials: [{
             credentialId: 'story-passkey-credential-01',
             label: 'Admin security key',
@@ -7900,7 +7904,7 @@ export const SystemSettingsAdmin: Story = {
     if (!pageText.includes('管理员密码') && !pageText.includes('Admin password')) {
       throw new Error('Expected admin settings to render administrator password management.')
     }
-    if (!pageText.includes('Passkey 管理') && !pageText.includes('Passkey management')) {
+    if (!pageText.includes('本节点 Passkey 管理') && !pageText.includes('Node passkey management')) {
       throw new Error('Expected admin settings to render passkey management.')
     }
     if (!pageText.includes('新增 Passkey') && !pageText.includes('Add passkey')) {
@@ -7945,6 +7949,20 @@ export const SystemSettingsAdmin: Story = {
     const confirmDeleteButton = deleteButtons.at(-1)
     if (!confirmDeleteButton || confirmDeleteButton.disabled) {
       throw new Error('Expected destructive confirmation to be available after the dialog opens.')
+    }
+  },
+}
+
+export const SystemSettingsAdminScopeMismatch: Story = {
+  render: () => <SystemSettingsAdminPageCanvas scopeMismatch />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+    const pageText = canvasElement.ownerDocument.body.textContent ?? ''
+    if (!pageText.includes('暂时禁用') && !pageText.includes('temporarily disabled')) {
+      throw new Error('Expected the passkey scope mismatch warning.')
     }
   },
 }
