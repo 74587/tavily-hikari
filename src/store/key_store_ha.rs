@@ -3053,7 +3053,7 @@ impl KeyStore {
     }
 
     async fn delete_ha_channel_events_returning_max_seq_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         channel: HaSyncChannel,
         threshold: i64,
         batch_size: i64,
@@ -3065,7 +3065,7 @@ impl KeyStore {
         ))
         .bind(threshold)
         .bind(batch_size.max(1))
-        .fetch_all(&mut **conn)
+        .fetch_all(&mut *conn)
         .await?;
         let max_deleted_seq = deleted_seqs.iter().copied().max();
         Ok((deleted_seqs.len() as i64, max_deleted_seq))
@@ -3080,7 +3080,7 @@ impl KeyStore {
     }
 
     async fn delete_ha_invalid_legacy_events_bounded_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         channel: HaSyncChannel,
         batch_size: i64,
         updated_at: i64,
@@ -3090,14 +3090,14 @@ impl KeyStore {
         let last_seq: i64 = sqlx::query_scalar(&format!(
             "SELECT {cursor_column} FROM ha_outbox_gc_state WHERE id = 'local'"
         ))
-        .fetch_one(&mut **conn)
+        .fetch_one(&mut *conn)
         .await?;
         let scanned: Vec<(i64, String)> = sqlx::query_as(&format!(
             "SELECT seq, resource FROM {table} WHERE seq > ? ORDER BY seq ASC LIMIT ?"
         ))
         .bind(last_seq)
         .bind(batch_size.max(1))
-        .fetch_all(&mut **conn)
+        .fetch_all(&mut *conn)
         .await?;
         let scanned_len = scanned.len() as i64;
         let next_seq = scanned.last().map(|(seq, _)| *seq).unwrap_or(last_seq);
@@ -3115,7 +3115,7 @@ impl KeyStore {
             for seq in &invalid_seqs {
                 query = query.bind(seq);
             }
-            query.execute(&mut **conn).await?;
+            query.execute(&mut *conn).await?;
         }
         let reached_end = if scanned_len < batch_size.max(1) {
             true
@@ -3124,14 +3124,14 @@ impl KeyStore {
                 "SELECT EXISTS(SELECT 1 FROM {table} WHERE seq > ? LIMIT 1)"
             ))
             .bind(next_seq)
-            .fetch_one(&mut **conn)
+            .fetch_one(&mut *conn)
             .await?
         };
         sqlx::query(&format!(
             "UPDATE ha_outbox_gc_state SET {cursor_column} = ? WHERE id = 'local'"
         ))
         .bind(if reached_end { 0 } else { next_seq })
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         if let Some(max_deleted_seq) = invalid_seqs.iter().copied().max() {
             Self::remember_ha_channel_expired_legacy_watermark_on_conn(

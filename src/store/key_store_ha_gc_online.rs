@@ -84,12 +84,17 @@ impl KeyStore {
     ) -> Result<HaOutboxGcReport, ProxyError> {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
-        let mut conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
-            .await
-            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
+        let mut pooled_conn = Some(
+            tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
+                .await
+                .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??,
+        );
         let result = async {
+            let conn = pooled_conn
+                .as_mut()
+                .expect("online HA GC must own a pooled connection");
             sqlx::query("PRAGMA busy_timeout = 100")
-                .execute(&mut *conn)
+                .execute(&mut **conn)
                 .await?;
             let maximum_batch_size = options.batch_size.clamp(
                 crate::HA_OUTBOX_GC_MIN_BATCH_SIZE,
@@ -99,7 +104,7 @@ impl KeyStore {
             let (next_channel, pending_channel_mask): (String, i64) = sqlx::query_as(
                 "SELECT next_channel, pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
             )
-            .fetch_one(&mut *conn)
+            .fetch_one(&mut **conn)
             .await?;
             let pending_channel_mask = if pending_channel_mask == 0 {
                 7
@@ -116,7 +121,7 @@ impl KeyStore {
                    FROM ha_outbox_gc_channel_state WHERE channel = ?"#,
             )
             .bind(channel.as_str())
-            .fetch_one(&mut *conn)
+            .fetch_one(&mut **conn)
             .await?;
             let batch_size = persisted_batch_size.clamp(
                 crate::HA_OUTBOX_GC_MIN_BATCH_SIZE,
@@ -125,7 +130,7 @@ impl KeyStore {
             let retention_secs = ha_channel_retention_secs(channel);
             let threshold = self.backend_time.now_ts() - retention_secs;
             Self::remember_ha_channel_valid_watermark_on_conn(
-                &mut conn,
+                &mut *conn,
                 channel,
                 self.backend_time.now_ts(),
             )
@@ -138,16 +143,19 @@ impl KeyStore {
             let mut legacy_cursor_advanced = false;
             let mut active_elapsed_ms = 0_u128;
             let mut max_batch_elapsed_ms = 0_u128;
+            let mut conn = pooled_conn
+                .take()
+                .expect("online HA GC must retain its pooled connection");
 
             // A slice owns one persisted channel. Advancing the cursor after every
             // slice keeps a hot control stream from monopolizing online maintenance.
             while batches < max_batches && Instant::now() < deadline {
                 let batch_started = Instant::now();
-                sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+                let mut transaction = ImmediateSqliteTransaction::begin(conn).await?;
                 let batch_result = async {
                     let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
                         Self::delete_ha_invalid_legacy_events_bounded_on_conn(
-                        &mut conn,
+                        &mut transaction,
                         channel,
                         batch_size,
                         self.backend_time.now_ts(),
@@ -157,7 +165,7 @@ impl KeyStore {
                     if deleted_invalid == 0 {
                         let (deleted, max_deleted_valid_seq) =
                             Self::delete_ha_channel_events_returning_max_seq_on_conn(
-                            &mut conn,
+                            &mut transaction,
                             channel,
                             threshold,
                             batch_size,
@@ -168,7 +176,7 @@ impl KeyStore {
                             && let Some(max_deleted_valid_seq) = max_deleted_valid_seq
                         {
                             Self::remember_ha_channel_expired_valid_watermark_on_conn(
-                                &mut conn,
+                                &mut transaction,
                                 channel,
                                 max_deleted_valid_seq,
                                 self.backend_time.now_ts(),
@@ -183,7 +191,7 @@ impl KeyStore {
                         )
                         .bind(batch_deleted_rows)
                         .bind(channel.as_str())
-                        .execute(&mut *conn)
+                        .execute(&mut *transaction)
                         .await?;
                     }
                     Ok::<_, ProxyError>((
@@ -197,14 +205,11 @@ impl KeyStore {
                 let (deleted_invalid, deleted_retention, scanned_more_legacy, scanned_legacy_rows) =
                     match batch_result {
                         Ok(result) => {
-                            if let Err(err) = sqlx::query("COMMIT").execute(&mut *conn).await {
-                                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                                return Err(ProxyError::Database(err));
-                            }
+                            conn = transaction.commit_connection().await?;
                             result
                         }
                         Err(err) => {
-                            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                            let _ = transaction.rollback().await;
                             return Err(err);
                         }
                     };
@@ -336,7 +341,7 @@ impl KeyStore {
             .bind(channel.as_str())
             .execute(&mut *conn)
             .await?;
-            Ok::<HaOutboxGcReport, ProxyError>(HaOutboxGcReport {
+            let report = HaOutboxGcReport {
                 batch_size,
                 max_batches: options.max_batches,
                 deleted_rows,
@@ -360,15 +365,19 @@ impl KeyStore {
                 max_batch_elapsed_ms,
                 elapsed_ms: started.elapsed().as_millis(),
                 continuation_delay_secs,
-            })
+            };
+            pooled_conn = Some(conn);
+            Ok::<HaOutboxGcReport, ProxyError>(report)
         }
         .await;
-        let _ = sqlx::query(&format!(
-            "PRAGMA busy_timeout = {}",
-            crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
-        ))
-        .execute(&mut *conn)
-        .await;
+        if let Some(mut conn) = pooled_conn.take() {
+            let _ = sqlx::query(&format!(
+                "PRAGMA busy_timeout = {}",
+                crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+            ))
+            .execute(&mut *conn)
+            .await;
+        }
         result
     }
 }
