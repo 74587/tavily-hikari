@@ -496,7 +496,9 @@
   queue-wait alert before its `available_at` time.
 - HA cleanup keeps an hourly baseline sweep for newly expired rows. Its five-minute watchdog reads
   the durable pending-channel mask and only coalesces a representative job when unfinished channel
-  debt remains, avoiding repeated clean-state GC writes.
+  debt remains, avoiding repeated clean-state GC writes. A deferred-continuation fallback writes
+  its selected channel bit and per-channel defer state in the same short transaction, so a cleared
+  mask cannot hide a lost continuation from the watchdog.
 
 ## Transaction and claim lifecycle
 
