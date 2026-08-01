@@ -3,7 +3,7 @@ use super::upstream_support_and_manual_jobs::*;
 use super::*;
 
 #[tokio::test]
-async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
+async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     let db_path = temp_db_path("ha-outbox-stats");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -55,9 +55,25 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, Some("standby-a"))
         .await
         .expect("read outbox stats");
-    assert_eq!(stats.row_count, 3);
+    assert_eq!(stats.sequence_span_estimate, 3);
+    assert_eq!(stats.high_watermark, 3);
     assert!(stats.oldest_age_secs >= 100);
     assert_eq!(stats.ack_lag, Some(2));
+    let span_plan: Vec<String> = sqlx::query(
+        "EXPLAIN QUERY PLAN SELECT seq, created_at FROM ha_outbox ORDER BY created_at ASC, seq ASC LIMIT 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("explain indexed span query")
+    .into_iter()
+    .map(|row| row.try_get("detail").expect("read query plan detail"))
+    .collect();
+    assert!(
+        span_plan
+            .iter()
+            .any(|detail| detail.contains("idx_ha_outbox_created")),
+        "indexed sequence-span diagnostics must not scan the whole outbox: {span_plan:?}"
+    );
     let no_peer_stats = proxy
         .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, None)
         .await
@@ -78,6 +94,14 @@ async fn ha_channel_outbox_stats_reports_count_age_and_ack_lag() {
         .execute(&pool)
         .await
         .expect("delete middle event for gap probe");
+    let stats_after_gap = proxy
+        .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, Some("standby-a"))
+        .await
+        .expect("read span estimate after gap");
+    assert_eq!(
+        stats_after_gap.sequence_span_estimate, 3,
+        "HA diagnostics must expose the indexed sequence span, not run an exact row count"
+    );
     proxy
         .ack_ha_peer_watermark(tavily_hikari::HaSyncChannel::Control, "standby-gap", 1)
         .await

@@ -893,7 +893,11 @@ async fn emit_ha_sync_perf_event(
             next_seq = perf.next_seq,
             detail = perf.detail.unwrap_or(""),
             outbox_sampled = outbox.is_some(),
-            outbox_row_count = outbox.as_ref().map(|value| value.row_count).unwrap_or_default(),
+            outbox_sequence_span_estimate = outbox
+                .as_ref()
+                .map(|value| value.sequence_span_estimate)
+                .unwrap_or_default(),
+            outbox_high_watermark = outbox.as_ref().map(|value| value.high_watermark).unwrap_or_default(),
             outbox_oldest_age_secs = outbox.as_ref().map(|value| value.oldest_age_secs),
             outbox_ack_lag = outbox.as_ref().and_then(|value| value.ack_lag),
             memory_sampled = memory.is_some(),

@@ -139,6 +139,25 @@ Online GC persists per-channel attempt and progress state. Normal slices are DEB
 stalled, deferred, and recovered states are logged only on transitions. A failed continuation
 write does not start an unbounded retry task: the stale-job reaper owns eventual recovery.
 
+Online retention debt is self-healing through a persisted per-channel controller. It keeps one
+channel per slice, starts at an adaptive `25..250` batch size, and measures each active database
+micro-batch without counting the outbox. A productive slice whose slowest micro-batch stays within
+the `50ms` active-work budget continues in five seconds; a slow slice, lease conflict, or SQLite
+writer conflict yields for 30 seconds. A
+valid legacy-resource cursor is intentionally lower priority and continues at five minutes, so
+legacy verification cannot turn an otherwise clean large outbox into a perpetual write loop. The
+five-minute scheduler watchdog coalesces with the active representative job and rediscovers a
+lost continuation without waiting for an hourly sweep.
+
+The same state records `totalDeletedRows`, the most recent channel high watermark, ingress sequence
+delta, and estimated net-row delta. `ha_outbox_cleanup_once --dry-run --json` exposes these fields
+when the schema is present. They are sequence-based progress estimates, not a substitute for an
+expensive exact row count; operators must not describe them as an exact global backlog total.
+
+Sampled HA export and sync diagnostics use `outbox_sequence_span_estimate` plus
+`outbox_high_watermark`, never an exact `outbox_row_count`. The span is an upper bound when
+sequence holes exist and must not be presented as inventory.
+
 - 用户控制台在 failover、provisional、recovery、同步滞后时显示降级警告。
 - 管理员控制台的完整 HA 服务节点管理面板只出现在系统设置的高可用二级界面，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。
 - 管理员控制台的 HA 页面必须稳定分成三块：真实节点清单、`planned cutover` 操作区、7 天时间线；dual-active 模式下还要显示当前 leader key 语义下的控制面写节点。
@@ -193,6 +212,11 @@ PR: include
 - `GET /api/admin/ha/nodes/:node_id` 必须有响应边界回归测试，确保当前节点 EdgeOne 与源站设置
   不会重新进入 peer 节点详情。
 - 大量调用记录和大请求/响应正文不得进入 HA baseline、events 或 recovery payload。
+- 大量过期 HA 事件下，最慢 active-work micro-batch 低于预算的 productive online slice 必须持久化五秒
+  continuation；超过预算时必须缩批并持久化 30 秒 continuation。只有 legacy cursor 仍待扫描时，
+  continuation 必须是五分钟，不能形成快速 maintenance loop。
+- 重启后，per-channel deletion total、high watermark 与 ingress/net estimate 必须保留；只读
+  preflight 必须能报告它们，且在线路径不得为此执行精确 `COUNT(*)`。
 - 共享 `codex-testbox` 上的 256MiB cgroup v2 合同验证必须通过：standby 首次全量 baseline
   sync 成功、active 连续 billing baseline 导出成功，且主备进程组 `memory.current` 峰值都不
   得超过 `268435456` bytes。

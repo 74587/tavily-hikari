@@ -199,6 +199,22 @@ month-tail public metrics scan.
 - Treat large retained HA event cleanup like request-log cleanup: bounded online GC for freshness,
   explicit offline one-shot cleanup for backlog removal, and optional later compaction only when
   reclaimable bytes justify it.
+- Make online HA outbox cleanup a per-channel debt controller rather than a fixed-delay loop.
+  Persist the current batch, deletion total, high watermark, ingress sequence delta, and estimated
+  net-row delta. When the slowest active database micro-batch stays inside the small slice budget, a short continuation
+  is safe enough to drain retention debt; when it exceeds the budget or the writer is busy, shrink
+  and defer. Keep legacy-resource verification on a much slower cursor cadence, because treating a
+  scan of valid rows as urgent backlog turns a clean large table into continuous maintenance load.
+  A low-frequency coalescing watchdog should rediscover a lost continuation, not create competing
+  jobs.
+- Sequence high-watermark deltas are useful low-cost evidence of drainage versus ingress, but they
+  are estimates, not exact row counts. If historical exact counts were not sampled, report the
+  oldest retained age moving forward as proof of partial cleanup only; do not claim that total
+  backlog rows decreased without a comparable measurement.
+- Avoid exact outbox inventory on HA export/sync sampling. Read the oldest `(created_at, seq)` row
+  through the retention index and pair it with the high watermark to publish a clearly named
+  sequence-span estimate. Sequence holes make it an upper bound suitable for trend diagnosis, not
+  a deletion decision.
 - For upgraded HA databases, treat trigger repair as a separate first-class maintenance step.
   If legacy `trg_ha_outbox_*` triggers from the old single-channel era remain in `sqlite_master`,
   online GC will never catch up because the live node keeps appending fresh non-control noise into

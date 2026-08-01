@@ -244,3 +244,10 @@
 - Per-channel GC state now persists attempts, progress, batch size, defer reason, and retry time.
   Administrator peer details expose those fields beside ACK health; continuation persistence has no
   unbounded retry task and relies on generation-safe stale recovery.
+- Productive retention cleanup now persists a five-second continuation while its slowest active
+  SQLite micro-batch stays within a 50ms target. Slow work, busy writers, and lease deferrals retain the 30-second
+  delay; a valid-only legacy cursor scan remains on a five-minute cadence so compatibility cleanup
+  cannot create a permanent online write loop. Per-channel state records high-watermark deltas,
+  an ingress-minus-delete estimate, and cumulative deletions without a hot-path `COUNT(*)`.
+- Sampled HA export/sync logs publish indexed `outbox_sequence_span_estimate` and high watermark
+  instead of an exact outbox row count. Sequence holes make the span an estimate, not inventory.

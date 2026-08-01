@@ -23,6 +23,32 @@ fn online_ha_gc_has_a_tight_slice_without_changing_cli_defaults() {
     assert_eq!(cli.max_runtime_secs, 20);
 }
 
+#[test]
+fn online_ha_gc_adapts_only_when_one_micro_batch_exceeds_its_budget() {
+    let four_healthy_batches_total = HA_OUTBOX_GC_ACTIVE_BUDGET_MS * 4;
+    assert!(four_healthy_batches_total > HA_OUTBOX_GC_ACTIVE_BUDGET_MS);
+    assert_eq!(
+        ha_outbox_gc_continuation_delay_secs(true, HA_OUTBOX_GC_ACTIVE_BUDGET_MS),
+        Some(HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS)
+    );
+    assert_eq!(
+        ha_outbox_gc_continuation_delay_secs(true, HA_OUTBOX_GC_ACTIVE_BUDGET_MS + 1),
+        Some(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
+    );
+    assert_eq!(
+        next_ha_outbox_gc_batch_size(250, 250, HA_OUTBOX_GC_ACTIVE_BUDGET_MS + 1),
+        125
+    );
+    assert_eq!(
+        next_ha_outbox_gc_batch_size(25, 250, HA_OUTBOX_GC_ACTIVE_BUDGET_MS + 1),
+        25
+    );
+    assert_eq!(
+        next_ha_outbox_gc_batch_size(250, 250, HA_OUTBOX_GC_ACTIVE_BUDGET_MS),
+        250
+    );
+}
+
 #[tokio::test]
 async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     let db_path = temp_db_path("ha-outbox-online-gc-round-robin");
@@ -99,6 +125,183 @@ async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     assert!(!report.has_more);
     assert!(report.completed);
 
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_uses_a_short_continuation_while_a_large_debt_is_draining() {
+    let db_path = temp_db_path("ha-outbox-online-gc-fast-continuation");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-online-gc-fast-continuation".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let old_ts = Utc::now().timestamp() - (15 * SECS_PER_DAY);
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let mut tx = pool.begin().await.expect("begin seed transaction");
+    for index in 0..1_250 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("fast-continuation-{index}"))
+        .bind(old_ts)
+        .execute(&mut *tx)
+        .await
+        .expect("insert expired control event");
+    }
+    tx.commit().await.expect("commit seed transaction");
+
+    let report = proxy.gc_ha_outbox_online().await.expect("online GC");
+    assert_eq!(report.channels[0].channel, HaSyncChannel::Control);
+    assert_eq!(report.deleted_rows, 1_000);
+    assert!(report.has_more);
+    assert_eq!(
+        report.continuation_delay_secs,
+        Some(HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS)
+    );
+
+    let (last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark):
+        (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read GC continuation state");
+    assert!(
+        next_retry_at.saturating_sub(last_attempt_at) <= 5,
+        "a fast, productive slice must continue quickly instead of waiting 30 seconds"
+    );
+    assert_eq!(total_deleted_rows, 1_000);
+    assert_eq!(last_high_watermark, 1_250);
+
+    pool.close().await;
+    drop(proxy);
+    let recovered_proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-online-gc-fast-continuation".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy reopened");
+    let recovered_pool = connect_sqlite_test_pool(&db_str).await;
+    let recovered_total_deleted_rows: i64 = sqlx::query_scalar(
+        "SELECT total_deleted_rows FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    )
+    .fetch_one(&recovered_pool)
+    .await
+    .expect("read persistent GC debt state");
+    assert_eq!(recovered_total_deleted_rows, 1_000);
+    recovered_pool.close().await;
+
+    let ingress_pool = connect_sqlite_test_pool(&db_str).await;
+    for index in 0..50 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("fast-continuation-ingress-{index}"))
+        .bind(old_ts)
+        .execute(&ingress_pool)
+        .await
+        .expect("insert new expired control event");
+    }
+    ingress_pool.close().await;
+    assert_eq!(
+        recovered_proxy
+            .gc_ha_outbox_online()
+            .await
+            .expect("billing rotation")
+            .channels[0]
+            .channel,
+        HaSyncChannel::Billing
+    );
+    assert_eq!(
+        recovered_proxy
+            .gc_ha_outbox_online()
+            .await
+            .expect("runtime rotation")
+            .channels[0]
+            .channel,
+        HaSyncChannel::Runtime
+    );
+    assert_eq!(
+        recovered_proxy
+            .gc_ha_outbox_online()
+            .await
+            .expect("control catch-up")
+            .deleted_rows,
+        300
+    );
+    let metrics_pool = connect_sqlite_test_pool(&db_str).await;
+    let (last_ingress_seq_delta, last_net_rows_delta_estimate, total_deleted_rows):
+        (Option<i64>, Option<i64>, i64) = sqlx::query_as(
+        "SELECT last_ingress_seq_delta, last_net_rows_delta_estimate, total_deleted_rows FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    )
+    .fetch_one(&metrics_pool)
+    .await
+    .expect("read net debt estimate");
+    assert_eq!(last_ingress_seq_delta, Some(50));
+    assert_eq!(last_net_rows_delta_estimate, Some(-250));
+    assert_eq!(total_deleted_rows, 1_300);
+    metrics_pool.close().await;
+    drop(recovered_proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_does_not_fast_loop_while_only_legacy_scanning_remains() {
+    let db_path = temp_db_path("ha-outbox-online-gc-legacy-scan-yield");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-online-gc-legacy-scan-yield".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let now = Utc::now().timestamp();
+    let mut tx = pool.begin().await.expect("begin seed transaction");
+    for index in 0..251 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("legacy-scan-yield-{index}"))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .expect("insert retained control event");
+    }
+    tx.commit().await.expect("commit seed transaction");
+
+    let report = proxy.gc_ha_outbox_online().await.expect("online GC");
+    assert_eq!(report.deleted_rows, 0);
+    assert!(report.has_more);
+    assert_eq!(
+        report.continuation_delay_secs,
+        Some(HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS),
+        "legacy cursor progress must not form a fast maintenance loop"
+    );
+
+    pool.close().await;
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

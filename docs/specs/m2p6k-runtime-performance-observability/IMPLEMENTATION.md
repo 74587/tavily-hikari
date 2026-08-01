@@ -73,7 +73,10 @@
   `256MiB` 进程组合同做成可验收 harness。
 - 目前 `low_memory_protection_decision` 事件只记录当前 verdict，不代表已经具备真正的
   `503 low_memory_protection` 保护行为。
-- 当前只为 HA outbox 增加观测字段，没有修改 retention、GC、repair 或 compaction 行为；这些仍属于后续独立治理范围。
+- HA outbox 观测现已覆盖在线 self-healing 的累计与最慢 micro-batch SQL 耗时、续片延迟、累计删除、高水位增量与
+  ingress-minus-delete 估算；这些字段不能替代精确库存统计，但可低成本确认过期债务是否持续前移。
+- HA export/sync 的低频样本使用 `outbox_sequence_span_estimate` 和 `outbox_high_watermark`，不再对每个通道
+  执行 `COUNT(*)` 或把近似 span 标成精确 `outbox_row_count`。
 
 ## 相关文件
 

@@ -482,7 +482,9 @@
 - HA outbox GC now has a separate online budget (`250 x 4`, one second, 100ms yield) and uses the
   application's existing SQLite pool. The scheduler probes the maintenance write lease with
   `try_write`; writer contention becomes a durable 30-second continuation rather than a 10-second
-  lock retry. The offline HA cleanup command keeps its larger CLI defaults.
+  lock retry. Productive retention slices whose slowest active SQL micro-batch stays under 50ms continue in five seconds,
+  while valid-only legacy scans stay at five minutes to avoid a permanent compatibility scan loop.
+  The offline HA cleanup command keeps its larger CLI defaults.
 
 ## Online HA cleanup isolation
 

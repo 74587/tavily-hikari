@@ -321,6 +321,18 @@ source when a usable persisted runtime already exists.
 - Online HA outbox GC must use a non-blocking maintenance write lease and a one-second slice
   budget. If the lease or SQLite writer is busy, it must finish the current scheduled row and
   persist a 30-second continuation instead of waiting through the scheduler's long retry window.
+  Productive retention slices whose slowest active database micro-batch stays within `50ms` must persist a
+  five-second continuation and adapt their per-channel batch size within `25..250`; an over-budget
+  slice halves its next batch before retrying. Legacy-resource cursor verification is not retention
+  debt and must continue no faster than five minutes, so a clean large outbox cannot become a
+  permanent fast maintenance loop. The periodic scheduler recheck must coalesce with the current
+  representative and rediscover a lost continuation within five minutes.
+- Per-channel HA GC state must retain cumulative deleted rows, the last high watermark, ingress
+  sequence delta, and estimated net-row delta. These are low-cost trend evidence for the read-only
+  `ha_outbox_cleanup_once --dry-run` path and must not introduce an online exact `COUNT(*)`.
+- HA diagnostic sampling uses an indexed sequence-span estimate with its high watermark rather
+  than `COUNT(*)`. A sequence span is an upper bound when deletions leave holes and must be named
+  as an estimate.
 - With an upstream `/usage` endpoint that hangs past the quota-sync timeout budget, manual and
   scheduler-triggered quota sync runs finish as `error`, leave no long-lived `running` row behind,
   and do not write `api_key_quota_sync_samples` or `api_keys.quota_*`.

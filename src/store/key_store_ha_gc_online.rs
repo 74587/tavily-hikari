@@ -1,0 +1,326 @@
+impl KeyStore {
+    pub(crate) async fn gc_ha_outbox_online(&self) -> Result<HaOutboxGcReport, ProxyError> {
+        self.gc_ha_outbox_online_with_options(HaOutboxGcOptions::online())
+            .await
+    }
+
+    pub(crate) async fn record_ha_outbox_gc_deferred(
+        &self,
+        reason: &str,
+    ) -> Result<(), ProxyError> {
+        let mut conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
+            .await
+            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
+        sqlx::query("PRAGMA busy_timeout = 100")
+            .execute(&mut *conn)
+            .await?;
+        let result = async {
+            let (next_channel, pending_channel_mask): (String, i64) = sqlx::query_as(
+                "SELECT next_channel, pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+            )
+            .fetch_one(&mut *conn)
+            .await?;
+            let pending_channel_mask = if pending_channel_mask == 0 {
+                7
+            } else {
+                pending_channel_mask & 7
+            };
+            let channel = Self::select_ha_outbox_gc_channel(
+                Self::ha_outbox_gc_channel_from_name(&next_channel),
+                pending_channel_mask,
+            );
+            let now = self.backend_time.now_ts();
+            sqlx::query(
+                r#"UPDATE ha_outbox_gc_channel_state
+                   SET last_attempt_at = ?, last_defer_reason = ?, next_retry_at = ?,
+                       consecutive_no_progress = consecutive_no_progress + 1,
+                       last_continuation_delay_secs = ?
+                   WHERE channel = ?"#,
+            )
+            .bind(now)
+            .bind(reason)
+            .bind(now.saturating_add(crate::HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS))
+            .bind(crate::HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
+            .bind(channel.as_str())
+            .execute(&mut *conn)
+            .await?;
+            Ok::<(), ProxyError>(())
+        }
+        .await;
+        let restore_result = sqlx::query(&format!(
+            "PRAGMA busy_timeout = {}",
+            SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+        ))
+        .execute(&mut *conn)
+        .await;
+        result?;
+        restore_result?;
+        Ok(())
+    }
+
+    async fn gc_ha_outbox_online_with_options(
+        &self,
+        options: HaOutboxGcOptions,
+    ) -> Result<HaOutboxGcReport, ProxyError> {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
+        let mut conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
+            .await
+            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
+        let result = async {
+            sqlx::query("PRAGMA busy_timeout = 100")
+                .execute(&mut *conn)
+                .await?;
+            let maximum_batch_size = options.batch_size.clamp(
+                crate::HA_OUTBOX_GC_MIN_BATCH_SIZE,
+                crate::HA_OUTBOX_GC_MAX_ONLINE_BATCH_SIZE,
+            );
+            let max_batches = options.max_batches.max(1);
+            let (next_channel, pending_channel_mask): (String, i64) = sqlx::query_as(
+                "SELECT next_channel, pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+            )
+            .fetch_one(&mut *conn)
+            .await?;
+            let pending_channel_mask = if pending_channel_mask == 0 {
+                7
+            } else {
+                pending_channel_mask & 7
+            };
+            let channel = Self::select_ha_outbox_gc_channel(
+                Self::ha_outbox_gc_channel_from_name(&next_channel),
+                pending_channel_mask,
+            );
+            let (persisted_batch_size, last_observed_at, last_high_watermark):
+                (i64, Option<i64>, i64) = sqlx::query_as(
+                r#"SELECT batch_size, last_observed_at, last_high_watermark
+                   FROM ha_outbox_gc_channel_state WHERE channel = ?"#,
+            )
+            .bind(channel.as_str())
+            .fetch_one(&mut *conn)
+            .await?;
+            let batch_size = persisted_batch_size.clamp(
+                crate::HA_OUTBOX_GC_MIN_BATCH_SIZE,
+                maximum_batch_size,
+            );
+            let retention_secs = ha_channel_retention_secs(channel);
+            let threshold = self.backend_time.now_ts() - retention_secs;
+            Self::remember_ha_channel_valid_watermark_on_conn(
+                &mut conn,
+                channel,
+                self.backend_time.now_ts(),
+            )
+            .await?;
+            let mut deleted_rows = 0_i64;
+            let mut batches = 0_i64;
+            let mut invalid_legacy_deleted_rows = 0_i64;
+            let mut retention_deleted_rows = 0_i64;
+            let mut legacy_has_more = false;
+            let mut legacy_cursor_advanced = false;
+            let mut active_elapsed_ms = 0_u128;
+            let mut max_batch_elapsed_ms = 0_u128;
+
+            // A slice owns one persisted channel. Advancing the cursor after every
+            // slice keeps a hot control stream from monopolizing online maintenance.
+            while batches < max_batches && Instant::now() < deadline {
+                let batch_started = Instant::now();
+                let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
+                    Self::delete_ha_invalid_legacy_events_bounded_on_conn(
+                        &mut conn,
+                        channel,
+                        batch_size,
+                        self.backend_time.now_ts(),
+                    )
+                    .await?;
+                legacy_has_more = scanned_more_legacy;
+                legacy_cursor_advanced |= scanned_legacy_rows;
+                invalid_legacy_deleted_rows += deleted_invalid;
+                deleted_rows += deleted_invalid;
+                batches += 1;
+
+                if deleted_invalid == 0 {
+                    let (deleted_retention, max_deleted_valid_seq) =
+                        Self::delete_ha_channel_events_returning_max_seq_on_conn(
+                            &mut conn,
+                            channel,
+                            threshold,
+                            batch_size,
+                        )
+                        .await?;
+                    if deleted_retention > 0
+                        && let Some(max_deleted_valid_seq) = max_deleted_valid_seq
+                    {
+                        Self::remember_ha_channel_expired_valid_watermark_on_conn(
+                            &mut conn,
+                            channel,
+                            max_deleted_valid_seq,
+                            self.backend_time.now_ts(),
+                        )
+                        .await?;
+                    }
+                    retention_deleted_rows += deleted_retention;
+                    deleted_rows += deleted_retention;
+                    if deleted_retention < batch_size {
+                        let batch_elapsed_ms = batch_started.elapsed().as_millis();
+                        active_elapsed_ms = active_elapsed_ms.saturating_add(batch_elapsed_ms);
+                        max_batch_elapsed_ms = max_batch_elapsed_ms.max(batch_elapsed_ms);
+                        break;
+                    }
+                }
+
+                let batch_elapsed_ms = batch_started.elapsed().as_millis();
+                active_elapsed_ms = active_elapsed_ms.saturating_add(batch_elapsed_ms);
+                max_batch_elapsed_ms = max_batch_elapsed_ms.max(batch_elapsed_ms);
+
+                if batches < max_batches && Instant::now() < deadline {
+                    self.backend_time
+                        .sleep(Duration::from_millis(options.inter_batch_sleep_ms))
+                        .await;
+                }
+            }
+
+            let has_more_started = Instant::now();
+            let has_more_retention: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS(SELECT 1 FROM {} WHERE created_at < ? LIMIT 1)",
+                quote_sqlite_identifier(ha_channel_event_table(channel))
+            ))
+            .bind(threshold)
+            .fetch_one(&mut *conn)
+            .await?;
+            max_batch_elapsed_ms = max_batch_elapsed_ms.max(has_more_started.elapsed().as_millis());
+            let channel_has_more = legacy_has_more || has_more_retention;
+            let high_watermark_started = Instant::now();
+            let high_watermark = Self::ha_channel_high_watermark_on_conn(&mut conn, channel).await?;
+            max_batch_elapsed_ms =
+                max_batch_elapsed_ms.max(high_watermark_started.elapsed().as_millis());
+            let channel_mask = Self::ha_outbox_gc_channel_mask(channel);
+            let next_pending_channel_mask = if channel_has_more {
+                pending_channel_mask | channel_mask
+            } else {
+                pending_channel_mask & !channel_mask
+            };
+            let next_channel = Self::next_ha_outbox_gc_channel(channel);
+            sqlx::query(
+                r#"
+                UPDATE ha_outbox_gc_state
+                   SET next_channel = ?, pending_channel_mask = ?, updated_at = ?
+                 WHERE id = 'local'
+                "#,
+            )
+            .bind(next_channel.as_str())
+            .bind(next_pending_channel_mask)
+            .bind(self.backend_time.now_ts())
+            .execute(&mut *conn)
+            .await?;
+            let completed = next_pending_channel_mask == 0;
+            let now = self.backend_time.now_ts();
+            let channel_continuation_delay_secs = if has_more_retention {
+                crate::ha_outbox_gc_continuation_delay_secs(true, max_batch_elapsed_ms)
+            } else if legacy_has_more {
+                Some(crate::HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS)
+            } else {
+                None
+            };
+            let continuation_delay_secs = if completed {
+                None
+            } else if let Some(delay) = channel_continuation_delay_secs {
+                Some(delay)
+            } else {
+                crate::ha_outbox_gc_continuation_delay_secs(true, max_batch_elapsed_ms)
+            };
+            let defer_reason = channel_continuation_delay_secs.map(|delay| {
+                if delay == crate::HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS {
+                    "fast_progress"
+                } else if delay == crate::HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS {
+                    "legacy_scan"
+                } else {
+                    "slice_budget"
+                }
+            });
+            let ingress_seq_delta = last_observed_at.map(|_| {
+                high_watermark
+                    .saturating_sub(last_high_watermark)
+                    .max(0)
+            });
+            let net_rows_delta_estimate = ingress_seq_delta
+                .map(|ingress| ingress.saturating_sub(deleted_rows));
+            let next_batch_size = crate::next_ha_outbox_gc_batch_size(
+                batch_size,
+                maximum_batch_size,
+                max_batch_elapsed_ms,
+            );
+            sqlx::query(
+                r#"UPDATE ha_outbox_gc_channel_state
+                   SET last_attempt_at = ?,
+                       last_progress_at = CASE WHEN ? > 0 OR ? THEN ? ELSE last_progress_at END,
+                       last_deleted_rows = ?,
+                       last_defer_reason = ?,
+                       next_retry_at = ?,
+                       consecutive_no_progress = CASE
+                           WHEN ? > 0 OR ? OR ? = 0 THEN 0
+                           ELSE consecutive_no_progress + 1
+                       END,
+                       batch_size = ?,
+                       last_observed_at = ?,
+                       last_high_watermark = ?,
+                       last_ingress_seq_delta = ?,
+                       last_net_rows_delta_estimate = ?,
+                       total_deleted_rows = total_deleted_rows + ?,
+                       last_continuation_delay_secs = ?
+                   WHERE channel = ?"#,
+            )
+            .bind(now)
+            .bind(deleted_rows)
+            .bind(legacy_cursor_advanced)
+            .bind(now)
+            .bind(deleted_rows)
+            .bind(defer_reason)
+            .bind(channel_continuation_delay_secs.map(|delay| now.saturating_add(delay)))
+            .bind(deleted_rows)
+            .bind(legacy_cursor_advanced)
+            .bind(i64::from(channel_has_more))
+            .bind(next_batch_size)
+            .bind(now)
+            .bind(high_watermark)
+            .bind(ingress_seq_delta)
+            .bind(net_rows_delta_estimate)
+            .bind(deleted_rows)
+            .bind(channel_continuation_delay_secs)
+            .bind(channel.as_str())
+            .execute(&mut *conn)
+            .await?;
+            Ok::<HaOutboxGcReport, ProxyError>(HaOutboxGcReport {
+                batch_size,
+                max_batches: options.max_batches,
+                deleted_rows,
+                batches,
+                completed,
+                has_more: !completed,
+                channels: vec![HaOutboxGcChannelReport {
+                    channel,
+                    retention_secs,
+                    threshold,
+                    invalid_legacy_deleted_rows,
+                    retention_deleted_rows,
+                    deleted_rows,
+                    batches,
+                    has_more: channel_has_more,
+                }],
+                wal_checkpoint_busy: false,
+                wal_checkpoint_log_frames: 0,
+                wal_checkpoint_checkpointed_frames: 0,
+                active_elapsed_ms,
+                max_batch_elapsed_ms,
+                elapsed_ms: started.elapsed().as_millis(),
+                continuation_delay_secs,
+            })
+        }
+        .await;
+        let _ = sqlx::query(&format!(
+            "PRAGMA busy_timeout = {}",
+            crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
+        ))
+        .execute(&mut *conn)
+        .await;
+        result
+    }
+}

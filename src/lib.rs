@@ -621,6 +621,51 @@ impl HaOutboxGcOptions {
     }
 }
 
+pub const HA_OUTBOX_GC_MIN_BATCH_SIZE: i64 = 25;
+pub const HA_OUTBOX_GC_MAX_ONLINE_BATCH_SIZE: i64 = 250;
+pub const HA_OUTBOX_GC_ACTIVE_BUDGET_MS: u128 = 50;
+pub const HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS: i64 = 5;
+pub const HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS: i64 = 30;
+pub const HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
+
+/// Chooses the next online continuation without counting outbox rows. A fast
+/// productive slice may catch up quickly, while any individual database-work
+/// batch that exceeded its budget yields long enough for foreground writes to
+/// win. The total active time is intentionally diagnostic only: a full slice
+/// may contain several healthy micro-batches.
+pub fn ha_outbox_gc_continuation_delay_secs(
+    has_more: bool,
+    slowest_batch_elapsed_ms: u128,
+) -> Option<i64> {
+    has_more.then_some(
+        if slowest_batch_elapsed_ms <= HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
+            HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS
+        } else {
+            HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS
+        },
+    )
+}
+
+pub fn next_ha_outbox_gc_batch_size(
+    current_batch_size: i64,
+    maximum_batch_size: i64,
+    slowest_batch_elapsed_ms: u128,
+) -> i64 {
+    let maximum_batch_size = maximum_batch_size.clamp(
+        HA_OUTBOX_GC_MIN_BATCH_SIZE,
+        HA_OUTBOX_GC_MAX_ONLINE_BATCH_SIZE,
+    );
+    let current_batch_size =
+        current_batch_size.clamp(HA_OUTBOX_GC_MIN_BATCH_SIZE, maximum_batch_size);
+    if slowest_batch_elapsed_ms > HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
+        (current_batch_size / 2).max(HA_OUTBOX_GC_MIN_BATCH_SIZE)
+    } else if slowest_batch_elapsed_ms.saturating_mul(2) < HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
+        (current_batch_size + HA_OUTBOX_GC_MIN_BATCH_SIZE).min(maximum_batch_size)
+    } else {
+        current_batch_size
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HaOutboxGcChannelReport {
@@ -647,12 +692,15 @@ pub struct HaOutboxGcReport {
     pub wal_checkpoint_busy: bool,
     pub wal_checkpoint_log_frames: i64,
     pub wal_checkpoint_checkpointed_frames: i64,
+    pub active_elapsed_ms: u128,
+    pub max_batch_elapsed_ms: u128,
     pub elapsed_ms: u128,
+    pub continuation_delay_secs: Option<i64>,
 }
 
 pub fn format_ha_outbox_gc_report_message(report: &HaOutboxGcReport, passes: usize) -> String {
     format!(
-        "deleted_rows={} completed={} has_more={} channels={} batches={} passes={} wal_busy={} wal_log_frames={} wal_checkpointed_frames={} elapsed_ms={}",
+        "deleted_rows={} completed={} has_more={} channels={} batches={} passes={} wal_busy={} wal_log_frames={} wal_checkpointed_frames={} active_elapsed_ms={} max_batch_elapsed_ms={} elapsed_ms={} continuation_delay_secs={:?}",
         report.deleted_rows,
         report.completed,
         report.has_more,
@@ -676,7 +724,10 @@ pub fn format_ha_outbox_gc_report_message(report: &HaOutboxGcReport, passes: usi
         report.wal_checkpoint_busy,
         report.wal_checkpoint_log_frames,
         report.wal_checkpoint_checkpointed_frames,
-        report.elapsed_ms
+        report.active_elapsed_ms,
+        report.max_batch_elapsed_ms,
+        report.elapsed_ms,
+        report.continuation_delay_secs,
     )
 }
 
