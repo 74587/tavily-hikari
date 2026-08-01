@@ -256,5 +256,8 @@
   the five-minute watchdog only resumes durable channel debt. Per-channel state records
   high-watermark deltas, an ingress-minus-delete estimate, and cumulative deletions without a
   hot-path `COUNT(*)`.
+- The CI shard manifest assigns `deferred_ha_gc_*` watchdog-debt regression coverage to `lib-misc`.
+  `ci_backend_tests.py verify` requires every discovered backend test to have exactly one shard
+  owner, so the continuation-recovery regression cannot silently disappear from the PR matrix.
 - Sampled HA export/sync logs publish indexed `outbox_sequence_span_estimate` and high watermark
   instead of an exact outbox row count. Sequence holes make the span an estimate, not inventory.
