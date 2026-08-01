@@ -101,6 +101,9 @@
 - `ha_outbox_cleanup_once` now distinguishes immediate invalid-legacy cleanup from normal retention
   cleanup in its JSON/plain reports, so operators can prove whether the pass is shrinking a stale
   upgraded backlog or only trimming aged rows.
+- The standalone cleanup report keeps command wall-clock separate from `active_elapsed_ms` and
+  `max_batch_elapsed_ms`. The latter two values accumulate actual cleanup batches only, excluding
+  configured inter-batch yields and post-cleanup maintenance overhead.
 - `ha_outbox_cleanup_once --dry-run` uses a read-only SQLite connection and reports index presence,
   retention, oldest age, watermark, lowest peer ACK, and pending-cleanup state without repairing
   triggers or deleting rows.

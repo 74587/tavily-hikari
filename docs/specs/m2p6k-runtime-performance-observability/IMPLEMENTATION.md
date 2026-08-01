@@ -29,6 +29,9 @@
   the diagnostic fields available without adding read pressure on each polling pass. DEBUG samples
   retain source, peer, watermark, cursor, and detail fields so an operator can still trace normal
   synchronization progress without enabling the expensive aggregate collection.
+- HA cleanup timing keeps command wall-clock distinct from active cleanup time and the slowest
+  cleanup batch. The offline command excludes configured yields and post-cleanup overhead from its
+  batch metrics, so its diagnostics remain comparable to the online slice contract.
 - SQLx slow-statement emission uses DEBUG instead of WARN. Default runtime logs retain structured
   operation timing/errors without complete statement text; an explicit `sqlx::query=debug` filter
   restores SQL-level diagnostics.

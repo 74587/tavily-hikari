@@ -484,7 +484,9 @@
   `try_write`; writer contention becomes a durable 30-second continuation rather than a 10-second
   lock retry. Productive retention slices whose slowest active SQL micro-batch stays under 50ms continue in five seconds,
   while valid-only legacy scans stay at five minutes to avoid a permanent compatibility scan loop.
-  The offline HA cleanup command keeps its larger CLI defaults.
+  The offline HA cleanup command keeps its larger CLI defaults. Its active and maximum-batch timing
+  fields accumulate only cleanup batches; command wall-clock remains separate so inter-batch yields
+  and post-cleanup work do not masquerade as slow SQLite writes.
 
 ## Online HA cleanup isolation
 
