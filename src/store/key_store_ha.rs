@@ -271,10 +271,16 @@ impl KeyStore {
     ) -> Result<HaOutboxStats, ProxyError> {
         let mut conn = self.pool.acquire().await?;
         let table = quote_sqlite_identifier(ha_channel_event_table(channel));
-        let oldest: Option<(i64, i64)> = sqlx::query_as(&format!(
-            "SELECT seq, created_at FROM {table} ORDER BY created_at ASC, seq ASC LIMIT 1"
+        let allowed_resources = ha_channel_allowed_resources_sql(channel);
+        let oldest_created_at: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT created_at FROM {table} WHERE resource IN ({allowed_resources}) ORDER BY created_at ASC, seq ASC LIMIT 1"
         ))
         .fetch_optional(&mut *conn)
+        .await?;
+        let minimum_retained_seq: Option<i64> = sqlx::query_scalar(&format!(
+            "SELECT MIN(seq) FROM {table} WHERE resource IN ({allowed_resources})"
+        ))
+        .fetch_one(&mut *conn)
         .await?;
         let acked_seq = match peer_node_id {
             Some(peer_node_id) => {
@@ -296,14 +302,14 @@ impl KeyStore {
         };
         let high_watermark = Self::ha_channel_high_watermark_on_conn(&mut conn, channel).await?;
         let now = self.backend_time.now_ts();
-        let sequence_span_estimate = oldest
-            .map(|(oldest_seq, _)| high_watermark.saturating_sub(oldest_seq).saturating_add(1))
+        let sequence_span_estimate = minimum_retained_seq
+            .map(|minimum_seq| high_watermark.saturating_sub(minimum_seq).saturating_add(1))
             .unwrap_or(0);
         Ok(HaOutboxStats {
             sequence_span_estimate,
             high_watermark,
-            oldest_age_secs: oldest
-                .map(|(_, created_at)| now.saturating_sub(created_at).max(0))
+            oldest_age_secs: oldest_created_at
+                .map(|created_at| now.saturating_sub(created_at).max(0))
                 .unwrap_or(0),
             ack_lag: acked_seq.map(|acked| high_watermark.saturating_sub(acked).max(0)),
         })

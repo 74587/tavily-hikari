@@ -60,7 +60,7 @@ async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     assert!(stats.oldest_age_secs >= 100);
     assert_eq!(stats.ack_lag, Some(2));
     let span_plan: Vec<String> = sqlx::query(
-        "EXPLAIN QUERY PLAN SELECT seq, created_at FROM ha_outbox ORDER BY created_at ASC, seq ASC LIMIT 1",
+        "EXPLAIN QUERY PLAN SELECT MIN(seq) FROM ha_outbox WHERE resource IN ('meta')",
     )
     .fetch_all(&pool)
     .await
@@ -71,7 +71,7 @@ async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     assert!(
         span_plan
             .iter()
-            .any(|detail| detail.contains("idx_ha_outbox_created")),
+            .any(|detail| detail.contains("idx_ha_outbox_resource")),
         "indexed sequence-span diagnostics must not scan the whole outbox: {span_plan:?}"
     );
     let no_peer_stats = proxy
@@ -200,6 +200,53 @@ async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     assert_eq!(expired_health.high_watermark, 4);
     assert_eq!(expired_health.cursor_state, "expired_backlog");
     assert!(expired_health.expired_backlog);
+
+    pool.close().await;
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn ha_channel_outbox_stats_span_uses_minimum_valid_sequence() {
+    let db_path = temp_db_path("ha-outbox-span-minimum-sequence");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-outbox-span-minimum-sequence".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let now = Utc::now().timestamp();
+
+    for (seq, created_at) in [(1, now - 10), (2, now - 5), (3, now - 100)] {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (seq, kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES (?, 'state', 'meta', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(seq)
+        .bind(format!("out-of-order-created-at-{seq}"))
+        .bind(created_at)
+        .execute(&pool)
+        .await
+        .expect("insert valid control event");
+    }
+
+    let stats = proxy
+        .ha_channel_outbox_stats(tavily_hikari::HaSyncChannel::Control, None)
+        .await
+        .expect("read indexed span estimate");
+    assert_eq!(stats.high_watermark, 3);
+    assert_eq!(
+        stats.sequence_span_estimate, 3,
+        "the sequence span must use the minimum valid sequence, not the oldest timestamp row"
+    );
+    assert!(stats.oldest_age_secs >= 100);
 
     pool.close().await;
     let _ = std::fs::remove_file(&db_path);

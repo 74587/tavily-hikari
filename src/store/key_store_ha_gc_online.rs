@@ -143,57 +143,87 @@ impl KeyStore {
             // slice keeps a hot control stream from monopolizing online maintenance.
             while batches < max_batches && Instant::now() < deadline {
                 let batch_started = Instant::now();
-                let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
-                    Self::delete_ha_invalid_legacy_events_bounded_on_conn(
+                sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+                let batch_result = async {
+                    let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
+                        Self::delete_ha_invalid_legacy_events_bounded_on_conn(
                         &mut conn,
                         channel,
                         batch_size,
                         self.backend_time.now_ts(),
                     )
                     .await?;
-                legacy_has_more = scanned_more_legacy;
-                legacy_cursor_advanced |= scanned_legacy_rows;
-                invalid_legacy_deleted_rows += deleted_invalid;
-                deleted_rows += deleted_invalid;
-                batches += 1;
-
-                if deleted_invalid == 0 {
-                    let (deleted_retention, max_deleted_valid_seq) =
-                        Self::delete_ha_channel_events_returning_max_seq_on_conn(
+                    let mut deleted_retention = 0_i64;
+                    if deleted_invalid == 0 {
+                        let (deleted, max_deleted_valid_seq) =
+                            Self::delete_ha_channel_events_returning_max_seq_on_conn(
                             &mut conn,
                             channel,
                             threshold,
                             batch_size,
                         )
                         .await?;
-                    if deleted_retention > 0
-                        && let Some(max_deleted_valid_seq) = max_deleted_valid_seq
-                    {
-                        Self::remember_ha_channel_expired_valid_watermark_on_conn(
-                            &mut conn,
-                            channel,
-                            max_deleted_valid_seq,
-                            self.backend_time.now_ts(),
+                        deleted_retention = deleted;
+                        if deleted_retention > 0
+                            && let Some(max_deleted_valid_seq) = max_deleted_valid_seq
+                        {
+                            Self::remember_ha_channel_expired_valid_watermark_on_conn(
+                                &mut conn,
+                                channel,
+                                max_deleted_valid_seq,
+                                self.backend_time.now_ts(),
+                            )
+                            .await?;
+                        }
+                    }
+                    let batch_deleted_rows = deleted_invalid.saturating_add(deleted_retention);
+                    if batch_deleted_rows > 0 {
+                        sqlx::query(
+                            "UPDATE ha_outbox_gc_channel_state SET total_deleted_rows = total_deleted_rows + ? WHERE channel = ?",
                         )
+                        .bind(batch_deleted_rows)
+                        .bind(channel.as_str())
+                        .execute(&mut *conn)
                         .await?;
                     }
-                    retention_deleted_rows += deleted_retention;
-                    deleted_rows += deleted_retention;
-                    if deleted_retention < batch_size {
-                        record_ha_outbox_gc_batch_timing(
-                            &mut active_elapsed_ms,
-                            &mut max_batch_elapsed_ms,
-                            batch_started,
-                        );
-                        break;
-                    }
+                    Ok::<_, ProxyError>((
+                        deleted_invalid,
+                        deleted_retention,
+                        scanned_more_legacy,
+                        scanned_legacy_rows,
+                    ))
                 }
+                .await;
+                let (deleted_invalid, deleted_retention, scanned_more_legacy, scanned_legacy_rows) =
+                    match batch_result {
+                        Ok(result) => {
+                            if let Err(err) = sqlx::query("COMMIT").execute(&mut *conn).await {
+                                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                                return Err(ProxyError::Database(err));
+                            }
+                            result
+                        }
+                        Err(err) => {
+                            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                            return Err(err);
+                        }
+                    };
+                legacy_has_more = scanned_more_legacy;
+                legacy_cursor_advanced |= scanned_legacy_rows;
+                invalid_legacy_deleted_rows += deleted_invalid;
+                retention_deleted_rows += deleted_retention;
+                deleted_rows += deleted_invalid.saturating_add(deleted_retention);
+                batches += 1;
+                let retention_exhausted = deleted_invalid == 0 && deleted_retention < batch_size;
 
                 record_ha_outbox_gc_batch_timing(
                     &mut active_elapsed_ms,
                     &mut max_batch_elapsed_ms,
                     batch_started,
                 );
+                if retention_exhausted {
+                    break;
+                }
 
                 if batches < max_batches && Instant::now() < deadline {
                     self.backend_time
@@ -284,7 +314,6 @@ impl KeyStore {
                        last_high_watermark = ?,
                        last_ingress_seq_delta = ?,
                        last_net_rows_delta_estimate = ?,
-                       total_deleted_rows = total_deleted_rows + ?,
                        last_continuation_delay_secs = ?
                    WHERE channel = ?"#,
             )
@@ -303,7 +332,6 @@ impl KeyStore {
             .bind(high_watermark)
             .bind(ingress_seq_delta)
             .bind(net_rows_delta_estimate)
-            .bind(deleted_rows)
             .bind(channel_continuation_delay_secs)
             .bind(channel.as_str())
             .execute(&mut *conn)
