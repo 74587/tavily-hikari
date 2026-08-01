@@ -393,3 +393,10 @@ source when a usable persisted runtime already exists.
 - `docs/specs/34pgu-mcp-session-privacy-affinity-hardening/SPEC.md`
 - `docs/specs/3tyrc-admin-dashboard-quota-charge-cards/SPEC.md`
 - `docs/solutions/operations/sqlite-write-lock-contention.md`
+
+## Visual Evidence
+
+PR: none
+
+- evidence_note: This topic change is limited to SQLite scheduling and persistence behavior. Any
+  future UI-affecting change must add current-SHA visual evidence before selecting it for a PR.

@@ -118,3 +118,10 @@
 - HA peer-less export and baseline samples report `ack_lag=null`; normal summaries stay sampled per
   channel, while heavy outbox and memory snapshots remain reserved for slow, error, or threshold
   transition events.
+
+## Visual Evidence
+
+PR: none
+
+- evidence_note: This change only adjusts runtime diagnostics and scheduler recovery. Any future
+  UI-affecting change must add current-SHA visual evidence before selecting it for a PR.

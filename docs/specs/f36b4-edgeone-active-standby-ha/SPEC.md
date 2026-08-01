@@ -177,7 +177,7 @@ sequence holes exist and must not be presented as inventory.
 
 ## Visual Evidence
 
-PR: include
+PR: none
 
 ![HA channel ACK and GC health](./assets/ha-channel-gc-health-desktop.png)
 
@@ -185,9 +185,11 @@ PR: include
 - docs_entry_or_title: `Admin/HaNodeDetailPanel / Docs`
 - scenario: healthy, draining, and deferred channels
 - evidence_note: The current mock-only peer panel shows ACK watermark, retention, GC state, oldest
-  event, adaptive batch, progress, defer reason, and retry time for all three channels.
+  event, adaptive batch, progress, defer reason, and retry time for all three channels. It is
+  historical topic evidence and must not be reused by a backend-only PR; a future UI change must
+  capture new proof at its final SHA before selecting it for a PR.
 
-PR: include
+PR: none
 
 ![HA channel stalled GC state](./assets/ha-channel-gc-health-stalled.png)
 
@@ -195,7 +197,9 @@ PR: include
 - docs_entry_or_title: `Admin/HaNodeDetailPanel / Docs`
 - scenario: runtime channel consecutive no progress
 - evidence_note: The stalled transition is visually distinct and retains the last progress,
-  no-progress reason, retry time, and reduced batch size needed for diagnosis.
+  no-progress reason, retry time, and reduced batch size needed for diagnosis. It is historical
+  topic evidence and must not be reused by a backend-only PR; a future UI change must capture new
+  proof at its final SHA before selecting it for a PR.
 
 ## Acceptance
 
