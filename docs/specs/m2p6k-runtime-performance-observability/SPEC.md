@@ -35,7 +35,8 @@
   60 秒输出一次 INFO。
 - HA GC slice 的 DEBUG 事件还必须区分 wall-clock `elapsed_ms` 与 active database work
   `active_elapsed_ms`、`max_batch_elapsed_ms`，并记录 `deleted_rows` 与 `continuation_delay_secs`，使短让步与 SQLite
-  writer contention 不会被混为同一种性能问题。
+  writer contention 不会被混为同一种性能问题。active 字段只包含 cleanup micro-batch，不包含 post-slice
+  state probe。
 - HA export/sync 的窗口采样以 `outbox_sequence_span_estimate` 与 `outbox_high_watermark` 表示积压趋势；不得在
   该热路径计算或记录名为 `outbox_row_count` 的精确库存。
 - 内存 INFO 快照最多每 5 分钟真实读取一次 `/proc` 与 cgroup；slow/error 事件立即采集。

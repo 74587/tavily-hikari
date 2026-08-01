@@ -310,6 +310,10 @@ impl TavilyProxy {
         self.key_store.gc_ha_outbox_online().await
     }
 
+    pub async fn ha_outbox_gc_watchdog_needed(&self) -> Result<bool, ProxyError> {
+        self.key_store.ha_outbox_gc_watchdog_needed().await
+    }
+
     pub async fn record_ha_outbox_gc_deferred(&self, reason: &str) -> Result<(), ProxyError> {
         self.key_store.record_ha_outbox_gc_deferred(reason).await
     }

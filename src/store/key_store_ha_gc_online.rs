@@ -1,4 +1,13 @@
 impl KeyStore {
+    pub(crate) async fn ha_outbox_gc_watchdog_needed(&self) -> Result<bool, ProxyError> {
+        let pending_channel_mask: Option<i64> = sqlx::query_scalar(
+            "SELECT pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(pending_channel_mask.is_none_or(|mask| mask & 7 != 0))
+    }
+
     pub(crate) async fn gc_ha_outbox_online(&self) -> Result<HaOutboxGcReport, ProxyError> {
         self.gc_ha_outbox_online_with_options(HaOutboxGcOptions::online())
             .await
@@ -160,16 +169,20 @@ impl KeyStore {
                     retention_deleted_rows += deleted_retention;
                     deleted_rows += deleted_retention;
                     if deleted_retention < batch_size {
-                        let batch_elapsed_ms = batch_started.elapsed().as_millis();
-                        active_elapsed_ms = active_elapsed_ms.saturating_add(batch_elapsed_ms);
-                        max_batch_elapsed_ms = max_batch_elapsed_ms.max(batch_elapsed_ms);
+                        record_ha_outbox_gc_batch_timing(
+                            &mut active_elapsed_ms,
+                            &mut max_batch_elapsed_ms,
+                            batch_started,
+                        );
                         break;
                     }
                 }
 
-                let batch_elapsed_ms = batch_started.elapsed().as_millis();
-                active_elapsed_ms = active_elapsed_ms.saturating_add(batch_elapsed_ms);
-                max_batch_elapsed_ms = max_batch_elapsed_ms.max(batch_elapsed_ms);
+                record_ha_outbox_gc_batch_timing(
+                    &mut active_elapsed_ms,
+                    &mut max_batch_elapsed_ms,
+                    batch_started,
+                );
 
                 if batches < max_batches && Instant::now() < deadline {
                     self.backend_time
@@ -178,20 +191,16 @@ impl KeyStore {
                 }
             }
 
-            let has_more_started = Instant::now();
+            let allowed_resources = ha_channel_allowed_resources_sql(channel);
             let has_more_retention: bool = sqlx::query_scalar(&format!(
-                "SELECT EXISTS(SELECT 1 FROM {} WHERE created_at < ? LIMIT 1)",
-                quote_sqlite_identifier(ha_channel_event_table(channel))
+                "SELECT EXISTS(SELECT 1 FROM {} WHERE created_at < ? AND resource IN ({allowed_resources}) LIMIT 1)",
+                quote_sqlite_identifier(ha_channel_event_table(channel)),
             ))
             .bind(threshold)
             .fetch_one(&mut *conn)
             .await?;
-            max_batch_elapsed_ms = max_batch_elapsed_ms.max(has_more_started.elapsed().as_millis());
             let channel_has_more = legacy_has_more || has_more_retention;
-            let high_watermark_started = Instant::now();
             let high_watermark = Self::ha_channel_high_watermark_on_conn(&mut conn, channel).await?;
-            max_batch_elapsed_ms =
-                max_batch_elapsed_ms.max(high_watermark_started.elapsed().as_millis());
             let channel_mask = Self::ha_outbox_gc_channel_mask(channel);
             let next_pending_channel_mask = if channel_has_more {
                 pending_channel_mask | channel_mask

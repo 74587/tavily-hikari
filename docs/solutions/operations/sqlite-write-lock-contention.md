@@ -205,8 +205,10 @@ month-tail public metrics scan.
   is safe enough to drain retention debt; when it exceeds the budget or the writer is busy, shrink
   and defer. Keep legacy-resource verification on a much slower cursor cadence, because treating a
   scan of valid rows as urgent backlog turns a clean large table into continuous maintenance load.
-  A low-frequency coalescing watchdog should rediscover a lost continuation, not create competing
-  jobs.
+  Measure only cleanup batches for adaptive timing; post-slice state probes are diagnostics, not
+  evidence that a write micro-batch exceeded budget. Keep an hourly baseline sweep for newly
+  expired rows, and gate a low-frequency watchdog on durable pending-channel debt so it rediscovers
+  a lost continuation without creating clean-state jobs.
 - Sequence high-watermark deltas are useful low-cost evidence of drainage versus ingress, but they
   are estimates, not exact row counts. If historical exact counts were not sampled, report the
   oldest retained age moving forward as proof of partial cleanup only; do not claim that total

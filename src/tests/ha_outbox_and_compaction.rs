@@ -50,6 +50,53 @@ fn online_ha_gc_adapts_only_when_one_micro_batch_exceeds_its_budget() {
 }
 
 #[tokio::test]
+async fn ha_outbox_gc_watchdog_only_reports_persisted_channel_debt() {
+    let db_path = temp_db_path("ha-outbox-gc-watchdog-debt");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-watchdog-debt".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+
+    assert!(
+        proxy
+            .ha_outbox_gc_watchdog_needed()
+            .await
+            .expect("read initial GC debt state")
+    );
+    sqlx::query("UPDATE ha_outbox_gc_state SET pending_channel_mask = 0 WHERE id = 'local'")
+        .execute(&pool)
+        .await
+        .expect("clear GC debt state");
+    assert!(
+        !proxy
+            .ha_outbox_gc_watchdog_needed()
+            .await
+            .expect("read cleared GC debt state")
+    );
+    sqlx::query("UPDATE ha_outbox_gc_state SET pending_channel_mask = 4 WHERE id = 'local'")
+        .execute(&pool)
+        .await
+        .expect("restore runtime GC debt state");
+    assert!(
+        proxy
+            .ha_outbox_gc_watchdog_needed()
+            .await
+            .expect("read restored GC debt state")
+    );
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     let db_path = temp_db_path("ha-outbox-online-gc-round-robin");
     let db_str = db_path.to_string_lossy().to_string();
@@ -290,6 +337,17 @@ async fn online_ha_gc_does_not_fast_loop_while_only_legacy_scanning_remains() {
         .await
         .expect("insert retained control event");
     }
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'scheduled_jobs', 'legacy-invalid-old', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(now - (4 * SECS_PER_DAY))
+    .execute(&mut *tx)
+    .await
+    .expect("insert old invalid legacy event beyond the first cursor window");
     tx.commit().await.expect("commit seed transaction");
 
     let report = proxy.gc_ha_outbox_online().await.expect("online GC");

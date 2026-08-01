@@ -58,6 +58,7 @@ const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
 const HA_OUTBOX_GC_RECHECK_SECS: u64 = 5 * 60;
+const HA_OUTBOX_GC_BASELINE_SECS: i64 = 60 * 60;
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
 const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE: &str =
     "auth_token_logs_alert_index_ensure";
@@ -866,27 +867,44 @@ fn spawn_auth_token_logs_gc_scheduler(state: Arc<AppState>) {
 
 fn spawn_ha_outbox_gc_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
+        let mut next_baseline_at = state.proxy.backend_time().now_ts();
         loop {
-            let Some(_) = enqueue_scheduled_job_logged(
-                state.as_ref(),
-                "ha_outbox_gc",
-                None,
-                TRIGGER_SOURCE_SCHEDULER,
-                "ha-outbox-gc",
-            )
-            .await
-            else {
-                state
-                    .proxy
-                    .backend_time()
-                    .sleep(Duration::from_secs(HA_OUTBOX_GC_RECHECK_SECS))
-                    .await;
-                continue;
+            let now = state.proxy.backend_time().now_ts();
+            let baseline_due = now >= next_baseline_at;
+            let watchdog_needed = if baseline_due {
+                false
+            } else {
+                match state.proxy.ha_outbox_gc_watchdog_needed().await {
+                    Ok(needed) => needed,
+                    Err(err) => {
+                        tracing::debug!(
+                            component = "ha_outbox_gc",
+                            event = "watchdog_state_unavailable",
+                            err = %err,
+                            "HA outbox GC watchdog could not read durable debt state"
+                        );
+                        false
+                    }
+                }
             };
 
-            // This is a watchdog, not the normal catch-up cadence. An active
-            // representative job is coalesced; a lost continuation is rediscovered
-            // within five minutes instead of waiting for the next hourly sweep.
+            if baseline_due || watchdog_needed {
+                let enqueued = enqueue_scheduled_job_logged(
+                    state.as_ref(),
+                    "ha_outbox_gc",
+                    None,
+                    TRIGGER_SOURCE_SCHEDULER,
+                    "ha-outbox-gc",
+                )
+                .await;
+                if baseline_due && enqueued.is_some() {
+                    next_baseline_at = now.saturating_add(HA_OUTBOX_GC_BASELINE_SECS);
+                }
+            }
+
+            // The hourly baseline discovers newly expired records. Between sweeps,
+            // this only restores a lost continuation when durable GC state still
+            // reports channel debt.
             state
                 .proxy
                 .backend_time()

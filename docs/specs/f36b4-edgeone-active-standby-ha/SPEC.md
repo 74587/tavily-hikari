@@ -146,8 +146,9 @@ the `50ms` active-work budget continues in five seconds; a slow slice, lease con
 writer conflict yields for 30 seconds. A
 valid legacy-resource cursor is intentionally lower priority and continues at five minutes, so
 legacy verification cannot turn an otherwise clean large outbox into a perpetual write loop. The
-five-minute scheduler watchdog coalesces with the active representative job and rediscovers a
-lost continuation without waiting for an hourly sweep.
+hourly baseline sweep discovers newly expired rows. Between sweeps, the five-minute scheduler
+watchdog coalesces with the representative job only when durable GC state still reports channel
+debt, so it can rediscover a lost continuation without creating clean-state GC work.
 
 The same state records `totalDeletedRows`, the most recent channel high watermark, ingress sequence
 delta, and estimated net-row delta. `ha_outbox_cleanup_once --dry-run --json` exposes these fields
@@ -214,7 +215,8 @@ PR: include
 - 大量调用记录和大请求/响应正文不得进入 HA baseline、events 或 recovery payload。
 - 大量过期 HA 事件下，最慢 active-work micro-batch 低于预算的 productive online slice 必须持久化五秒
   continuation；超过预算时必须缩批并持久化 30 秒 continuation。只有 legacy cursor 仍待扫描时，
-  continuation 必须是五分钟，不能形成快速 maintenance loop。
+  continuation 必须是五分钟，不能形成快速 maintenance loop。post-slice probe 不得参与 active-work
+  批次预算；旧的非法 resource 也不得被误判为 retention debt。
 - 重启后，per-channel deletion total、high watermark 与 ingress/net estimate 必须保留；只读
   preflight 必须能报告它们，且在线路径不得为此执行精确 `COUNT(*)`。
 - 共享 `codex-testbox` 上的 256MiB cgroup v2 合同验证必须通过：standby 首次全量 baseline
