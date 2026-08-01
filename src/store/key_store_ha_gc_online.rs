@@ -24,21 +24,32 @@ impl KeyStore {
             .execute(&mut *conn)
             .await?;
         let result = async {
-            let (next_channel, pending_channel_mask): (String, i64) = sqlx::query_as(
+            let mut transaction = ImmediateSqliteTransaction::begin(conn).await?;
+            let (next_channel, persisted_pending_channel_mask): (String, i64) = sqlx::query_as(
                 "SELECT next_channel, pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
             )
-            .fetch_one(&mut *conn)
+            .fetch_one(&mut *transaction)
             .await?;
-            let pending_channel_mask = if pending_channel_mask == 0 {
+            let pending_channel_mask = if persisted_pending_channel_mask == 0 {
                 7
             } else {
-                pending_channel_mask & 7
+                persisted_pending_channel_mask & 7
             };
             let channel = Self::select_ha_outbox_gc_channel(
                 Self::ha_outbox_gc_channel_from_name(&next_channel),
                 pending_channel_mask,
             );
             let now = self.backend_time.now_ts();
+            sqlx::query(
+                r#"UPDATE ha_outbox_gc_state
+                   SET pending_channel_mask = (? & 7) | ?, updated_at = ?
+                   WHERE id = 'local'"#,
+            )
+            .bind(persisted_pending_channel_mask)
+            .bind(Self::ha_outbox_gc_channel_mask(channel))
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
             sqlx::query(
                 r#"UPDATE ha_outbox_gc_channel_state
                    SET last_attempt_at = ?, last_defer_reason = ?, next_retry_at = ?,
@@ -51,18 +62,18 @@ impl KeyStore {
             .bind(now.saturating_add(crate::HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS))
             .bind(crate::HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
             .bind(channel.as_str())
-            .execute(&mut *conn)
+            .execute(&mut *transaction)
             .await?;
-            Ok::<(), ProxyError>(())
+            transaction.commit_connection().await
         }
         .await;
+        let mut conn = result?;
         let restore_result = sqlx::query(&format!(
             "PRAGMA busy_timeout = {}",
             SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
         ))
         .execute(&mut *conn)
         .await;
-        result?;
         restore_result?;
         Ok(())
     }

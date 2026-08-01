@@ -97,6 +97,51 @@ async fn ha_outbox_gc_watchdog_only_reports_persisted_channel_debt() {
 }
 
 #[tokio::test]
+async fn deferred_ha_gc_sets_watchdog_debt_when_mask_is_clear() {
+    let db_path = temp_db_path("ha-outbox-gc-deferred-watchdog-debt");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-deferred-watchdog-debt".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET next_channel = 'billing', pending_channel_mask = 0 WHERE id = 'local'",
+    )
+    .execute(&pool)
+    .await
+    .expect("clear GC debt state");
+    proxy
+        .record_ha_outbox_gc_deferred("continuation_persist_failed")
+        .await
+        .expect("persist deferred GC state");
+
+    let pending_channel_mask: i64 = sqlx::query_scalar(
+        "SELECT pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read deferred GC debt state");
+    assert_eq!(pending_channel_mask, 2);
+    assert!(
+        proxy
+            .ha_outbox_gc_watchdog_needed()
+            .await
+            .expect("read deferred GC watchdog state")
+    );
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     let db_path = temp_db_path("ha-outbox-online-gc-round-robin");
     let db_str = db_path.to_string_lossy().to_string();
