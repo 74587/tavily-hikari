@@ -143,15 +143,23 @@ impl KeyStore {
             let mut legacy_cursor_advanced = false;
             let mut active_elapsed_ms = 0_u128;
             let mut max_batch_elapsed_ms = 0_u128;
-            let mut conn = pooled_conn
-                .take()
-                .expect("online HA GC must retain its pooled connection");
+            let mut batch_conn = Some(
+                pooled_conn
+                    .take()
+                    .expect("online HA GC must retain its pooled connection"),
+            );
+            let gc_result = async {
 
             // A slice owns one persisted channel. Advancing the cursor after every
             // slice keeps a hot control stream from monopolizing online maintenance.
             while batches < max_batches && Instant::now() < deadline {
                 let batch_started = Instant::now();
-                let mut transaction = ImmediateSqliteTransaction::begin(conn).await?;
+                let mut transaction = ImmediateSqliteTransaction::begin(
+                    batch_conn
+                        .take()
+                        .expect("online HA GC batch must retain its pooled connection"),
+                )
+                .await?;
                 let batch_result = async {
                     let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
                         Self::delete_ha_invalid_legacy_events_bounded_on_conn(
@@ -205,7 +213,7 @@ impl KeyStore {
                 let (deleted_invalid, deleted_retention, scanned_more_legacy, scanned_legacy_rows) =
                     match batch_result {
                         Ok(result) => {
-                            conn = transaction.commit_connection().await?;
+                            batch_conn = Some(transaction.commit_connection().await?);
                             result
                         }
                         Err(err) => {
@@ -237,16 +245,19 @@ impl KeyStore {
                 }
             }
 
+            let conn = batch_conn
+                .as_mut()
+                .expect("online HA GC must retain its pooled connection after each batch");
             let allowed_resources = ha_channel_allowed_resources_sql(channel);
             let has_more_retention: bool = sqlx::query_scalar(&format!(
                 "SELECT EXISTS(SELECT 1 FROM {} WHERE created_at < ? AND resource IN ({allowed_resources}) LIMIT 1)",
                 quote_sqlite_identifier(ha_channel_event_table(channel)),
             ))
             .bind(threshold)
-            .fetch_one(&mut *conn)
+            .fetch_one(&mut **conn)
             .await?;
             let channel_has_more = legacy_has_more || has_more_retention;
-            let high_watermark = Self::ha_channel_high_watermark_on_conn(&mut conn, channel).await?;
+            let high_watermark = Self::ha_channel_high_watermark_on_conn(conn, channel).await?;
             let channel_mask = Self::ha_outbox_gc_channel_mask(channel);
             let next_pending_channel_mask = if channel_has_more {
                 pending_channel_mask | channel_mask
@@ -264,7 +275,7 @@ impl KeyStore {
             .bind(next_channel.as_str())
             .bind(next_pending_channel_mask)
             .bind(self.backend_time.now_ts())
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
             let completed = next_pending_channel_mask == 0;
             let now = self.backend_time.now_ts();
@@ -339,7 +350,7 @@ impl KeyStore {
             .bind(net_rows_delta_estimate)
             .bind(channel_continuation_delay_secs)
             .bind(channel.as_str())
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
             let report = HaOutboxGcReport {
                 batch_size,
@@ -366,8 +377,11 @@ impl KeyStore {
                 elapsed_ms: started.elapsed().as_millis(),
                 continuation_delay_secs,
             };
-            pooled_conn = Some(conn);
             Ok::<HaOutboxGcReport, ProxyError>(report)
+            }
+            .await;
+            pooled_conn = batch_conn;
+            gc_result
         }
         .await;
         if let Some(mut conn) = pooled_conn.take() {
