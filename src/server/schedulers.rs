@@ -6,6 +6,8 @@ use tavily_hikari::{
     LinuxDoCreditRefundExternalSuccessMarker as SharedLinuxDoCreditRefundExternalSuccessMarker,
     decode_linuxdo_credit_refund_external_success_marker,
     format_ha_outbox_gc_report_message, format_linuxdo_credit_money,
+    HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
+    HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS,
     linuxdo_credit_recharge_system_refund_retry_delay_secs,
     linuxdo_credit_refund_params as shared_linuxdo_credit_refund_params,
     linuxdo_credit_refund_url as shared_linuxdo_credit_refund_url,
@@ -55,7 +57,8 @@ const TRIGGER_SOURCE_SCHEDULER: &str = "scheduler";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
-const HA_OUTBOX_GC_CONTINUATION_DELAY_SECS: i64 = 30;
+const HA_OUTBOX_GC_RECHECK_SECS: u64 = 5 * 60;
+const HA_OUTBOX_GC_BASELINE_SECS: i64 = 60 * 60;
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
 const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE: &str =
     "auth_token_logs_alert_index_ensure";
@@ -460,7 +463,7 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
     .await;
     let continuation_delay = match job_type.as_str() {
         "request_logs_gc" if !completed => Some(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS),
-        "ha_outbox_gc" if !completed => Some(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS),
+        "ha_outbox_gc" if !completed => Some(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS),
         _ => None,
     };
     if let Some(continuation_delay) = continuation_delay {
@@ -864,21 +867,49 @@ fn spawn_auth_token_logs_gc_scheduler(state: Arc<AppState>) {
 
 fn spawn_ha_outbox_gc_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
+        let mut next_baseline_at = state.proxy.backend_time().now_ts();
         loop {
-            let Some(_) = enqueue_scheduled_job_logged(
-                state.as_ref(),
-                "ha_outbox_gc",
-                None,
-                TRIGGER_SOURCE_SCHEDULER,
-                "ha-outbox-gc",
-            )
-            .await
-            else {
-                state.proxy.backend_time().sleep(Duration::from_secs(3600)).await;
-                continue;
+            let now = state.proxy.backend_time().now_ts();
+            let baseline_due = now >= next_baseline_at;
+            let watchdog_needed = if baseline_due {
+                false
+            } else {
+                match state.proxy.ha_outbox_gc_watchdog_needed().await {
+                    Ok(needed) => needed,
+                    Err(err) => {
+                        tracing::debug!(
+                            component = "ha_outbox_gc",
+                            event = "watchdog_state_unavailable",
+                            err = %err,
+                            "HA outbox GC watchdog could not read durable debt state"
+                        );
+                        false
+                    }
+                }
             };
 
-            state.proxy.backend_time().sleep(Duration::from_secs(3600)).await;
+            if baseline_due || watchdog_needed {
+                let enqueued = enqueue_scheduled_job_logged(
+                    state.as_ref(),
+                    "ha_outbox_gc",
+                    None,
+                    TRIGGER_SOURCE_SCHEDULER,
+                    "ha-outbox-gc",
+                )
+                .await;
+                if baseline_due && enqueued.is_some() {
+                    next_baseline_at = now.saturating_add(HA_OUTBOX_GC_BASELINE_SECS);
+                }
+            }
+
+            // The hourly baseline discovers newly expired records. Between sweeps,
+            // this only restores a lost continuation when durable GC state still
+            // reports channel debt.
+            state
+                .proxy
+                .backend_time()
+                .sleep(Duration::from_secs(HA_OUTBOX_GC_RECHECK_SECS))
+                .await;
         }
     });
 }
@@ -1133,12 +1164,13 @@ async fn finish_ha_gc_with_continuation(
     job_id: i64,
     claim_generation: i64,
     message: String,
+    continuation_delay_secs: i64,
 ) -> bool {
     let available_at = state
         .proxy
         .backend_time()
         .now_ts()
-        .saturating_add(HA_OUTBOX_GC_CONTINUATION_DELAY_SECS);
+        .saturating_add(continuation_delay_secs);
     let result = state
         .proxy
         .scheduled_job_finish_and_enqueue_auto_at(
@@ -1159,7 +1191,7 @@ async fn finish_ha_gc_with_continuation(
                 job_id,
                 continuation_job_id = result.job_id,
                 continuation_created = result.created,
-                continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                continuation_delay_secs,
                 available_at,
             );
         }
@@ -1169,7 +1201,7 @@ async fn finish_ha_gc_with_continuation(
                 event = "continuation_persist_deferred",
                 job_id,
                 claim_generation,
-                continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                continuation_delay_secs,
                 err = %err,
                 "HA outbox GC continuation hit a transient SQLite conflict; stale reaper will recover it"
             );
@@ -1180,7 +1212,7 @@ async fn finish_ha_gc_with_continuation(
                 component = "ha_outbox_gc",
                 event = "continuation_transaction_failed",
                 job_id,
-                continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+                continuation_delay_secs,
                 err = %err,
                 "HA outbox GC could not persist its deferred continuation"
             );
@@ -1225,13 +1257,14 @@ async fn run_ha_outbox_gc_claimed_job(
             job_id,
             claim_generation,
             defer_reason = "gc_lease_busy",
-            continuation_delay_secs = HA_OUTBOX_GC_CONTINUATION_DELAY_SECS,
+            continuation_delay_secs = HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
         );
         return finish_ha_gc_with_continuation(
             &state,
             job_id,
             claim_generation,
             "deferred=gc_lease_busy".to_string(),
+            HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
         )
         .await;
     };
@@ -1241,24 +1274,37 @@ async fn run_ha_outbox_gc_claimed_job(
         Ok(report) => {
             let needs_continuation = report.has_more || !report.completed;
             if needs_continuation {
+                let continuation_delay_secs = report
+                    .continuation_delay_secs
+                    .unwrap_or(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS);
                 tracing::debug!(
                     component = "ha_outbox_gc",
                     event = "deferred",
                     job_id,
                     claim_generation,
-                    defer_reason = if report.has_more {
-                        "has_more"
+                    defer_reason = if continuation_delay_secs
+                        == HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS
+                    {
+                        "legacy_scan"
+                    } else if continuation_delay_secs
+                        < HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS
+                    {
+                        "fast_progress"
                     } else {
                         "slice_budget_exhausted"
                     },
                     deleted_rows = report.deleted_rows,
+                    active_elapsed_ms = report.active_elapsed_ms as u64,
+                    max_batch_elapsed_ms = report.max_batch_elapsed_ms as u64,
                     elapsed_ms = report.elapsed_ms as u64,
+                    continuation_delay_secs,
                 );
                 return finish_ha_gc_with_continuation(
                     &state,
                     job_id,
                     claim_generation,
                     format_ha_outbox_gc_report_message(&report, 1),
+                    continuation_delay_secs,
                 )
                 .await;
             } else {
@@ -1287,6 +1333,7 @@ async fn run_ha_outbox_gc_claimed_job(
                         job_id,
                         claim_generation,
                         format!("deferred=job_finish_failed error={err}"),
+                        HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
                     )
                     .await;
                 }
@@ -1306,6 +1353,7 @@ async fn run_ha_outbox_gc_claimed_job(
                 job_id,
                 claim_generation,
                 format!("deferred=sqlite_busy error={err}"),
+                HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
             )
             .await;
         }

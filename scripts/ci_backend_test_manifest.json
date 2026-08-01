@@ -299,6 +299,7 @@
         "tests::account_quota_and_billing::billing_",
         "tests::account_quota_and_billing::dropped_",
         "tests::ha_baseline_streaming_and_sessions::",
+        "tests::ha_outbox_and_compaction::deferred_ha_gc_",
         "tests::ha_outbox_and_compaction::ha_outbox_",
         "tests::ha_outbox_and_compaction::ha_events_cursor_",
         "tests::ha_outbox_and_compaction::ha_peer_health_",

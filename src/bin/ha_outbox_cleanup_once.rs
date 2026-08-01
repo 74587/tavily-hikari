@@ -70,6 +70,22 @@ struct PreflightChannel {
     high_watermark: i64,
     lowest_peer_ack: Option<i64>,
     pending_cleanup: bool,
+    gc_progress: Option<PreflightGcProgress>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+struct PreflightGcProgress {
+    last_observed_at: Option<i64>,
+    last_high_watermark: i64,
+    last_ingress_seq_delta: Option<i64>,
+    last_net_rows_delta_estimate: Option<i64>,
+    total_deleted_rows: i64,
+    last_progress_at: Option<i64>,
+    last_defer_reason: Option<String>,
+    next_retry_at: Option<i64>,
+    batch_size: i64,
+    last_continuation_delay_secs: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +101,15 @@ async fn read_only_preflight(db_path: &str) -> Result<PreflightReport, Box<dyn s
         .disable_statement_logging();
     let pool = SqlitePool::connect_with(options).await?;
     let now = chrono::Utc::now().timestamp();
+    let gc_progress_supported: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(
+               SELECT 1
+                 FROM pragma_table_info('ha_outbox_gc_channel_state')
+                WHERE name = 'last_net_rows_delta_estimate'
+           )"#,
+    )
+    .fetch_one(&pool)
+    .await?;
     let mut channels = Vec::with_capacity(3);
     for (ha_channel, table, index, retention_secs) in [
         (
@@ -142,6 +167,21 @@ async fn read_only_preflight(db_path: &str) -> Result<PreflightReport, Box<dyn s
             pending_query = pending_query.bind(*resource);
         }
         let pending_cleanup = pending_query.fetch_one(&pool).await?;
+        let gc_progress = if gc_progress_supported {
+            sqlx::query_as::<_, PreflightGcProgress>(
+                r#"SELECT last_observed_at, last_high_watermark, last_ingress_seq_delta,
+                          last_net_rows_delta_estimate, total_deleted_rows, last_progress_at,
+                          last_defer_reason, next_retry_at, batch_size,
+                          last_continuation_delay_secs
+                   FROM ha_outbox_gc_channel_state
+                   WHERE channel = ?"#,
+            )
+            .bind(channel)
+            .fetch_optional(&pool)
+            .await?
+        } else {
+            None
+        };
         channels.push(PreflightChannel {
             channel,
             retention_secs,
@@ -150,6 +190,7 @@ async fn read_only_preflight(db_path: &str) -> Result<PreflightReport, Box<dyn s
             high_watermark: high_watermark.unwrap_or(0),
             lowest_peer_ack,
             pending_cleanup,
+            gc_progress,
         });
     }
     pool.close().await;
@@ -200,7 +241,10 @@ struct CliReport {
     wal_checkpoint_busy: bool,
     wal_checkpoint_log_frames: i64,
     wal_checkpoint_checkpointed_frames: i64,
+    active_elapsed_ms: u128,
+    max_batch_elapsed_ms: u128,
     elapsed_ms: u128,
+    continuation_delay_secs: Option<i64>,
     pass_reports: Vec<HaOutboxGcReport>,
 }
 
@@ -239,7 +283,14 @@ impl CliReport {
             wal_checkpoint_busy: last.wal_checkpoint_busy,
             wal_checkpoint_log_frames: last.wal_checkpoint_log_frames,
             wal_checkpoint_checkpointed_frames: last.wal_checkpoint_checkpointed_frames,
+            active_elapsed_ms: reports.iter().map(|report| report.active_elapsed_ms).sum(),
+            max_batch_elapsed_ms: reports
+                .iter()
+                .map(|report| report.max_batch_elapsed_ms)
+                .max()
+                .unwrap_or(0),
             elapsed_ms: reports.iter().map(|report| report.elapsed_ms).sum(),
+            continuation_delay_secs: last.continuation_delay_secs,
             pass_reports: reports,
         }
     }
@@ -263,7 +314,10 @@ fn write_plain_report(mut writer: impl Write, report: &CliReport) -> io::Result<
         wal_checkpoint_busy: report.wal_checkpoint_busy,
         wal_checkpoint_log_frames: report.wal_checkpoint_log_frames,
         wal_checkpoint_checkpointed_frames: report.wal_checkpoint_checkpointed_frames,
+        active_elapsed_ms: report.active_elapsed_ms,
+        max_batch_elapsed_ms: report.max_batch_elapsed_ms,
         elapsed_ms: report.elapsed_ms,
+        continuation_delay_secs: report.continuation_delay_secs,
     };
     writeln!(
         writer,
@@ -287,8 +341,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
         } else {
             for channel in report.channels {
+                let gc_progress = channel.gc_progress.as_ref();
                 println!(
-                    "{}: index_pending={} retention_secs={} oldest_age_secs={:?} high_watermark={} lowest_peer_ack={:?} pending_cleanup={}",
+                    "{}: index_pending={} retention_secs={} oldest_age_secs={:?} high_watermark={} lowest_peer_ack={:?} pending_cleanup={} gc_total_deleted_rows={:?} gc_last_net_rows_delta_estimate={:?} gc_last_progress_at={:?} gc_next_retry_at={:?}",
                     channel.channel,
                     !channel.created_at_index_present,
                     channel.retention_secs,
@@ -296,6 +351,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     channel.high_watermark,
                     channel.lowest_peer_ack,
                     channel.pending_cleanup,
+                    gc_progress.map(|progress| progress.total_deleted_rows),
+                    gc_progress.and_then(|progress| progress.last_net_rows_delta_estimate),
+                    gc_progress.and_then(|progress| progress.last_progress_at),
+                    gc_progress.and_then(|progress| progress.next_retry_at),
                 );
             }
         }
@@ -423,7 +482,10 @@ mod tests {
                     wal_checkpoint_busy: false,
                     wal_checkpoint_log_frames: 0,
                     wal_checkpoint_checkpointed_frames: 0,
+                    active_elapsed_ms: 9,
+                    max_batch_elapsed_ms: 5,
                     elapsed_ms: 12,
+                    continuation_delay_secs: Some(5),
                 },
                 HaOutboxGcReport {
                     batch_size: 10,
@@ -445,7 +507,10 @@ mod tests {
                     wal_checkpoint_busy: false,
                     wal_checkpoint_log_frames: 0,
                     wal_checkpoint_checkpointed_frames: 0,
+                    active_elapsed_ms: 7,
+                    max_batch_elapsed_ms: 4,
                     elapsed_ms: 8,
+                    continuation_delay_secs: None,
                 },
             ],
         );

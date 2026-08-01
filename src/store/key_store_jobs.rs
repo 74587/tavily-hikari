@@ -646,6 +646,7 @@ impl KeyStore {
         available_at: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
         let finished_at = self.backend_time.now_ts();
+        let continuation_delay_secs = available_at.saturating_sub(finished_at);
         let mut raw_conn = tokio::time::timeout(
             Duration::from_millis(100),
             self.pool.acquire(),
@@ -701,12 +702,14 @@ impl KeyStore {
                 sqlx::query(
                     r#"UPDATE ha_outbox_gc_channel_state
                        SET last_attempt_at = ?, last_defer_reason = ?, next_retry_at = ?,
-                           consecutive_no_progress = consecutive_no_progress + 1
+                           consecutive_no_progress = consecutive_no_progress + 1,
+                           last_continuation_delay_secs = ?
                        WHERE channel = ?"#,
                 )
                 .bind(finished_at)
                 .bind(defer_reason)
                 .bind(available_at)
+                .bind(continuation_delay_secs)
                 .bind(channel.as_str())
                 .execute(&mut *conn)
                 .await?;

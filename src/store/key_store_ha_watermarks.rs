@@ -98,7 +98,7 @@ impl KeyStore {
     }
 
     async fn remember_ha_channel_expired_valid_watermark_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         channel: HaSyncChannel,
         max_deleted_seq: i64,
         updated_at: i64,
@@ -106,7 +106,7 @@ impl KeyStore {
         let has_sync_watermarks: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ha_sync_watermarks')",
         )
-        .fetch_one(&mut **conn)
+        .fetch_one(&mut *conn)
         .await?;
         if !has_sync_watermarks {
             return Ok(());
@@ -126,31 +126,31 @@ impl KeyStore {
         .bind(ha_channel_expired_valid_watermark_name(channel))
         .bind(max_deleted_seq)
         .bind(updated_at)
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
     async fn ha_channel_expired_legacy_watermark_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         channel: HaSyncChannel,
     ) -> Result<Option<i64>, ProxyError> {
         let has_sync_watermarks: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ha_sync_watermarks')",
         )
-        .fetch_one(&mut **conn)
+        .fetch_one(&mut *conn)
         .await?;
         if !has_sync_watermarks {
             return Ok(None);
         }
         Ok(sqlx::query_scalar("SELECT watermark FROM ha_sync_watermarks WHERE name = ?")
             .bind(ha_channel_expired_legacy_watermark_name(channel))
-            .fetch_optional(&mut **conn)
+            .fetch_optional(&mut *conn)
             .await?)
     }
 
     async fn remember_ha_channel_expired_legacy_watermark_on_conn(
-        conn: &mut sqlx::pool::PoolConnection<Sqlite>,
+        conn: &mut sqlx::SqliteConnection,
         channel: HaSyncChannel,
         max_deleted_seq: i64,
         updated_at: i64,
@@ -158,7 +158,7 @@ impl KeyStore {
         let has_sync_watermarks: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ha_sync_watermarks')",
         )
-        .fetch_one(&mut **conn)
+        .fetch_one(&mut *conn)
         .await?;
         if !has_sync_watermarks {
             return Ok(());
@@ -178,7 +178,7 @@ impl KeyStore {
         .bind(ha_channel_expired_legacy_watermark_name(channel))
         .bind(max_deleted_seq)
         .bind(updated_at)
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }

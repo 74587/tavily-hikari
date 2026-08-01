@@ -482,7 +482,11 @@
 - HA outbox GC now has a separate online budget (`250 x 4`, one second, 100ms yield) and uses the
   application's existing SQLite pool. The scheduler probes the maintenance write lease with
   `try_write`; writer contention becomes a durable 30-second continuation rather than a 10-second
-  lock retry. The offline HA cleanup command keeps its larger CLI defaults.
+  lock retry. Productive retention slices whose slowest active SQL micro-batch stays under 50ms continue in five seconds,
+  while valid-only legacy scans stay at five minutes to avoid a permanent compatibility scan loop.
+  The offline HA cleanup command keeps its larger CLI defaults. Online and offline active and
+  maximum-batch timing fields accumulate only cleanup batches; command wall-clock remains separate
+  so inter-batch yields and post-slice state probes do not masquerade as slow SQLite writes.
 
 ## Online HA cleanup isolation
 
@@ -490,6 +494,11 @@
   non-blocking GC lease serializes only GC slices, while scheduler diagnostics distinguish queue age,
   scheduled delay, and eligible wait. A scheduled continuation therefore does not produce a false
   queue-wait alert before its `available_at` time.
+- HA cleanup keeps an hourly baseline sweep for newly expired rows. Its five-minute watchdog reads
+  the durable pending-channel mask and only coalesces a representative job when unfinished channel
+  debt remains, avoiding repeated clean-state GC writes. A deferred-continuation fallback writes
+  its selected channel bit and per-channel defer state in the same short transaction, so a cleared
+  mask cannot hide a lost continuation from the watchdog.
 
 ## Transaction and claim lifecycle
 

@@ -29,6 +29,9 @@
   the diagnostic fields available without adding read pressure on each polling pass. DEBUG samples
   retain source, peer, watermark, cursor, and detail fields so an operator can still trace normal
   synchronization progress without enabling the expensive aggregate collection.
+- HA cleanup timing keeps command wall-clock distinct from active cleanup time and the slowest
+  cleanup batch. The offline command excludes configured yields and post-cleanup overhead from its
+  batch metrics, so its diagnostics remain comparable to the online slice contract.
 - SQLx slow-statement emission uses DEBUG instead of WARN. Default runtime logs retain structured
   operation timing/errors without complete statement text; an explicit `sqlx::query=debug` filter
   restores SQL-level diagnostics.
@@ -73,7 +76,13 @@
   `256MiB` 进程组合同做成可验收 harness。
 - 目前 `low_memory_protection_decision` 事件只记录当前 verdict，不代表已经具备真正的
   `503 low_memory_protection` 保护行为。
-- 当前只为 HA outbox 增加观测字段，没有修改 retention、GC、repair 或 compaction 行为；这些仍属于后续独立治理范围。
+- HA outbox 观测现已覆盖在线 self-healing 的累计与最慢 cleanup micro-batch SQL 耗时、续片延迟、累计删除、高水位增量与
+  ingress-minus-delete 估算；后置状态 probe 不参与批次耗时。它们不能替代精确库存统计，但可低成本确认过期债务是否持续前移。
+- Deferred-continuation diagnostics share one durable transaction with the selected channel's
+  pending-debt bit. A cleared global mask therefore cannot suppress the watchdog signal for a
+  failed continuation write, while normal clean-state polling remains quiet.
+- HA export/sync 的低频样本使用 `outbox_sequence_span_estimate` 和 `outbox_high_watermark`，不再对每个通道
+  执行 `COUNT(*)` 或把近似 span 标成精确 `outbox_row_count`。
 
 ## 相关文件
 

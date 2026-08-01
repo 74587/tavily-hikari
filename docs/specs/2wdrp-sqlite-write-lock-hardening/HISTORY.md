@@ -217,3 +217,12 @@
 - Added cancellation-safe immediate transactions, generation-bound scheduled-job completion, and
   threshold-based stale recovery so cancelled work cannot pollute the pool or complete a reclaimed
   job.
+
+## HA Retention Catch-up Cadence
+
+Online HA cleanup needs distinct response modes: productive expired-row cleanup may catch up at a
+short cadence, but lock contention, lease contention, and legacy compatibility inspection must
+yield. The durable controller therefore uses a five-second productive continuation only when the
+slowest micro-batch stays below the 50ms active-SQL target, a 30-second deferred continuation, and
+a five-minute legacy-scan cadence.
+This raises sustainable cleanup capacity without broadening the SQLite write window.

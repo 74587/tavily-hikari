@@ -101,6 +101,9 @@
 - `ha_outbox_cleanup_once` now distinguishes immediate invalid-legacy cleanup from normal retention
   cleanup in its JSON/plain reports, so operators can prove whether the pass is shrinking a stale
   upgraded backlog or only trimming aged rows.
+- Online and standalone cleanup reports keep command wall-clock separate from `active_elapsed_ms`
+  and `max_batch_elapsed_ms`. The latter two values accumulate actual cleanup batches only,
+  excluding configured inter-batch yields and post-slice maintenance probes.
 - `ha_outbox_cleanup_once --dry-run` uses a read-only SQLite connection and reports index presence,
   retention, oldest age, watermark, lowest peer ACK, and pending-cleanup state without repairing
   triggers or deleting rows.
@@ -243,4 +246,18 @@
   health without a `COUNT(*)` query.
 - Per-channel GC state now persists attempts, progress, batch size, defer reason, and retry time.
   Administrator peer details expose those fields beside ACK health; continuation persistence has no
-  unbounded retry task and relies on generation-safe stale recovery.
+  unbounded retry task and relies on generation-safe stale recovery. If that persistence falls
+  back, it atomically records the selected channel in the global pending-debt mask with the channel
+  defer state, so the five-minute watchdog can recover the work even from an otherwise clean mask.
+- Productive retention cleanup now persists a five-second continuation while its slowest active
+  SQLite micro-batch stays within a 50ms target. Slow work, busy writers, and lease deferrals retain the 30-second
+  delay; a valid-only legacy cursor scan remains on a five-minute cadence so compatibility cleanup
+  cannot create a permanent online write loop. The hourly baseline discovers newly expired rows;
+  the five-minute watchdog only resumes durable channel debt. Per-channel state records
+  high-watermark deltas, an ingress-minus-delete estimate, and cumulative deletions without a
+  hot-path `COUNT(*)`.
+- The CI shard manifest assigns `deferred_ha_gc_*` watchdog-debt regression coverage to `lib-misc`.
+  `ci_backend_tests.py verify` requires every discovered backend test to have exactly one shard
+  owner, so the continuation-recovery regression cannot silently disappear from the PR matrix.
+- Sampled HA export/sync logs publish indexed `outbox_sequence_span_estimate` and high watermark
+  instead of an exact outbox row count. Sequence holes make the span an estimate, not inventory.

@@ -216,3 +216,16 @@ the 101 primary look like it had a leak whenever billing baseline export repeate
 - Online HA outbox cleanup now uses the application pool and a bounded non-blocking writer slice;
   billing/runtime retention is 14 days, while expired cursors continue through the existing
   `410 -> baseline` recovery path. Admin HA status includes low-cost per-channel ACK/GC health.
+
+## Online Outbox Self-Healing
+
+The fixed 30-second online continuation made bounded cleanup safe but left large expiration debt
+with a low maximum service rate. Productive retention slices now continue after five seconds when
+their slowest active database micro-batch remains below the 50ms target. Slow work, writer contention, and
+lease deferral remain deliberately slower, while a valid-only legacy cursor scan uses a
+five-minute cadence. This keeps online write windows bounded without treating passive
+compatibility inspection as backlog that needs a tight retry loop.
+
+Progress evidence is intentionally sequence- and age-based rather than an exact row count:
+high-watermark deltas, deleted rows, and the ingress-minus-delete estimate provide a bounded
+trend signal without reintroducing hot-path full-table aggregation.
