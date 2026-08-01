@@ -589,6 +589,61 @@ async fn standalone_ha_outbox_gc_deletes_expired_rows_across_channels_in_bounded
 }
 
 #[tokio::test]
+async fn standalone_ha_outbox_gc_reports_batch_timing_without_yield_delay() {
+    let db_path = temp_db_path("ha-outbox-gc-batch-timing");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-batch-timing".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let old_ts = Utc::now().timestamp() - (4 * SECS_PER_DAY);
+    for resource_id in ["timing-1", "timing-2"] {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(resource_id)
+        .bind(old_ts)
+        .execute(&pool)
+        .await
+        .expect("seed expired control event");
+    }
+    pool.close().await;
+
+    let report = proxy
+        .gc_ha_outbox_with_options(HaOutboxGcOptions {
+            batch_size: 1,
+            max_batches: 2,
+            max_runtime_secs: 20,
+            inter_batch_sleep_ms: 100,
+        })
+        .await
+        .expect("run standalone ha outbox gc");
+
+    assert!(report.batches >= 2);
+    assert!(
+        report.active_elapsed_ms.saturating_add(50) <= report.elapsed_ms,
+        "active batches must exclude the configured yield: {report:?}"
+    );
+    assert!(
+        report.max_batch_elapsed_ms.saturating_add(50) <= report.elapsed_ms,
+        "the maximum batch must not be the command wall-clock duration: {report:?}"
+    );
+    assert!(report.max_batch_elapsed_ms <= report.active_elapsed_ms);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn ha_outbox_cursor_validation_query_prefers_resource_created_seq_index() {
     let db_path = temp_db_path("ha-outbox-cursor-query-plan");
     let pool = sqlx::SqlitePool::connect_with(

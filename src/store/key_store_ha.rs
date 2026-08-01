@@ -2,6 +2,16 @@ use std::collections::{HashMap, HashSet};
 
 type HaGcChannelStateRow = (Option<i64>, i64, Option<String>, Option<i64>, i64, i64);
 
+fn record_ha_outbox_gc_batch_timing(
+    active_elapsed_ms: &mut u128,
+    max_batch_elapsed_ms: &mut u128,
+    batch_started: Instant,
+) {
+    let batch_elapsed_ms = batch_started.elapsed().as_millis();
+    *active_elapsed_ms = active_elapsed_ms.saturating_add(batch_elapsed_ms);
+    *max_batch_elapsed_ms = (*max_batch_elapsed_ms).max(batch_elapsed_ms);
+}
+
 impl KeyStore {
     pub(crate) async fn persist_ha_node_state(
         &self,
@@ -2904,6 +2914,8 @@ impl KeyStore {
         let mut deleted_rows = 0_i64;
         let mut batches = 0_i64;
         let mut channels = Vec::new();
+        let mut active_elapsed_ms = 0_u128;
+        let mut max_batch_elapsed_ms = 0_u128;
 
         for channel in [
             HaSyncChannel::Control,
@@ -2925,6 +2937,7 @@ impl KeyStore {
             let mut channel_batches = 0_i64;
 
             while channel_batches < max_batches && Instant::now() < deadline {
+                let batch_started = Instant::now();
                 let deleted_invalid = self
                     .delete_ha_invalid_legacy_events_bounded(channel, batch_size)
                     .await?;
@@ -2933,6 +2946,11 @@ impl KeyStore {
                 channel_batches += 1;
                 if deleted_invalid > 0 {
                     if deleted_invalid < batch_size {
+                        record_ha_outbox_gc_batch_timing(
+                            &mut active_elapsed_ms,
+                            &mut max_batch_elapsed_ms,
+                            batch_started,
+                        );
                         continue;
                     }
                 } else {
@@ -2957,12 +2975,19 @@ impl KeyStore {
                     retention_deleted_rows += deleted_retention;
                     channel_deleted_rows += deleted_retention;
                     if deleted_retention < batch_size {
+                        record_ha_outbox_gc_batch_timing(
+                            &mut active_elapsed_ms,
+                            &mut max_batch_elapsed_ms,
+                            batch_started,
+                        );
                         break;
                     }
                 }
-                if deleted_invalid > 0 && deleted_invalid < batch_size {
-                    break;
-                }
+                record_ha_outbox_gc_batch_timing(
+                    &mut active_elapsed_ms,
+                    &mut max_batch_elapsed_ms,
+                    batch_started,
+                );
                 if options.inter_batch_sleep_ms > 0 {
                     self.backend_time
                         .sleep(Duration::from_millis(options.inter_batch_sleep_ms))
@@ -3002,6 +3027,7 @@ impl KeyStore {
         };
 
         let completed = !channels.iter().any(|channel| channel.has_more);
+        let elapsed_ms = started.elapsed().as_millis();
         Ok(HaOutboxGcReport {
             batch_size,
             max_batches,
@@ -3013,9 +3039,9 @@ impl KeyStore {
             wal_checkpoint_busy: busy,
             wal_checkpoint_log_frames: log_frames,
             wal_checkpoint_checkpointed_frames: checkpointed_frames,
-            active_elapsed_ms: started.elapsed().as_millis(),
-            max_batch_elapsed_ms: started.elapsed().as_millis(),
-            elapsed_ms: started.elapsed().as_millis(),
+            active_elapsed_ms,
+            max_batch_elapsed_ms,
+            elapsed_ms,
             continuation_delay_secs: None,
         })
     }
