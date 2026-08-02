@@ -170,7 +170,11 @@
 
 ## Visual Evidence
 
-- 本节点 Passkey scope 失配状态：[admin-passkey-scope-mismatch.png](./assets/admin-passkey-scope-mismatch.png)
+PR: include
+
+本节点 Passkey scope 失配状态。
+
+![本节点 Passkey scope 失配状态](./assets/admin-passkey-scope-mismatch.png)
 
 - `2026-08-01` 登录页品牌位（ui_demo，mock-only，`trim_only`）：
 
