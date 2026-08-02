@@ -296,6 +296,7 @@ pub struct AdminPasskeyOptions {
     pub enabled: bool,
     pub rp_id: Option<String>,
     pub rp_origin: Option<String>,
+    pub scope: Option<tavily_hikari::AdminPasskeyScope>,
     pub challenge_ttl_secs: i64,
     pub session_max_age_secs: i64,
 }
@@ -307,6 +308,7 @@ impl AdminPasskeyOptions {
             enabled: false,
             rp_id: None,
             rp_origin: None,
+            scope: None,
             challenge_ttl_secs: 300,
             session_max_age_secs: 60 * 60 * 24 * 14,
         }
@@ -314,6 +316,7 @@ impl AdminPasskeyOptions {
 
     fn is_configured(&self) -> bool {
         self.enabled
+            && self.scope.is_some()
             && self
                 .rp_id
                 .as_deref()
@@ -1058,7 +1061,8 @@ async fn resolve_admin_passkey_session(
         return None;
     }
     let token = cookie_value(headers, ADMIN_PASSKEY_COOKIE_NAME)?;
-    match state.proxy.get_active_admin_passkey_session(&token).await {
+    let scope = state.admin_passkey.scope.as_ref()?;
+    match state.proxy.get_active_admin_passkey_session(scope, &token).await {
         Ok(Some(session)) => Some(session),
         _ => None,
     }

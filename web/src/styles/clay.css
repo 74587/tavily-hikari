@@ -1685,9 +1685,11 @@
 
   .system-settings-password-controls {
     display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.68rem 0.8rem;
     align-items: end;
     min-width: 0;
+    container-type: inline-size;
   }
 
   .system-settings-password-controls label {
@@ -1697,13 +1699,21 @@
   .system-settings-password-actions {
     display: flex;
     flex-wrap: wrap;
+    grid-column: 1 / -1;
     gap: 0.55rem;
     align-items: center;
+    justify-content: flex-end;
     min-width: 0;
   }
 
   .system-settings-password-actions .btn {
     white-space: nowrap;
+  }
+
+  @container (max-width: 32rem) {
+    .system-settings-password-controls {
+      grid-template-columns: minmax(0, 1fr);
+    }
   }
 
   .admin-passkey-list {
@@ -1903,16 +1913,6 @@
     margin: 0;
     padding: 0.7rem 1rem;
     border-top: 1px solid hsl(var(--border) / 0.38);
-  }
-
-  @media (min-width: 1181px) {
-    .system-settings-password-controls {
-      grid-template-columns: minmax(12rem, 1fr) minmax(12rem, 1fr) auto;
-    }
-
-    .system-settings-password-actions {
-      flex-wrap: nowrap;
-    }
   }
 
   @media (max-width: 1180px) {

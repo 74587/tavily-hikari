@@ -133,6 +133,30 @@ export FORWARD_AUTH_NICKNAME_HEADER=Remote-Name
 echo -n 'change-me' | cargo run --quiet --bin admin_password_hash
 ```
 
+### HA 下的本节点 Passkey
+
+Passkey 凭据、reset token、WebAuthn challenge 与 Passkey session 都只保存在本节点。每个节点都要
+有稳定的节点标识和 HTTPS 域名：
+
+```bash
+export ADMIN_AUTH_PASSKEY_ENABLED=true
+export NODE_ID=tavily-node-a
+export NODE_PUBLIC_SCHEME=https
+export NODE_PUBLIC_HOST=tavily-node-a.example.com
+```
+
+`ADMIN_PASSKEY_RP_ID` 和 `ADMIN_PASSKEY_RP_ORIGIN` 可以显式覆盖自动推导；未覆盖时，Hikari 优先
+使用 `NODE_PUBLIC_*`，只有缺少节点公网 host 才回退到 `EDGEONE_DOMAIN`。在目标节点本地用相同
+origin 生成 bootstrap URL：
+
+```bash
+tavily-hikari admin passkey reset-url --base-url https://tavily-node-a.example.com
+```
+
+命令会拒绝 origin 与实际 RP origin 不一致的 URL。其他节点或其他 RP scope 的凭据只会临时禁用，不会
+删除；恢复完全相同的节点/RP 配置后会自动恢复。升级时先升级当前 `full_master`，再滚动升级 standby 与
+recovery 节点，并在每个节点各自完成一次本地登记。历史全局 Passkey 记录需要在每个节点重新登记。
+
 ### `DEV_OPEN_ADMIN`
 
 这是开发快捷通道：

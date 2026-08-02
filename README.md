@@ -243,17 +243,24 @@ For production deployments, prefer passkey admin login. It keeps the administrat
 
 ```bash
 export ADMIN_AUTH_PASSKEY_ENABLED=true
-export ADMIN_PASSKEY_RP_ID=tavily.example.com
-export ADMIN_PASSKEY_RP_ORIGIN=https://tavily.example.com
+export NODE_ID=tavily-node-a
+export NODE_PUBLIC_SCHEME=https
+export NODE_PUBLIC_HOST=tavily-node-a.example.com
 ```
 
 After deployment, create a one-time enrollment URL on the server:
 
 ```bash
-tavily-hikari admin passkey reset-url --base-url https://tavily.example.com
+tavily-hikari admin passkey reset-url --base-url https://tavily-node-a.example.com
 ```
 
 Open the printed URL once to register the first admin passkey.
+
+In HA, Passkeys are node-local. Configure a distinct `NODE_ID` and `NODE_PUBLIC_*` origin on every
+node, upgrade the current `full_master` first, then roll the release to standby/recovery nodes.
+Run the reset command on each target node with that node's HTTPS origin and enroll separately.
+`ADMIN_PASSKEY_RP_ID` and `ADMIN_PASSKEY_RP_ORIGIN` remain supported as explicit overrides; the
+command rejects a `--base-url` whose origin does not exactly match the effective RP origin.
 
 ### Legacy ForwardAuth Integration
 

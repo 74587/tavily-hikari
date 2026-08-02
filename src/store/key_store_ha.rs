@@ -2564,6 +2564,9 @@ impl HaBaselineApplySession {
                     .get("resource")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| ProxyError::Other("HA baseline resource is missing".to_string()))?;
+                if ha_resource_retired_for_channel(self.channel, resource) {
+                    return Ok(());
+                }
                 ensure_ha_resource_whitelisted(self.channel, resource)?;
                 let data = value
                     .get("data")
@@ -2677,6 +2680,14 @@ impl HaEventsApplySession {
                     .get("resource")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| ProxyError::Other("HA event resource is missing".to_string()))?;
+                self.high_watermark = event
+                    .get("seq")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(self.high_watermark)
+                    .max(self.high_watermark);
+                if ha_resource_retired_for_channel(self.channel, resource) {
+                    return Ok(());
+                }
                 ensure_ha_resource_whitelisted(self.channel, resource)?;
                 let op = event
                     .get("op")
@@ -2696,11 +2707,6 @@ impl HaEventsApplySession {
                 self.payload_bytes += serde_json::to_vec(&payload)
                     .map(|bytes| bytes.len())
                     .unwrap_or_default();
-                self.high_watermark = event
-                    .get("seq")
-                    .and_then(serde_json::Value::as_i64)
-                    .unwrap_or(self.high_watermark)
-                    .max(self.high_watermark);
                 let merged_counter =
                     if let Some(peer_node_id) = peer_import_node_id {
                         merge_peer_runtime_counter_on_conn(

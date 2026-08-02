@@ -37,13 +37,24 @@ pub async fn serve(
             "admin password settings load failed; using startup configuration"
         ),
     }
+    let admin_passkey_scope = match (&passkey_rp_id, &passkey_rp_origin) {
+        (Some(rp_id), Some(rp_origin)) => Some(
+            tavily_hikari::AdminPasskeyScope::new(&ha_config.node_id, rp_id, rp_origin)
+                .map_err(|err| format!("invalid admin passkey scope: {err}"))?,
+        ),
+        _ => None,
+    };
     let admin_passkey = AdminPasskeyOptions {
         enabled: passkey_auth_enabled,
         rp_id: passkey_rp_id,
         rp_origin: passkey_rp_origin,
+        scope: admin_passkey_scope,
         challenge_ttl_secs: passkey_challenge_ttl_secs.max(60),
         session_max_age_secs: passkey_session_max_age_secs.max(60),
     };
+    if let Some(scope) = admin_passkey.scope.as_ref() {
+        proxy.ensure_admin_passkey_scope(scope).await?;
+    }
     let ha = tavily_hikari::HaRuntime::new(ha_config);
     let startup_ha_status = initialize_ha_startup_state(&proxy, &ha).await;
     if let Err(err) = sync_forward_proxy_runtime_for_status(proxy.clone(), &startup_ha_status).await {
@@ -1632,7 +1643,16 @@ async fn refresh_admin_password_state_after_ha_apply(
         return Ok(());
     }
     let settings = state.proxy.get_admin_password_settings().await?;
+    let login_totp_became_required = !state.builtin_admin.login_totp_required()
+        && settings
+            .as_ref()
+            .is_some_and(|settings| settings.login_totp_required);
     state.builtin_admin.apply_persisted_settings(settings);
+    if login_totp_became_required
+        && let Some(scope) = state.admin_passkey.scope.as_ref()
+    {
+        state.proxy.revoke_all_admin_passkey_sessions(scope).await?;
+    }
     Ok(())
 }
 
@@ -1958,6 +1978,29 @@ mod serve_tests {
         )
         .await
         .expect("proxy created");
+        let passkey_scope = tavily_hikari::AdminPasskeyScope::new(
+            "node-ha-refresh",
+            "admin.example.com",
+            "https://admin.example.com",
+        )
+        .expect("passkey scope");
+        proxy
+            .upsert_admin_passkey_credential(
+                &passkey_scope,
+                "credential-ha-refresh",
+                r#"{\"credential\":1}"#,
+                None,
+            )
+            .await
+            .expect("create passkey credential");
+        let passkey_session = proxy
+            .create_admin_passkey_session(
+                &passkey_scope,
+                Some("credential-ha-refresh"),
+                120,
+            )
+            .await
+            .expect("create passkey session");
         let builtin_admin = BuiltinAdminAuth::new(true, Some("env-password".to_string()), None);
         let state = AppState {
             proxy: proxy.clone(),
@@ -1965,7 +2008,14 @@ mod serve_tests {
             forward_auth: ForwardAuthConfig::new(None, None, None, None),
             forward_auth_enabled: false,
             builtin_admin,
-            admin_passkey: AdminPasskeyOptions::disabled(),
+            admin_passkey: AdminPasskeyOptions {
+                enabled: true,
+                rp_id: Some("admin.example.com".to_string()),
+                rp_origin: Some("https://admin.example.com".to_string()),
+                scope: Some(passkey_scope.clone()),
+                challenge_ttl_secs: 300,
+                session_max_age_secs: 120,
+            },
             linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
             linuxdo_credit: LinuxDoCreditOptions::disabled(),
             ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
@@ -2001,6 +2051,11 @@ mod serve_tests {
         assert!(state.builtin_admin.login_totp_required());
         assert!(!state.builtin_admin.is_admin(&session_headers));
         assert!(state.builtin_admin.login("env-password").is_some());
+        assert!(proxy
+            .get_active_admin_passkey_session(&passkey_scope, &passkey_session.token)
+            .await
+            .expect("read revoked passkey session")
+            .is_none());
 
         proxy
             .disable_admin_password_preserving_login(true, false)
@@ -2045,8 +2100,15 @@ mod serve_tests {
         )
         .await
         .expect("proxy created");
+        let passkey_scope = tavily_hikari::AdminPasskeyScope::new(
+            "node-passkey-actor",
+            "example.com",
+            "https://example.com",
+        )
+        .expect("test passkey scope");
         proxy
             .upsert_admin_passkey_credential(
+                &passkey_scope,
                 "credential-actor-1234567890",
                 r#"{"credential":1}"#,
                 None,
@@ -2054,7 +2116,7 @@ mod serve_tests {
             .await
             .expect("insert passkey credential");
         let session = proxy
-            .create_admin_passkey_session(Some("credential-actor-1234567890"), 120)
+            .create_admin_passkey_session(&passkey_scope, Some("credential-actor-1234567890"), 120)
             .await
             .expect("create passkey session");
         let state = AppState {
@@ -2067,6 +2129,7 @@ mod serve_tests {
                 enabled: true,
                 rp_id: Some("example.com".to_string()),
                 rp_origin: Some("https://example.com".to_string()),
+                scope: Some(passkey_scope),
                 challenge_ttl_secs: 300,
                 session_max_age_secs: 120,
             },
@@ -2106,6 +2169,12 @@ mod serve_tests {
         )
         .await
         .expect("proxy created");
+        let passkey_scope = tavily_hikari::AdminPasskeyScope::new(
+            "node-passkey-standby",
+            "hikari.example.com",
+            "https://hikari.example.com",
+        )
+        .expect("test passkey scope");
         let state = Arc::new(AppState {
             proxy,
             static_dir: None,
@@ -2116,6 +2185,7 @@ mod serve_tests {
                 enabled: true,
                 rp_id: Some("hikari.example.com".to_string()),
                 rp_origin: Some("https://hikari.example.com".to_string()),
+                scope: Some(passkey_scope),
                 challenge_ttl_secs: 300,
                 session_max_age_secs: 60 * 60,
             },

@@ -771,10 +771,14 @@ pub async fn configure_ha_write_mode(database_path: &str, mode: HaMode) -> Resul
 
 pub async fn create_admin_passkey_reset_token_for_database(
     database_path: &str,
+    scope: &AdminPasskeyScope,
     ttl_secs: i64,
 ) -> Result<AdminPasskeyResetTokenRecord, ProxyError> {
     let store = crate::store::KeyStore::new_with_time(database_path, BackendTime::system()).await?;
-    store.create_admin_passkey_reset_token(ttl_secs).await
+    store.ensure_admin_passkey_scope(scope).await?;
+    store
+        .create_admin_passkey_reset_token(scope, ttl_secs)
+        .await
 }
 
 #[derive(Debug, Clone, Serialize)]

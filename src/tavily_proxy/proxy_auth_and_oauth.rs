@@ -16,39 +16,57 @@ impl TavilyProxy {
         self.key_store.validate_access_token(token).await
     }
 
-    pub async fn admin_passkey_enabled(&self) -> Result<bool, ProxyError> {
-        self.key_store.admin_passkey_enabled().await
+    pub async fn admin_passkey_enabled(&self, scope: &AdminPasskeyScope) -> Result<bool, ProxyError> {
+        self.key_store.admin_passkey_enabled(scope).await
+    }
+
+    pub async fn ensure_admin_passkey_scope(
+        &self,
+        scope: &AdminPasskeyScope,
+    ) -> Result<(), ProxyError> {
+        self.key_store.ensure_admin_passkey_scope(scope).await
+    }
+
+    pub async fn admin_passkey_scope_status(
+        &self,
+        scope: &AdminPasskeyScope,
+    ) -> Result<AdminPasskeyScopeStatus, ProxyError> {
+        self.key_store.admin_passkey_scope_status(scope).await
     }
 
     pub async fn create_admin_passkey_reset_token(
         &self,
+        scope: &AdminPasskeyScope,
         ttl_secs: i64,
     ) -> Result<AdminPasskeyResetTokenRecord, ProxyError> {
         self.key_store
-            .create_admin_passkey_reset_token(ttl_secs)
+            .create_admin_passkey_reset_token(scope, ttl_secs)
             .await
     }
 
     pub async fn get_active_admin_passkey_reset_token(
         &self,
+        scope: &AdminPasskeyScope,
         token: &str,
     ) -> Result<Option<AdminPasskeyResetTokenRecord>, ProxyError> {
         self.key_store
-            .get_active_admin_passkey_reset_token(token)
+            .get_active_admin_passkey_reset_token(scope, token)
             .await
     }
 
     pub async fn consume_admin_passkey_reset_token_hash(
         &self,
+        scope: &AdminPasskeyScope,
         token_hash: &str,
     ) -> Result<bool, ProxyError> {
         self.key_store
-            .consume_admin_passkey_reset_token_hash(token_hash)
+            .consume_admin_passkey_reset_token_hash(scope, token_hash)
             .await
     }
 
     pub async fn complete_admin_passkey_reset_registration(
         &self,
+        scope: &AdminPasskeyScope,
         token_hash: &str,
         credential_id: &str,
         passkey_json: &str,
@@ -57,6 +75,7 @@ impl TavilyProxy {
     ) -> Result<bool, ProxyError> {
         self.key_store
             .complete_admin_passkey_reset_registration(
+                scope,
                 token_hash,
                 credential_id,
                 passkey_json,
@@ -88,6 +107,22 @@ impl TavilyProxy {
             .disable_admin_password_preserving_login(
                 external_admin_login_available,
                 runtime_passkey_login_available,
+                None,
+            )
+            .await
+    }
+
+    pub async fn disable_admin_password_preserving_login_for_scope(
+        &self,
+        external_admin_login_available: bool,
+        runtime_passkey_login_available: bool,
+        passkey_scope: Option<&AdminPasskeyScope>,
+    ) -> Result<AdminPasswordSettingsRecord, ProxyError> {
+        self.key_store
+            .disable_admin_password_preserving_login(
+                external_admin_login_available,
+                runtime_passkey_login_available,
+                passkey_scope,
             )
             .await
     }
@@ -96,8 +131,16 @@ impl TavilyProxy {
         &self,
         required: bool,
     ) -> Result<AdminPasswordSettingsRecord, ProxyError> {
+        self.key_store.set_admin_login_totp_required(required, None).await
+    }
+
+    pub async fn set_admin_login_totp_required_for_scope(
+        &self,
+        required: bool,
+        passkey_scope: Option<&AdminPasskeyScope>,
+    ) -> Result<AdminPasswordSettingsRecord, ProxyError> {
         self.key_store
-            .set_admin_login_totp_required(required)
+            .set_admin_login_totp_required(required, passkey_scope)
             .await
     }
 
@@ -111,49 +154,55 @@ impl TavilyProxy {
 
     pub async fn list_active_admin_passkey_credentials(
         &self,
+        scope: &AdminPasskeyScope,
     ) -> Result<Vec<AdminPasskeyCredentialRecord>, ProxyError> {
-        self.key_store.list_active_admin_passkey_credentials().await
+        self.key_store.list_active_admin_passkey_credentials(scope).await
     }
 
     pub async fn upsert_admin_passkey_credential(
         &self,
+        scope: &AdminPasskeyScope,
         credential_id: &str,
         passkey_json: &str,
         label: Option<&str>,
     ) -> Result<(), ProxyError> {
         self.key_store
-            .upsert_admin_passkey_credential(credential_id, passkey_json, label)
+            .upsert_admin_passkey_credential(scope, credential_id, passkey_json, label)
             .await
     }
 
     pub async fn update_admin_passkey_credential_after_auth(
         &self,
+        scope: &AdminPasskeyScope,
         credential_id: &str,
         passkey_json: &str,
     ) -> Result<bool, ProxyError> {
         self.key_store
-            .update_admin_passkey_credential_after_auth(credential_id, passkey_json)
+            .update_admin_passkey_credential_after_auth(scope, credential_id, passkey_json)
             .await
     }
 
     pub async fn update_admin_passkey_credential_label(
         &self,
+        scope: &AdminPasskeyScope,
         credential_id: &str,
         label: Option<&str>,
     ) -> Result<bool, ProxyError> {
         self.key_store
-            .update_admin_passkey_credential_label(credential_id, label)
+            .update_admin_passkey_credential_label(scope, credential_id, label)
             .await
     }
 
     pub async fn revoke_admin_passkey_credential_preserving_login(
         &self,
+        scope: &AdminPasskeyScope,
         credential_id: &str,
         external_admin_login_available: bool,
         runtime_password_available: bool,
     ) -> Result<bool, ProxyError> {
         self.key_store
             .revoke_admin_passkey_credential_preserving_login(
+                scope,
                 credential_id,
                 external_admin_login_available,
                 runtime_password_available,
@@ -163,58 +212,70 @@ impl TavilyProxy {
 
     pub async fn insert_admin_passkey_challenge(
         &self,
+        scope: &AdminPasskeyScope,
         kind: AdminPasskeyChallengeKind,
         reset_token: Option<&str>,
         state_json: &str,
         ttl_secs: i64,
     ) -> Result<AdminPasskeyChallengeRecord, ProxyError> {
         self.key_store
-            .insert_admin_passkey_challenge(kind, reset_token, state_json, ttl_secs)
+            .insert_admin_passkey_challenge(scope, kind, reset_token, state_json, ttl_secs)
             .await
     }
 
     pub async fn consume_admin_passkey_challenge(
         &self,
+        scope: &AdminPasskeyScope,
         id: &str,
         kind: AdminPasskeyChallengeKind,
     ) -> Result<Option<AdminPasskeyChallengeRecord>, ProxyError> {
         self.key_store
-            .consume_admin_passkey_challenge(id, kind)
+            .consume_admin_passkey_challenge(scope, id, kind)
             .await
     }
 
     pub async fn create_admin_passkey_session(
         &self,
+        scope: &AdminPasskeyScope,
         credential_id: Option<&str>,
         ttl_secs: i64,
     ) -> Result<AdminPasskeySessionRecord, ProxyError> {
         self.key_store
-            .create_admin_passkey_session(credential_id, ttl_secs)
+            .create_admin_passkey_session(scope, credential_id, ttl_secs)
             .await
     }
 
     pub async fn get_active_admin_passkey_session(
         &self,
+        scope: &AdminPasskeyScope,
         token: &str,
     ) -> Result<Option<AdminPasskeySessionRecord>, ProxyError> {
-        self.key_store.get_active_admin_passkey_session(token).await
+        self.key_store.get_active_admin_passkey_session(scope, token).await
     }
 
-    pub async fn revoke_admin_passkey_session(&self, token: &str) -> Result<(), ProxyError> {
-        self.key_store.revoke_admin_passkey_session(token).await
+    pub async fn revoke_admin_passkey_session(
+        &self,
+        scope: &AdminPasskeyScope,
+        token: &str,
+    ) -> Result<(), ProxyError> {
+        self.key_store.revoke_admin_passkey_session(scope, token).await
     }
 
     pub async fn revoke_admin_passkey_sessions_for_credential(
         &self,
+        scope: &AdminPasskeyScope,
         credential_id: &str,
     ) -> Result<(), ProxyError> {
         self.key_store
-            .revoke_admin_passkey_sessions_for_credential(credential_id)
+            .revoke_admin_passkey_sessions_for_credential(scope, credential_id)
             .await
     }
 
-    pub async fn revoke_all_admin_passkey_sessions(&self) -> Result<(), ProxyError> {
-        self.key_store.revoke_all_admin_passkey_sessions().await
+    pub async fn revoke_all_admin_passkey_sessions(
+        &self,
+        scope: &AdminPasskeyScope,
+    ) -> Result<(), ProxyError> {
+        self.key_store.revoke_all_admin_passkey_sessions(scope).await
     }
 
     /// Admin: create a new access token with optional note.

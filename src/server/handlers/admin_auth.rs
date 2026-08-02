@@ -1285,11 +1285,17 @@ async fn get_profile(
     let forward_auth_enabled = state.forward_auth_enabled && config.is_enabled();
     let builtin_auth_enabled = state.builtin_admin.is_enabled();
     let admin_login_totp_required = state.builtin_admin.login_totp_required();
-    let passkey_auth_enabled = state.admin_passkey.is_configured()
-        && state.proxy.admin_passkey_enabled().await.unwrap_or_else(|err| {
-            eprintln!("get admin passkey enabled error: {err}");
-            false
-        });
+    let passkey_auth_enabled = match state.admin_passkey.scope.as_ref() {
+        Some(scope) if state.admin_passkey.is_configured() => state
+            .proxy
+            .admin_passkey_enabled(scope)
+            .await
+            .unwrap_or_else(|err| {
+                eprintln!("get admin passkey enabled error: {err}");
+                false
+            }),
+        _ => false,
+    };
 
     if state.dev_open_admin {
         return Ok(Json(ProfileView {
@@ -1524,6 +1530,17 @@ struct AdminPasskeysView {
     enabled: bool,
     credential_count: usize,
     credentials: Vec<AdminPasskeyCredentialView>,
+    scope: Option<AdminPasskeyScopeView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminPasskeyScopeView {
+    node_id: String,
+    rp_id: String,
+    rp_origin: String,
+    inactive_credential_count: i64,
+    legacy_credential_count: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1554,6 +1571,13 @@ struct AdminPasswordSettingsPatchRequest {
 
 fn admin_passkey_unavailable() -> StatusCode {
     StatusCode::NOT_FOUND
+}
+
+fn admin_passkey_scope(state: &AppState) -> Result<&tavily_hikari::AdminPasskeyScope, StatusCode> {
+    if !state.admin_passkey.is_configured() {
+        return Err(admin_passkey_unavailable());
+    }
+    state.admin_passkey.scope.as_ref().ok_or_else(admin_passkey_unavailable)
 }
 
 async fn require_admin_credential_write(state: &AppState) -> Result<(), StatusCode> {
@@ -1598,11 +1622,12 @@ async fn get_admin_passkeys(
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
+    let scope = state.admin_passkey.scope.as_ref();
     let configured = state.admin_passkey.is_configured();
-    let credentials = if configured {
+    let credentials = if let Some(scope) = scope.filter(|_| configured) {
         state
             .proxy
-            .list_active_admin_passkey_credentials()
+            .list_active_admin_passkey_credentials(scope)
             .await
             .map_err(|err| {
                 eprintln!("list admin passkeys error: {err}");
@@ -1621,11 +1646,27 @@ async fn get_admin_passkeys(
             last_used_at: record.last_used_at,
         })
         .collect::<Vec<_>>();
+    let scope_view = if let Some(scope) = scope.filter(|_| configured) {
+        let status = state.proxy.admin_passkey_scope_status(scope).await.map_err(|err| {
+            eprintln!("get admin passkey scope status error: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        Some(AdminPasskeyScopeView {
+            node_id: scope.node_id.clone(),
+            rp_id: scope.rp_id.clone(),
+            rp_origin: scope.rp_origin.clone(),
+            inactive_credential_count: status.inactive_credential_count,
+            legacy_credential_count: status.legacy_credential_count,
+        })
+    } else {
+        None
+    };
     Ok(Json(AdminPasskeysView {
         configured,
         enabled: configured && !credential_views.is_empty(),
         credential_count: credential_views.len(),
         credentials: credential_views,
+        scope: scope_view,
     }))
 }
 
@@ -1638,17 +1679,14 @@ async fn patch_admin_passkey(
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    require_admin_credential_write(state.as_ref()).await?;
-    if !state.admin_passkey.is_configured() {
-        return Err(admin_passkey_unavailable());
-    }
+    let scope = admin_passkey_scope(state.as_ref())?;
     let credential_id = credential_id.trim();
     if credential_id.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
     let updated = state
         .proxy
-        .update_admin_passkey_credential_label(credential_id, payload.label.as_deref())
+        .update_admin_passkey_credential_label(scope, credential_id, payload.label.as_deref())
         .await
         .map_err(|err| {
             eprintln!("update admin passkey label error: {err}");
@@ -1668,10 +1706,7 @@ async fn delete_admin_passkey(
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    require_admin_credential_write(state.as_ref()).await?;
-    if !state.admin_passkey.is_configured() {
-        return Err(admin_passkey_unavailable());
-    }
+    let scope = admin_passkey_scope(state.as_ref())?;
     let credential_id = credential_id.trim();
     if credential_id.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -1679,6 +1714,7 @@ async fn delete_admin_passkey(
     let revoked = state
         .proxy
         .revoke_admin_passkey_credential_preserving_login(
+            scope,
             credential_id,
             external_admin_login_available(state.as_ref()),
             state.builtin_admin.is_enabled(),
@@ -1690,7 +1726,7 @@ async fn delete_admin_passkey(
     }
     state
         .proxy
-        .revoke_admin_passkey_sessions_for_credential(credential_id)
+        .revoke_admin_passkey_sessions_for_credential(scope, credential_id)
         .await
         .map_err(|err| {
             eprintln!("revoke admin passkey sessions for credential error: {err}");
@@ -1714,12 +1750,10 @@ fn credential_id_for_passkey(passkey: &Passkey) -> String {
 async fn post_admin_passkey_authentication_start(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AdminPasskeyAuthenticationStartResponse>, StatusCode> {
-    if !state.admin_passkey.is_configured() {
-        return Err(admin_passkey_unavailable());
-    }
+    let scope = admin_passkey_scope(state.as_ref())?;
     let credentials = state
         .proxy
-        .list_active_admin_passkey_credentials()
+        .list_active_admin_passkey_credentials(scope)
         .await
         .map_err(|err| {
             eprintln!("list admin passkey credentials error: {err}");
@@ -1749,6 +1783,7 @@ async fn post_admin_passkey_authentication_start(
     let challenge = state
         .proxy
         .insert_admin_passkey_challenge(
+            scope,
             tavily_hikari::AdminPasskeyChallengeKind::Authentication,
             None,
             &state_json,
@@ -1770,12 +1805,11 @@ async fn post_admin_passkey_authentication_finish(
     headers: HeaderMap,
     Json(payload): Json<AdminPasskeyAuthenticationFinishRequest>,
 ) -> Result<Response<Body>, StatusCode> {
-    if !state.admin_passkey.is_configured() {
-        return Err(admin_passkey_unavailable());
-    }
+    let scope = admin_passkey_scope(state.as_ref())?;
     let challenge = state
         .proxy
         .consume_admin_passkey_challenge(
+            scope,
             payload.challenge_id.trim(),
             tavily_hikari::AdminPasskeyChallengeKind::Authentication,
         )
@@ -1804,7 +1838,7 @@ async fn post_admin_passkey_authentication_finish(
     let credential_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id_bytes);
     let mut passkey = state
         .proxy
-        .list_active_admin_passkey_credentials()
+        .list_active_admin_passkey_credentials(scope)
         .await
         .map_err(|err| {
             eprintln!("list admin passkey credentials after auth error: {err}");
@@ -1828,7 +1862,7 @@ async fn post_admin_passkey_authentication_finish(
     })?;
     let updated = state
         .proxy
-        .update_admin_passkey_credential_after_auth(&credential_id, &passkey_json)
+        .update_admin_passkey_credential_after_auth(scope, &credential_id, &passkey_json)
         .await
         .map_err(|err| {
             eprintln!("update admin passkey after auth error: {err}");
@@ -1840,6 +1874,7 @@ async fn post_admin_passkey_authentication_finish(
     let session = state
         .proxy
         .create_admin_passkey_session(
+            scope,
             Some(&credential_id),
             state.admin_passkey.session_max_age_secs,
         )
@@ -1868,7 +1903,6 @@ async fn post_admin_passkey_registration_start(
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    require_admin_credential_write(state.as_ref()).await?;
     start_admin_passkey_registration(state, None).await
 }
 
@@ -1876,7 +1910,6 @@ async fn post_admin_passkey_reset_registration_start(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,
 ) -> Result<Json<AdminPasskeyRegistrationStartResponse>, StatusCode> {
-    require_admin_credential_write(state.as_ref()).await?;
     let reset = active_admin_passkey_reset_token(state.as_ref(), &token).await?;
     start_admin_passkey_registration(state, Some(reset.token_hash)).await
 }
@@ -1889,9 +1922,10 @@ async fn active_admin_passkey_reset_token(
     if token.is_empty() {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    let scope = admin_passkey_scope(state)?;
     state
         .proxy
-        .get_active_admin_passkey_reset_token(token)
+        .get_active_admin_passkey_reset_token(scope, token)
         .await
         .map_err(|err| {
             eprintln!("get admin passkey reset token error: {err}");
@@ -1904,12 +1938,10 @@ async fn start_admin_passkey_registration(
     state: Arc<AppState>,
     reset_token_hash: Option<String>,
 ) -> Result<Json<AdminPasskeyRegistrationStartResponse>, StatusCode> {
-    if !state.admin_passkey.is_configured() {
-        return Err(admin_passkey_unavailable());
-    }
+    let scope = admin_passkey_scope(state.as_ref())?;
     let existing = state
         .proxy
-        .list_active_admin_passkey_credentials()
+        .list_active_admin_passkey_credentials(scope)
         .await
         .map_err(|err| {
             eprintln!("list admin passkeys for registration error: {err}");
@@ -1944,6 +1976,7 @@ async fn start_admin_passkey_registration(
     let challenge = state
         .proxy
         .insert_admin_passkey_challenge(
+            scope,
             tavily_hikari::AdminPasskeyChallengeKind::Registration,
             reset_token_hash.as_deref(),
             &state_json,
@@ -1968,7 +2001,6 @@ async fn post_admin_passkey_registration_finish(
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    require_admin_credential_write(state.as_ref()).await?;
     finish_admin_passkey_registration(state, payload, None).await
 }
 
@@ -1977,7 +2009,6 @@ async fn post_admin_passkey_reset_registration_finish(
     Path(token): Path<String>,
     Json(payload): Json<AdminPasskeyRegistrationFinishRequest>,
 ) -> Result<Json<AdminPasskeyRegistrationFinishResponse>, StatusCode> {
-    require_admin_credential_write(state.as_ref()).await?;
     let reset = active_admin_passkey_reset_token(state.as_ref(), &token).await?;
     finish_admin_passkey_registration(state, payload, Some(reset.token_hash)).await
 }
@@ -1987,12 +2018,11 @@ async fn finish_admin_passkey_registration(
     payload: AdminPasskeyRegistrationFinishRequest,
     reset_token_hash: Option<String>,
 ) -> Result<Json<AdminPasskeyRegistrationFinishResponse>, StatusCode> {
-    if !state.admin_passkey.is_configured() {
-        return Err(admin_passkey_unavailable());
-    }
+    let scope = admin_passkey_scope(state.as_ref())?;
     let challenge = state
         .proxy
         .consume_admin_passkey_challenge(
+            scope,
             payload.challenge_id.trim(),
             tavily_hikari::AdminPasskeyChallengeKind::Registration,
         )
@@ -2030,7 +2060,7 @@ async fn finish_admin_passkey_registration(
     let previous_credentials = if reset_token_hash.is_some() {
         state
             .proxy
-            .list_active_admin_passkey_credentials()
+            .list_active_admin_passkey_credentials(scope)
             .await
             .map_err(|err| {
                 eprintln!("list old admin passkeys for reset error: {err}");
@@ -2047,6 +2077,7 @@ async fn finish_admin_passkey_registration(
         let completed = state
             .proxy
             .complete_admin_passkey_reset_registration(
+                scope,
                 token_hash,
                 &credential_id,
                 &passkey_json,
@@ -2067,6 +2098,7 @@ async fn finish_admin_passkey_registration(
     state
         .proxy
         .upsert_admin_passkey_credential(
+            scope,
             &credential_id,
             &passkey_json,
             payload.label.as_deref(),
@@ -2079,7 +2111,7 @@ async fn finish_admin_passkey_registration(
     for record in previous_credentials {
         state
             .proxy
-            .revoke_admin_passkey_credential_preserving_login(&record.credential_id, true, true)
+            .revoke_admin_passkey_credential_preserving_login(scope, &record.credential_id, true, true)
             .await
             .map_err(|err| {
                 eprintln!("revoke old admin passkey after reset error: {err}");
@@ -2087,7 +2119,7 @@ async fn finish_admin_passkey_registration(
             })?;
         state
             .proxy
-            .revoke_admin_passkey_sessions_for_credential(&record.credential_id)
+            .revoke_admin_passkey_sessions_for_credential(scope, &record.credential_id)
             .await
             .map_err(|err| {
                 eprintln!("revoke old admin passkey sessions after reset error: {err}");
@@ -2224,7 +2256,10 @@ async fn patch_admin_password(
     }
     let settings = state
         .proxy
-        .set_admin_login_totp_required(payload.login_totp_required)
+        .set_admin_login_totp_required_for_scope(
+            payload.login_totp_required,
+            state.admin_passkey.scope.as_ref(),
+        )
         .await
         .map_err(|err| {
             eprintln!("set admin login totp requirement error: {err}");
@@ -2249,9 +2284,10 @@ async fn delete_admin_password(
     require_admin_credential_write(state.as_ref()).await?;
     let settings = state
         .proxy
-        .disable_admin_password_preserving_login(
+        .disable_admin_password_preserving_login_for_scope(
             external_admin_login_available(state.as_ref()),
             state.admin_passkey.is_configured(),
+            state.admin_passkey.scope.as_ref(),
         )
         .await
         .map_err(|err| map_admin_login_method_error("disable admin password error", err))?;
@@ -2297,10 +2333,12 @@ async fn post_admin_logout(
         return Err(StatusCode::NOT_FOUND);
     }
     state.builtin_admin.forget_session(&headers);
-    if let Some(token) = cookie_value(&headers, ADMIN_PASSKEY_COOKIE_NAME) {
+    if let Some(token) = cookie_value(&headers, ADMIN_PASSKEY_COOKIE_NAME)
+        && let Some(scope) = state.admin_passkey.scope.as_ref()
+    {
         state
             .proxy
-            .revoke_admin_passkey_session(&token)
+            .revoke_admin_passkey_session(scope, &token)
             .await
             .map_err(|err| {
                 eprintln!("revoke admin passkey session error: {err}");
@@ -2326,6 +2364,10 @@ mod admin_auth_last_login_method_tests {
             enabled: true,
             rp_id: Some("example.com".to_string()),
             rp_origin: Some("https://example.com".to_string()),
+            scope: Some(
+                tavily_hikari::AdminPasskeyScope::new("node-test", "example.com", "https://example.com")
+                    .expect("test scope"),
+            ),
             challenge_ttl_secs: 300,
             session_max_age_secs: 60 * 60 * 24 * 14,
         }
@@ -2430,12 +2472,21 @@ mod admin_auth_last_login_method_tests {
         .await;
         state
             .proxy
-            .upsert_admin_passkey_credential("credential-1", r#"{"credential":1}"#, None)
+            .upsert_admin_passkey_credential(
+                state.admin_passkey.scope.as_ref().expect("passkey scope"),
+                "credential-1",
+                r#"{"credential":1}"#,
+                None,
+            )
             .await
             .expect("insert passkey credential");
         let session = state
             .proxy
-            .create_admin_passkey_session(Some("credential-1"), 120)
+            .create_admin_passkey_session(
+                state.admin_passkey.scope.as_ref().expect("passkey scope"),
+                Some("credential-1"),
+                120,
+            )
             .await
             .expect("create passkey session");
         let mut headers = HeaderMap::new();
@@ -2455,7 +2506,7 @@ mod admin_auth_last_login_method_tests {
         assert!(matches!(result, Err(StatusCode::CONFLICT)));
         let credentials = state
             .proxy
-            .list_active_admin_passkey_credentials()
+            .list_active_admin_passkey_credentials(state.admin_passkey.scope.as_ref().expect("passkey scope"))
             .await
             .expect("list credentials");
         assert_eq!(credentials.len(), 1);
@@ -2512,12 +2563,21 @@ mod admin_auth_last_login_method_tests {
             .expect("seed TOTP secret");
         state
             .proxy
-            .upsert_admin_passkey_credential("credential-1", r#"{"credential":1}"#, None)
+            .upsert_admin_passkey_credential(
+                state.admin_passkey.scope.as_ref().expect("passkey scope"),
+                "credential-1",
+                r#"{"credential":1}"#,
+                None,
+            )
             .await
             .expect("insert passkey credential");
         let passkey_session = state
             .proxy
-            .create_admin_passkey_session(Some("credential-1"), 120)
+            .create_admin_passkey_session(
+                state.admin_passkey.scope.as_ref().expect("passkey scope"),
+                Some("credential-1"),
+                120,
+            )
             .await
             .expect("create passkey session");
         let login = post_admin_login(
@@ -2547,7 +2607,10 @@ mod admin_auth_last_login_method_tests {
         assert!(
             state
                 .proxy
-                .get_active_admin_passkey_session(&passkey_session.token)
+                .get_active_admin_passkey_session(
+                    state.admin_passkey.scope.as_ref().expect("passkey scope"),
+                    &passkey_session.token,
+                )
                 .await
                 .expect("lookup passkey session")
                 .is_none()

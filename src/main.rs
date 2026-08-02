@@ -35,8 +35,9 @@ use argon2::password_hash::PasswordHash;
 use clap::{Parser, Subcommand};
 use dotenvy::dotenv;
 use tavily_hikari::{
-    DEFAULT_UPSTREAM, HaConfig, HaMode, LOW_QUOTA_DEPLETION_THRESHOLD_DEFAULT, RuntimeLogFormat,
-    TavilyProxy, TavilyProxyOptions, create_admin_passkey_reset_token_for_database,
+    AdminPasskeyScope, DEFAULT_UPSTREAM, HaConfig, HaMode, LOW_QUOTA_DEPLETION_THRESHOLD_DEFAULT,
+    RuntimeLogFormat, TavilyProxy, TavilyProxyOptions,
+    create_admin_passkey_reset_token_for_database,
 };
 use tracing::{info, warn};
 
@@ -745,19 +746,38 @@ async fn print_admin_passkey_reset_url(
     cli: &Cli,
     command: &AdminPasskeyResetUrlCommand,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let scope = admin_passkey_scope_for_cli(cli)?;
+    let base_url = url::Url::parse(command.base_url.trim())?;
+    if base_url.origin().ascii_serialization() != scope.rp_origin
+        || base_url.path() != "/"
+        || base_url.query().is_some()
+        || base_url.fragment().is_some()
+    {
+        return Err(
+            "--base-url origin must exactly match the effective admin passkey RP origin".into(),
+        );
+    }
     let token =
-        create_admin_passkey_reset_token_for_database(&cli.db_path, command.ttl_secs).await?;
+        create_admin_passkey_reset_token_for_database(&cli.db_path, &scope, command.ttl_secs)
+            .await?;
     let raw_token = token
         .token
         .as_deref()
         .ok_or("admin passkey reset token was not returned")?;
-    let base_url = command.base_url.trim().trim_end_matches('/');
-    if base_url.is_empty() {
-        return Err("--base-url must not be empty".into());
-    }
     let encoded = urlencoding::encode(raw_token);
-    std::println!("{base_url}/login?adminPasskeyResetToken={encoded}");
+    std::println!("{}/login?adminPasskeyResetToken={encoded}", scope.rp_origin);
     Ok(())
+}
+
+fn admin_passkey_scope_for_cli(cli: &Cli) -> Result<AdminPasskeyScope, Box<dyn std::error::Error>> {
+    let rp_id = trim_optional(cli.admin_passkey_rp_id.clone())
+        .or_else(|| infer_admin_passkey_rp_id(cli))
+        .ok_or("admin passkey RP ID is not configured")?;
+    let rp_origin = trim_optional(cli.admin_passkey_rp_origin.clone())
+        .or_else(|| infer_admin_passkey_rp_origin(cli))
+        .ok_or("admin passkey RP origin is not configured")?;
+    AdminPasskeyScope::new(&cli.node_id, &rp_id, &rp_origin)
+        .map_err(|err| format!("invalid admin passkey scope: {err}").into())
 }
 
 fn trim_optional(value: Option<String>) -> Option<String> {
@@ -804,11 +824,11 @@ fn preferred_admin_passkey_rp_host(
     edgeone_domain: Option<String>,
     node_public_host: Option<String>,
 ) -> Option<(String, AdminPasskeyRpHostSource)> {
-    trim_optional(edgeone_domain)
-        .map(|host| (host, AdminPasskeyRpHostSource::EdgeOneDomain))
+    trim_optional(node_public_host)
+        .map(|host| (host, AdminPasskeyRpHostSource::NodePublicHost))
         .or_else(|| {
-            trim_optional(node_public_host)
-                .map(|host| (host, AdminPasskeyRpHostSource::NodePublicHost))
+            trim_optional(edgeone_domain)
+                .map(|host| (host, AdminPasskeyRpHostSource::EdgeOneDomain))
         })
 }
 
@@ -876,15 +896,15 @@ mod main_tests {
     }
 
     #[test]
-    fn passkey_rp_host_prefers_browser_facing_edgeone_domain() {
+    fn passkey_rp_host_prefers_node_public_host() {
         assert_eq!(
             preferred_admin_passkey_rp_host(
                 Some(" hikari.example.com ".to_string()),
                 Some("origin.internal".to_string()),
             ),
             Some((
-                "hikari.example.com".to_string(),
-                AdminPasskeyRpHostSource::EdgeOneDomain,
+                "origin.internal".to_string(),
+                AdminPasskeyRpHostSource::NodePublicHost,
             )),
         );
         assert_eq!(

@@ -3,11 +3,13 @@ use crate::*;
 use axum::http::{HeaderMap, HeaderName};
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
 };
 use tracing::{error, info};
+use url::Url;
 
 pub const DEFAULT_TRUSTED_PROXY_CIDRS: &[&str] = &["127.0.0.0/8", "::1/128"];
 
@@ -1581,6 +1583,64 @@ pub(crate) fn random_string(alphabet: &[u8], len: usize) -> String {
         s.push(alphabet[idx] as char);
     }
     s
+}
+
+pub const LEGACY_ADMIN_PASSKEY_SCOPE_ID: &str = "legacy";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminPasskeyScope {
+    pub id: String,
+    pub node_id: String,
+    pub rp_id: String,
+    pub rp_origin: String,
+}
+
+impl AdminPasskeyScope {
+    pub fn new(node_id: &str, rp_id: &str, rp_origin: &str) -> Result<Self, String> {
+        let node_id = node_id.trim();
+        let rp_id = rp_id.trim().to_ascii_lowercase();
+        let mut origin = Url::parse(rp_origin.trim())
+            .map_err(|err| format!("invalid admin passkey RP origin: {err}"))?;
+        if node_id.is_empty()
+            || rp_id.is_empty()
+            || origin.host_str().is_none()
+            || !matches!(origin.scheme(), "http" | "https")
+        {
+            return Err("admin passkey scope requires node ID, RP ID, and RP origin".to_string());
+        }
+        if origin.path() != "/" || origin.query().is_some() || origin.fragment().is_some() {
+            return Err(
+                "admin passkey RP origin must not contain a path, query, or fragment".to_string(),
+            );
+        }
+        origin.set_path("");
+        let rp_origin = origin.origin().ascii_serialization();
+        if rp_origin == "null" {
+            return Err("admin passkey RP origin must be an HTTP(S) origin".to_string());
+        }
+
+        let scope_material = format!("{node_id}\0{rp_id}\0{rp_origin}");
+        let digest = Sha256::digest(scope_material.as_bytes());
+        let id = format!(
+            "v1:{}",
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        Ok(Self {
+            id,
+            node_id: node_id.to_string(),
+            rp_id,
+            rp_origin,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminPasskeyScopeStatus {
+    pub inactive_credential_count: i64,
+    pub legacy_credential_count: i64,
 }
 
 #[derive(Debug, Clone)]
