@@ -178,8 +178,6 @@ PR: include
 
 - `2026-08-01` 登录页品牌位（ui_demo，mock-only，`trim_only`）：
 
-  PR: none
-
   绝对定位品牌区显式保持 `260px` 可用宽度，桌面端显示完整 lockup；窄容器仍由组件切换到紧凑版本。
 
   ![登录页桌面暗色完整 lockup](./assets/admin-login-brand-lockup-desktop-dark.png)
