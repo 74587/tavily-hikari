@@ -62,6 +62,9 @@
 - 无 Research 在窗口结束 10 分钟后结算；有 Research 在全部终态后 10 分钟结算，最长等待 24 小时后 degraded 结算。
 - reconciliation 在每轮结算前主动轮询已关闭窗口中未终态的 Research；轮询最多 20 条、每个 Key 最多 4 条，并优先补足当天尚无标准成功账期的账号覆盖。
 - `429` 只对 `period_reconciliation` scope 中的对应 Key 建立持久化冷却，使用 `Retry-After` 或 `5/10/20/30` 分钟退避；不得批量把同 Key 的其他窗口写为 rate-limited，也不得影响正常 API/MCP 流量。
+- 候选观测必须使用有界索引页：`queueEstimate` 可为空且最多统计 64 个候选，`hasEligible` 与最老候选年龄必须单独表达，首次观测前 coverage 为 `unknown`，不得以零伪装未观测状态。历史 degraded 状态必须由独立的索引化 `EXISTS` 探测保留，不能用当天计数替代。
+- 连续三轮存在候选、未产生远端尝试且本地预算耗尽时，持久化全局本地退避 `2/5/10/30` 分钟，并以更晚的 `Retry-After` 为准；退避期间只保留一个 delayed representative job，真实远端尝试或成功结算后立即复位。
+- 20 秒单轮总预算内，最迟只允许在第 11 秒前启动新的 8 秒远端请求，必须为本地收尾与持久化留出余量。
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）
@@ -94,6 +97,10 @@
   representative job。
 - 成功结算或压力比例恢复后清零全局压力状态。逐 key 429 为采样 DEBUG，进入、升级和恢复全局
   退避才产生状态跃迁日志。
+- 管理员状态同时返回 `reconciliationObservation` 与 `reconciliationLocalBackoff`；未观测时
+  coverage 为 `unknown`，`queueEstimate=null`，页面显示“未知”而不是“0”。
+- 历史 degraded 相位由独立索引化 `EXISTS` 决定；管理员 `degradedSettlements` 为最多 64 条的
+  有界观测，超过时以 `degradedSettlementsCapped=true` 和 `64+` 明示，不伪装成精确总数。
 
 - 请求入口固定 period code；实际上游后记录所用 token、key、匿名 project id、业务 credits 与 Research 终态。
 - 每个 token/period 汇总实际使用过的 key；以该匿名 project id 调用每把 key 的 `/usage`，只采用 `key.usage` 并跨 key 求和。
@@ -183,14 +190,21 @@
 ## Visual Evidence
 
 PR: include
+![Reconciliation unknown observation](./assets/current/reconciliation-observation-unknown.png)
 
-![Reconciliation budget exhausted state](./assets/reconciliation-budget-exhausted.png)
-
-- source_type: `storybook_docs`
-- docs_entry_or_title: `Admin/Modules/SystemStatusModule / Docs`
-- scenario: reconciliation budget exhausted
-- evidence_note: The current mock-only system status surface shows the bounded 20-second round,
-  attempted/settled/429 aggregate, and explicit exhausted budget state without per-key warning noise.
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/UnknownObservation`
+- scenario: `d88925bb` unknown reconciliation observation
+- requested_viewport: `desktop default`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `browser-viewport`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Captured from `d88925bb`. The state presents a nullable settlement queue as
+  `unconfigured` and candidate coverage as `unknown`; it never fabricates zero from a missing
+  observation.
+- submission_gate: `approved`
 
 ## Related PRs
 

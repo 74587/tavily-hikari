@@ -84,6 +84,100 @@ fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {
 
 static DB_MAINTENANCE_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 static ONLINE_HA_GC_LEASE: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+const FOREGROUND_ACTIVITY_BUCKETS: usize = 10;
+const FOREGROUND_ACTIVITY_BUCKET_MS: u64 = 100;
+
+struct ForegroundActivityMeter {
+    buckets: [AtomicU64; FOREGROUND_ACTIVITY_BUCKETS],
+    started_slot: u64,
+    last_high_pressure_slot: AtomicU64,
+}
+
+impl ForegroundActivityMeter {
+    fn new() -> Self {
+        Self {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            started_slot: foreground_activity_slot(),
+            last_high_pressure_slot: AtomicU64::new(0),
+        }
+    }
+
+    const COUNT_BITS: u32 = 16;
+    const COUNT_MASK: u64 = (1 << Self::COUNT_BITS) - 1;
+
+    fn record_at(&self, slot: u64) {
+        let bucket = &self.buckets[(slot as usize) % FOREGROUND_ACTIVITY_BUCKETS];
+        loop {
+            let current = bucket.load(AtomicOrdering::Acquire);
+            let epoch = current >> Self::COUNT_BITS;
+            let count = current & Self::COUNT_MASK;
+            let next_count = if epoch == slot { count.saturating_add(1).min(Self::COUNT_MASK) } else { 1 };
+            let next = (slot << Self::COUNT_BITS) | next_count;
+            if bucket
+                .compare_exchange(current, next, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+                .is_ok()
+            {
+                if self.rps_at(slot) > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+                    self.last_high_pressure_slot.fetch_max(slot, AtomicOrdering::AcqRel);
+                }
+                return;
+            }
+        }
+    }
+
+    fn rps_at(&self, current_slot: u64) -> i64 {
+        self.buckets
+            .iter()
+            .filter_map(|bucket| {
+                let value = bucket.load(AtomicOrdering::Acquire);
+                let epoch = value >> Self::COUNT_BITS;
+                (current_slot >= epoch && current_slot.saturating_sub(epoch) < FOREGROUND_ACTIVITY_BUCKETS as u64)
+                    .then_some(value & Self::COUNT_MASK)
+            })
+            .sum::<u64>()
+            .min(i64::MAX as u64) as i64
+    }
+
+    fn low_pressure_since_floor_at(&self, current_slot: u64) -> i64 {
+        let floor_slot = self
+            .started_slot
+            .max(self.last_high_pressure_slot.load(AtomicOrdering::Acquire))
+            .min(current_slot);
+        floor_slot
+            .saturating_mul(FOREGROUND_ACTIVITY_BUCKET_MS)
+            .saturating_div(1_000)
+            .min(i64::MAX as u64) as i64
+    }
+}
+
+static FOREGROUND_ACTIVITY: OnceLock<ForegroundActivityMeter> = OnceLock::new();
+
+fn foreground_activity_meter() -> &'static ForegroundActivityMeter {
+    FOREGROUND_ACTIVITY.get_or_init(ForegroundActivityMeter::new)
+}
+
+fn foreground_activity_slot() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .saturating_div(FOREGROUND_ACTIVITY_BUCKET_MS as u128) as u64
+}
+
+pub(crate) fn record_foreground_activity() {
+    let slot = foreground_activity_slot();
+    foreground_activity_meter().record_at(slot);
+}
+
+pub(crate) fn foreground_activity_rps() -> i64 {
+    let current_slot = foreground_activity_slot();
+    foreground_activity_meter().rps_at(current_slot)
+}
+
+pub(crate) fn foreground_activity_low_pressure_since_floor() -> i64 {
+    let current_slot = foreground_activity_slot();
+    foreground_activity_meter().low_pressure_since_floor_at(current_slot)
+}
 static DB_JOB_EXECUTION_GATES: OnceLock<std::sync::Mutex<HashMap<usize, std::sync::Weak<Mutex<()>>>>> =
     OnceLock::new();
 static MAINTENANCE_WORKER_WAKES: OnceLock<
@@ -187,6 +281,7 @@ async fn db_maintenance_http_gate(
         return next.run(req).await;
     }
 
+    record_foreground_activity();
     let _guard = acquire_db_maintenance_read_gate().await;
     next.run(req).await
 }
@@ -201,7 +296,10 @@ fn db_maintenance_gated_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod db_maintenance_gate_tests {
-    use super::db_maintenance_gated_path;
+    use super::{
+        AtomicOrdering, FOREGROUND_ACTIVITY_BUCKETS, ForegroundActivityMeter,
+        db_maintenance_gated_path,
+    };
 
     #[test]
     fn maintenance_gate_only_covers_db_backed_routes() {
@@ -223,6 +321,30 @@ mod db_maintenance_gate_tests {
         let lease = super::try_acquire_online_ha_gc_lease().expect("GC lease available");
         assert!(super::try_acquire_online_ha_gc_lease().is_none());
         drop(lease);
+    }
+
+    #[test]
+    fn foreground_activity_slot_rollover_keeps_concurrent_arrivals() {
+        let meter = ForegroundActivityMeter::new();
+        let slot = 42;
+        meter.record_at(slot);
+        for _ in 0..3 {
+            meter.record_at(slot + FOREGROUND_ACTIVITY_BUCKETS as u64);
+        }
+
+        assert_eq!(meter.rps_at(slot + FOREGROUND_ACTIVITY_BUCKETS as u64), 3);
+    }
+
+    #[test]
+    fn foreground_activity_burst_resets_the_low_pressure_floor() {
+        let meter = ForegroundActivityMeter::new();
+        let slot = meter.started_slot.saturating_add(1);
+        for _ in 0..=tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+            meter.record_at(slot);
+        }
+
+        assert_eq!(meter.last_high_pressure_slot.load(AtomicOrdering::Acquire), slot);
+        assert_eq!(meter.low_pressure_since_floor_at(slot + 1), (slot / 10) as i64);
     }
 }
 

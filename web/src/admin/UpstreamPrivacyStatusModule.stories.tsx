@@ -43,6 +43,7 @@ const pendingStatus: UpstreamPrivacyStatus = {
   pendingResearch: 1,
   queuedSettlements: 2,
   degradedSettlements: 0,
+  degradedSettlementsCapped: false,
   lastReconciliationRunAt: 1_783_958_250,
   lastShadowAdjustmentAt: 1_783_958_100,
   lastReconciliationEnqueueErrorAt: 1_783_957_900,
@@ -51,6 +52,19 @@ const pendingStatus: UpstreamPrivacyStatus = {
   reconciliationPressureStreak: 0,
   reconciliationBackoffLevel: 0,
   reconciliationBackoffUntil: null,
+  reconciliationObservation: {
+    observedAt: 1_783_958_320,
+    coverage: 'bounded',
+    queueEstimate: null,
+    hasEligible: true,
+    oldestCandidateAgeSecs: 3_600,
+  },
+  reconciliationLocalBackoff: {
+    pressureStreak: 0,
+    level: 0,
+    availableAt: null,
+    lastRecoveredAt: null,
+  },
   retryBuckets: {
     upstream429: 3,
     localUsageRateLimit: 1,
@@ -305,6 +319,34 @@ export const GlobalBackoff: Story = {
       reconciliationPressureStreak: 3,
       reconciliationBackoffLevel: 1,
       reconciliationBackoffUntil: 1_783_959_120,
+      reconciliationLocalBackoff: {
+        pressureStreak: 3,
+        level: 1,
+        availableAt: 1_783_959_120,
+        lastRecoveredAt: null,
+      },
+    },
+  },
+}
+
+export const UnknownObservation: Story = {
+  args: {
+    status: {
+      ...activeStatus,
+      queuedSettlements: null,
+      reconciliationObservation: {
+        observedAt: null,
+        coverage: 'unknown',
+        queueEstimate: null,
+        hasEligible: false,
+        oldestCandidateAgeSecs: null,
+      },
+      reconciliationLocalBackoff: {
+        pressureStreak: 0,
+        level: 0,
+        availableAt: null,
+        lastRecoveredAt: null,
+      },
     },
   },
 }

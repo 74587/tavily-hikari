@@ -49,6 +49,23 @@ fn online_ha_gc_adapts_only_when_one_micro_batch_exceeds_its_budget() {
     );
 }
 
+#[test]
+fn online_ha_gc_slow_recovery_yields_before_the_one_second_fast_path() {
+    assert_eq!(
+        ha_outbox_gc_continuation_delay_secs_for_pressure(
+            true,
+            HA_OUTBOX_GC_ACTIVE_BUDGET_MS + 1,
+            true,
+            0,
+        ),
+        Some(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
+    );
+    assert_eq!(
+        ha_outbox_gc_continuation_delay_secs_for_pressure(true, 1, true, 0),
+        Some(HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS)
+    );
+}
+
 #[tokio::test]
 async fn ha_outbox_gc_watchdog_only_reports_persisted_channel_debt() {
     let db_path = temp_db_path("ha-outbox-gc-watchdog-debt");
@@ -90,6 +107,133 @@ async fn ha_outbox_gc_watchdog_only_reports_persisted_channel_debt() {
     );
 
     pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_gc_report_exposes_recovery_debt_and_slo_state() {
+    let db_path = temp_db_path("ha-outbox-gc-recovery-state");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-recovery-state".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let report = proxy.gc_ha_outbox_online().await.expect("online GC report");
+    let value = serde_json::to_value(report.channels.first().expect("channel report"))
+        .expect("serialize channel report");
+    assert!(
+        value.get("debtMode").is_some(),
+        "GC debt mode is diagnostic state"
+    );
+    assert!(
+        value.get("oldestDeletableAgeSecs").is_some(),
+        "GC must expose the age of the oldest deletable event"
+    );
+    assert!(
+        value.get("deletedRowsPerMinute").is_some(),
+        "GC must expose an observed deletion rate"
+    );
+    assert!(
+        value.get("sloState").is_some(),
+        "GC must expose its SLO state"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_enters_one_second_recovery_after_low_pressure_window() {
+    let db_path = temp_db_path("ha-outbox-gc-low-pressure-recovery");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-low-pressure-recovery".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let now = Utc::now().timestamp();
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    for index in 0..1_250 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("low-pressure-recovery-{index}"))
+        .bind(now - (15 * SECS_PER_DAY))
+        .execute(&pool)
+        .await
+        .expect("insert expired control event");
+    }
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET low_pressure_since = ?, pending_channel_mask = 1 WHERE id = 'local'",
+    )
+    .bind(now - HA_OUTBOX_GC_LOW_PRESSURE_WINDOW_SECS)
+    .execute(&pool)
+    .await
+    .expect("seed low-pressure window");
+    pool.close().await;
+
+    let report = proxy
+        .gc_ha_outbox_online_with_foreground_rps(0)
+        .await
+        .expect("run low-pressure recovery slice");
+    let channel = report.channels.first().expect("control channel report");
+    assert_eq!(channel.debt_mode, "recovering");
+    assert!(channel.recovery_deadline_at.is_some());
+    assert_eq!(channel.slo_state, "breached");
+    assert_eq!(channel.slo_state_transition.as_deref(), Some("breached"));
+    assert_eq!(report.continuation_delay_secs, Some(1));
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_burst_between_slices_resets_low_pressure_tenure() {
+    let db_path = temp_db_path("ha-outbox-gc-low-pressure-burst");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-low-pressure-burst".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let now = Utc::now().timestamp();
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET low_pressure_since = ?, pending_channel_mask = 1 WHERE id = 'local'",
+    )
+    .bind(now - HA_OUTBOX_GC_LOW_PRESSURE_WINDOW_SECS)
+    .execute(&pool)
+    .await
+    .expect("seed stale low-pressure window");
+    pool.close().await;
+
+    let report = proxy
+        .gc_ha_outbox_online_with_foreground_pressure(0, now)
+        .await
+        .expect("run post-burst GC slice");
+    let channel = report.channels.first().expect("control channel report");
+    assert_ne!(channel.debt_mode, "recovering");
+    assert_ne!(report.continuation_delay_secs, Some(1));
+
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -256,9 +400,13 @@ async fn online_ha_gc_uses_a_short_continuation_while_a_large_debt_is_draining()
     assert_eq!(report.channels[0].channel, HaSyncChannel::Control);
     assert_eq!(report.deleted_rows, 1_000);
     assert!(report.has_more);
-    assert_eq!(
-        report.continuation_delay_secs,
-        Some(HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS)
+    assert!(
+        matches!(
+            report.continuation_delay_secs,
+            Some(HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS)
+                | Some(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
+        ),
+        "a productive slice must continue quickly unless an individual SQL batch exceeded its budget"
     );
 
     let (last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark):
@@ -268,9 +416,11 @@ async fn online_ha_gc_uses_a_short_continuation_while_a_large_debt_is_draining()
     .fetch_one(&pool)
     .await
     .expect("read GC continuation state");
-    assert!(
-        next_retry_at.saturating_sub(last_attempt_at) <= 5,
-        "a fast, productive slice must continue quickly instead of waiting 30 seconds"
+    assert_eq!(
+        next_retry_at.saturating_sub(last_attempt_at),
+        report
+            .continuation_delay_secs
+            .expect("continuation is scheduled")
     );
     assert_eq!(total_deleted_rows, 1_000);
     assert_eq!(last_high_watermark, 1_250);
@@ -463,7 +613,10 @@ async fn online_ha_gc_scans_legacy_rows_by_persisted_sequence_cursor() {
     .await
     .expect("read legacy cursor");
     assert_eq!(remaining_resources, vec!["users"]);
-    assert_eq!(cursor, 0);
+    assert_eq!(
+        cursor, 3,
+        "legacy cursor remains at the scanned high-water mark"
+    );
     pool.close().await;
 
     let _ = std::fs::remove_file(&db_path);

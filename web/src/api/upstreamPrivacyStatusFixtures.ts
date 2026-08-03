@@ -95,6 +95,7 @@ function createUpstreamPrivacyStatus(diagnostics: ActivityDiagnostics): Upstream
     pendingResearch: 1,
     queuedSettlements: 2,
     degradedSettlements: 0,
+    degradedSettlementsCapped: false,
     lastReconciliationRunAt: 1_783_958_250,
     lastShadowAdjustmentAt: 1_783_958_100,
     lastReconciliationEnqueueErrorAt: 1_783_957_900,
@@ -105,6 +106,19 @@ function createUpstreamPrivacyStatus(diagnostics: ActivityDiagnostics): Upstream
     reconciliationLastSettled: 0,
     reconciliationLastUpstream429: 16,
     reconciliationLastBudgetExhausted: true,
+    reconciliationObservation: {
+      observedAt: 1_783_958_320,
+      coverage: 'bounded',
+      queueEstimate: null,
+      hasEligible: true,
+      oldestCandidateAgeSecs: 3_600,
+    },
+    reconciliationLocalBackoff: {
+      pressureStreak: 0,
+      level: 0,
+      availableAt: null,
+      lastRecoveredAt: null,
+    },
     ...diagnostics,
     recentAdjustments: [
       {

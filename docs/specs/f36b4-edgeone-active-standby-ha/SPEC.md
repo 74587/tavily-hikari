@@ -133,10 +133,13 @@ Tavily Hikari 的高可用方案采用核心业务双活 + 控制面单写，而
 
 The administrator-only peer detail exposes `gcState`, `oldestAgeSecs`, `lastProgressAt`,
 `lastDeferReason`, `nextRetryAt`, and `batchSize` beside the existing ACK watermark fields for
-control, billing, and runtime. The public `/api/ha/status` response remains unchanged.
+control, billing, and runtime. It also exposes `gcDebtMode`, `gcObservedAt`,
+`gcDeletedRowsPerMinute`, `gcRecoveryDeadlineAt`, `gcSloState`, and `gcForegroundRps`. The public
+`/api/ha/status` response remains unchanged.
 
 Online GC persists per-channel attempt and progress state. Normal slices are DEBUG-level events;
-stalled, deferred, and recovered states are logged only on transitions. A failed continuation
+stalled, deferred, SLO-breached, and recovered states are logged only on persisted state
+transitions. A failed continuation
 write does not start an unbounded retry task: the stale-job reaper owns eventual recovery.
 
 Online retention debt is self-healing through a persisted per-channel controller. It keeps one
@@ -159,6 +162,11 @@ Sampled HA export and sync diagnostics use `outbox_sequence_span_estimate` plus
 `outbox_high_watermark`, never an exact `outbox_row_count`. The span is an upper bound when
 sequence holes exist and must not be presented as inventory.
 
+When the foreground request meter stays at or below `5` requests per second for 30 minutes, the
+admin detail marks the channel as recovering and shows the recovery deadline and observed deletion
+rate. A request burst, SQLite busy result, or slow micro-batch changes the debt mode to deferred and
+the next retry to 30 seconds; no channel may be hidden by a clean-state exact count.
+
 - 用户控制台在 failover、provisional、recovery、同步滞后时显示降级警告。
 - 管理员控制台的完整 HA 服务节点管理面板只出现在系统设置的高可用二级界面，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。
 - 管理员控制台的 HA 页面必须稳定分成三块：真实节点清单、`planned cutover` 操作区、7 天时间线；dual-active 模式下还要显示当前 leader key 语义下的控制面写节点。
@@ -177,29 +185,24 @@ sequence holes exist and must not be presented as inventory.
 
 ## Visual Evidence
 
-PR: none
+PR: include
+![HA channel GC recovery desktop](./assets/current/ha-channel-gc-recovering-desktop.png)
 
-![HA channel ACK and GC health](./assets/ha-channel-gc-health-desktop.png)
-
-- source_type: `storybook_docs`
-- docs_entry_or_title: `Admin/HaNodeDetailPanel / Docs`
-- scenario: healthy, draining, and deferred channels
-- evidence_note: The current mock-only peer panel shows ACK watermark, retention, GC state, oldest
-  event, adaptive batch, progress, defer reason, and retry time for all three channels. It is
-  historical topic evidence and must not be reused by a backend-only PR; a future UI change must
-  capture new proof at its final SHA before selecting it for a PR.
-
-PR: none
-
-![HA channel stalled GC state](./assets/ha-channel-gc-health-stalled.png)
-
-- source_type: `storybook_docs`
-- docs_entry_or_title: `Admin/HaNodeDetailPanel / Docs`
-- scenario: runtime channel consecutive no progress
-- evidence_note: The stalled transition is visually distinct and retains the last progress,
-  no-progress reason, retry time, and reduced batch size needed for diagnosis. It is historical
-  topic evidence and must not be reused by a backend-only PR; a future UI change must capture new
-  proof at its final SHA before selecting it for a PR.
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/HaNodeDetailPanel/Recovering`
+- scenario: `d88925bb` recovery state with all three channels
+- requested_viewport: `desktop default`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `browser-viewport`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Captured from `d88925bb` after the recovery and reconciliation changes were
+  finalized.
+  The panel shows ACK/high-watermark/lag, retention, GC state, oldest age, adaptive batch,
+  progress, defer reason, retry time, debt mode, delete rate, foreground RPS, SLO, deadline,
+  and observed time for control, billing, and runtime.
+- submission_gate: `approved`
 
 ## Acceptance
 
