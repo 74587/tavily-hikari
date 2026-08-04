@@ -74,7 +74,9 @@
 ### Core flows
 
 1. Promotion 创建新 writable revision，并恰好启动一套 `MaintenanceRuntime`。
-2. Demotion 撤销 authority；旧 revision 的本地与远端工作在 250ms 内停止获得新执行权。
+2. Demotion 撤销 authority 并触发旧 revision 的 cancellation token；在途远端请求必须可取消，SQLite
+   写入必须在 commit 前再次校验 revision fence。旧 revision 在 250ms 内停止获得新执行权，且不得在
+   demotion 后提交新写入。
 3. 每个 HA channel 独立 claim GC work，完成后原子记录 typed outcome 和 continuation。
 4. reconciliation projection 选择有界 work page，engine 在 2 秒内开始首次远端尝试并在 20 秒内结束。
 5. observability sidecar 持久化 alert projection；Dashboard builder 生成共享 `Arc` snapshot，HTTP/SSE
@@ -105,7 +107,8 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Demotion 后 250ms 内停止 claim、远端请求和新写入；promotion 只启动一套 runtime。
+- Demotion 后 250ms 内停止 claim、取消在途远端请求并阻止旧 revision 提交新写入；promotion 只启动
+  一套 runtime。
 - control 延迟 300 秒时 billing/runtime 仍持续推进；stale generation 无法完成新 claim。
 - 相同 wire payload UPDATE 不产生事件，有效变化恰好一条，旧版本仍可消费。
 - reconciliation 首次远端尝试小于 2 秒、单轮不超过 20 秒，查询成本受 page limit 约束。
@@ -114,6 +117,18 @@
 - AlertProjection 与旧结果在时间窗、过滤、分页、分组和状态跃迁上等价。
 - 30 分钟生产形状基准中进程组 RSS P95 不超过 256MiB。
 - architecture checker 证明目标热路径不存在 raw pool、coalescer、全局 pointer-map gate 或旧 cache。
+
+### Reproducible performance workload
+
+- Dashboard benchmark 使用 release build、预热后的 read model、20 个持续 SSE client 和 20 个 HTTP
+  client；每个 HTTP client 每秒请求一次，按 3:1 轮询 Dashboard GET 与缓存 HA GET，持续 10 分钟。
+  从服务端 phase timing 计算 p95，并按 build generation 验证任意 10 秒窗口最多一次 build。
+- RSS benchmark 在 Linux x86_64 隔离环境运行 release build 30 分钟，前 5 分钟预热不计入结果；其后每
+  5 秒采样一次主进程及其子进程 RSS 并计算 P95。SQLite fixture 包含 100 万 request log、每个 HA
+  channel 10 万 outbox row、10 万 alert event 和 100 个 reconciliation work item；stub upstream 下
+  维持 5 rps（60% HTTP API、20% MCP、20% 管理员读取）及 20 个 SSE client。
+- 基准报告必须记录 commit SHA、构建 profile、CPU/内存环境、fixture seed、实际请求率、采样序列和
+  p50/p95/max；不得把 cgroup file cache 计入进程组 RSS。
 
 ## 验收清单（Acceptance checklist）
 
