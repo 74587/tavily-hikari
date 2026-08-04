@@ -231,7 +231,8 @@ PR: none (current-SHA evidence displayed in review; repository image asset await
   preflight 必须能报告它们，且在线路径不得为此执行精确 `COUNT(*)`。
 - 正常在线 GC slice/defer 只写 DEBUG；每个 channel 最多每 60 秒输出一条聚合 INFO，包含删除量、最老可删年龄、删除速率、前台 RPS、债务模式与下次重试。慢批次、锁冲突、SLO 状态跃迁和真实错误仍立即告警。
 - 聚合 INFO 同时包含 continuation delay 与计算出的 `next_retry_at`，使 deferred GC 的恢复时间
-  可从低频正常日志直接判断。
+  可从低频正常日志直接判断；两者必须使用 post-slice 前台流量探测后的有效 continuation delay，
+  与实际持久化的 continuation 保持一致。
 - 共享 `codex-testbox` 上的 256MiB cgroup v2 合同验证必须通过：standby 首次全量 baseline
   sync 成功、active 连续 billing baseline 导出成功，且主备进程组 `memory.current` 峰值都不
   得超过 `268435456` bytes。

@@ -1303,6 +1303,17 @@ async fn run_ha_outbox_gc_claimed_job(
 
     match result {
         Ok(report) => {
+            let needs_continuation = report.has_more || !report.completed;
+            let foreground_rps_after_slice = needs_continuation.then(foreground_activity_rps);
+            let effective_continuation_delay_secs = foreground_rps_after_slice.map_or(
+                report.continuation_delay_secs,
+                |foreground_rps| {
+                    Some(ha_gc_continuation_delay_secs(
+                        report.continuation_delay_secs,
+                        foreground_rps,
+                    ))
+                },
+            );
             if report.max_batch_elapsed_ms > tavily_hikari::HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
                 tracing::warn!(
                     component = "ha_outbox_gc",
@@ -1334,9 +1345,8 @@ async fn run_ha_outbox_gc_claimed_job(
                         debt_mode = channel.debt_mode.as_str(),
                         slo_state = channel.slo_state.as_str(),
                         has_more = channel.has_more,
-                        continuation_delay_secs = report.continuation_delay_secs,
-                        next_retry_at = report
-                            .continuation_delay_secs
+                        continuation_delay_secs = effective_continuation_delay_secs,
+                        next_retry_at = effective_continuation_delay_secs
                             .map(|delay| channel.observed_at.saturating_add(delay)),
                         elapsed_ms = report.elapsed_ms as u64,
                     );
@@ -1366,15 +1376,13 @@ async fn run_ha_outbox_gc_claimed_job(
                     }
                 }
             }
-            let needs_continuation = report.has_more || !report.completed;
             if needs_continuation {
                 // A request may arrive while the one-second slice is running.
                 // Finish that slice, but do not immediately start another one.
-                let foreground_rps_after_slice = foreground_activity_rps();
-                let continuation_delay_secs = ha_gc_continuation_delay_secs(
-                    report.continuation_delay_secs,
-                    foreground_rps_after_slice,
-                );
+                let foreground_rps_after_slice = foreground_rps_after_slice
+                    .expect("foreground RPS must be sampled when GC continuation is required");
+                let continuation_delay_secs = effective_continuation_delay_secs
+                    .expect("continuation delay must be set when GC continuation is required");
                 let defer_reason = if foreground_rps_after_slice > HA_OUTBOX_GC_LOW_PRESSURE_RPS {
                     "foreground_pressure"
                 } else if continuation_delay_secs == HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS {
