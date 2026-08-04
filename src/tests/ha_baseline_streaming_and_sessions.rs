@@ -200,7 +200,7 @@ async fn write_ha_baseline_ndjson_closes_read_snapshot_before_reusing_connection
 }
 
 #[tokio::test]
-async fn ha_replicates_reconciliation_global_backoff_metadata() {
+async fn ha_replicates_reconciliation_backoff_metadata() {
     let db_path = temp_db_path("ha-reconciliation-global-backoff-meta");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -223,6 +223,16 @@ async fn ha_replicates_reconciliation_global_backoff_metadata() {
             META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1,
             1_752_000_120,
         ),
+        (META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1, 3),
+        (META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1, 1),
+        (
+            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1,
+            1_752_000_060,
+        ),
+        (
+            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1,
+            1_752_000_000,
+        ),
     ] {
         proxy
             .key_store
@@ -242,11 +252,15 @@ async fn ha_replicates_reconciliation_global_backoff_metadata() {
     .fetch_all(&proxy.key_store.pool)
     .await
     .expect("read replicated reconciliation backoff events");
-    assert_eq!(replicated_event_payloads.len(), 3);
+    assert_eq!(replicated_event_payloads.len(), 7);
     for key in [
         META_KEY_UPSTREAM_RECONCILIATION_PRESSURE_STREAK_V1,
         META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1,
         META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1,
     ] {
         assert!(
             replicated_event_payloads
@@ -266,6 +280,10 @@ async fn ha_replicates_reconciliation_global_backoff_metadata() {
         META_KEY_UPSTREAM_RECONCILIATION_PRESSURE_STREAK_V1,
         META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1,
         META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1,
+        META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1,
     ] {
         assert!(baseline.contains(key), "baseline should contain {key}");
     }

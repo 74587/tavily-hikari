@@ -266,7 +266,14 @@ source when a usable persisted runtime already exists.
   commit.
 - Reconciliation candidate selection is bounded by indexed pages before hydration. Three consecutive
   rounds with eligible candidates but no remote attempt and exhausted local budget enter a persisted
-  `2/5/10/30` minute local backoff, extended by `Retry-After`, with one delayed representative job.
+  short local backoff with one delayed representative job. Only actual upstream 429 attempts enter
+  the persisted `2/5/10/30` minute remote backoff and honor `Retry-After`.
+- Reconciliation's main settlement pass owns the first remote-attempt budget. Research terminal
+  polling is permitted only after the main pass (or when no eligible main candidate exists), and
+  all remote requests plus their durable bookkeeping are bounded by the same per-run deadline.
+- Settlement finalization has a reserved tail budget for the fresh billing read, adjustment writes,
+  and pressure-state markers; an observation that completes before that tail is not discarded merely
+  because no new remote request may start.
 - The business-call cache keeps raw events for one hour and five-minute aggregates for the remaining
   1–25 hour window. Startup backfill reads 500-row pages and merges a captured request-log tail, so
   it never materializes the complete history or copies live events while holding the cache lock.
@@ -351,6 +358,8 @@ source when a usable persisted runtime already exists.
 - HA diagnostic sampling uses an indexed sequence-span estimate with its high watermark rather
   than `COUNT(*)`. A sequence span is an upper bound when deletions leave holes and must be named
   as an estimate.
+- Normal online HA GC progress is sampled as one channel-scoped INFO aggregate per 60 seconds;
+  slow slices and writer conflicts remain immediate diagnostics.
 - With an upstream `/usage` endpoint that hangs past the quota-sync timeout budget, manual and
   scheduler-triggered quota sync runs finish as `error`, leave no long-lived `running` row behind,
   and do not write `api_key_quota_sync_samples` or `api_keys.quota_*`.
@@ -417,3 +426,9 @@ PR: none
 
 - evidence_note: This topic change is limited to SQLite scheduling and persistence behavior. Any
   future UI-affecting change must add current-SHA visual evidence before selecting it for a PR.
+
+## Runtime Boundary
+
+- Reconciliation candidate-query timeouts are recorded as local pressure rather than an empty
+  queue, and successful remote observations are finalized within the reserved write tail even when
+  a later candidate exhausts the request budget.

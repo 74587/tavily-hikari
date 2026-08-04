@@ -235,3 +235,12 @@ yield. The durable controller therefore uses a five-second productive continuati
 slowest micro-batch stays below the 50ms active-SQL target, a 30-second deferred continuation, and
 a five-minute legacy-scan cadence.
 This raises sustainable cleanup capacity without broadening the SQLite write window.
+
+The reconciliation worker now starts main settlement before research sweep and keeps local budget
+pressure separate from upstream rate limiting; HA GC aggregate logs use the same bounded sampling
+window as HA export/sync diagnostics.
+
+The final review tightened the deadline contract: remote request starts stop before the finalization
+tail, successful observations may still settle during that tail, and research bookkeeping cannot
+outlive the run budget. Local reconciliation pressure metadata is replicated with the HA meta set so
+failover does not reset a deliberate local backoff.

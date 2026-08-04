@@ -235,3 +235,9 @@ compatibility inspection as backlog that needs a tight retry loop.
 Progress evidence is intentionally sequence- and age-based rather than an exact row count:
 high-watermark deltas, deleted rows, and the ingress-minus-delete estimate provide a bounded
 trend signal without reintroducing hot-path full-table aggregation.
+
+Normal GC progress is now observable through a channel-scoped 60-second aggregate log window;
+the persisted admin health fields remain the source of truth for per-channel progress between samples.
+
+Failover recovery now carries local reconciliation pressure metadata through HA meta replication, and
+the reconciliation worker reserves a durable finalization tail after remote request starts stop.

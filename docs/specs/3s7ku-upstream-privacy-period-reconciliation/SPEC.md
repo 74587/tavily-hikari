@@ -63,8 +63,10 @@
 - reconciliation 在每轮结算前主动轮询已关闭窗口中未终态的 Research；轮询最多 20 条、每个 Key 最多 4 条，并优先补足当天尚无标准成功账期的账号覆盖。
 - `429` 只对 `period_reconciliation` scope 中的对应 Key 建立持久化冷却，使用 `Retry-After` 或 `5/10/20/30` 分钟退避；不得批量把同 Key 的其他窗口写为 rate-limited，也不得影响正常 API/MCP 流量。
 - 候选观测必须使用有界索引页：`queueEstimate` 可为空且最多统计 64 个候选，`hasEligible` 与最老候选年龄必须单独表达，首次观测前 coverage 为 `unknown`，不得以零伪装未观测状态。历史 degraded 状态必须由独立的索引化 `EXISTS` 探测保留，不能用当天计数替代。
-- 连续三轮存在候选、未产生远端尝试且本地预算耗尽时，持久化全局本地退避 `2/5/10/30` 分钟，并以更晚的 `Retry-After` 为准；退避期间只保留一个 delayed representative job，真实远端尝试或成功结算后立即复位。
-- 20 秒单轮总预算内，最迟只允许在第 11 秒前启动新的 8 秒远端请求，必须为本地收尾与持久化留出余量。
+- 连续三轮存在候选、未产生远端尝试且本地预算耗尽时，持久化独立的本地短退避；它不得增加 upstream 429 全局退避。只有真实远端 429 才按 `2/5/10/30` 分钟升级，并以更晚的 `Retry-After` 为准；退避期间只保留一个 delayed representative job，真实远端尝试或成功结算后立即复位。
+- 主结算候选页、key/cooldown hydrate 与 reservation 的本地准备预算最多 2 秒，主结算优先启动；terminal-research sweep 仅在主结算之后使用同一轮剩余预算，单轮总预算保持 20 秒。
+- 远端请求启动、观察结果、结算写入和 Research 状态落盘均受同一轮截止时间约束；最后的持久化收尾预算不得被新一轮远端请求抢占。
+- 本地预算耗尽只推进独立 local backoff，不增加 upstream 429 压力；local backoff 的持久化元数据随 HA meta 增量和 baseline 同步，接管后继续执行原退避而不是立即重试。
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）
@@ -189,22 +191,22 @@
 
 ## Visual Evidence
 
-PR: include
-![Reconciliation unknown observation](./assets/current/reconciliation-observation-unknown.png)
+PR: none (current-SHA evidence displayed in review; repository image asset awaits owner approval)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
-- story_id_or_title: `Admin/Modules/SystemStatusModule/UnknownObservation`
-- scenario: `d88925bb` unknown reconciliation observation
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery` and `Mobile`
+- scenario: current reconciliation status gallery with pending, active, degraded, backoff, unknown,
+  budget-exhausted and empty/error states
 - requested_viewport: `desktop default`
 - viewport_strategy: `storybook-viewport`
 - capture_scope: `browser-viewport`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Captured from `d88925bb`. The state presents a nullable settlement queue as
-  `unconfigured` and candidate coverage as `unknown`; it never fabricates zero from a missing
-  observation.
-- submission_gate: `approved`
+- evidence_note: Captured from the final implementation SHA and displayed in the owner review.
+  The evidence covers desktop and `393x852` mobile rendering. No stale screenshot is reused and no
+  image asset is committed until owner approval.
+- submission_gate: `owner_approval_pending`
 
 ## Related PRs
 
@@ -223,3 +225,9 @@ PR: include
 - `../m30lm-http-project-affinity-x-project-id/SPEC.md`
 - `../cp8s9-upstream-agnostic-api-rebalance/SPEC.md`
 - `../xm3dh-rebalance-mcp-gateway/SPEC.md`
+
+## Finalization Boundary
+
+- A later request timeout must not discard an earlier successful observation when the bounded
+  finalization tail remains available; candidate-query timeout also counts as local pressure and
+  never advances upstream 429 backoff.

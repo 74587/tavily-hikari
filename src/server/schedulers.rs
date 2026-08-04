@@ -1303,30 +1303,67 @@ async fn run_ha_outbox_gc_claimed_job(
 
     match result {
         Ok(report) => {
-            if let Some(channel) = report.channels.first()
-                && let Some(transition) = channel.slo_state_transition.as_deref()
-            {
-                match transition {
-                    "breached" => tracing::warn!(
+            if report.max_batch_elapsed_ms > tavily_hikari::HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
+                tracing::warn!(
+                    component = "ha_outbox_gc",
+                    event = "slow_slice",
+                    job_id,
+                    claim_generation,
+                    max_batch_elapsed_ms = report.max_batch_elapsed_ms as u64,
+                    active_elapsed_ms = report.active_elapsed_ms as u64,
+                    elapsed_ms = report.elapsed_ms as u64,
+                    "HA outbox GC slice exceeded its SQL budget"
+                );
+            }
+            for channel in &report.channels {
+                let sampling =
+                    tavily_hikari::sample_ha_perf_event_windowed("gc_aggregate", channel.channel);
+                if sampling.emit_info {
+                    tracing::info!(
                         component = "ha_outbox_gc",
-                        event = "slo_breached",
+                        event = "aggregate",
                         job_id,
+                        claim_generation,
                         channel = channel.channel.as_str(),
+                        deleted_rows = channel.deleted_rows,
+                        retention_deleted_rows = channel.retention_deleted_rows,
+                        invalid_legacy_deleted_rows = channel.invalid_legacy_deleted_rows,
                         oldest_deletable_age_secs = channel.oldest_deletable_age_secs,
                         deleted_rows_per_minute = channel.deleted_rows_per_minute,
-                        recovery_deadline_at = channel.recovery_deadline_at,
-                        "HA outbox GC recovery SLO breached"
-                    ),
-                    "recovered" => tracing::info!(
-                        component = "ha_outbox_gc",
-                        event = "slo_recovered",
-                        job_id,
-                        channel = channel.channel.as_str(),
-                        oldest_deletable_age_secs = channel.oldest_deletable_age_secs,
-                        deleted_rows_per_minute = channel.deleted_rows_per_minute,
-                        "HA outbox GC recovery SLO recovered"
-                    ),
-                    _ => {}
+                        foreground_rps = channel.foreground_rps,
+                        debt_mode = channel.debt_mode.as_str(),
+                        slo_state = channel.slo_state.as_str(),
+                        has_more = channel.has_more,
+                        continuation_delay_secs = report.continuation_delay_secs,
+                        next_retry_at = report
+                            .continuation_delay_secs
+                            .map(|delay| channel.observed_at.saturating_add(delay)),
+                        elapsed_ms = report.elapsed_ms as u64,
+                    );
+                }
+                if let Some(transition) = channel.slo_state_transition.as_deref() {
+                    match transition {
+                        "breached" => tracing::warn!(
+                            component = "ha_outbox_gc",
+                            event = "slo_breached",
+                            job_id,
+                            channel = channel.channel.as_str(),
+                            oldest_deletable_age_secs = channel.oldest_deletable_age_secs,
+                            deleted_rows_per_minute = channel.deleted_rows_per_minute,
+                            recovery_deadline_at = channel.recovery_deadline_at,
+                            "HA outbox GC recovery SLO breached"
+                        ),
+                        "recovered" => tracing::info!(
+                            component = "ha_outbox_gc",
+                            event = "slo_recovered",
+                            job_id,
+                            channel = channel.channel.as_str(),
+                            oldest_deletable_age_secs = channel.oldest_deletable_age_secs,
+                            deleted_rows_per_minute = channel.deleted_rows_per_minute,
+                            "HA outbox GC recovery SLO recovered"
+                        ),
+                        _ => {}
+                    }
                 }
             }
             let needs_continuation = report.has_more || !report.completed;

@@ -345,11 +345,77 @@ impl KeyStore {
         ))
     }
 
-    pub(crate) async fn upstream_reconciliation_last_recovered_at(
+    pub(crate) async fn upstream_reconciliation_local_backoff_state(
+        &self,
+    ) -> Result<(i64, i64, i64), ProxyError> {
+        Ok((
+            self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1)
+                .await?
+                .unwrap_or(0),
+            self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1)
+                .await?
+                .unwrap_or(0),
+            self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
+                .await?
+                .unwrap_or(0),
+        ))
+    }
+
+    pub(crate) async fn upstream_reconciliation_local_last_recovered_at(
         &self,
     ) -> Result<Option<i64>, ProxyError> {
-        self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_RECOVERED_AT_V1)
+        self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1)
             .await
+    }
+
+    pub(crate) async fn update_upstream_reconciliation_local_backoff(
+        &self,
+        pressure: bool,
+        now: i64,
+    ) -> Result<(i64, i64, i64), ProxyError> {
+        let (previous_streak, previous_level, _) =
+            self.upstream_reconciliation_local_backoff_state().await?;
+        let (streak, level, until) = if pressure {
+            let streak = previous_streak.saturating_add(1);
+            let level = if streak < 3 {
+                0
+            } else {
+                previous_level.saturating_add(1).clamp(1, 4)
+            };
+            let delay_secs = match level {
+                1 => 60,
+                2 => 120,
+                3 => 300,
+                4 => 600,
+                _ => 0,
+            };
+            (streak, level, now.saturating_add(delay_secs))
+        } else {
+            (0, 0, 0)
+        };
+        self.set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1,
+            streak,
+        )
+        .await?;
+        self.set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1,
+            level,
+        )
+        .await?;
+        self.set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1,
+            until,
+        )
+        .await?;
+        if !pressure && previous_level > 0 {
+            self.set_meta_i64(
+                META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1,
+                now,
+            )
+            .await?;
+        }
+        Ok((streak, level, until))
     }
 
     pub(crate) async fn upstream_reconciliation_last_run_stats(
@@ -1000,47 +1066,89 @@ impl KeyStore {
         })
     }
 
-    pub(crate) async fn reconciliation_key_ids(
+    pub(crate) async fn reconciliation_key_ids_batch(
         &self,
-        token_id: &str,
-        period_code: &str,
-    ) -> Result<Vec<String>, ProxyError> {
-        sqlx::query_scalar(
-            r#"
-            SELECT key_id
-            FROM upstream_reconciliation_usage
-            WHERE token_id = ? AND period_code = ?
-            ORDER BY key_id ASC
-            "#,
-        )
-        .bind(token_id)
-        .bind(period_code)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(ProxyError::Database)
+        candidates: &[(String, String)],
+    ) -> Result<std::collections::HashMap<(String, String), Vec<String>>, ProxyError> {
+        if candidates.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT token_id, period_code, key_id FROM upstream_reconciliation_usage WHERE ",
+        );
+        for (index, (token_id, period_code)) in candidates.iter().enumerate() {
+            if index > 0 {
+                query.push(" OR ");
+            }
+            query
+                .push("(token_id = ")
+                .push_bind(token_id)
+                .push(" AND period_code = ")
+                .push_bind(period_code)
+                .push(")");
+        }
+        query.push(" ORDER BY token_id ASC, period_code ASC, key_id ASC");
+        let rows = query
+            .build_query_as::<(String, String, String)>()
+            .fetch_all(&self.pool)
+            .await?;
+        let mut grouped = std::collections::HashMap::new();
+        for (token_id, period_code, key_id) in rows {
+            grouped
+                .entry((token_id, period_code))
+                .or_insert_with(Vec::new)
+                .push(key_id);
+        }
+        Ok(grouped)
     }
 
-    pub(crate) async fn reconciliation_local_billed_credits(
+    pub(crate) async fn reconciliation_local_billed_credits_batch(
         &self,
-        candidate: &UpstreamReconciliationCandidate,
-    ) -> Result<i64, ProxyError> {
-        sqlx::query_scalar(
-            r#"
-            SELECT COALESCE(SUM(business_credits), 0)
-            FROM billing_ledger
-            WHERE token_id = ?
-              AND billing_state = 'charged'
-              AND created_at >= ?
-              AND created_at < ?
-              AND COALESCE(business_credits, 0) > 0
+        candidates: &[UpstreamReconciliationCandidate],
+    ) -> Result<std::collections::HashMap<(String, String), i64>, ProxyError> {
+        if candidates.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "WITH requested(token_id, period_code, period_start, period_end) AS (VALUES ",
+        );
+        for (index, candidate) in candidates.iter().enumerate() {
+            if index > 0 {
+                query.push(", ");
+            }
+            query
+                .push("(")
+                .push_bind(&candidate.token_id)
+                .push(", ")
+                .push_bind(&candidate.period_code)
+                .push(", ")
+                .push_bind(candidate.period_start)
+                .push(", ")
+                .push_bind(candidate.period_end)
+                .push(")");
+        }
+        query.push(
+            r#")
+            SELECT requested.token_id, requested.period_code,
+                   COALESCE(SUM(business_credits), 0)
+            FROM requested
+            LEFT JOIN billing_ledger
+              ON billing_ledger.token_id = requested.token_id
+             AND billing_ledger.billing_state = 'charged'
+             AND billing_ledger.created_at >= requested.period_start
+             AND billing_ledger.created_at < requested.period_end
+             AND COALESCE(billing_ledger.business_credits, 0) > 0
+            GROUP BY requested.token_id, requested.period_code
             "#,
-        )
-        .bind(&candidate.token_id)
-        .bind(candidate.period_start)
-        .bind(candidate.period_end)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(ProxyError::Database)
+        );
+        let rows = query
+            .build_query_as::<(String, String, i64)>()
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(token_id, period_code, credits)| ((token_id, period_code), credits))
+            .collect())
     }
 
     pub(crate) async fn reserve_upstream_usage_attempt(

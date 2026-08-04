@@ -100,18 +100,50 @@ pub struct HaPerfSampling {
 static HA_PERF_INFO_SAMPLE_WINDOWS: OnceLock<StdMutex<HashMap<(String, String), Instant>>> =
     OnceLock::new();
 static HA_PERF_HEAVY_SAMPLE_WINDOWS: OnceLock<StdMutex<HashMap<String, Instant>>> = OnceLock::new();
+static HA_PERF_GC_INFO_SAMPLE_WINDOWS: OnceLock<StdMutex<HashMap<(String, String), Instant>>> =
+    OnceLock::new();
 
 pub fn sample_ha_perf_event(
     event: &str,
     channel: HaSyncChannel,
     elapsed: Duration,
 ) -> HaPerfSampling {
-    if elapsed >= Duration::from_secs(1) {
-        return HaPerfSampling {
-            emit_info: true,
-            capture_heavy_stats: true,
-        };
+    sample_ha_perf_event_mode(event, channel, elapsed, true)
+}
+
+pub fn sample_ha_perf_event_windowed(event: &str, channel: HaSyncChannel) -> HaPerfSampling {
+    let windows = HA_PERF_GC_INFO_SAMPLE_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut windows = windows
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    sample_ha_perf_event_windowed_at(&mut windows, event, channel, Instant::now())
+}
+
+fn sample_ha_perf_event_windowed_at(
+    windows: &mut HashMap<(String, String), Instant>,
+    event: &str,
+    channel: HaSyncChannel,
+    now: Instant,
+) -> HaPerfSampling {
+    const HA_PERF_INFO_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
+    let key = (event.to_string(), channel.as_str().to_string());
+    let last_info = windows.entry(key).or_insert(now);
+    let emit_info = now.duration_since(*last_info) >= HA_PERF_INFO_SAMPLE_INTERVAL;
+    if emit_info {
+        *last_info = now;
     }
+    HaPerfSampling {
+        emit_info,
+        capture_heavy_stats: false,
+    }
+}
+
+fn sample_ha_perf_event_mode(
+    event: &str,
+    channel: HaSyncChannel,
+    elapsed: Duration,
+    immediate_slow: bool,
+) -> HaPerfSampling {
     let info_windows = HA_PERF_INFO_SAMPLE_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
     let heavy_windows = HA_PERF_HEAVY_SAMPLE_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut info_windows = info_windows
@@ -127,6 +159,7 @@ pub fn sample_ha_perf_event(
         channel,
         elapsed,
         Instant::now(),
+        immediate_slow,
     )
 }
 
@@ -137,12 +170,13 @@ fn sample_ha_perf_event_at(
     channel: HaSyncChannel,
     elapsed: Duration,
     now: Instant,
+    immediate_slow: bool,
 ) -> HaPerfSampling {
     const HA_PERF_INFO_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
     const HA_PERF_HEAVY_SAMPLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
     const HA_PERF_SLOW_OPERATION_THRESHOLD: Duration = Duration::from_secs(1);
 
-    if elapsed >= HA_PERF_SLOW_OPERATION_THRESHOLD {
+    if immediate_slow && elapsed >= HA_PERF_SLOW_OPERATION_THRESHOLD {
         return HaPerfSampling {
             emit_info: true,
             capture_heavy_stats: true,
@@ -186,6 +220,7 @@ mod ha_perf_sampling_tests {
             HaSyncChannel::Control,
             Duration::ZERO,
             now,
+            true,
         );
         assert_eq!(
             first,
@@ -202,6 +237,7 @@ mod ha_perf_sampling_tests {
             HaSyncChannel::Control,
             Duration::ZERO,
             now + Duration::from_secs(60),
+            true,
         );
         assert!(info_sample.emit_info);
         assert!(!info_sample.capture_heavy_stats);
@@ -213,6 +249,7 @@ mod ha_perf_sampling_tests {
             HaSyncChannel::Control,
             Duration::ZERO,
             now + Duration::from_secs(5 * 60),
+            true,
         );
         assert!(heavy_sample.capture_heavy_stats);
 
@@ -223,6 +260,7 @@ mod ha_perf_sampling_tests {
             HaSyncChannel::Billing,
             Duration::ZERO,
             now + Duration::from_secs(5 * 60),
+            true,
         );
         assert!(!other_channel.capture_heavy_stats);
 
@@ -233,9 +271,52 @@ mod ha_perf_sampling_tests {
             HaSyncChannel::Billing,
             Duration::from_secs(1),
             now + Duration::from_secs(5 * 60),
+            true,
         );
         assert!(slow_operation.emit_info);
         assert!(slow_operation.capture_heavy_stats);
+
+        let mut windowed_info = HashMap::new();
+        let mut windowed_heavy = HashMap::new();
+        let first_windowed = sample_ha_perf_event_at(
+            &mut windowed_info,
+            &mut windowed_heavy,
+            "gc_aggregate",
+            HaSyncChannel::Runtime,
+            Duration::from_secs(1),
+            now,
+            false,
+        );
+        assert!(!first_windowed.emit_info);
+        assert!(!first_windowed.capture_heavy_stats);
+        let second_windowed = sample_ha_perf_event_at(
+            &mut windowed_info,
+            &mut windowed_heavy,
+            "gc_aggregate",
+            HaSyncChannel::Runtime,
+            Duration::from_secs(1),
+            now + Duration::from_secs(60),
+            false,
+        );
+        assert!(second_windowed.emit_info);
+
+        let mut gc_info = HashMap::new();
+        let first_gc = sample_ha_perf_event_windowed_at(
+            &mut gc_info,
+            "gc_aggregate",
+            HaSyncChannel::Runtime,
+            now,
+        );
+        assert!(!first_gc.emit_info);
+        assert!(!first_gc.capture_heavy_stats);
+        let second_gc = sample_ha_perf_event_windowed_at(
+            &mut gc_info,
+            "gc_aggregate",
+            HaSyncChannel::Runtime,
+            now + Duration::from_secs(60),
+        );
+        assert!(second_gc.emit_info);
+        assert!(!second_gc.capture_heavy_stats);
     }
 }
 
@@ -1355,6 +1436,14 @@ const META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1: &str =
     "upstream_reconciliation_backoff_until_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_LAST_RECOVERED_AT_V1: &str =
     "upstream_reconciliation_last_recovered_at_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1: &str =
+    "upstream_reconciliation_local_pressure_streak_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1: &str =
+    "upstream_reconciliation_local_backoff_level_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1: &str =
+    "upstream_reconciliation_local_backoff_until_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1: &str =
+    "upstream_reconciliation_local_last_recovered_at_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_LAST_DURATION_MS_V1: &str =
     "upstream_reconciliation_last_duration_ms_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_LAST_ATTEMPTED_V1: &str =

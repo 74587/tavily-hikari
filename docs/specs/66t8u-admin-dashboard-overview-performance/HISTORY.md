@@ -10,6 +10,11 @@
 - Bounded expensive freshness probes and rebuilds to a 10-second minimum interval and added the
   post-ready partial alert index maintenance path.
 
+- Confirmed the current 10-second rebuild and 60-second unchanged freshness contract remains the
+  boundary while the new HA and reconciliation status fields are surfaced through existing admin modules.
+- Confirmed the final HA/reconciliation diagnostics remain inside the existing snapshot path and do
+  not add a dashboard query or shorten either freshness interval.
+
 ## 2026-07-17
 
 - Corrected recent-alert grouped window wording so rolling `60m` business-call cap alerts no longer

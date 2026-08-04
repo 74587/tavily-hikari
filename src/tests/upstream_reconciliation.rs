@@ -473,33 +473,68 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     .expect("insert due reconciliation usage");
     sqlx::query(
         r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("research-token")
+    .bind(&key_id)
+    .bind("2026-07-15/R1")
+    .bind("project-research-runtime")
+    .bind("token:research-token")
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .bind("shadow")
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert research usage row");
+    sqlx::query(
+        r#"
         INSERT INTO upstream_reconciliation_research (
             request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, NULL, ?)
         "#,
     )
     .bind("research-runtime-marker")
-    .bind(&token.id)
+    .bind("research-token")
     .bind(&key_id)
-    .bind("2026-07-15/S1")
+    .bind("2026-07-15/R1")
     .bind(now - 900)
     .bind(now - 900)
     .execute(&proxy.key_store.pool)
     .await
     .expect("insert pending research");
 
+    let usage_started = Arc::new(AtomicUsize::new(usize::MAX));
+    let usage_started_for_route = Arc::clone(&usage_started);
+    let run_started = std::time::Instant::now();
     let app = Router::new()
         .route(
             "/usage",
-            get(|| async {
-                Json(serde_json::json!({
-                    "key": { "usage": 0 }
-                }))
+            get(move || {
+                let usage_started = Arc::clone(&usage_started_for_route);
+                async move {
+                    usage_started.store(
+                        run_started.elapsed().as_millis().min(usize::MAX as u128) as usize,
+                        Ordering::SeqCst,
+                    );
+                    Json(serde_json::json!({
+                        "key": { "usage": 0 }
+                    }))
+                }
             }),
         )
         .route(
             "/research/research-runtime-marker",
-            get(|| async { Json(serde_json::json!({ "status": "completed" })) }),
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+                Json(serde_json::json!({ "status": "completed" }))
+            }),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -514,6 +549,10 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
         .await
         .expect("run reconciliation once");
     assert_eq!(settled, 1);
+    assert!(
+        usage_started.load(Ordering::SeqCst) < 2_000,
+        "the first main settlement attempt must start before research consumes the budget"
+    );
     let (
         last_run_at,
         last_shadow_adjustment_at,
@@ -812,6 +851,50 @@ async fn reconciliation_global_backoff_counts_only_attempted_candidates() {
     assert_eq!(pressure_streak, 3);
     assert_eq!(backoff_level, 1);
     assert_eq!(backoff_until, now + 902 + 120);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn local_reconciliation_pressure_is_separate_from_upstream_backoff() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-local-pressure"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    for offset in 0..3 {
+        proxy
+            .key_store
+            .update_upstream_reconciliation_local_backoff(true, now + offset)
+            .await
+            .expect("record local pressure");
+    }
+
+    let (local_streak, local_level, local_until) = proxy
+        .key_store
+        .upstream_reconciliation_local_backoff_state()
+        .await
+        .expect("read local pressure state");
+    assert_eq!(local_streak, 3);
+    assert_eq!(local_level, 1);
+    assert_eq!(local_until, now + 60 + 2);
+    assert_eq!(
+        proxy
+            .key_store
+            .upstream_reconciliation_global_backoff_state()
+            .await
+            .expect("read global backoff state"),
+        (0, 0, 0)
+    );
 
     let _ = std::fs::remove_file(db_path);
 }
