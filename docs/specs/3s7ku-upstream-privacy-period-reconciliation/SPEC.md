@@ -231,3 +231,7 @@ PR: none (current-SHA evidence displayed in review; repository image asset await
 - A later request timeout must not discard an earlier successful observation when the bounded
   finalization tail remains available; candidate-query timeout also counts as local pressure and
   never advances upstream 429 backoff.
+- Retryable upstream responses must stop before the reserved retry-bookkeeping tail; key cooldown
+  persistence and the candidate retry marker are each bounded by the remaining tail. If either
+  write cannot complete within that budget, the run returns an explicit persistence error instead
+  of reporting a successful reconciliation without durable retry state.
