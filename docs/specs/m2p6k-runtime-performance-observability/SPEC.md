@@ -49,9 +49,12 @@
 - 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。
+- 对账主结算必须先于 Research sweep；本地预算压力与 upstream 429 必须分开记录，且最终
+  远端观察、结算和状态落盘都必须受同一轮预算约束。HA GC 正常进展继续按通道 60 秒聚合，
+  不能恢复逐片 WARN。
 
 - 继续使用默认 `RUNTIME_LOG_FORMAT=json` + `stderr` 输出，保留 `text` fallback。
-- 新增的性能事件必须使用现有 `tracing` 结构化字段，至少包含：
+- 新增的性能事件必须使用现有 `tracing` 结构化字段，按事件适用性包含：
   - `component`
   - `event`
   - `elapsed_ms`
@@ -66,7 +69,7 @@
   - `payload_bytes`
   - `compressed_bytes`
   - `high_watermark`
-  - `outbox_row_count`
+  - `outbox_sequence_span_estimate`（仅趋势估算，不是库存）
   - `outbox_oldest_age_secs`
   - `outbox_ack_lag`
 - HA normal completion events may be emitted at DEBUG, with an INFO sample per `(event, channel)`
@@ -123,6 +126,8 @@
 - HA peer-less export and baseline samples report `ack_lag=null`; normal summaries stay sampled per
   channel, while heavy outbox and memory snapshots remain reserved for slow, error, or threshold
   transition events.
+- HA GC aggregate samples include the continuation delay and `next_retry_at`; the normal sampled
+  path remains sufficient to diagnose deferred recovery without restoring per-slice WARN logs.
 
 ## Visual Evidence
 

@@ -424,6 +424,9 @@ month-tail public metrics scan.
   recovery after atomic finish-plus-continuation persistence fails.
 - Keep online request-log and HA cleanup bounded; historical backlog rate must be proven by oldest
   deletable age and measured deletion rate, not by a sequence-span estimate or an unbounded count.
+- Keep reconciliation local-budget pressure separate from remote 429 pressure. Main settlement must
+  start before research sweep, and normal HA GC progress should use one sampled per-channel aggregate
+  INFO per minute; reserve immediate logs for slow slices, lock conflicts, and state transitions.
 
 ## References
 

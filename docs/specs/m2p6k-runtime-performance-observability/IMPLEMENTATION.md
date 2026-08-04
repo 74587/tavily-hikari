@@ -113,6 +113,14 @@
 - Normal HA slices, dashboard phases, and per-key rate limits are DEBUG; actionable states emit only
   enter, escalation, and recovery transitions.
 
+## Current diagnostics contract
+
+- Online HA GC emits a channel-scoped aggregate INFO at most once per 60 seconds; slow slices and writer conflicts bypass that window. The aggregate reports deletion progress and age, while sequence span remains explicitly an estimate.
+- Reconciliation local-budget pressure is stored and logged independently from upstream 429 backoff, preventing a local query-budget exhaustion from generating a remote-rate-limit alert.
+- Main settlement now precedes Research, and remote observations plus bookkeeping share bounded
+  nested deadlines with reserved finalization headroom. HA metadata carries local pressure across
+  takeover without increasing normal log volume.
+
 ## Visual Evidence
 
 PR: include

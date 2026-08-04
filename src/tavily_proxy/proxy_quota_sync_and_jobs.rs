@@ -18,12 +18,34 @@ fn should_emit_reconciliation_summary(now: i64) -> bool {
     }
 }
 
+async fn await_reconciliation_post_process<T>(
+    deadline: std::time::Instant,
+    operation: impl std::future::Future<Output = Result<T, ProxyError>>,
+) -> Result<T, ProxyError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(ProxyError::Other(
+            "reconciliation post-processing deadline exceeded".to_string(),
+        ));
+    }
+    tokio::time::timeout(remaining, operation)
+        .await
+        .map_err(|_| {
+            ProxyError::Other("reconciliation post-processing timed out".to_string())
+        })?
+}
+
 impl TavilyProxy {
     const RECONCILIATION_BACKOFF_SCOPE: &'static str = "period_reconciliation";
-    // Leave enough headroom for one final local settlement write after an
-    // eight-second remote request. The scheduler's outer budget is 20 seconds;
-    // never start a request once this pre-request budget has elapsed.
-    const RECONCILIATION_REQUEST_START_BUDGET_SECS: u64 = 11;
+    // Candidate hydration is deliberately bounded so the first main settlement
+    // request cannot be displaced by the terminal-research sweep. Research is
+    // allowed to use the remainder of the scheduler's 20 second budget.
+    const RECONCILIATION_MAIN_PREP_BUDGET_SECS: u64 = 2;
+    const RECONCILIATION_TOTAL_BUDGET_SECS: u64 = 20;
+    const RECONCILIATION_FINALIZATION_HEADROOM_SECS: u64 = 1;
+    const RECONCILIATION_POST_PROCESS_HEADROOM_SECS: u64 = 2;
+    const RECONCILIATION_RETRY_BOOKKEEPING_HEADROOM_SECS: u64 = 2;
+    const RECONCILIATION_OUTER_TIMEOUT_MARGIN_SECS: u64 = 1;
     const RESEARCH_SWEEP_LIMIT: usize = 20;
     const RESEARCH_SWEEP_PER_KEY_LIMIT: usize = 4;
 
@@ -122,9 +144,17 @@ impl TavilyProxy {
             .key_store
             .upstream_reconciliation_global_backoff_state()
             .await?;
-        let reconciliation_last_recovered_at = self
+        let (
+            reconciliation_local_pressure_streak,
+            reconciliation_local_backoff_level,
+            reconciliation_local_backoff_until,
+        ) = self
             .key_store
-            .upstream_reconciliation_last_recovered_at()
+            .upstream_reconciliation_local_backoff_state()
+            .await?;
+        let reconciliation_local_last_recovered_at = self
+            .key_store
+            .upstream_reconciliation_local_last_recovered_at()
             .await?;
         let (
             reconciliation_last_duration_ms,
@@ -209,11 +239,11 @@ impl TavilyProxy {
             reconciliation_last_budget_exhausted,
             reconciliation_observation,
             reconciliation_local_backoff: ReconciliationLocalBackoff {
-                pressure_streak: reconciliation_pressure_streak,
-                level: reconciliation_backoff_level,
-                available_at: (reconciliation_backoff_until > now)
-                    .then_some(reconciliation_backoff_until),
-                last_recovered_at: reconciliation_last_recovered_at,
+                pressure_streak: reconciliation_local_pressure_streak,
+                level: reconciliation_local_backoff_level,
+                available_at: (reconciliation_local_backoff_until > now)
+                    .then_some(reconciliation_local_backoff_until),
+                last_recovered_at: reconciliation_local_last_recovered_at,
             },
             retry_buckets,
             current_period_bound_users_by_key,
@@ -471,12 +501,24 @@ impl TavilyProxy {
         &self,
         usage_base: &str,
         started_at: &std::time::Instant,
+        request_start_budget_secs: u64,
+        request_deadline: std::time::Instant,
     ) -> Result<(i64, i64, i64, i64, i64, bool), ProxyError> {
         let now = self.backend_time.now_ts();
-        let candidates = self
-            .key_store
-            .next_upstream_reconciliation_research_candidates(80)
-            .await?;
+        let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok((0, 0, 0, 0, 0, true));
+        }
+        let candidates = match tokio::time::timeout(
+            remaining,
+            self.key_store
+                .next_upstream_reconciliation_research_candidates(80),
+        )
+        .await
+        {
+            Ok(candidates) => candidates?,
+            Err(_) => return Ok((0, 0, 0, 0, 0, true)),
+        };
         let candidate_count = candidates.len() as i64;
         tracing::debug!(
             component = "reconciliation",
@@ -497,20 +539,34 @@ impl TavilyProxy {
             if polled as usize >= Self::RESEARCH_SWEEP_LIMIT {
                 break;
             }
-            if started_at.elapsed().as_secs()
-                >= Self::RECONCILIATION_REQUEST_START_BUDGET_SECS
-            {
+            if started_at.elapsed() >= std::time::Duration::from_secs(request_start_budget_secs) {
                 budget_exhausted = true;
                 break;
             }
-            if cooling_keys.contains(&candidate.key_id)
-                || self
-                    .reconciliation_cooldown_until(&candidate.key_id, now)
-                    .await?
-                    .is_some()
-            {
+            let cooldown_remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+            if cooldown_remaining.is_zero() {
+                budget_exhausted = true;
+                break;
+            }
+            let cooldown_active = tokio::time::timeout(
+                cooldown_remaining,
+                self.reconciliation_cooldown_until(&candidate.key_id, self.backend_time.now_ts()),
+            )
+            .await;
+            let cooldown_active = match cooldown_active {
+                Ok(result) => result?.is_some(),
+                Err(_) => {
+                    budget_exhausted = true;
+                    break;
+                }
+            };
+            if cooling_keys.contains(&candidate.key_id) || cooldown_active {
                 skipped_cooldown += 1;
                 continue;
+            }
+            if started_at.elapsed() >= std::time::Duration::from_secs(request_start_budget_secs) {
+                budget_exhausted = true;
+                break;
             }
             let selected = selected_per_key.entry(candidate.key_id.clone()).or_default();
             if *selected >= Self::RESEARCH_SWEEP_PER_KEY_LIMIT {
@@ -518,14 +574,46 @@ impl TavilyProxy {
             }
             *selected += 1;
             polled += 1;
-            match self
-                .fetch_upstream_research_terminal(&candidate.key_id, usage_base, &candidate.request_id)
-                .await
-            {
-                Ok(true) => {
-                    self.key_store
-                        .mark_upstream_reconciliation_research_terminal(&candidate.request_id)
-                        .await?;
+            let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                budget_exhausted = true;
+                break;
+            }
+            let research_result = tokio::time::timeout(
+                remaining,
+                self.fetch_upstream_research_terminal(
+                    &candidate.key_id,
+                    usage_base,
+                    &candidate.request_id,
+                ),
+            )
+            .await;
+            match research_result {
+                Err(_) => {
+                    budget_exhausted = true;
+                    break;
+                }
+                Ok(Ok(true)) => {
+                    let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        budget_exhausted = true;
+                        break;
+                    }
+                    match tokio::time::timeout(
+                        remaining,
+                        self.key_store
+                            .mark_upstream_reconciliation_research_terminal(&candidate.request_id),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            result?;
+                        }
+                        Err(_) => {
+                            budget_exhausted = true;
+                            break;
+                        }
+                    }
                     terminal += 1;
                     tracing::debug!(
                         component = "reconciliation",
@@ -535,23 +623,54 @@ impl TavilyProxy {
                         period_code = %candidate.period_code,
                     );
                 }
-                Ok(false) => {
-                    self.key_store
-                        .record_upstream_reconciliation_research_poll(
-                            &candidate.request_id,
-                            now.saturating_add(120),
-                            "pending",
-                            None,
-                        )
-                        .await?;
+                Ok(Ok(false)) => {
+                    let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        budget_exhausted = true;
+                        break;
+                    }
+                    match tokio::time::timeout(
+                        remaining,
+                        self.key_store
+                            .record_upstream_reconciliation_research_poll(
+                                &candidate.request_id,
+                                now.saturating_add(120),
+                                "pending",
+                                None,
+                            ),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            result?;
+                        }
+                        Err(_) => {
+                            budget_exhausted = true;
+                            break;
+                        }
+                    }
                     pending += 1;
                 }
-                Err((err, retry_after)) => {
+                Ok(Err((err, retry_after))) => {
                     let reason = classify_reconciliation_retry_reason(Some(err.to_string().as_str()));
                     let next_poll_at = if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
-                        let until = self
-                            .arm_reconciliation_backoff(&candidate.key_id, retry_after, reason)
-                            .await?;
+                        let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            budget_exhausted = true;
+                            break;
+                        }
+                        let until = match tokio::time::timeout(
+                            remaining,
+                            self.arm_reconciliation_backoff(&candidate.key_id, retry_after, reason),
+                        )
+                        .await
+                        {
+                            Ok(result) => result?,
+                            Err(_) => {
+                                budget_exhausted = true;
+                                break;
+                            }
+                        };
                         cooling_keys.insert(candidate.key_id.clone());
                         tracing::debug!(
                             component = "reconciliation",
@@ -572,25 +691,57 @@ impl TavilyProxy {
                             _ => 1800,
                         })
                     };
-                    self.key_store
-                        .record_upstream_reconciliation_research_poll(
-                            &candidate.request_id,
-                            next_poll_at,
-                            if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
-                                "rate_limited"
-                            } else {
-                                "retry"
-                            },
-                            Some(reason),
-                        )
-                        .await?;
+                    let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        budget_exhausted = true;
+                        break;
+                    }
+                    match tokio::time::timeout(
+                        remaining,
+                        self.key_store
+                            .record_upstream_reconciliation_research_poll(
+                                &candidate.request_id,
+                                next_poll_at,
+                                if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
+                                    "rate_limited"
+                                } else {
+                                    "retry"
+                                },
+                                Some(reason),
+                            ),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            result?;
+                        }
+                        Err(_) => {
+                            budget_exhausted = true;
+                            break;
+                        }
+                    }
                     retries += 1;
                 }
             }
         }
-        self.key_store
-            .mark_upstream_reconciliation_research_sweep_at(now)
-            .await?;
+        let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            budget_exhausted = true;
+        } else {
+            match tokio::time::timeout(
+                remaining,
+                self.key_store.mark_upstream_reconciliation_research_sweep_at(now),
+            )
+            .await
+            {
+                Ok(result) => {
+                    result?;
+                }
+                Err(_) => {
+                    budget_exhausted = true;
+                }
+            }
+        }
         tracing::debug!(
             component = "reconciliation",
             event = "research_sweep_completed",
@@ -662,33 +813,189 @@ impl TavilyProxy {
             );
             return Ok(0);
         }
-        let mut candidate_batch = self
+        let (_, local_backoff_level, local_backoff_until) = self
             .key_store
-            .next_upstream_reconciliation_candidates(20)
+            .upstream_reconciliation_local_backoff_state()
             .await?;
-        let (
-            research_polled_count,
-            research_terminal_count,
-            research_pending_count,
-            research_retry_count,
-            research_skipped_cooldown_count,
-            research_budget_exhausted,
-        ) = self.run_research_terminal_sweep(usage_base, &started_at).await?;
-        // A research terminal transition can make a window eligible without
-        // requiring another full-table aggregate. Rehydrate one bounded page
-        // only when the first candidate page was empty.
-        if candidate_batch.candidates.is_empty() && research_terminal_count > 0 {
-            candidate_batch = self
-                .key_store
-                .next_upstream_reconciliation_candidates(20)
+        if local_backoff_until > now {
+            self.key_store
+                .mark_upstream_reconciliation_run_completed_at(now)
                 .await?;
+            tracing::debug!(
+                component = "reconciliation",
+                event = "local_backoff_active",
+                job_type = "upstream_reconciliation",
+                backoff_level = local_backoff_level,
+                backoff_until = local_backoff_until,
+            );
+            return Ok(0);
         }
+        let preparation_deadline = started_at
+            + std::time::Duration::from_secs(Self::RECONCILIATION_MAIN_PREP_BUDGET_SECS);
+        // Keep the deadlines nested so the outer 20-second scheduler timeout
+        // still has time for durable markers and backoff state writes.
+        let remote_request_deadline = started_at
+            + std::time::Duration::from_secs(
+                Self::RECONCILIATION_TOTAL_BUDGET_SECS
+                    .saturating_sub(Self::RECONCILIATION_FINALIZATION_HEADROOM_SECS)
+                    .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS)
+                    .saturating_sub(Self::RECONCILIATION_RETRY_BOOKKEEPING_HEADROOM_SECS),
+            );
+        let finalization_deadline = started_at
+            + std::time::Duration::from_secs(
+                Self::RECONCILIATION_TOTAL_BUDGET_SECS
+                    .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS),
+            );
+        let post_process_deadline = started_at
+            + std::time::Duration::from_secs(
+                Self::RECONCILIATION_TOTAL_BUDGET_SECS
+                    .saturating_sub(Self::RECONCILIATION_OUTER_TIMEOUT_MARGIN_SECS),
+            );
+        let research_start_budget_secs = Self::RECONCILIATION_TOTAL_BUDGET_SECS
+            .saturating_sub(QUOTA_SYNC_FETCH_TIMEOUT_SECS)
+            .saturating_sub(Self::RECONCILIATION_FINALIZATION_HEADROOM_SECS)
+            .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS);
+        let remote_request_start_budget_secs = research_start_budget_secs;
+        let empty_candidate_batch = || UpstreamReconciliationCandidateBatch {
+            candidates: Vec::new(),
+            recent_lane_budget: 0,
+            backlog_lane_budget: 0,
+            recent_candidate_count: 0,
+            backlog_candidate_count: 0,
+        };
+        let mut preparation_budget_exhausted = false;
+        let candidate_remaining = preparation_deadline
+            .saturating_duration_since(std::time::Instant::now());
+        let mut candidate_batch;
+        if candidate_remaining.is_zero() {
+            preparation_budget_exhausted = true;
+            candidate_batch = empty_candidate_batch();
+        } else {
+            candidate_batch = match tokio::time::timeout(
+                candidate_remaining,
+                self.key_store.next_upstream_reconciliation_candidates(20),
+            )
+            .await
+            {
+                Ok(batch) => batch?,
+                Err(_) => {
+                    preparation_budget_exhausted = true;
+                    empty_candidate_batch()
+                }
+            };
+        }
+        preparation_budget_exhausted |=
+            std::time::Instant::now() >= preparation_deadline;
+        let mut pre_main_research = (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, false);
+        let pre_main_research_ran =
+            candidate_batch.candidates.is_empty() && !preparation_budget_exhausted;
+        // If there is no main work, research is the only way to make a window
+        // eligible. Run one bounded sweep before hydrating the now-eligible
+        // page; this does not delay an already eligible settlement.
+        if candidate_batch.candidates.is_empty() && !preparation_budget_exhausted {
+            pre_main_research = self
+                .run_research_terminal_sweep(
+                    usage_base,
+                    &started_at,
+                    research_start_budget_secs,
+                    remote_request_deadline,
+                )
+                .await?;
+            if pre_main_research.1 > 0 {
+                let remaining = finalization_deadline
+                    .saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    preparation_budget_exhausted = true;
+                } else {
+                    candidate_batch = match tokio::time::timeout(
+                        remaining,
+                        self.key_store.next_upstream_reconciliation_candidates(20),
+                    )
+                    .await
+                    {
+                        Ok(batch) => batch?,
+                        Err(_) => {
+                            preparation_budget_exhausted = true;
+                            empty_candidate_batch()
+                        }
+                    };
+                }
+            }
+        }
+        // A terminal research sweep can make a previously ineligible window
+        // settleable after the two-second local-preparation window. Give that
+        // newly eligible page the remaining total budget for its bounded
+        // hydrate instead of dropping it until the next scheduler run.
+        let candidate_hydration_deadline = if pre_main_research_ran && pre_main_research.1 > 0 {
+            remote_request_deadline
+        } else {
+            preparation_deadline
+        };
         let recent_candidate_count = candidate_batch.recent_candidate_count;
         let backlog_candidate_count = candidate_batch.backlog_candidate_count;
         let recent_lane_budget = candidate_batch.recent_lane_budget;
         let backlog_lane_budget = candidate_batch.backlog_lane_budget;
         let candidates = candidate_batch.candidates;
         let candidate_count = candidates.len() as i64;
+        let candidate_keys = candidates
+            .iter()
+            .map(|candidate| (candidate.token_id.clone(), candidate.period_code.clone()))
+            .collect::<Vec<_>>();
+        let key_ids_by_candidate = if preparation_budget_exhausted {
+            std::collections::HashMap::new()
+        } else {
+            let remaining = candidate_hydration_deadline
+                .saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                preparation_budget_exhausted = true;
+                std::collections::HashMap::new()
+            } else {
+                match tokio::time::timeout(
+                    remaining,
+                    self.key_store.reconciliation_key_ids_batch(&candidate_keys),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        preparation_budget_exhausted = true;
+                        std::collections::HashMap::new()
+                    }
+                }
+            }
+        };
+        let all_key_ids = key_ids_by_candidate
+            .values()
+            .flat_map(|key_ids| key_ids.iter().cloned())
+            .collect::<std::collections::HashSet<_>>();
+        let active_key_cooldowns = if preparation_budget_exhausted {
+            std::collections::HashMap::new()
+        } else {
+            let remaining = candidate_hydration_deadline
+                .saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                preparation_budget_exhausted = true;
+                std::collections::HashMap::new()
+            } else {
+                match tokio::time::timeout(
+                    remaining,
+                    self.key_store.list_active_api_key_transient_backoffs(
+                        &all_key_ids.into_iter().collect::<Vec<_>>(),
+                        Self::RECONCILIATION_BACKOFF_SCOPE,
+                        self.backend_time.now_ts(),
+                    ),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        preparation_budget_exhausted = true;
+                        std::collections::HashMap::new()
+                    }
+                }
+            }
+        };
+        preparation_budget_exhausted |= std::time::Instant::now() >= candidate_hydration_deadline;
         tracing::debug!(
             component = "reconciliation",
             event = "run_started",
@@ -699,11 +1006,11 @@ impl TavilyProxy {
             backlog_lane_budget,
             candidate_recent_count = recent_candidate_count,
             candidate_backlog_count = backlog_candidate_count,
-            research_polled_count,
-            research_terminal_count,
-            research_pending_count,
-            research_retry_count,
-            research_skipped_cooldown_count,
+            research_polled_count = 0_i64,
+            research_terminal_count = 0_i64,
+            research_pending_count = 0_i64,
+            research_retry_count = 0_i64,
+            research_skipped_cooldown_count = 0_i64,
         );
         let result = async {
             let mut settled = 0_i64;
@@ -715,26 +1022,40 @@ impl TavilyProxy {
             let mut key_backoff_window_count = 0_i64;
             let mut skipped_by_key_backoff = 0_i64;
             let mut attempted_candidate_count = 0_i64;
-            let mut budget_exhausted = research_budget_exhausted;
+            let mut budget_exhausted = preparation_budget_exhausted;
             let mut max_retry_after_until = None::<i64>;
             let mut cooling_keys = HashSet::<String>::new();
-            for (index, candidate) in candidates.into_iter().enumerate() {
+            let mut remote_request_started = false;
+            let mut request_start_cutoff_reached = false;
+            let main_preparation_blocked = preparation_budget_exhausted;
+            let mut observed_candidates = Vec::<(
+                UpstreamReconciliationCandidate,
+                i64,
+                bool,
+            )>::new();
+            for (index, candidate) in candidates.iter().cloned().enumerate() {
+                if budget_exhausted {
+                    break;
+                }
+                if started_at.elapsed()
+                    >= std::time::Duration::from_secs(remote_request_start_budget_secs)
+                {
+                    request_start_cutoff_reached = true;
+                    budget_exhausted = true;
+                    break;
+                }
                 let in_recent_lane = index < recent_candidate_count as usize;
-                let key_ids = self
-                    .key_store
-                    .reconciliation_key_ids(&candidate.token_id, &candidate.period_code)
-                    .await?;
+                let key_ids = key_ids_by_candidate
+                    .get(&(candidate.token_id.clone(), candidate.period_code.clone()))
+                    .cloned()
+                    .unwrap_or_default();
                 if key_ids.iter().any(|key_id| cooling_keys.contains(key_id)) {
                     skipped_by_key_backoff += 1;
                     continue;
                 }
                 let mut key_in_cooldown = false;
                 for key_id in &key_ids {
-                    if self
-                        .reconciliation_cooldown_until(key_id, self.backend_time.now_ts())
-                        .await?
-                        .is_some()
-                    {
+                    if active_key_cooldowns.contains_key(key_id) {
                         cooling_keys.insert(key_id.clone());
                         key_in_cooldown = true;
                         break;
@@ -750,17 +1071,43 @@ impl TavilyProxy {
                 let mut retry_key_id = None;
                 let mut candidate_attempted = false;
                 for key_id in key_ids {
-                    if started_at.elapsed().as_secs()
-                        >= Self::RECONCILIATION_REQUEST_START_BUDGET_SECS
-                    {
+                    // The two-second limit applies only to local candidate
+                    // preparation. Once a remote request has started, allow
+                    // the bounded request timeout to finish and use the
+                    // separate total-budget deadline for subsequent requests.
+                    let reservation_deadline = if candidate_attempted || remote_request_started {
+                        remote_request_deadline
+                    } else {
+                        preparation_deadline
+                    };
+                    let remote_remaining = remote_request_deadline
+                        .saturating_duration_since(std::time::Instant::now());
+                    let request_timeout = Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS);
+                    if remote_remaining < request_timeout {
+                        request_start_cutoff_reached = true;
                         budget_exhausted = true;
                         break;
                     }
-                    match self
-                        .key_store
-                        .reserve_upstream_usage_attempt(&key_id)
-                        .await?
-                    {
+                    let reservation_budget = reservation_deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(remote_remaining.saturating_sub(request_timeout));
+                    if reservation_budget.is_zero() {
+                        budget_exhausted = true;
+                        break;
+                    }
+                    let reservation_result = tokio::time::timeout(
+                        reservation_budget,
+                        self.key_store.reserve_upstream_usage_attempt(&key_id),
+                    )
+                    .await;
+                    let reservation = match reservation_result {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            budget_exhausted = true;
+                            break;
+                        }
+                    };
+                    match reservation {
                         Ok(()) => {}
                         Err(next_attempt_at) => {
                             retry_at = Some(next_attempt_at);
@@ -774,12 +1121,25 @@ impl TavilyProxy {
                         attempted_candidate_count += 1;
                         candidate_attempted = true;
                     }
-                    match self
-                        .fetch_upstream_project_usage(&key_id, usage_base, &candidate.project_id)
-                        .await
-                    {
-                        Ok(usage) => upstream_usage = upstream_usage.saturating_add(usage),
-                        Err((err, upstream_retry_at)) => {
+                    let remaining = remote_request_deadline
+                        .saturating_duration_since(std::time::Instant::now());
+                    remote_request_started = true;
+                    let usage_result = tokio::time::timeout(
+                        remaining.max(Duration::from_millis(1)),
+                        self.fetch_upstream_project_usage(
+                            &key_id,
+                            usage_base,
+                            &candidate.project_id,
+                        ),
+                    )
+                    .await;
+                    match usage_result {
+                        Err(_) => {
+                            budget_exhausted = true;
+                            break;
+                        }
+                        Ok(Ok(usage)) => upstream_usage = upstream_usage.saturating_add(usage),
+                        Ok(Err((err, upstream_retry_at))) => {
                             retry_at = upstream_retry_at;
                             retry_reason = Some(err.to_string());
                             retry_key_id = Some(key_id.clone());
@@ -802,21 +1162,54 @@ impl TavilyProxy {
                                     .max(retry_after_until),
                             );
                         }
-                        let cooldown_until = self
-                            .arm_reconciliation_backoff(
+                        let retry_bookkeeping_deadline = started_at
+                            + std::time::Duration::from_secs(
+                                Self::RECONCILIATION_TOTAL_BUDGET_SECS
+                                    .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS),
+                            );
+                        let remaining = retry_bookkeeping_deadline
+                            .saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            return Err(ProxyError::Other(
+                                "reconciliation retry bookkeeping deadline exceeded".to_string(),
+                            ));
+                        }
+                        let cooldown_until = tokio::time::timeout(
+                            remaining,
+                            self.arm_reconciliation_backoff(
                                 &retry_key_id,
                                 retry_at,
                                 reason_kind,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ProxyError::Other(
+                                "reconciliation retry backoff persistence timed out".to_string(),
                             )
-                            .await?;
-                        self.key_store
-                            .mark_reconciliation_retry(
+                        })??;
+                        let remaining = retry_bookkeeping_deadline
+                            .saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            return Err(ProxyError::Other(
+                                "reconciliation retry bookkeeping deadline exceeded".to_string(),
+                            ));
+                        }
+                        tokio::time::timeout(
+                            remaining,
+                            self.key_store.mark_reconciliation_retry(
                                 &candidate,
                                 RECONCILIATION_STATUS_RATE_LIMITED,
                                 cooldown_until,
                                 Some(retry_reason.as_str()),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ProxyError::Other(
+                                "reconciliation retry marker persistence timed out".to_string(),
                             )
-                            .await?;
+                        })??;
                         let affected_window_count = 1_i64;
                         match reason_kind {
                             RECONCILIATION_RETRY_REASON_UPSTREAM_429 => {
@@ -844,33 +1237,96 @@ impl TavilyProxy {
                         );
                         continue;
                 }
-                let local_billed = self
-                    .key_store
-                    .reconciliation_local_billed_credits(&candidate)
-                    .await?;
-                let did_settle = if candidate.settlement_mode == "shadow" {
-                    self.key_store
-                        .settle_upstream_reconciliation_shadow(
-                            &candidate,
-                            upstream_usage,
-                            local_billed,
-                        )
-                        .await?
+                observed_candidates.push((candidate, upstream_usage, in_recent_lane));
+            }
+
+            // Billing can become charged while the remote request is in flight. Re-read
+            // all observed candidates in one batch immediately before settlement so the
+            // persisted adjustment uses the post-observation ledger state without
+            // reintroducing a per-candidate hydration query.
+            if !observed_candidates.is_empty() {
+                let observed = observed_candidates
+                    .iter()
+                    .map(|(candidate, _, _)| candidate.clone())
+                    .collect::<Vec<_>>();
+                let remaining = finalization_deadline
+                    .saturating_duration_since(std::time::Instant::now());
+                let fresh_local_billed_by_candidate = if remaining.is_zero() {
+                    budget_exhausted = true;
+                    None
                 } else {
-                    self.key_store
-                        .settle_upstream_reconciliation(&candidate, upstream_usage, local_billed)
-                        .await?
+                    match tokio::time::timeout(
+                        finalization_deadline
+                            .saturating_duration_since(std::time::Instant::now()),
+                        self.key_store.reconciliation_local_billed_credits_batch(&observed),
+                    )
+                    .await
+                    {
+                        Ok(result) => Some(result?),
+                        Err(_) => {
+                            budget_exhausted = true;
+                            None
+                        }
+                    }
                 };
-                if did_settle {
-                    settled += 1;
-                    if in_recent_lane {
-                        settled_recent += 1;
-                    } else {
-                        settled_backlog += 1;
+                // A later remote request may exhaust the main budget after an earlier
+                // request has already succeeded. Do not let that later timeout discard
+                // observations that still fit the bounded finalization window.
+                if let Some(fresh_local_billed_by_candidate) = fresh_local_billed_by_candidate {
+                    for (candidate, upstream_usage, in_recent_lane) in observed_candidates {
+                        let remaining = finalization_deadline
+                            .saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            budget_exhausted = true;
+                            break;
+                        }
+                        let local_billed = fresh_local_billed_by_candidate
+                            .get(&(candidate.token_id.clone(), candidate.period_code.clone()))
+                            .copied()
+                            .unwrap_or(0);
+                        let did_settle = match tokio::time::timeout(remaining, async {
+                            if candidate.settlement_mode == "shadow" {
+                                self.key_store
+                                    .settle_upstream_reconciliation_shadow(
+                                        &candidate,
+                                        upstream_usage,
+                                        local_billed,
+                                    )
+                                    .await
+                            } else {
+                                self.key_store
+                                    .settle_upstream_reconciliation(
+                                        &candidate,
+                                        upstream_usage,
+                                        local_billed,
+                                    )
+                                    .await
+                            }
+                        })
+                        .await
+                        {
+                            Ok(result) => result?,
+                            Err(_) => {
+                                budget_exhausted = true;
+                                break;
+                            }
+                        };
+                        if did_settle {
+                            settled += 1;
+                            if in_recent_lane {
+                                settled_recent += 1;
+                            } else {
+                                settled_backlog += 1;
+                            }
+                        }
                     }
                 }
             }
-            Ok::<(i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, Option<i64>), ProxyError>((
+            request_start_cutoff_reached |=
+                !main_preparation_blocked
+                    && started_at.elapsed()
+                        >= std::time::Duration::from_secs(remote_request_start_budget_secs);
+            Ok::<(i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, bool, Option<i64>), ProxyError>((
                 settled,
                 settled_recent,
                 settled_backlog,
@@ -881,13 +1337,40 @@ impl TavilyProxy {
                 skipped_by_key_backoff,
                 attempted_candidate_count,
                 budget_exhausted,
+                request_start_cutoff_reached,
                 max_retry_after_until,
             ))
         }
         .await;
-        self.key_store
-            .mark_upstream_reconciliation_run_completed_at(self.backend_time.now_ts())
-            .await?;
+        let main_budget_exhausted = result.as_ref().map(|value| value.9).unwrap_or(true);
+        let main_request_start_cutoff_reached = result.as_ref().map(|value| value.10).unwrap_or(false);
+        let pre_main_research_happened = pre_main_research_ran;
+        let (
+            research_polled_count,
+            research_terminal_count,
+            research_pending_count,
+            research_retry_count,
+            research_skipped_cooldown_count,
+            research_budget_exhausted,
+        ) = if pre_main_research_happened {
+            pre_main_research
+        } else if result.is_ok() && (!main_budget_exhausted || main_request_start_cutoff_reached) {
+            self.run_research_terminal_sweep(
+                usage_base,
+                &started_at,
+                research_start_budget_secs,
+                remote_request_deadline,
+            )
+            .await?
+        } else {
+            (0, 0, 0, 0, 0, main_budget_exhausted)
+        };
+        await_reconciliation_post_process(
+            post_process_deadline,
+            self.key_store
+                .mark_upstream_reconciliation_run_completed_at(self.backend_time.now_ts()),
+        )
+        .await?;
         match result {
             Ok((
                 settled,
@@ -899,9 +1382,11 @@ impl TavilyProxy {
                 key_backoff_window_count,
                 skipped_by_key_backoff,
                 attempted_candidate_count,
-                budget_exhausted,
+                mut budget_exhausted,
+                _request_start_cutoff_reached,
                 max_retry_after_until,
             )) => {
+                budget_exhausted |= research_budget_exhausted;
                 tracing::debug!(
                     component = "reconciliation",
                     event = "run_completed",
@@ -933,19 +1418,22 @@ impl TavilyProxy {
                     _previous_settled,
                     _previous_upstream_429,
                     previous_budget_exhausted,
-                ) = self
-                    .key_store
-                    .upstream_reconciliation_last_run_stats()
-                    .await?;
-                self.key_store
-                    .record_upstream_reconciliation_run_stats(
+                ) = await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.upstream_reconciliation_last_run_stats(),
+                )
+                .await?;
+                await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.record_upstream_reconciliation_run_stats(
                         started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
                         attempted_candidate_count,
                         settled,
                         upstream_429_retry_windows,
                         budget_exhausted,
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
                 let summary_now = self.backend_time.now_ts();
                 if budget_exhausted && !previous_budget_exhausted {
                     tracing::warn!(
@@ -980,20 +1468,55 @@ impl TavilyProxy {
                 let remote_pressure = upstream_429_retry_windows > 0
                     && upstream_429_retry_windows.saturating_mul(2)
                         >= attempted_candidate_count.max(1);
-                let local_pressure = candidate_count > 0
+                let local_pressure = (candidate_count > 0 || preparation_budget_exhausted)
                     && attempted_candidate_count == 0
                     && budget_exhausted;
-                let pressure = settled == 0 && (remote_pressure || local_pressure);
-                let (_, previous_backoff_level, _) = self
-                    .key_store
-                    .upstream_reconciliation_global_backoff_state()
+                let remote_pressure = settled == 0 && remote_pressure;
+                let (_, previous_local_backoff_level, _) = await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.upstream_reconciliation_local_backoff_state(),
+                )
+                .await?;
+                let (local_pressure_streak, local_backoff_level, local_backoff_until) =
+                    await_reconciliation_post_process(
+                        post_process_deadline,
+                        self.key_store.update_upstream_reconciliation_local_backoff(
+                        settled == 0 && local_pressure,
+                        self.backend_time.now_ts(),
+                        ),
+                    )
                     .await?;
-                let (pressure_streak, backoff_level, backoff_until) = self
-                    .key_store
-                    .update_upstream_reconciliation_global_backoff(
-                        pressure,
+                if local_backoff_level > previous_local_backoff_level {
+                    tracing::warn!(
+                        component = "reconciliation",
+                        event = "local_backoff_applied",
+                        job_type = "upstream_reconciliation",
+                        pressure_streak = local_pressure_streak,
+                        backoff_level = local_backoff_level,
+                        backoff_until = local_backoff_until,
+                        candidate_count,
+                        budget_exhausted,
+                    );
+                } else if previous_local_backoff_level > 0 && local_backoff_level == 0 {
+                    tracing::info!(
+                        component = "reconciliation",
+                        event = "local_backoff_recovered",
+                        job_type = "upstream_reconciliation",
+                    );
+                }
+                let (_, previous_backoff_level, _) = await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.upstream_reconciliation_global_backoff_state(),
+                )
+                .await?;
+                let (pressure_streak, backoff_level, backoff_until) =
+                    await_reconciliation_post_process(
+                        post_process_deadline,
+                        self.key_store.update_upstream_reconciliation_global_backoff(
+                        remote_pressure,
                         self.backend_time.now_ts(),
                         max_retry_after_until,
+                        ),
                     )
                     .await?;
                 if backoff_level > previous_backoff_level {
@@ -1649,11 +2172,15 @@ impl TavilyProxy {
     }
 
     pub async fn upstream_reconciliation_backoff_until(&self) -> Result<i64, ProxyError> {
-        let (_, _, backoff_until) = self
+        let (_, _, global_backoff_until) = self
             .key_store
             .upstream_reconciliation_global_backoff_state()
             .await?;
-        Ok(backoff_until)
+        let (_, _, local_backoff_until) = self
+            .key_store
+            .upstream_reconciliation_local_backoff_state()
+            .await?;
+        Ok(global_backoff_until.max(local_backoff_until))
     }
 
     pub async fn record_upstream_reconciliation_budget_exhausted(

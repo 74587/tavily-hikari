@@ -153,6 +153,11 @@ page, an exact `hasEligible` existence check, and the oldest candidate age. The 
 uses nullable, explicitly bounded estimates so an unobserved queue is not reported as zero and a
 multi-item queue is not collapsed into a boolean. Keep historical degraded visibility as a separate
 indexed existence probe instead of deriving it from a current-day metric. After three rounds with no
-remote attempt and exhausted local budget, persist the global `2/5/10/30` minute backoff and honor a
-later Retry-After; a real remote attempt or successful settlement clears it. Keep normal per-key
-429 logs at DEBUG and reserve state-transition logs for enter, escalation, and recovery.
+remote attempt and exhausted local budget, persist a short local backoff without changing remote
+429 state. Only actual upstream 429 attempts advance the global `2/5/10/30` minute backoff and honor
+a later Retry-After; a real remote attempt or successful settlement clears the relevant state. Keep
+normal per-key 429 logs at DEBUG and reserve state-transition logs for enter, escalation, and recovery.
+
+Main settlement must start before terminal-research polling. Hydrate the bounded candidate page and
+key/cooldown state in one indexed batch, reserve the first eligible key within the two-second local
+preparation budget, then use the remaining 20-second job budget for the research sweep.

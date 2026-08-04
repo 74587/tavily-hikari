@@ -267,5 +267,11 @@
 - The CI shard manifest assigns `deferred_ha_gc_*` watchdog-debt regression coverage to `lib-misc`.
   `ci_backend_tests.py verify` requires every discovered backend test to have exactly one shard
   owner, so the continuation-recovery regression cannot silently disappear from the PR matrix.
+
+## Current diagnostics contract
+
+- The scheduler emits one sampled `ha_outbox_gc` aggregate INFO per channel per 60-second window. Slow slices and SQLite conflicts bypass the normal window so they remain immediately visible without restoring per-slice WARN noise.
 - Sampled HA export/sync logs publish indexed `outbox_sequence_span_estimate` and high watermark
   instead of an exact outbox row count. Sequence holes make the span an estimate, not inventory.
+- Reconciliation local-pressure metadata is part of the replicated HA meta set. The final deadline
+  split also keeps durable reconciliation markers within the same bounded run as remote observations.

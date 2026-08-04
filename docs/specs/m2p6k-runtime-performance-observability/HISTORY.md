@@ -28,3 +28,8 @@
 - Corrected HA perf diagnostics so full-master export without a peer does not synthesize a zero
   ACK watermark; expensive outbox and memory sampling remains bounded to the existing slow/error
   and time-window triggers.
+
+- Reconciliation and HA GC diagnostics now expose the causal boundary directly: main settlement starts before research sweep, local pressure has its own state, and normal GC progress is sampled per channel instead of logged per slice.
+- The final review preserved that boundary with explicit request-start, settlement, and post-processing
+  deadlines; local pressure metadata is replicated during HA takeover and normal GC diagnostics remain
+  channel-sampled.

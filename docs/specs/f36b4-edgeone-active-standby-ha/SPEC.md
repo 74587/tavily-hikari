@@ -158,6 +158,10 @@ delta, and estimated net-row delta. `ha_outbox_cleanup_once --dry-run --json` ex
 when the schema is present. They are sequence-based progress estimates, not a substitute for an
 expensive exact row count; operators must not describe them as an exact global backlog total.
 
+The online reconciliation controller preserves its local pressure and retry metadata in the HA meta
+baseline and incremental stream. A standby takeover therefore resumes the existing local backoff
+instead of immediately recreating the pressure loop.
+
 Sampled HA export and sync diagnostics use `outbox_sequence_span_estimate` plus
 `outbox_high_watermark`, never an exact `outbox_row_count`. The span is an upper bound when
 sequence holes exist and must not be presented as inventory.
@@ -185,24 +189,23 @@ the next retry to 30 seconds; no channel may be hidden by a clean-state exact co
 
 ## Visual Evidence
 
-PR: include
-![HA channel GC recovery desktop](./assets/current/ha-channel-gc-recovering-desktop.png)
+PR: none (current-SHA evidence displayed in review; repository image asset awaits owner approval)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
-- story_id_or_title: `Admin/HaNodeDetailPanel/Recovering`
-- scenario: `d88925bb` recovery state with all three channels
+- story_id_or_title: `Admin/HaNodeDetailPanel/Stalled` and `Mobile`
+- scenario: current three-channel ACK and GC health states, including stalled/deferred diagnostics
 - requested_viewport: `desktop default`
 - viewport_strategy: `storybook-viewport`
 - capture_scope: `browser-viewport`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Captured from `d88925bb` after the recovery and reconciliation changes were
-  finalized.
-  The panel shows ACK/high-watermark/lag, retention, GC state, oldest age, adaptive batch,
-  progress, defer reason, retry time, debt mode, delete rate, foreground RPS, SLO, deadline,
-  and observed time for control, billing, and runtime.
-- submission_gate: `approved`
+- evidence_note: Captured from the final implementation SHA and displayed in the owner review.
+  The desktop and `393x852` mobile states show ACK/high-watermark/lag, retention, GC state, oldest
+  age, adaptive batch, progress, defer reason, retry time, debt mode, delete rate, foreground RPS,
+  SLO, deadline, and observed time for control, billing, and runtime. No stale screenshot is reused
+  and no image asset is committed until owner approval.
+- submission_gate: `owner_approval_pending`
 
 ## Acceptance
 
@@ -226,6 +229,10 @@ PR: include
   批次预算；旧的非法 resource 也不得被误判为 retention debt。
 - 重启后，per-channel deletion total、high watermark 与 ingress/net estimate 必须保留；只读
   preflight 必须能报告它们，且在线路径不得为此执行精确 `COUNT(*)`。
+- 正常在线 GC slice/defer 只写 DEBUG；每个 channel 最多每 60 秒输出一条聚合 INFO，包含删除量、最老可删年龄、删除速率、前台 RPS、债务模式与下次重试。慢批次、锁冲突、SLO 状态跃迁和真实错误仍立即告警。
+- 聚合 INFO 同时包含 continuation delay 与计算出的 `next_retry_at`，使 deferred GC 的恢复时间
+  可从低频正常日志直接判断；两者必须使用 post-slice 前台流量探测后的有效 continuation delay，
+  与实际持久化的 continuation 保持一致。
 - 共享 `codex-testbox` 上的 256MiB cgroup v2 合同验证必须通过：standby 首次全量 baseline
   sync 成功、active 连续 billing baseline 导出成功，且主备进程组 `memory.current` 峰值都不
   得超过 `268435456` bytes。

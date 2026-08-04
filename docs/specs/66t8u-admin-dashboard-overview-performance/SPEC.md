@@ -116,6 +116,8 @@
   last-good；只有没有 last-good 的冷启动允许一次有界同步构建。
 - 无业务变化时最多每 60 秒执行一次安全 freshness probe，响应结构与 SSE 事件结构保持不变。
 - recent-alert 候选读取使用 ready 后后台创建的 partial time index；索引维护不得阻塞服务 ready。
+- 本轮 HA/对账状态扩展不改变 dashboard 的 10 秒最短重建和 60 秒无变化 probe 合同；状态模块
+  复用已有 last-good snapshot，不得因新增诊断字段恢复高频重查询。
 
 - 新增内部表 `dashboard_request_rollup_buckets`：
   - 主键 `(bucket_start, bucket_secs)`
@@ -244,3 +246,9 @@
 - 2026-07-07: 修正默认流量趋势绝对柱状图窗口为 24 个完整小时加当前未满小时，共 25 个小时槽，并用灰底与竖向虚线标识当前未满小时。
 - 2026-08-02: 确认本轮不扩大 dashboard 重建范围；现有 10 秒最短刷新与 60 秒无变化 freshness probe
   保持不变，旧 dashboard 截图不作为本轮 PR 视觉证据。
+
+## Current Boundary
+
+- The reconciliation and HA diagnostic additions continue to use the existing snapshot payload;
+  they do not add dashboard freshness queries or alter the ten-second rebuild and sixty-second
+  unchanged-probe contract.

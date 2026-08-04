@@ -21,6 +21,11 @@
   unchanged freshness probe. This round changes HA/reconciliation status surfaces only and does not
   reuse older dashboard screenshots as PR evidence.
 
+- This round preserves the dashboard's 2-second SSE generation check and shared last-good snapshot;
+  no additional freshness SQL or rebuild trigger was added while HA/reconciliation diagnostics were extended.
+- The final reconciliation/HA review kept the dashboard read contract unchanged: new diagnostic
+  state is served through the existing snapshot payload and does not add a freshness probe or rebuild.
+
 ## Notes
 
 - The dashboard overview payload shape and SSE snapshot contract are unchanged.

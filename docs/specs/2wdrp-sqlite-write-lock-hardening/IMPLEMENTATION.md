@@ -524,3 +524,11 @@
 - Scheduled jobs increment `claim_generation` when claimed. All scheduler completion paths and
   atomic continuations match the generation, while the periodic stale reaper safely requeues only
   the currently running generation.
+
+- Reconciliation now performs the main settlement pass before research polling and batches the
+  candidate key/cooldown hydration. Local budget pressure is persisted separately from remote 429
+  pressure, while HA GC normal progress is emitted through the existing per-channel 60-second
+  sampling window.
+- The final reconciliation path separates request-start, remote-observation, settlement-finalization,
+  and durable-postprocessing deadlines. Research bookkeeping writes are individually bounded, and
+  local pressure metadata is included in the HA meta baseline so takeover preserves its backoff state.
