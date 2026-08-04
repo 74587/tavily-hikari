@@ -11,9 +11,9 @@ tags:
   - performance
 status: active
 related_specs:
-  - docs/specs/085cc-backend-deterministic-time/SPEC.md
-  - docs/specs/3grrf-ci-backend-test-split/SPEC.md
-  - docs/specs/2wdrp-sqlite-write-lock-hardening/SPEC.md
+  - docs/specs/backend-deterministic-time/SPEC.md
+  - docs/specs/ci-backend-test-split/SPEC.md
+  - docs/specs/sqlite-write-lock-hardening/SPEC.md
 ---
 
 # Backend deterministic time

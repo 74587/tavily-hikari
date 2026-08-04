@@ -1,0 +1,250 @@
+# History
+
+## 2026-08-02
+
+- Added low-pressure HA GC recovery with persisted debt/SLO state, foreground-aware continuation
+  delays, stale-claim fencing, and stale-reaper-only continuation recovery.
+- Replaced reconciliation pre/post full aggregates with bounded indexed candidate pages and persisted
+  local 429 pressure backoff.
+- Reduced business-call memory residency by retaining one hour of events, five-minute historical
+  buckets, and paged backfill with tail merge.
+
+## 2026-05-07
+
+- Created after production showed transient SQLite `database is locked` errors across token billing,
+  MCP session locks, scheduled job starts, and LinuxDo OAuth upserts.
+- Chose bounded retry hardening as the first repair because the evidence showed short writer
+  collisions, while API rebalance selection and research result key pinning were behaving as
+  designed.
+
+## 2026-05-24
+
+- Extended the same lock-hardening line to forward-proxy startup: subscription refresh now fetches
+  multiple feeds concurrently, runtime snapshot persistence retries transient busy/locked writes,
+  and startup logs now break out sqlite, refresh, xray, and store-sync phases.
+
+## 2026-05-31
+
+- Moved repeated LinuxDo system tag refresh out of the startup readiness path after production
+  timing showed SQLite initialization dominated by per-user binding sync on an already consistent
+  database. Startup still performs a cheap mismatch repair check; periodic refresh now runs in the
+  background scheduler.
+
+## 2026-06-04
+
+- Extended the hardening scope from transient write retries to operator-controlled scheduled jobs
+  and DB size convergence. Manual and automatic maintenance now share job bookkeeping semantics, and
+  SQLite file shrinkage is treated as an explicit compaction concern rather than an implicit side
+  effect of deleting old rows.
+
+## 2026-06-06
+
+- Added a process-wide execution gate for DB-backed scheduled/manual jobs after production evidence
+  showed stale running maintenance rows and overlapping writers across request-log GC, quota sync,
+  and compaction. Request-log GC catch-up only holds the gate during active cleanup windows, not
+  while sleeping between catch-up passes.
+
+## 2026-06-09
+
+- Extended the same hardening line to `quota_sync`: upstream `/usage` now has a hard timeout,
+  `quota_sync` / `quota_sync/hot` runs are bounded and self-heal stale `running` rows at claim
+  time, and failed runs explicitly finish as `error` without mutating quota snapshot/sample data.
+- Added an offline `db_compaction_once` operator binary so maintenance compaction no longer depends
+  on the in-process admin trigger path when the DB execution gate is busy.
+- Reduced the default SQLite pool concurrency from `5` to `3` after production evidence showed that
+  more writer-capable connections amplified contention instead of absorbing it.
+
+## 2026-06-10
+
+- Replaced the owner-facing “shared execution gate decides whether manual maintenance is rejected”
+  model with a persisted maintenance queue on `scheduled_jobs`.
+- Added `queued` lifecycle semantics (`queued_at`, nullable `started_at`, coalesced representative
+  rows, startup abandon-all cleanup) plus a single in-process maintenance worker for DB-backed
+  maintenance jobs.
+- Scheduler loops now enqueue maintenance work instead of claiming-and-running inline; manual
+  trigger APIs now return the representative queued/running job instead of surfacing
+  `db_job_execution_busy`.
+
+## 2026-06-11
+
+- Tightened the representative-row contract so a later manual trigger can promote an already
+  running scheduler row to `trigger_source=manual`, keeping `/api/jobs/trigger` and `/api/jobs`
+  aligned on the same representative instance.
+- Added queue-state hints (`status`, `coalesced`, `promoted`) to manual trigger responses so the
+  admin UI can say whether work was newly queued or attached to an existing active job.
+- Split `forward_proxy_geo_refresh` into a remote discovery phase plus a short DB persistence phase,
+  and let the maintenance worker keep one bounded remote-I/O slot instead of blocking the queue on
+  GEO I/O or fan-out starting multiple remote maintenance jobs at once.
+
+## 2026-06-13
+
+- Finished the first dual-DB stabilization pass after the observability sidecar split exposed
+  follow-up drift in admin/test paths.
+- Server test helpers now attach the sibling observability DB and use observability-aware schema
+  probes, so migration/admin coverage exercises the same attached-database layout as production.
+- Admin request-log page reads now self-heal missing catalog rollups before serving totals/facets,
+  and auth-token log queries now qualify `auth_token_logs.*` columns explicitly after the
+  `billing_ledger` join split removed synchronous billing truth from the legacy history table.
+
+## 2026-06-15
+
+- Added a large-legacy compatibility path for observability sidecar startup: when inline
+  `request_logs` migration would exceed the startup budget, `observability` stays attached to the
+  core DB so startup and offline GC can proceed without a heavy copy.
+- Tightened attached-schema self-heal helpers to probe `observability` explicitly, preventing
+  duplicate-column migrations when both `main.request_logs` and `observability.request_logs` are
+  present during sidecar rollout or repair.
+
+## 2026-06-17
+
+- Promoted the large-legacy observability cutover from a deferred follow-up into an explicit
+  offline operator flow via `observability_sidecar_migrate`.
+- Locked the migration semantics to “copy only `request_logs`, then rebuild or self-heal derived
+  observability tables in the sidecar layout” instead of attempting a full-table legacy transplant.
+- Added resumable `request_logs` batch copy semantics keyed by preserved `id`, so partial sidecar
+  copies can resume safely without duplicating rows or breaking preserved `request_log_id`
+  references.
+- Standardized the validation path around a shared-testbox single-node Compose harness plus a
+  short-maintenance cutover/rollback runbook, with the pre-cutover core DB exported to testbox as
+  the rollback anchor.
+- Replaced the earlier WAL-mode offline-lock heuristic with an explicit sibling
+  `observability-migrate.lock` contract so online service holders and the offline migration command
+  coordinate through a process-visible file lock instead of inferring shutdown from `BEGIN EXCLUSIVE`.
+- Recorded the first passing shared-testbox evidence for that flow: isolated compose project build,
+  explicit sidecar migration, fresh token-backed `/api/tavily/search`, `/mcp`, and migrated
+  request-log reads all succeeded against the migrated snapshot.
+
+## 2026-06-18
+
+- A short-maintenance cutover attempt exposed a contract bug in the first explicit migration: the
+  tool copied `request_logs` and reset derived-table rebuild markers, then service startup
+  synchronously awaited the large derived rollup rebuild before opening the HTTP listener.
+- The explicit migration contract now treats a successful reopen of the normal startup path as part
+  of completion, so `completed=true` only means “offline rebuild succeeded and the service can
+  reopen cleanly after the migration lock is released.”
+- Tightened the contract so `observability_sidecar_migrate` must complete all sidecar derived-table
+  rebuild work and write completion meta before reporting success or deleting hidden legacy
+  observability tables.
+- Tightened the finalization order again after review: the migration now drops hidden legacy
+  observability tables before writing completion meta and the explicit cutover marker, avoiding a
+  false completed state if final table deletion is interrupted.
+- Added startup protection for explicit cutovers: a sidecar with the explicit cutover marker,
+  historical rows, and missing derived completion meta now fails fast with an operator instruction
+  to rerun the offline tool instead of turning startup into an implicit migration worker. The guard
+  is scoped to the explicit marker so legacy startup and small automatic sidecar self-heal remain
+  compatible.
+- Tightened completion checks so only exact `1` meta values count as complete; stale `0` values
+  remain rebuild-needed and are recovered by rerunning the offline tool.
+- Restored `valuable_failure_429_count` in the offline `api_key_usage_buckets` rebuild path so
+  per-key upstream-429 failures survive explicit sidecar migration.
+
+## 2026-06-20
+
+- Validated the first lossless startup/read-path hardening pass against a live production SQLite
+  snapshot copied online with SQLite `.backup`, then replayed on the shared testbox.
+- The first upgraded boot still paid one-time repair/migration work on the historical snapshot:
+  `billing_ledger` repair ran once, and the new alert-supporting indexes were created on
+  `auth_token_logs`.
+- The second boot on that same repaired snapshot logged
+  `billing ledger startup precheck skipped: ... reason=no_gap` and reduced
+  `sqlite startup total` from about `24s` to about `2.2s`, confirming the routine restart tax is
+  gone after the first successful repair.
+- The same production-derived replay returned `/api/public/metrics` in about `1.44s`,
+  `/api/alerts/events` in about `0.14s`, and emitted the first public SSE `metrics` event
+  immediately after connect.
+- Offline `billing_ledger_audit` on that snapshot still reported `118` day-only mismatches between
+  quota samples and ledger-derived daily windows. That audit drift remains a separate quota
+  correctness follow-up and is not repaired by the startup ledger bootstrap path itself.
+
+## 2026-06-22
+
+- Production evidence re-opened the topic at the request hot path: `/health` and `/api/version`
+  stayed responsive, but the latest sampled hour still showed `34` transient `database is locked`
+  failures and `296` slow statements.
+- The highest-value live signatures were `record_pending_billing_attempt failed for /mcp`,
+  `db operation error: operation=request stats persist`, and a public metrics month-tail query
+  shaped like `WITH scoped_logs AS (...) FROM observability.request_logs`.
+- The fix line stayed narrow: request-path pending billing now retries inside one bounded
+  transaction, request-stats flush now retries with batch-aware requeue proof and structured
+  contention logs, and public success metrics stop using the retained-log wide-scan fallback.
+
+## 2026-06-27
+
+- Tightened serving-role `/health` so the startup grace window no longer masks missing
+  forward-proxy runtime or shared xray readiness on `single`, `full_master`, or
+  `provisional_master`.
+- Preserved the accepted `f36b4` HA carve-out: `standby` / `recovery` still report `200 ok` on
+  `/health` while business runtime warmup is intentionally skipped.
+- Moved `server_pressure_buckets` historical rebuild out of the startup critical path into one
+  post-listener background rebuild, then tightened that background path so later HA promotions also
+  trigger it, HA demotions cancel it cleanly, and each rebuild commits from one transactional
+  request-log snapshot.
+- Cold startup subscription refresh now fans out across the whole configured URL set in one wave,
+  so 5-8 slow feeds no longer turn strict readiness into multiple 60-second timeout batches.
+
+## 2026-06-28
+
+- Removed the extra image-side 20-second success gate after production follow-up confirmed it was
+  delaying healthy beyond true strict readiness. The image still uses
+  `start-period=20s/interval=5s/timeout=5s/retries=18`, but healthy now flips on the first
+  successful strict `/health` probe.
+- Closed the implementation/spec drift around startup-critical observability work: the sidecar
+  derived-table rebuild path no longer runs `server_pressure_buckets` synchronously, while
+  `user_business_calls_1h` history rehydration is again loaded during startup so owner-facing
+  business-call summaries are already populated when strict readiness turns green.
+- Added a no-op-aware request-log effect-bucket migration guard so steady-state restarts skip the
+  legacy full-table repair once the migration has completed or a cheap indexed precheck proves no
+  remaining rows need rewriting, and the rewrite plus completion marker now commit atomically.
+
+## 2026-07-05
+
+- Production inspection showed the node healthy while HA authority refreshes were retriggering
+  post-ready `server_pressure_buckets` rebuild and `user_business_calls_1h` backfill work roughly
+  every five seconds, creating repeated SQLite slow statements on large retained databases.
+- Tightened post-ready scheduling to a writable-tenure edge: first startup or promotion into a
+  writable role can run the non-core derived work once, repeated writable refreshes are suppressed,
+  and demotion out of writable resets the gate for a later promotion.
+
+## 2026-07-22
+
+- Production `srv-101` re-opened the topic on the owner-facing admin path: the
+  `/admin/analysis/rankings?tab=last24h` shell still rendered, but `/api/users/rankings`,
+  `/api/summary`, `/api/summary/windows`, and `/api/analysis/pressure` could all sit behind the
+  full request-stats flush budget and miss first paint while `/health` remained green.
+- The shared root cause was not a second broken query family. These reads were still borrowing the
+  main pool's `5s` SQLite `busy_timeout` plus the write-side `10s` request-stats retry budget
+  before they could even decide whether to fall back.
+- Added a dedicated short-timeout `read_flush_pool`, capped read-side flush attempts to `250ms`,
+  and let summary/rankings/analysis-pressure-family handlers serve already durable stats when
+  transient writer contention outlives that small read budget.
+- Added lock-holding regression coverage proving those admin reads return promptly under write
+  contention and expose the queued delta after the lock clears, while the healthy-path
+  flush-before-read semantics remain intact.
+
+## 2026-07-31
+
+- Added cancellation-safe immediate transactions, generation-bound scheduled-job completion, and
+  threshold-based stale recovery so cancelled work cannot pollute the pool or complete a reclaimed
+  job.
+
+## HA Retention Catch-up Cadence
+
+Online HA cleanup needs distinct response modes: productive expired-row cleanup may catch up at a
+short cadence, but lock contention, lease contention, and legacy compatibility inspection must
+yield. The durable controller therefore uses a five-second productive continuation only when the
+slowest micro-batch stays below the 50ms active-SQL target, a 30-second deferred continuation, and
+a five-minute legacy-scan cadence.
+This raises sustainable cleanup capacity without broadening the SQLite write window.
+
+The reconciliation worker now starts main settlement before research sweep and keeps local budget
+pressure separate from upstream rate limiting; HA GC aggregate logs use the same bounded sampling
+window as HA export/sync diagnostics.
+
+The final review tightened the deadline contract: remote request starts stop before the finalization
+tail, successful observations may still settle during that tail, and research bookkeeping cannot
+outlive the run budget. Local reconciliation pressure metadata is replicated with the HA meta set so
+failover does not reset a deliberate local backoff.
+
+## Legacy Identity
+
+- Legacy compatibility identity: `#2wdrp`.

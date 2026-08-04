@@ -1,0 +1,247 @@
+# History
+
+## 2026-08-02
+
+- Extended the administrator HA channel contract with low-pressure recovery mode, observed deletion
+  rate, foreground request rate, recovery deadline, and SLO state. The panel now renders those fields
+  for all three channels.
+
+## Decision
+
+The project originally considered a master/slave split with multiple serving slaves and centralized token quota dispatch. The accepted direction is core-business dual-active plus control-plane single-write: EdgeOne origin-group routing can keep both business nodes serving, but only one node at a time owns control-plane writes and high-risk mutations.
+
+## Rationale
+
+Dual-active reduces the service-side blast radius of a node becoming standby while still keeping one authoritative control writer. Existing MCP Rebalance and API Rebalance stay instance-local, the billing/runtime truth set converges by peer sync, and the key invariant is that we must not guess a new upstream key when a research result is being resumed on the other node.
+
+## Accepted Semantics
+
+- `HA_CORE_DUAL_ACTIVE=1` with `HA_SOURCE_KIND=origin_group` enables the dual-active serving semantics.
+- `ha_full_master_node_id_v1` is the control-plane authority for the current writer.
+- `full_master` remains the only control-plane and full-write node; `standby` may serve core Tavily business in dual-active mode; `recovery` stays fenced.
+- `direct` keeps the legacy active/standby/finalize flow, including `provisional_master`.
+- `planned cutover` in dual-active mode switches the leader key directly; `finalize` is rejected in that route family, and `promote` is reserved for explicit `force=true` takeover when no reachable peer still owns full writes.
+- Recovery import is mergeable-only. It must not import request or auth-token log rows, and it must not overwrite settings, current quota/token/key state, or rebalance authority state.
+- Non-force promote stays a standby operation on the legacy `direct` path. Active-node promote attempts are rejected so operator error cannot produce a local double-active state.
+
+## Small-State Sync Revision
+
+Production validation showed that full SQLite snapshot sync is unsafe for the current data shape because request logs and response bodies can make the database tens of GiB. The accepted replacement is standby-pulled, zstd-compressed NDJSON state sync over explicit whitelisted resources plus a 72-hour `ha_outbox` event stream. HA sync is now forbidden from transporting full database files or raw request/auth-token log records.
+
+## Multi-Channel HA Revision
+
+Production `ha_outbox` growth showed that the old single whitelist simultaneously controlled
+baseline export, event emission, and trigger install, so hot tables such as `billing_ledger` and
+runtime quota state could silently flood the same `ha_outbox`. The accepted replacement splits HA
+into explicit `control`, `billing`, and `runtime` channels with independent baselines, event
+streams, and peer watermarks.
+
+- `control` stays a small control-plane event stream in `ha_outbox`.
+- `billing` gets dedicated `billing_ledger` replication through `ha_billing_outbox`.
+- `runtime` carries only minimal API/MCP correctness state through `ha_runtime_outbox`.
+- Mixed-version HA is no longer supported. A future standby must cold start from the same build and
+  then join using the new channel-aware contract.
+
+## HA Outbox Maintenance Revision
+
+Large historical `ha_outbox` cleanup is now an explicit maintenance action, not a startup side
+effect. The accepted sequence is:
+
+1. stop new HA writes or keep the node in `HA_MODE=single`
+2. run the offline `ha_outbox_cleanup_once` / `scripts/ha-outbox-maintenance.sh`
+3. run `db_compaction_once` only if reclaimable space justifies it
+
+The scheduler still performs bounded online `ha_outbox_gc`, but that path is intentionally limited
+to per-channel expired-row cleanup plus a passive WAL checkpoint so it cannot recreate the previous
+SWAP spike failure mode.
+
+## Upgrade Trigger Repair Revision
+
+Production-shaped validation confirmed that the post-upgrade `ha_outbox` growth was not just stale
+retained history. The upgraded 101 database still carried old single-channel `trg_ha_outbox_*`
+triggers, so hot tables such as `billing_ledger`, `account_usage_rollup_buckets`, and
+`scheduled_jobs` kept appending fresh invalid rows into `ha_outbox` even after the code had moved
+to three explicit channels.
+
+- The accepted fix is an explicit repair-first maintenance step that enumerates HA replication
+  triggers from `sqlite_master`, drops the whole legacy/current HA trigger set, and recreates only
+  the current `control/billing/runtime` contract.
+- Invalid legacy `ha_outbox` rows are now treated as garbage and removed immediately during
+  cleanup instead of waiting for retention.
+- Shared-testbox validation against a full 101 snapshot deleted `27,770,036` invalid legacy rows
+  plus `1,373,458` ordinary retention rows, proving that the continuous growth was rooted in stale
+  upgraded triggers rather than only slow historical decay.
+
+## Full Live Snapshot Validation Revision
+
+Merge-ready validation for the HA outbox fix now requires a complete production-shaped SQLite input
+copied from 101 into `codex-testbox`. “Complete” is explicitly the core DB plus the observability
+sidecar sibling, not the main `.db` file alone.
+
+- The accepted source path on 101 remains the Docker volume backing `/srv/app/data`.
+- The accepted transfer shape is a read-only SQLite `.backup` snapshot set, not sampled tables and
+  not a hand-picked subset of rows.
+- Offline HA cleanup and optional compaction proof now runs against that copied snapshot set inside
+  one isolated testbox run directory.
+- Hot WAL-mode production snapshots should default to a single-step SQLite backup instead of small
+  incremental page loops. Incremental `backup_step()` on a busy live source can restart repeatedly
+  when the source changes under it and may never finish in practice; the accepted export default is
+  therefore `pages=-1` with progress logging for observability.
+- Shared-testbox compaction proof remains subject to the testbox's own disk headroom. In the
+  validated run the cleanup created about `12 GiB` of reclaimable space, but `VACUUM` still failed
+  on the testbox because the root filesystem only had about `3.5 GiB` free. That does not weaken
+  the repair-first conclusion; it means the real production maintenance window must ensure enough
+  temporary free space before compaction starts.
+
+## Admin IA Revision
+
+The full HA node inventory is an operations setting, not global business-page chrome. Admin business pages stay silent in normal `full_master` state and show only a compact attention link during abnormal HA states; promote/finalize remains confined to the System Settings high-availability subpage.
+
+## Source Settings Revision
+
+The admin HA page now treats the current instance source as a private, per-node setting that can be switched between direct `IP/域名` and `源站组`. The stored value overrides the Env/CLI default for this instance only, and active/provisional operators can apply the saved source directly to EdgeOne from the same page. Startup defaults now accept `HA_SOURCE_KIND` and `HA_SOURCE_ORIGIN_GROUP_ID`, while `EDGEONE_EXPECTED_ORIGIN_*` remains a direct-origin compatibility input.
+
+## Startup Source Restore Hardening
+
+Restart validation exposed a startup-ordering defect in the HA control plane. The node already persisted its local HA source override, but startup role reconciliation still compared EdgeOne against the Env default source first and only restored the persisted override afterwards. The same stale pre-restore view was then written back into `ha_node_state`, which could downgrade a saved `:1443` override back to the Env default `:443`.
+
+- The accepted contract is that persisted node-local HA source settings remain authoritative across restarts.
+- Startup must therefore restore the persisted local source override before the first EdgeOne authority comparison and before rewriting the startup HA snapshot.
+- This defect is a startup state-restoration bug inside the application. It is not a frontend rendering issue and not an EdgeOne describe-response parsing issue.
+
+## Runtime EdgeOne Outer-Port Parsing Hardening
+
+Production validation exposed a second, separate HA control-plane defect during live `保存并切换 EdgeOne 到此源站` operations. After the admin switched the current node source from `gz.ivanli.cc:443` to `gz.ivanli.cc:1443`, the running authority-refresh loop queried `DescribeAccelerationDomains` again and compared the reported live target against this node's effective source settings. The real EdgeOne target was still the same node on `:1443`, but the describe parser only read `AccelerationDomains[0].OriginDetail` and ignored `OriginProtocol` / `HttpOriginPort` / `HttpsOriginPort` fields carried on the outer domain record. When `OriginDetail` itself omitted the custom port, the parser silently defaulted HTTPS back to `:443`, then mis-demoted the active node into `recovery`.
+
+- The accepted contract is that runtime authority refresh must reconstruct the live EdgeOne target from the full domain record, not from `OriginDetail` in isolation.
+- When outer-record direct-origin fields are present, they must backfill missing `OriginDetail` port/protocol values before the live target is compared with this node's effective source settings.
+- This defect is a runtime authority-refresh parse bug. It is distinct from the startup source-restore ordering bug fixed separately above.
+
+## Source Settings Contract Hardening
+
+HA source settings originally drifted across layers: the frontend, demo fixtures, and spec already used lowercase `http|https|follow`, but the Rust enum deserializer still expected PascalCase variants, causing direct-origin saves to fail before the handler executed. The accepted contract is now explicitly lowercase on the HA admin JSON wire, with the uppercase `HTTP|HTTPS|FOLLOW` mapping confined to the downstream EdgeOne control-plane payload.
+
+## Node Detail Scope
+
+The node-detail endpoint and page previously combined the URL-selected peer with current-node
+EdgeOne settings. That made a peer detail screen look like the peer owned the current management
+node's domain and source configuration.
+
+- Node detail is now a peer-scoped inspection surface: it returns and renders the selected node,
+  the current management-node identifier, and their interaction timeline.
+- Current-node EdgeOne/source configuration and its mutation entry point remain exclusively on the
+  HA overview, where the setting ownership is unambiguous.
+
+## Source Settings Failure UX Hardening
+
+The HA source settings dialog previously dumped raw backend failure text straight into the modal body, which was both visually inconsistent and hard to scan. The accepted interaction keeps local input validation beside the affected field and reserves form-level remote failures for a formal destructive alert with operator-friendly copy plus a default-collapsed technical-details disclosure.
+
+## EdgeOne Direct-Origin Payload Compatibility Revision
+
+Production validation on 101 showed that the HA admin “save and switch” path could not move a
+direct origin to a new `host:port` even when the target itself was reachable. The failure was not
+XP ingress routing; it was the downstream EdgeOne control-plane payload using lowercase
+`OriginInfo.OriginType=ip_domain`, which Tencent now rejects for direct origins.
+
+- The accepted direct-origin contract is provider-compatible `OriginInfo.OriginType=IP_DOMAIN`.
+- This compatibility detail is part of the HA source-switching control-plane contract and must stay
+  covered by regression tests, because a rejected switch leaves the node unable to adopt the new
+  effective source target without entering HA role drift.
+
+## Node Inventory Source Column Contract
+
+The HA node inventory had drifted into a mixed-semantics column: the local row rendered
+`edgeoneCurrentTarget`, while peer rows rendered `publicOrigin`. That made the same “源站” label show
+current EdgeOne routing for one row and direct-entry labels for another, which is not an operator
+usable contract.
+
+- The accepted contract is that the node inventory “源站” column shows node source configuration,
+  not current EdgeOne routing.
+- The local row therefore renders the current instance `haSourceEffective.target`.
+- Peer rows now receive and render peer-reported `sourceConfigTarget`; `publicOrigin` remains the
+  peer direct-entry label but no longer backs the “源站” column.
+
+## HA Control Plane Revision
+
+The earlier HA admin UI mixed real local state with inferred remote placeholders derived from
+`edgeoneOrigin` / `edgeoneExpectedOrigin`. That was acceptable for initial fault-recovery work but
+not for routine maintenance operations.
+
+- The accepted model is a single-writer control surface over a dual-active service plane.
+- Real peer inventory now comes from `HA_PEER_NODES_JSON`.
+- Only one peer may be marked `standby_candidate` in the current release.
+- `planned cutover` is the formal maintenance cutover path and is initiated from the current leader-key owner in dual-active mode, or from the current `full_master` on the legacy direct path.
+- Peer visibility and timeline retention are intentionally bounded: multiple peers may be observed,
+  but only the eligible standby candidate can take planned cutover, and raw operator-visible
+  control-plane events are retained for 7 days.
+
+## 2026-07-31
+
+- Persisted per-channel GC progress and surfaced it in administrator peer details; generation-safe
+  stale recovery replaced unbounded continuation retries.
+
+## Streaming HA Memory Contract Revision
+
+Observed 101 memory growth showed that HA sync still had one large-object pipeline even after the
+channel split: active baseline export built a full NDJSON string for `billing_ledger`, then
+compressed it as one blob; standby baseline/events import downloaded and decoded whole zstd
+payloads before applying them. That behavior produced the `hinet-lam` standby OOM and also made
+the 101 primary look like it had a leak whenever billing baseline export repeated.
+
+- The accepted fix is to make HA baseline/export/import line-streaming end-to-end while preserving
+  the current zstd NDJSON wire contract.
+- `HA_MODE=single` keeps the old eager forward-proxy runtime startup semantics, but
+  `active_standby` standby/recovery roles now intentionally avoid prewarming xray/runtime before
+  they are promoted back into business-serving roles.
+- Subsequent serving-health hardening does not weaken that HA minimal-health carve-out.
+  `standby` / `recovery` remain green without xray prewarm, while only business-serving roles lose
+  the temporary startup-grace shortcut and must wait for actual xray readiness.
+- Production-shaped standby proof exposed a second bug after the streaming refactor: standby still
+  started business schedulers such as `quota_sync`, usage rollups, and request-log GC. Those jobs
+  could write into the same SQLite file while HA apply sessions were trying to hold
+  `BEGIN IMMEDIATE`, producing `database is locked`, nested-transaction errors, and false “memory
+  leak” symptoms during large catch-up.
+- The accepted refinement is that standby/recovery startup keeps only HA-minimal background tasks.
+  Business background jobs must follow the same role gate as business traffic and runtime warmup.
+- HA sync state persistence also needs an explicit per-channel flush boundary. Coalescing watermark
+  and node-state writes until the end of the whole sync loop is not safe once each channel owns its
+  own long-running apply transaction.
+- Standby validation on `hinet-lam` exposed another HA-sync semantic gap after the memory fix:
+  runtime events can still arrive in a channel-local order that is valid on the active node but
+  temporarily invalid on the standby because the required parent row has not been re-established in
+  that channel window yet. The accepted behavior is not to keep retrying the same event batch
+  forever. Instead, a standby channel that fails events apply with SQLite foreign-key errors must
+  reset its own `baseline_applied` / `applied_seq` watermarks and recover on the next interval via
+  a fresh baseline pull.
+- Readiness semantics split accordingly: active/full-business roles still treat xray readiness as a
+  health requirement, while standby/recovery roles do not.
+- Shared-testbox proof is now part of the accepted contract rather than an ad hoc smoke check. For
+  the production-shaped synthetic fixture used here, the contract passes only when standby finishes
+  its first full catch-up under a `256MiB` cgroup limit and repeated active billing baseline exports
+  stay within the same limit without OOM.
+- Online HA outbox cleanup now uses the application pool and a bounded non-blocking writer slice;
+  billing/runtime retention is 14 days, while expired cursors continue through the existing
+  `410 -> baseline` recovery path. Admin HA status includes low-cost per-channel ACK/GC health.
+
+## Online Outbox Self-Healing
+
+The fixed 30-second online continuation made bounded cleanup safe but left large expiration debt
+with a low maximum service rate. Productive retention slices now continue after five seconds when
+their slowest active database micro-batch remains below the 50ms target. Slow work, writer contention, and
+lease deferral remain deliberately slower, while a valid-only legacy cursor scan uses a
+five-minute cadence. This keeps online write windows bounded without treating passive
+compatibility inspection as backlog that needs a tight retry loop.
+
+Progress evidence is intentionally sequence- and age-based rather than an exact row count:
+high-watermark deltas, deleted rows, and the ingress-minus-delete estimate provide a bounded
+trend signal without reintroducing hot-path full-table aggregation.
+
+Normal GC progress is now observable through a channel-scoped 60-second aggregate log window;
+the persisted admin health fields remain the source of truth for per-channel progress between samples.
+
+Failover recovery now carries local reconciliation pressure metadata through HA meta replication, and
+the reconciliation worker reserves a durable finalization tail after remote request starts stop.
+
+## Legacy Identity
+
+- Legacy compatibility identity: `#f36b4`.

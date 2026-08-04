@@ -1,0 +1,457 @@
+# Linux.do Credit 额度充值（#5vxmz）
+
+> 当前有效规范以本文为准；实现覆盖与当前状态见 `./IMPLEMENTATION.md`，关键演进原因见 `./HISTORY.md`。
+
+## 背景 / 问题陈述
+
+- 新用户默认账户额度为 0，管理员可手动调基线额度，但用户无法自助购买可用额度。
+- Linux.do Credit 已提供积分流转 API，可作为用户侧充值支付通道。
+- 若不固定充值订单、权益展开、回调验签和自然月口径，月末购买与重复通知会产生长期歧义。
+
+## 目标 / 非目标
+
+### Goals
+
+- 登录用户可在 `/console` 概览右侧直接购买月度积分额度包，并在独立的 `/console/billing` 页面查看完整权益构成与排期。
+- 使用 Linux.do Credit 官方 LDC 创建订单：`type=ldcpay`、Ed25519 签名、跳转至平台认证支付页。
+- 支付成功后按服务器本地自然月展开权益，当前自然月从购买时所在月份到月底算第 1 个月。
+- 服务端 quote 以 `quote_month_start` 锁定报价月；若剩余天数下的当前月日均额度累加不足以覆盖完整月额度，则当前月 `monthlyLimit` 线性 clamp，并按裁掉的当前月月额度折价，`hourlyLimit` / `dailyLimit` 保持原档位。
+- 已生效权益叠加到账户有效 `hourlyLimit`、`dailyLimit` 与 `monthlyLimit`，不改变 hourly-any 请求频率额度。
+- 用户侧必须能最小可用地读懂“当前哪些额度来自充值、后续哪些自然月还会生效、现在的单价和购买规则是什么”，而不是只看到 stepper 与金额。
+- 管理端提供充值记录页，可查看、筛选、排序、按用户聚合订单，并在 TOTP 二次确认后执行退单或仅退款。
+
+### Non-goals
+
+- 不接入易支付兼容 MD5 创建订单路径。
+- 不实现部分退款；Linux.do Credit 当前退款接口只支持全额退回。
+- 不改变 Tavily business credits 的实际扣减口径。
+- 不改变现有用户标签、基线额度、`block_all` 语义。
+
+## 范围（Scope）
+
+### In scope
+
+- 后端充值配置、订单创建、通知验签、订单查询封装、DB schema 与幂等权益发放。
+- 账户有效额度解析读取当前服务器本地自然月命中的充值权益。
+- 用户控制台概览右侧完整充值卡、独立 billing 页、订单历史、权益构成摘要、未来月份时间线、状态刷新与 Storybook 状态覆盖。
+- Admin 用户详情只读审计区域、充值记录管理页、退款操作保护、全局管理端 TOTP 绑定，以及订单本地关闭 / 自动退款补偿状态透出。
+
+### Out of scope
+
+- 部分退款、后台补单按钮、单管理员独立 TOTP、恢复码。
+- 多币种、多价格表、多支付渠道。
+- 将充值额度拆分到 token 级别。
+
+## 需求（Requirements）
+
+### MUST
+
+- 默认价格固定为 `50 LDC = 1000 积分额度 / 自然月`；测试价开关开启后，`1 LDC = 1 积分额度 / 自然月`。
+- 用户选择的积分额度默认必须在 `1000..=20000` 内，且为 `1000` 的正整数倍；测试价开启后允许 `1..=20000` 且步进为 `1`。
+- 用户选择的自然月数必须在 `1..=12` 内。
+- 订单金额按 `credits / 1000 * months * 50` 计算，并以两位小数字符串提交给 Linux.do Credit。
+- 订单创建必须持久化 `out_trade_no`、用户、购买额度、月数、金额、状态、创建/更新时间。
+- 充值订单的本地生命周期固定为 `pending -> expired -> cancelled`：`pay_expires_at = created_at + 10 分钟`，`cancel_after_at = created_at + 24 小时`；10 分钟后关闭支付入口，24 小时后硬关闭订单。
+- 异步通知必须校验订单存在、金额一致、状态成功、签名有效，并对重复通知幂等返回 `success`。
+- 成功回调只有在 `pending` / `expired` 且仍未超过 `cancel_after_at`、同时支付月份与 `quote_month_start` 相同的情况下才会发放权益；超过 24 小时或跨月晚到支付必须进入系统自动退款路径。
+- 权益必须按服务器本地自然月展开为 `(user_id, month_start, credits)`，同一订单同一月份只能发放一次。
+- 当前月份的充值权益必须按 `1000 月积分 => +20 小时额度、+100 日额度、+1000 月额度` 派生并加入账户有效 quota，正数小额测试价至少显示并生效 `+1` 小时/日额度；`block_all` 生效时最终额度仍为 0。
+
+### SHOULD
+
+- 私钥配置应支持 32-byte seed（base64/base64url/hex）和 PKCS#8 DER/PEM，方便部署。
+- 用户控制台应通过后端返回的价格与配置展示充值选项，避免前端重复实现支付规则。
+- 订单查询接口用于用户返回控制台后的状态刷新，不作为发放权益的唯一依据。
+- 管理端系统设置应提供充值总开关与“开放非管理员充值”调试开关；总开关关闭时用户控制台不展示充值入口，创建订单接口拒绝新订单；非管理员开关关闭时仅管理员请求可看到并创建充值订单。
+- 管理端系统设置在充值总开关开启时提供全局管理端 TOTP 绑定；首次绑定需确认当前验证码，重置/解绑需当前 TOTP。
+- 退单与仅退款必须先验证全局管理端 TOTP，输入框必须使用 `autocomplete="one-time-code"`、`inputmode="numeric"`、数字 `pattern` 和稳定 `name/id`，且不能是密码框。
+- 管理端充值记录页应读取全局管理端 TOTP 状态；未绑定时点击退单或仅退款应提示先绑定并引导到系统设置，不展示验证码输入框。
+- 管理端充值记录页提交退单或仅退款失败时，应在确认弹窗内展示明确错误反馈并恢复可操作状态，不能只停留在无反馈的确认状态。
+- 管理端充值记录支持按用户、时间范围、状态搜索，支持按下单时间、成交时间、退款时间、状态排序，并支持平铺与按用户聚合视图。
+- 管理端充值记录在没有任何充值订单时不显示导航模块；直达 `/admin/recharges` 时只显示轻量占位。
+- `DEV_OPEN_ADMIN` 下禁止修改充值总开关，禁止执行退单/仅退款，避免免鉴权环境进入真实退款链路。
+
+### COULD
+
+- 后续可支持平台公钥验签、部分退款、恢复码与管理员补偿单。
+
+## 功能与行为规格（Functional/Behavior Spec）
+
+### Core flows
+
+- 用户打开 `/console`，在充值卡片中用只读步进器选择积分额度与自然月数，并看到本次购买会增加多少小时、日、月额度。
+- 用户打开 `/console/billing`，在同一页先看到当前权益构成、资费规则、自然月时间线与近期订单，再在购买区用只读步进器选择积分额度与自然月数，并看到本次购买会增加多少小时、日、月额度。
+- 前端调用创建订单 API，后端生成唯一 `out_trade_no`，持久化 pending 订单，使用官方 LDC 签名调用 Linux.do Credit 创建订单。
+- 生命周期 worker 负责在 bounded run 中处理三类任务：10 分钟本地过期 sweep、24 小时取消 sweep、系统自动退款重试；任何远程退款调用都不能在持有 SQLite 写 gate 时执行。
+- 后端不跟随 Linux.do Credit 创建订单响应的跳转；若上游返回 3xx `Location`，将该地址作为支付 URL 返回给浏览器，由浏览器跳转到 Linux.do Credit 完成认证支付。
+- Linux.do Credit GET 通知本服务 notify endpoint；服务验签和校验金额后，若订单仍在本地可认窗口内则置为 paid 并发放权益，否则转入 `refunding` / `refunded` 自动补偿路径。
+- quote 与下单请求必须逐字段一致；`POST /api/user/recharge/orders` 需要回传完整 quote 摘要，服务端按同一算法重算并校验，stale/mismatched quote 一律拒绝。
+- 用户回到 `/console?payment=<out_trade_no>` 后，控制台刷新 dashboard 和订单列表，显示当前生效额度与订单状态；当存在 `pending` / `expired` / `refunding` 订单时，前端按最近的 `pay_expires_at`、`cancel_after_at`、`refund_retry_after_at` 自动轻量刷新。
+- 管理员打开 `/admin/recharges` 后，后端返回订单列表、聚合数据和 `hasRechargeOrders`；前端仅在存在订单时展示导航项。
+- 管理员在充值记录列表或按用户聚合视图点击用户名时，跳转到用户详情页；用户详情页以表格形式展示覆盖所有充值周期前一个月至后一个月的额度月历。
+- 管理员执行退单时，服务先调用 Linux.do Credit `POST /epay/api.php` 全额退款接口；平台成功后订单状态置为 `refunded`，删除该订单权益并刷新额度快照。
+- 管理员执行仅退款时，服务先调用同一全额退款接口；平台成功后订单状态置为 `refundOnly`，保留该订单权益并记录退款审计字段。
+
+### Edge cases / errors
+
+- 充值未配置时，用户控制台显示不可用状态，创建订单返回 `503`。
+- 非登录用户访问充值 API 返回 `401`。
+- 金额、订单号或签名不匹配的通知返回 `400`，不发放权益。
+- 重复成功通知不重复插入权益，仍返回 `success`。
+- `expired` 只表示“创建 10 分钟后本地关闭支付入口”，不是跨月语义；该状态下若用户早已在支付平台打开页面并在 24 小时内、同月成功支付，服务仍认单。
+- `quote_month_start` 所在自然月仍是订单的唯一报价月份；若成功回调到达时支付月份已跨出 `quote_month_start`，订单必须进入系统自动退款路径，不发放权益。
+- 超过 `cancel_after_at` 才到达的成功回调必须进入系统自动退款路径，不发放权益。
+- 过期月份权益不参与当前 quota 解析。
+- 未绑定 TOTP、TOTP 错误或失败次数锁定时，退款操作返回错误且不会调用 Linux.do Credit。
+- 前端已知 TOTP 未绑定时不应提交退款请求；若后端仍返回未绑定、验证码错误或锁定错误，确认弹窗必须保持打开并显示可理解的失败提示。
+- 前端尚未确认 TOTP 状态或状态读取失败时不应展示验证码输入或提交退款请求，必须先展示等待/错误提示。
+- 前端已知 TOTP 当前不可用（如缺少加密配置或调试环境禁用敏感操作）时不应展示验证码输入或提交退款请求，必须先展示不可用提示。
+- 已退款、失败、pending、expired、cancelled 订单不能发起管理员退款；系统自动退款 worker 只处理 `refund_actor = system:auto` 的 `refunding` 订单，不能接管管理员手工退款单。
+
+## 接口契约（Interfaces & Contracts）
+
+### 接口清单（Inventory）
+
+| 接口（Name）                                          | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc）   | 负责人（Owner） | 使用方（Consumers） | 备注（Notes）                      |
+| ----------------------------------------------------- | ------------ | ------------- | -------------- | -------------------------- | --------------- | ------------------- | ---------------------------------- |
+| `GET /api/user/recharge/config`                       | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | user console        | 读取充值可用性、价格、当前权益摘要 |
+| `GET /api/user/billing/summary`                       | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | user console        | 用户可读的权益构成与未来月份摘要   |
+| `POST /api/user/recharge/quote`                       | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | user console        | 服务端 quote + 当前月折抵预览      |
+| `GET /api/user/recharge/orders`                       | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | user console        | 用户订单历史                       |
+| `POST /api/user/recharge/orders`                      | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | user console        | 创建 Linux.do Credit 支付订单      |
+| `GET /api/user/recharge/orders/:out_trade_no`         | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | user console        | 查询当前用户订单                   |
+| `GET /api/linuxdo-credit/notify`                      | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | Linux.do Credit     | 支付成功异步通知                   |
+| `GET /api/users/:id`                                  | HTTP         | external      | Modify         | `./contracts/http-apis.md` | backend         | admin UI            | 增加只读充值审计字段               |
+| `GET /api/admin/recharges`                            | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 充值记录搜索、排序、聚合           |
+| `POST /api/admin/recharges/:out_trade_no/refund`      | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 全额退款并撤销权益                 |
+| `POST /api/admin/recharges/:out_trade_no/refund-only` | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 全额退款但保留权益                 |
+| `GET /api/admin/totp`                                 | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 查询全局管理端 TOTP 状态           |
+| `POST /api/admin/totp/setup`                          | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 生成未确认 TOTP secret 与 QR       |
+| `POST /api/admin/totp/confirm`                        | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 首次确认并持久化 TOTP              |
+| `POST /api/admin/totp/reset`                          | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 当前 TOTP 验证后重置绑定           |
+| `POST /api/admin/totp/disable`                        | HTTP         | external      | New            | `./contracts/http-apis.md` | backend         | admin UI            | 当前 TOTP 验证后解绑               |
+
+### 契约文档（按 Kind 拆分）
+
+- [`./contracts/http-apis.md`](./contracts/http-apis.md)
+- [`./contracts/db.md`](./contracts/db.md)
+
+## 验收标准（Acceptance Criteria）
+
+- Given 充值配置完整且用户已登录
+  When 用户购买 `2000` 积分额度、`3` 个自然月
+  Then 订单金额为 `300.00` LDC，支付请求使用 `type=ldcpay` 和 Ed25519 签名。
+
+- Given Linux.do Credit 发送同一成功通知两次
+  When 服务处理通知
+  Then 订单保持 paid，权益只发放一次，响应体均为 `success`。
+
+- Given 用户在月底下单且剩余天数内的当前月日均额度累加不足以覆盖完整月额度
+  When 服务返回 quote
+  Then 当前月月额度会 clamp，价格按当前月被裁掉的月额度线性折价，`hourlyLimit` / `dailyLimit` 不抬高。
+
+- Given 创建订单请求携带 stale 或不匹配的 quote
+  When 服务重新计算 quote 并逐字段校验
+  Then 请求被拒绝且不会创建订单。
+
+- Given `pending` 订单创建 10 分钟后仍未支付
+  When 生命周期 worker 处理到期订单
+  Then 订单转为 `expired`，`paymentUrl` 被清空，前端自动刷新后显示支付入口已关闭。
+
+- Given `pending` 或 `expired` 订单满 24 小时仍未支付
+  When 生命周期 worker 处理取消 sweep
+  Then 订单转为 `cancelled`，前端自动刷新后显示订单已取消。
+
+- Given `expired` 订单在 24 小时窗口内收到成功回调且支付月份仍等于 `quote_month_start`
+  When 服务处理通知
+  Then 订单转为 `paid`，只发放一次权益。
+
+- Given 订单超过 `cancel_after_at` 后才收到成功回调
+  When 服务处理通知
+  Then 订单转为 `refunding`，不发放权益，并由后台自动重试原路退款直到进入 `refunded`。
+
+- Given 月底折价订单在成功回调到达时支付月份不再等于 `quote_month_start`
+  When 服务处理通知
+  Then 订单转为 `refunding`，不发放权益，并保留最终值与折抵标记用于审计。
+
+- Given 用户本月有 `3000` 充值权益，且基线/标签有效小时/日/月额度为 `100/500/5000`
+  When 读取 dashboard 或做 quota precheck
+  Then 有效小时/日/月额度为 `160/800/8000`。
+
+- Given 用户当前总额度同时包含基础额度、长期权益和充值权益
+  When 用户打开 `/console/billing`
+  Then 页面能把“长期/基础部分”和“充值带来的当前月增量”拆开解释，不暴露后台账本备注、操作者或原始 source id。
+
+- Given 充值配置对当前用户可见
+  When 用户在桌面端打开 `/console`
+  Then 账户概览右侧显示完整充值卡，保留当前权益摘要、近期订单、报价预览与创建订单动作；`/console/billing` 继续承载完整权益与月份时间线。
+
+- Given 用户存在未来两个月的充值排期
+  When 用户打开 `/console/billing`
+  Then 页面按自然月卡片时间线展示上月 / 本月 / 下月，并继续扩展到最近有效月份的下一个月，清楚呈现充值 credits 与月度增量；没有未来排期时也要给出明确提示。
+
+- Given 自然月时间线同时包含上月、当前月和后续月份
+  When 用户首次打开 `/console/billing`
+  Then 当前月卡片默认处于选中状态，所选月份详情展示当前月额度；用户随后选择其他月份并发生响应式布局变化时，时间线保持该选择并将对应卡片带回可视范围。
+
+- Given 用户打开充值订单影响预览
+  When 页面展示按月份展开的充值变化
+  Then 三个数字字段明确命名为“本单前充值月额度 / 本单增加 / 本单后充值月额度”，英文表头对应为 “Before order / Added by order / After order”；其中本单后充值月额度等于本单前充值月额度加本单增加；三者只描述充值权益，不包含基础额度或其他额度调整。
+
+- Given 用户在桌面端查看充值订单影响预览
+  When 用户悬浮、聚焦或点击任一数字列表头
+  Then 页面展示对应的可访问说明；点击外部或按 Escape 可关闭固定说明，月份列左对齐，三个数字列的表头与数据共用网格轨道并右对齐，数字使用等宽数字。
+
+- Given 用户在移动端查看充值订单影响预览
+  When 用户点击抽屉标题右侧的帮助入口
+  Then 页面集中展示三个数字字段的定义，说明支付成功前提与本月剩余天数折算规则；入口支持键盘聚焦、屏幕阅读器名称、关闭与 Escape，不与标题、关闭按钮或月份卡片重叠。
+
+- Given 管理员需要调整用户基础额度
+  When 在用户详情账号权益账本新增 `base` scope 记录
+  Then 该记录按三项 quota delta 叠加到默认账户基线，并在有效额度拆解中展示为“基础额度”。
+
+- Given 测试价开关已开启
+  When 用户购买 `1` 积分额度、`1` 个自然月
+  Then 订单金额为 `1.00` LDC，界面展示最小额度增量。
+
+- Given 用户绑定 `block_all` 标签
+  When 同一用户存在充值权益
+  Then 有效额度仍为 `0`。
+
+- Given 充值配置缺失
+  When 用户打开控制台
+  Then 充值卡片展示不可用状态，创建订单接口不应产生本地订单。
+
+- Given 管理员关闭充值功能总开关
+  When 普通用户打开控制台或调用创建订单接口
+  Then 用户控制台不展示充值入口，创建订单接口返回不可用且不产生本地订单。
+
+- Given 管理员关闭“开放非管理员充值”调试开关
+  When 普通用户打开控制台
+  Then 用户控制台不展示充值入口；管理员请求仍可看到并创建充值订单。
+
+- Given 没有任何充值订单
+  When 管理员打开管理端
+  Then 导航不展示充值记录模块；直达 `/admin/recharges` 只显示轻量占位。
+
+- Given 管理员已绑定 TOTP 且订单为 paid
+  When 管理员输入当前 TOTP 后执行退单
+  Then 服务先调用 Linux.do Credit 全额退款，成功后订单状态为 `refunded`，该订单权益被撤销并刷新额度快照。
+
+- Given 管理员已绑定 TOTP 且订单为 paid
+  When 管理员输入当前 TOTP 后执行仅退款
+  Then 服务先调用 Linux.do Credit 全额退款，成功后订单状态为 `refundOnly`，该订单权益保留。
+
+- Given 管理员尚未绑定 TOTP 且订单为 paid
+  When 管理员点击退单或仅退款
+  Then 管理端展示先绑定 TOTP 的提示和系统设置入口，不展示验证码输入框，也不提交退款请求。
+
+- Given 管理员已绑定 TOTP 且退款请求失败
+  When 管理员在确认弹窗中提交退款操作
+  Then 管理端保持确认弹窗打开，展示失败原因，并恢复确认按钮可再次操作。
+
+- Given 服务运行在 `DEV_OPEN_ADMIN`
+  When 管理员尝试开启充值功能或执行退款
+  Then 请求被拒绝，不进入真实退款链路。
+
+## 验收清单（Acceptance checklist）
+
+- [x] 核心路径的长期行为已被明确描述。
+- [x] 关键边界/错误场景已被覆盖。
+- [x] 涉及的接口/契约已写清楚或明确为 `None`。
+- [x] 相关验收条件已经可以用于实现与 review 对齐。
+
+## 非功能性验收 / 质量门槛（Quality Gates）
+
+### Testing
+
+- Unit tests: LDC 签名字符串、私钥解析、通知验签、月份展开、TOTP ±1 窗口与失败锁定。
+- Integration tests: 创建订单、重复通知幂等、权益叠加 quota、`block_all` 优先级、退款成功/失败、退单撤销权益、仅退款保留权益、`DEV_OPEN_ADMIN` 阻断。
+- E2E tests (if applicable): 用户控制台充值交互可用。
+
+### UI / Storybook (if applicable)
+
+- Stories to add/update: `BillingPage` 默认、有未来月份、无订单、充值关闭、移动端、生命周期状态面；现有 `UserConsole` 充值相关故事继续覆盖月底折抵、测试价与隐藏态；`AdminRechargeRecordsModule` 平铺、聚合、未绑定 TOTP、退款失败反馈、空记录，以及 `expired` / `cancelled` / `refunding(system:auto)` / `refunded(system:auto)`。
+- Docs pages / state galleries to add/update: 用户控制台 billing 页面状态 gallery；管理端充值记录 TOTP、最终成交与折抵状态。
+- `play` / interaction coverage to add/update: billing 页面关键分区可见性、stepper 调整、创建订单成功/失败路径、月底折抵提示、充值预览桌面三列表头的说明打开/关闭、移动端标题帮助入口，以及管理端未绑定 TOTP 提示与退款失败反馈。
+- Visual regression baseline changes (if any): 充值卡片桌面与移动布局，管理端记录表格新增最终成交列。
+
+### Quality checks
+
+- `cargo fmt`
+- `cargo clippy -- -D warnings`
+- `cargo test`
+- `cd web && bun test`
+- `cd web && bun run build`
+- `cd web && bun run build-storybook`
+
+## Visual Evidence
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?demo=1
+  state: default
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x4096
+  viewport_strategy: ui-demo-source
+  sensitive_exclusion: N/A
+  evidence_note: 独立 `/console/billing` 页面在桌面端以整行横向自然月卡片作为主体，用户可直接比较上月 / 本月 / 下月，并继续切到后续排期月份；下方月份详情把基础接入额度、长期权益与标签调整合并为统一的“基础权益”，再单独对比当月调整与充值权益。
+
+![User console billing page desktop](./assets/console-billing-live-desktop-carousel.png)
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?demo=1
+  state: desktop default current-month selection
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1440x1100
+  viewport_strategy: devtools-emulate
+  sensitive_exclusion: N/A
+  evidence_note: 首次加载时当前月卡片保持高亮，且下方详情展示当前月的月度调整与充值权益。
+
+PR: include
+![Billing page desktop current-month selection](./assets/console-billing-current-month-selected-desktop.png)
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?demo=1
+  state: mobile
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 390x4096
+  viewport_strategy: ui-demo-source
+  sensitive_exclusion: N/A
+  evidence_note: 同一 billing 页面在移动端收敛为单卡横滑的自然月视图，左右切换按钮下沉到卡片底部，同时仍保留统一的“基础权益”、订单状态与购买控件的完整页面级阅读路径。
+
+![User console billing page mobile](./assets/console-billing-live-mobile-carousel.png)
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?demo=1
+  state: mobile selected-month follow
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 390x844
+  viewport_strategy: devtools-emulate
+  sensitive_exclusion: N/A
+  evidence_note: 用户在桌面选择后续月份后切换到移动布局，该月份仍保持选中并回到单卡可视范围，详情继续对应所选月份。
+
+PR: include
+![Billing page mobile selected-month follow](./assets/console-billing-selected-month-mobile-follow.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/UserDetailQuotaTab
+  state: base quota ledger rows
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1920x1400
+  viewport_strategy: devtools-emulate
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 用户详情基础额度页不再展示独立基础额度编辑器，基础额度记录在账号权益账本中以 Base quota 呈现。
+
+![Admin user detail base quota ledger](./assets/admin-user-detail-base-quota-ledger.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/UserDetailQuotaTab
+  state: entitlement ledger filters desktop
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1280x720
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 账本筛选栏使用共享 Radix Select 与单一月份范围外壳，起止月份由“至”分隔，应用筛选按钮按内容宽度靠右显示。
+
+![Admin entitlement ledger filters desktop](./assets/admin-user-detail-entitlement-filters-desktop.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/UserDetailQuotaTabCompact
+  state: entitlement ledger filters narrow viewport
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 390x844
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 窄屏筛选栏无横向溢出，月份范围外壳保持为单一控件并在内部堆叠起止输入，应用筛选按钮保持独立的内容宽度和触控高度。
+
+![Admin entitlement ledger filters mobile](./assets/admin-user-detail-entitlement-filters-mobile.png)
+
+- source_type: ui_demo
+  demo_entry_or_url: /console/billing?announcements=closed (with VITE_DEMO_MODE=true)
+  state: recharge lifecycle states with paginated recent orders
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1600x3200
+  viewport_strategy: ui-demo-source
+  sensitive_exclusion: N/A
+  evidence_note: 前台 `/console/billing` demo 路由在关闭公告弹窗的稳定页面上，同时展示 `pending`、`expired`、`cancelled`、`refunding(system:auto)`、`refunded(system:auto)`；最近订单区保持整行通栏，不再只占购买区左半边，并新增每页 10 条分页与页脚页码，且每条记录仍带出本地关闭时间与自动退款说明。
+
+![Billing recharge lifecycle states](./assets/console-billing-lifecycle-states.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: Admin/Pages/Recharges
+  state: recharge lifecycle page
+  target_program: mock-only
+  capture_scope: browser-viewport
+  requested_viewport: 1600x1180
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  evidence_note: 管理端充值记录页以整页状态展示 `cancelled`、`expired`、`refunding(system:auto)`、`refunded(system:auto)`，并验证筛选栏在桌面宽度下完整铺满页面主内容区，而不是只占左半区。
+
+![Admin recharge lifecycle page](./assets/admin-recharge-page.png)
+
+![Recharge burst price and quota controls](./assets/recharge-burst-price-story.png)
+![Recharge month-end clamp and discounted quota](./assets/recharge-month-end-clamp.png)
+![Admin recharge records flat desktop view](./assets/admin-recharge-records-flat.png)
+![Admin recharge refund TOTP confirmation](./assets/admin-recharge-refund-totp.png)
+![Admin recharge bound TOTP confirmation](./assets/admin-recharge-bound-totp-confirmation.png)
+![Admin recharge unbound TOTP prompt](./assets/admin-recharge-unbound-totp-prompt.png)
+![Admin recharge refund failure feedback](./assets/admin-recharge-refund-failure-feedback.png)
+![Admin recharge user detail quota calendar](./assets/admin-recharge-user-detail-calendar.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: User Console/Billing/Billing Page/Default
+  state: desktop recharge preview with the first column glossary tooltip open
+  target_program: mock-only
+  capture_scope: component
+  requested_viewport: 1280x720
+  viewport_strategy: browser-default
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 桌面充值预览使用新的三列命名，月份列左对齐，数字列和表头统一右对齐；第一列表头的固定说明明确已有充值权益范围，并说明不含基础额度及其他调整。
+
+![Recharge preview column glossary desktop](./assets/recharge-preview-columns-desktop.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: User Console/Billing/Billing Page/Mobile
+  state: mobile recharge preview drawer with the consolidated glossary open
+  target_program: mock-only
+  capture_scope: component
+  requested_viewport: 390x844
+  viewport_strategy: browser-resize-fallback
+  sensitive_exclusion: N/A
+  PR: include
+  evidence_note: 移动端在抽屉标题右侧提供帮助图标，一次展开即可阅读三个字段定义；标题、帮助入口、月份键值布局和底部关闭按钮保持稳定，不与说明内容重叠。
+
+![Recharge preview column glossary mobile](./assets/recharge-preview-columns-mobile.png)
+![Admin recharge bound TOTP confirmation](./assets/admin-recharge-bound-totp-confirmation.png)
+![Admin recharge unbound TOTP prompt](./assets/admin-recharge-unbound-totp-prompt.png)
+![Admin recharge refund failure feedback](./assets/admin-recharge-refund-failure-feedback.png)
+![Admin recharge user detail quota calendar](./assets/admin-recharge-user-detail-calendar.png)
+
+## Related PRs
+
+- None
+
+## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
+
+- 假设：创建订单使用官方 LDC Ed25519；异步通知因文档未提供平台公钥，按公共通知字段的排序签名和 `Client Secret` 校验。
+- 风险：Linux.do Credit 平台若实际回调签名与文档公共段不一致，通知验签会拒绝，需要后续按平台实际字段调整。
+- 假设：服务器本地时区为运行环境的 `chrono::Local`，当前部署为 `Asia/Shanghai`。
+- 假设：月底 clamp 仅影响 quote_month_start 所在当前月，后续完整自然月仍按原档位展开。
+
+## 参考（References）
+
+- [Linux.do Credit API 文档](https://credit.linux.do/docs/api)
+- [`docs/specs/account-quota-user-console/SPEC.md`](../account-quota-user-console/SPEC.md)
+- [`docs/specs/admin-user-tags-quota/SPEC.md`](../admin-user-tags-quota/SPEC.md)
