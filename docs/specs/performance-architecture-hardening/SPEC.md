@@ -59,8 +59,10 @@
   transport、semantic failure 与 budget exhaustion。
 - 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
-- 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。危险角色切换必须实时探测全部已配置
-  节点；任一节点 capability 缺失、unknown 或 probe 失败时 fail closed。公开 HA 状态响应保持不变。
+- 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通
+  promote 必须实时探测全部已配置节点；任一可达节点 capability 缺失或 unknown 时 fail closed。当前
+  active 不可达时，只有显式 `force=true` 的 emergency takeover 可绕过远端 capability，且必须保留既有
+  防脑裂校验、确认和审计。公开 HA 状态响应保持不变。
 
 ### SHOULD
 
@@ -93,8 +95,9 @@
 - 单一 HA channel 的 eligibility 延迟不得阻塞其他 channel。
 - read model cold start 无可用 last-good 时显式 degraded，不在请求线程执行重聚合。
 - 滚动升级中的旧节点继续消费现有 wire payload；新字段或表仅以向后兼容方式扩展。
-- 旧节点不报告 `writable_tenure_v1`，因此混跑期危险角色切换按 fail-closed 规则拒绝；普通同步和读取
-  不受 capability gate 影响。
+- 旧节点不报告 `writable_tenure_v1`，因此混跑期 planned cutover、finalize 和普通 promote 按
+  fail-closed 规则拒绝；普通同步和读取不受 capability gate 影响。仅在 active 不可达时保留显式
+  emergency takeover，不把 capability 缺失本身当作 peer 已失效的证据。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -115,8 +118,10 @@
 
 - Demotion 请求发出后 250ms 内停止 claim、取消在途远端请求并完成 authority epoch commit；该 commit
   后旧 revision 不得提交新写入。promotion 只启动一套 runtime。
-- 两节点混跑测试中，任一节点不报告 `writable_tenure_v1`、probe unknown 或不可达时，promote、finalize
-  与 planned cutover 均 fail closed；全部节点报告 capability 后才允许进入既有切换校验。
+- 两节点混跑测试中，任一可达节点不报告 `writable_tenure_v1` 或 capability unknown 时，普通 promote、
+  finalize 与 planned cutover 均 fail closed；全部可达节点报告 capability 后才允许进入既有切换校验。
+- active probe 不可达时，普通 promote 仍拒绝；显式 `force=true` emergency takeover 只有在既有防脑裂
+  条件通过后才允许，并产生包含 capability bypass 原因的控制面审计事件。
 - control 延迟 300 秒时 billing/runtime 仍持续推进；stale generation 无法完成新 claim。
 - 相同 wire payload UPDATE 不产生事件，有效变化恰好一条，旧版本仍可消费。
 - reconciliation 首次远端尝试小于 2 秒、单轮不超过 20 秒，查询成本受 page limit 约束。
