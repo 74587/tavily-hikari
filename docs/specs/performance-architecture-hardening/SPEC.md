@@ -60,9 +60,10 @@
 - 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通
-  promote 必须实时探测全部已配置节点；任一可达节点 capability 缺失或 unknown 时 fail closed。当前
-  active 不可达时，只有显式 `force=true` 的 emergency takeover 可绕过远端 capability，且必须保留既有
-  防脑裂校验、确认和审计。公开 HA 状态响应保持不变。
+  promote 必须实时探测全部已配置节点；任一节点 capability 缺失、unknown 或不可达时 fail closed。
+  当前 active 不可达时，只有显式 `force=true` 的 emergency takeover 可绕过该 active 的远端
+  capability，且必须保留既有防脑裂校验、确认和审计；其他 peer 仍按既有 emergency takeover 安全规则
+  参与拒绝判断。公开 HA 状态响应保持不变。
 
 ### SHOULD
 
@@ -98,6 +99,9 @@
 - 旧节点不报告 `writable_tenure_v1`，因此混跑期 planned cutover、finalize 和普通 promote 按
   fail-closed 规则拒绝；普通同步和读取不受 capability gate 影响。仅在 active 不可达时保留显式
   emergency takeover，不把 capability 缺失本身当作 peer 已失效的证据。
+- authority epoch commit 在 250ms 写预算内遇到 busy 时，节点保持 cancellation 生效并进入持久
+  `demoting` 状态；禁止恢复旧 runtime、promotion 或新 claim。唯一 tenure supervisor 以有界退避重试，
+  直到 epoch commit 成功后完成 demotion；重启必须恢复该状态而不是重新获得 writable authority。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -116,10 +120,12 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Demotion 请求发出后 250ms 内停止 claim、取消在途远端请求并完成 authority epoch commit；该 commit
-  后旧 revision 不得提交新写入。promotion 只启动一套 runtime。
-- 两节点混跑测试中，任一可达节点不报告 `writable_tenure_v1` 或 capability unknown 时，普通 promote、
-  finalize 与 planned cutover 均 fail closed；全部可达节点报告 capability 后才允许进入既有切换校验。
+- Demotion 请求发出后 250ms 内停止 claim 并取消在途远端请求；authority epoch commit 成功后旧
+  revision 不得提交新写入。epoch 写锁超时时节点保持 `demoting` fail-closed，锁释放后只完成一次 epoch
+  commit，promotion 仍只启动一套 runtime。
+- 两节点混跑测试中，任一已配置节点不报告 `writable_tenure_v1`、capability unknown 或不可达时，普通
+  promote、finalize 与 planned cutover 均 fail closed；全部节点报告 capability 后才允许进入既有切换
+  校验。
 - active probe 不可达时，普通 promote 仍拒绝；显式 `force=true` emergency takeover 只有在既有防脑裂
   条件通过后才允许，并产生包含 capability bypass 原因的控制面审计事件。
 - control 延迟 300 秒时 billing/runtime 仍持续推进；stale generation 无法完成新 claim。
