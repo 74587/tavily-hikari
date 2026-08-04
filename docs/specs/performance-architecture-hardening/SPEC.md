@@ -47,7 +47,9 @@
 
 ### MUST
 
-- `HaRuntime` 发布单调递增 revision 的 writable authority；旧 revision 不得继续 claim、远端调用或写入。
+- `HaRuntime` 发布单调递增 revision 的 writable authority；authority epoch 持久化在 SQLite，并与业务
+  写入的最终 fence/commit 通过同一 SQLite writer serialization point 排序。旧 revision 不得继续
+  claim、远端调用或写入。
 - `MaintenanceRuntime` 独占 worker、reaper、`JoinSet`、lease 和 remote-I/O slot 的生命周期。
 - `SqliteRuntime` 唯一持有生产 pools、事务 guard、admission 和操作预算。
 - `ha_outbox_gc_work` 按 control、billing、runtime 独立持久化 eligibility、claim 与 continuation。
@@ -57,7 +59,8 @@
   transport、semantic failure 与 budget exhaustion。
 - 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
-- 混跑期间禁止 HA 角色切换，直到所有节点均具备 writable-tenure supervisor。
+- 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。危险角色切换必须实时探测全部已配置
+  节点；任一节点 capability 缺失、unknown 或 probe 失败时 fail closed。公开 HA 状态响应保持不变。
 
 ### SHOULD
 
@@ -74,9 +77,10 @@
 ### Core flows
 
 1. Promotion 创建新 writable revision，并恰好启动一套 `MaintenanceRuntime`。
-2. Demotion 撤销 authority 并触发旧 revision 的 cancellation token；在途远端请求必须可取消，SQLite
-   写入必须在 commit 前再次校验 revision fence。旧 revision 在 250ms 内停止获得新执行权，且不得在
-   demotion 后提交新写入。
+2. Demotion 先触发旧 revision 的 cancellation token，再以 SQLite 写事务递增持久 authority epoch；
+   demotion 只有在该事务提交后才对外完成。业务写事务必须在同一事务内校验预期 epoch，并由 SQLite
+   writer serialization 保证“旧业务 commit”与“demotion epoch commit”存在全序：旧写入要么先完成，
+   要么在 epoch 变化后失败，不存在检查与 commit 间的 TOCTOU。
 3. 每个 HA channel 独立 claim GC work，完成后原子记录 typed outcome 和 continuation。
 4. reconciliation projection 选择有界 work page，engine 在 2 秒内开始首次远端尝试并在 20 秒内结束。
 5. observability sidecar 持久化 alert projection；Dashboard builder 生成共享 `Arc` snapshot，HTTP/SSE
@@ -89,6 +93,8 @@
 - 单一 HA channel 的 eligibility 延迟不得阻塞其他 channel。
 - read model cold start 无可用 last-good 时显式 degraded，不在请求线程执行重聚合。
 - 滚动升级中的旧节点继续消费现有 wire payload；新字段或表仅以向后兼容方式扩展。
+- 旧节点不报告 `writable_tenure_v1`，因此混跑期危险角色切换按 fail-closed 规则拒绝；普通同步和读取
+  不受 capability gate 影响。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -107,8 +113,10 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Demotion 后 250ms 内停止 claim、取消在途远端请求并阻止旧 revision 提交新写入；promotion 只启动
-  一套 runtime。
+- Demotion 请求发出后 250ms 内停止 claim、取消在途远端请求并完成 authority epoch commit；该 commit
+  后旧 revision 不得提交新写入。promotion 只启动一套 runtime。
+- 两节点混跑测试中，任一节点不报告 `writable_tenure_v1`、probe unknown 或不可达时，promote、finalize
+  与 planned cutover 均 fail closed；全部节点报告 capability 后才允许进入既有切换校验。
 - control 延迟 300 秒时 billing/runtime 仍持续推进；stale generation 无法完成新 claim。
 - 相同 wire payload UPDATE 不产生事件，有效变化恰好一条，旧版本仍可消费。
 - reconciliation 首次远端尝试小于 2 秒、单轮不超过 20 秒，查询成本受 page limit 约束。

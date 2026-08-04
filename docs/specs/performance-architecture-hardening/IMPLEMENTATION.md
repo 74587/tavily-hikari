@@ -13,7 +13,7 @@
 
 实现拆为 12 个 risk-gated child Ticket，按依赖波次进入 integration branch：
 
-1. writable-tenure supervisor
+1. writable-tenure supervisor、持久 authority epoch 与 mixed-version capability gate
 2. SqliteRuntime seam
 3. MaintenanceRuntime legacy adapter
 4. RequestStatsPipeline
