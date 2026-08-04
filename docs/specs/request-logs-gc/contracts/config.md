@@ -24,7 +24,7 @@
 - Type: integer（天）
 - Default: `7`
 - Validation:
-  - 解析失败或小于下限：按下限处理或回退默认值（以 `PLAN.md` 决策为准）
+  - 解析失败或小于下限：按下限处理或回退默认值（以 `SPEC.md` 决策为准）
   - 强制下限：`>= 7`
 - Semantics:
   - 在线热数据集（primary DB）中保留最近 N 天的 `request_logs`（按自然日边界计算）

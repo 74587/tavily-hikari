@@ -5,8 +5,8 @@
 编写约定：
 
 - 只保留本计划实际用到的契约文件（不用的不要创建/应删除）。
-- `../PLAN.md` 是唯一的“接口清单（Inventory）”：每条接口都必须在那张表里出现。
-- 在 `../PLAN.md` 的 `Contract Doc` 列，填入对应契约文件的相对路径（例如 `./contracts/http-apis.md`）。
+- `../SPEC.md` 是唯一的“接口清单（Inventory）”：每条接口都必须在那张表里出现。
+- 在 `../SPEC.md` 的 `Contract Doc` 列，填入对应契约文件的相对路径（例如 `./contracts/http-apis.md`）。
 - 修改既有接口时，契约里必须写清楚：
   - 变化点（旧 → 新）
   - 向后兼容期望
