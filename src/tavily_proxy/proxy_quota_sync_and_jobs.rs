@@ -18,6 +18,23 @@ fn should_emit_reconciliation_summary(now: i64) -> bool {
     }
 }
 
+async fn await_reconciliation_post_process<T>(
+    deadline: std::time::Instant,
+    operation: impl std::future::Future<Output = Result<T, ProxyError>>,
+) -> Result<T, ProxyError> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(ProxyError::Other(
+            "reconciliation post-processing deadline exceeded".to_string(),
+        ));
+    }
+    tokio::time::timeout(remaining, operation)
+        .await
+        .map_err(|_| {
+            ProxyError::Other("reconciliation post-processing timed out".to_string())
+        })?
+}
+
 impl TavilyProxy {
     const RECONCILIATION_BACKOFF_SCOPE: &'static str = "period_reconciliation";
     // Candidate hydration is deliberately bounded so the first main settlement
@@ -828,6 +845,8 @@ impl TavilyProxy {
                 Self::RECONCILIATION_TOTAL_BUDGET_SECS
                     .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS),
             );
+        let post_process_deadline = started_at
+            + std::time::Duration::from_secs(Self::RECONCILIATION_TOTAL_BUDGET_SECS);
         let research_start_budget_secs = Self::RECONCILIATION_TOTAL_BUDGET_SECS
             .saturating_sub(QUOTA_SYNC_FETCH_TIMEOUT_SECS)
             .saturating_sub(Self::RECONCILIATION_FINALIZATION_HEADROOM_SECS)
@@ -1342,9 +1361,12 @@ impl TavilyProxy {
         } else {
             (0, 0, 0, 0, 0, main_budget_exhausted)
         };
-        self.key_store
-            .mark_upstream_reconciliation_run_completed_at(self.backend_time.now_ts())
-            .await?;
+        await_reconciliation_post_process(
+            post_process_deadline,
+            self.key_store
+                .mark_upstream_reconciliation_run_completed_at(self.backend_time.now_ts()),
+        )
+        .await?;
         match result {
             Ok((
                 settled,
@@ -1392,19 +1414,22 @@ impl TavilyProxy {
                     _previous_settled,
                     _previous_upstream_429,
                     previous_budget_exhausted,
-                ) = self
-                    .key_store
-                    .upstream_reconciliation_last_run_stats()
-                    .await?;
-                self.key_store
-                    .record_upstream_reconciliation_run_stats(
+                ) = await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.upstream_reconciliation_last_run_stats(),
+                )
+                .await?;
+                await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.record_upstream_reconciliation_run_stats(
                         started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
                         attempted_candidate_count,
                         settled,
                         upstream_429_retry_windows,
                         budget_exhausted,
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
                 let summary_now = self.backend_time.now_ts();
                 if budget_exhausted && !previous_budget_exhausted {
                     tracing::warn!(
@@ -1443,15 +1468,18 @@ impl TavilyProxy {
                     && attempted_candidate_count == 0
                     && budget_exhausted;
                 let remote_pressure = settled == 0 && remote_pressure;
-                let (_, previous_local_backoff_level, _) = self
-                    .key_store
-                    .upstream_reconciliation_local_backoff_state()
-                    .await?;
-                let (local_pressure_streak, local_backoff_level, local_backoff_until) = self
-                    .key_store
-                    .update_upstream_reconciliation_local_backoff(
+                let (_, previous_local_backoff_level, _) = await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.upstream_reconciliation_local_backoff_state(),
+                )
+                .await?;
+                let (local_pressure_streak, local_backoff_level, local_backoff_until) =
+                    await_reconciliation_post_process(
+                        post_process_deadline,
+                        self.key_store.update_upstream_reconciliation_local_backoff(
                         settled == 0 && local_pressure,
                         self.backend_time.now_ts(),
+                        ),
                     )
                     .await?;
                 if local_backoff_level > previous_local_backoff_level {
@@ -1472,16 +1500,19 @@ impl TavilyProxy {
                         job_type = "upstream_reconciliation",
                     );
                 }
-                let (_, previous_backoff_level, _) = self
-                    .key_store
-                    .upstream_reconciliation_global_backoff_state()
-                    .await?;
-                let (pressure_streak, backoff_level, backoff_until) = self
-                    .key_store
-                    .update_upstream_reconciliation_global_backoff(
+                let (_, previous_backoff_level, _) = await_reconciliation_post_process(
+                    post_process_deadline,
+                    self.key_store.upstream_reconciliation_global_backoff_state(),
+                )
+                .await?;
+                let (pressure_streak, backoff_level, backoff_until) =
+                    await_reconciliation_post_process(
+                        post_process_deadline,
+                        self.key_store.update_upstream_reconciliation_global_backoff(
                         remote_pressure,
                         self.backend_time.now_ts(),
                         max_retry_after_until,
+                        ),
                     )
                     .await?;
                 if backoff_level > previous_backoff_level {
