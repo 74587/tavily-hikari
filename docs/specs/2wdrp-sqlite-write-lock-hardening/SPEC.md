@@ -435,4 +435,5 @@ PR: none
 - Reconciliation completion markers, run statistics, and local/global pressure state share one
   bounded post-processing deadline. SQLite contention may produce an explicit persistence timeout,
   but must not leave the worker waiting past the run budget or report a durable success without
-  recording the state transition.
+  recording the state transition; the deadline must end before the scheduler's outer timeout so
+  cancellation cannot race the controlled timeout path.

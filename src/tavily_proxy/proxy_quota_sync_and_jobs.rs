@@ -45,6 +45,7 @@ impl TavilyProxy {
     const RECONCILIATION_FINALIZATION_HEADROOM_SECS: u64 = 1;
     const RECONCILIATION_POST_PROCESS_HEADROOM_SECS: u64 = 2;
     const RECONCILIATION_RETRY_BOOKKEEPING_HEADROOM_SECS: u64 = 2;
+    const RECONCILIATION_OUTER_TIMEOUT_MARGIN_SECS: u64 = 1;
     const RESEARCH_SWEEP_LIMIT: usize = 20;
     const RESEARCH_SWEEP_PER_KEY_LIMIT: usize = 4;
 
@@ -846,7 +847,10 @@ impl TavilyProxy {
                     .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS),
             );
         let post_process_deadline = started_at
-            + std::time::Duration::from_secs(Self::RECONCILIATION_TOTAL_BUDGET_SECS);
+            + std::time::Duration::from_secs(
+                Self::RECONCILIATION_TOTAL_BUDGET_SECS
+                    .saturating_sub(Self::RECONCILIATION_OUTER_TIMEOUT_MARGIN_SECS),
+            );
         let research_start_budget_secs = Self::RECONCILIATION_TOTAL_BUDGET_SECS
             .saturating_sub(QUOTA_SYNC_FETCH_TIMEOUT_SECS)
             .saturating_sub(Self::RECONCILIATION_FINALIZATION_HEADROOM_SECS)
