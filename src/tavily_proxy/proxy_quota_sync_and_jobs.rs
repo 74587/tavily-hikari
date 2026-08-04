@@ -27,6 +27,7 @@ impl TavilyProxy {
     const RECONCILIATION_TOTAL_BUDGET_SECS: u64 = 20;
     const RECONCILIATION_FINALIZATION_HEADROOM_SECS: u64 = 1;
     const RECONCILIATION_POST_PROCESS_HEADROOM_SECS: u64 = 2;
+    const RECONCILIATION_RETRY_BOOKKEEPING_HEADROOM_SECS: u64 = 2;
     const RESEARCH_SWEEP_LIMIT: usize = 20;
     const RESEARCH_SWEEP_PER_KEY_LIMIT: usize = 4;
 
@@ -819,7 +820,8 @@ impl TavilyProxy {
             + std::time::Duration::from_secs(
                 Self::RECONCILIATION_TOTAL_BUDGET_SECS
                     .saturating_sub(Self::RECONCILIATION_FINALIZATION_HEADROOM_SECS)
-                    .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS),
+                    .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS)
+                    .saturating_sub(Self::RECONCILIATION_RETRY_BOOKKEEPING_HEADROOM_SECS),
             );
         let finalization_deadline = started_at
             + std::time::Duration::from_secs(
@@ -1137,21 +1139,54 @@ impl TavilyProxy {
                                     .max(retry_after_until),
                             );
                         }
-                        let cooldown_until = self
-                            .arm_reconciliation_backoff(
+                        let retry_bookkeeping_deadline = started_at
+                            + std::time::Duration::from_secs(
+                                Self::RECONCILIATION_TOTAL_BUDGET_SECS
+                                    .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS),
+                            );
+                        let remaining = retry_bookkeeping_deadline
+                            .saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            return Err(ProxyError::Other(
+                                "reconciliation retry bookkeeping deadline exceeded".to_string(),
+                            ));
+                        }
+                        let cooldown_until = tokio::time::timeout(
+                            remaining,
+                            self.arm_reconciliation_backoff(
                                 &retry_key_id,
                                 retry_at,
                                 reason_kind,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ProxyError::Other(
+                                "reconciliation retry backoff persistence timed out".to_string(),
                             )
-                            .await?;
-                        self.key_store
-                            .mark_reconciliation_retry(
+                        })??;
+                        let remaining = retry_bookkeeping_deadline
+                            .saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            return Err(ProxyError::Other(
+                                "reconciliation retry bookkeeping deadline exceeded".to_string(),
+                            ));
+                        }
+                        tokio::time::timeout(
+                            remaining,
+                            self.key_store.mark_reconciliation_retry(
                                 &candidate,
                                 RECONCILIATION_STATUS_RATE_LIMITED,
                                 cooldown_until,
                                 Some(retry_reason.as_str()),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| {
+                            ProxyError::Other(
+                                "reconciliation retry marker persistence timed out".to_string(),
                             )
-                            .await?;
+                        })??;
                         let affected_window_count = 1_i64;
                         match reason_kind {
                             RECONCILIATION_RETRY_REASON_UPSTREAM_429 => {
