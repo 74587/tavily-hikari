@@ -129,7 +129,8 @@
 
 - Rust: `cargo fmt --all -- --check`、`cargo test`、
   `cargo clippy --all-targets --all-features -- -D warnings`。
-- Web: `bun test`、`bun run test:source-budgets`、`bun run build`。
+- Web: `bun --cwd web test`、`bun --cwd web run test:source-budgets`、
+  `bun --cwd web run build`。
 - 并发与 SQLite 场景使用隔离测试环境和 stub/sandbox upstream。
 
 ### UI / Storybook
