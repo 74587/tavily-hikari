@@ -432,3 +432,7 @@ PR: none
 - Reconciliation candidate-query timeouts are recorded as local pressure rather than an empty
   queue, and successful remote observations are finalized within the reserved write tail even when
   a later candidate exhausts the request budget.
+- Reconciliation completion markers, run statistics, and local/global pressure state share one
+  bounded post-processing deadline. SQLite contention may produce an explicit persistence timeout,
+  but must not leave the worker waiting past the run budget or report a durable success without
+  recording the state transition.
