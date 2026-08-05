@@ -2018,6 +2018,7 @@ impl KeyStore {
         };
 
         if credits <= 0 {
+            let settled_at = self.backend_time.now_ts();
             let updated = sqlx::query(
                 r#"
                 UPDATE billing_ledger
@@ -2033,8 +2034,8 @@ impl KeyStore {
                 "#,
             )
             .bind(BILLING_STATE_CHARGED)
-            .bind(Utc::now().timestamp())
-            .bind(Utc::now().timestamp())
+            .bind(settled_at)
+            .bind(settled_at)
             .bind(log_id)
             .bind(BILLING_STATE_PENDING)
             .execute(&mut *tx)
@@ -2068,7 +2069,7 @@ impl KeyStore {
         let charge_time = Utc
             .timestamp_opt(created_at, 0)
             .single()
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(|| self.backend_time.now_utc());
         let charge_ts = charge_time.timestamp();
         let minute_bucket = charge_ts - (charge_ts % SECS_PER_MINUTE);
         let day_bucket = local_day_bucket_start_utc_ts(charge_ts);
@@ -2300,6 +2301,7 @@ impl KeyStore {
             });
         }
 
+        let settled_at = self.backend_time.now_ts();
         let updated = sqlx::query(
             r#"
             UPDATE billing_ledger
@@ -2315,8 +2317,8 @@ impl KeyStore {
             "#,
         )
         .bind(BILLING_STATE_CHARGED)
-        .bind(Utc::now().timestamp())
-        .bind(Utc::now().timestamp())
+        .bind(settled_at)
+        .bind(settled_at)
         .bind(log_id)
         .bind(BILLING_STATE_PENDING)
         .execute(&mut *tx)

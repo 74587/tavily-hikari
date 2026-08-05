@@ -240,6 +240,7 @@ impl KeyStore {
         let flush_result = loop {
             match Self::flush_request_stats_writes_once(
                 &pool,
+                &backend_time,
                 &drained.pending_dashboard_rollups,
                 &drained.pending_api_key_usage,
                 &drained.pending_auth_token_activity,
@@ -347,13 +348,14 @@ impl KeyStore {
 
     async fn flush_request_stats_writes_once(
         pool: &SqlitePool,
+        backend_time: &BackendTime,
         pending_dashboard_rollups: &HashMap<(i64, i64), DashboardRequestRollupCounts>,
         pending_api_key_usage: &HashMap<(String, i64), ApiKeyUsageBucketDelta>,
         pending_auth_token_activity: &HashMap<String, AuthTokenActivityDelta>,
         pending_account_request_rollups: &HashMap<AccountRequestRollupKey, AccountUsageRollupDelta>,
         pending_request_log_catalog: &HashMap<RequestLogCatalogRollupKey, i64>,
     ) -> Result<(), ProxyError> {
-        let updated_at = Utc::now().timestamp();
+        let updated_at = backend_time.now_ts();
         let mut tx = pool.begin().await?;
         let mut dashboard_entries = pending_dashboard_rollups
             .iter()

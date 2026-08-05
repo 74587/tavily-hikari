@@ -517,6 +517,7 @@ impl KeyStore {
             && !request_kind_key.trim().is_empty()
             && request_kind_key.trim() != "api:unknown-path"
         {
+            let updated_at = self.backend_time.now_ts();
             let old_key = Self::request_log_catalog_rollup_key_for_request(
                 created_at,
                 &request_kind_key,
@@ -530,8 +531,7 @@ impl KeyStore {
                 auth_token_id.as_deref(),
                 api_key_id.as_deref(),
             );
-            Self::upsert_request_log_catalog_rollup_delta(&mut tx, &old_key, -1, Utc::now().timestamp())
-                .await?;
+            Self::upsert_request_log_catalog_rollup_delta(&mut tx, &old_key, -1, updated_at).await?;
             let new_key = Self::request_log_catalog_rollup_key_for_request(
                 created_at,
                 &request_kind_key,
@@ -545,8 +545,7 @@ impl KeyStore {
                 auth_token_id.as_deref(),
                 api_key_id.as_deref(),
             );
-            Self::upsert_request_log_catalog_rollup_delta(&mut tx, &new_key, 1, Utc::now().timestamp())
-                .await?;
+            Self::upsert_request_log_catalog_rollup_delta(&mut tx, &new_key, 1, updated_at).await?;
         }
 
         tx.commit().await?;

@@ -923,7 +923,7 @@ impl KeyStore {
             .fetch_utc_month_gap_bucket_metrics(
                 month_since,
                 month_request_log_floor,
-                Utc::now().timestamp(),
+                self.backend_time.now_ts(),
             )
             .await?
             .success_count;
