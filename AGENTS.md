@@ -48,6 +48,20 @@
 - Configure keys via `.env` or env vars (`TAVILY_API_KEYS`).
 - Do not commit secrets or local DB files. Backend can serve `web/dist` when present.
 
+## Agent skills
+
+### Issue tracker
+
+Engineering work is tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical five-role triage vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+The repository uses a single-context domain layout. See `docs/agents/domain.md`.
+
 ## Agent Runtime Conventions (Dev)
 
 - Default high ports: backend `58087`, frontend `55173` (increment within high range if needed).
