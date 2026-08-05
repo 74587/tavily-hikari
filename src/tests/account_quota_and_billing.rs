@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn pending_billing_settlement_uses_injected_time() {
+async fn billing_pending_settlement_uses_injected_time() {
     let db_path = temp_db_path("pending-billing-injected-time");
     let db_str = db_path.to_string_lossy().to_string();
     let (backend_time, manual_clock) = BackendTime::manual_from_ts(1_700_000_000);

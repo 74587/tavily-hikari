@@ -162,7 +162,7 @@ async fn public_success_breakdown_flushes_pending_request_stats_for_current_wind
 }
 
 #[tokio::test]
-async fn request_stats_flush_uses_injected_time_for_persisted_rollups() {
+async fn public_request_stats_flush_uses_injected_time_for_persisted_rollups() {
     let db_path = temp_db_path("request-stats-flush-injected-time");
     let db_str = db_path.to_string_lossy().to_string();
     let (backend_time, manual_clock) = BackendTime::manual_from_ts(PUBLIC_METRICS_TEST_NOW);
