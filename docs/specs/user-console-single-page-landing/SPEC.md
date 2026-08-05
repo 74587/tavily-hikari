@@ -2,9 +2,9 @@
 
 ## 背景 / 问题陈述
 
-- 当前 `/console` 把“账户仪表盘”和“Token 管理”拆成 `#/dashboard` 与 `#/tokens` 两个落地页。
+- `/console` 曾把“账户仪表盘”和“Token 管理”拆成 hash 路由；当前控制台以 pathname 路由承载同一单页体验。
 - 用户进入控制台后需要先切页才能从账户概览跳到 token 列表，中间还残留一块只承载切页按钮的空白容器。
-- 旧 hash 已经被分享和记录，若直接删掉 `#/dashboard` / `#/tokens` 会破坏既有入口与回退路径。
+- 路由兼容边界由 `../user-console-path-routing/SPEC.md` 统一约束，本主题只负责 merged landing 的内容与定位行为。
 
 ## 目标 / 非目标
 
@@ -12,8 +12,8 @@
 
 - 将 `/console` 的 landing 体验收敛为一个纵向单页：账户概览在前，Token 列表在后。
 - 充值对当前用户可见时，桌面 landing 在账户概览右侧保留完整充值卡；小屏继续按单列内容流展示。
-- 保留旧 hash 兼容：访问 `#/dashboard` 或 `#/tokens` 时仍进入同一页，但自动定位到对应区块。
-- 保留 `#/tokens/:id` 作为独立 token detail 路由，并让 detail 返回操作固定落到单页内的 Token 列表区块。
+- 访问 `/console/dashboard` 或 `/console/tokens` 时仍进入同一页，并自动定位到对应区块。
+- 保留 `/console/tokens/:id` 作为独立 token detail 路由，并让 detail 返回操作固定落到单页内的 Token 列表区块。
 - 同步更新 Storybook、测试与快车道交付物，使验收口径围绕 merged landing 而不是双页面切换。
 
 ### Non-goals
@@ -47,8 +47,8 @@
 
 - `/console` 首屏同时渲染账户概览区块与 Token 列表区块。
 - 充值配置对当前用户可见时，`/console` 首屏还必须渲染完整充值卡及右栏布局；卡片不可见时不保留空右栏。
-- `#/dashboard` 与 `#/tokens` 保持可访问，并自动定位到 merged landing 的对应区块。
-- `#/tokens/:id` 保持 detail 页；点击 detail 返回按钮后进入 merged landing 的 Token 列表区块。
+- `/console/dashboard` 与 `/console/tokens` 保持可访问，并自动定位到 merged landing 的对应区块。
+- `/console/tokens/:id` 保持 detail 页；点击 detail 返回按钮后进入 merged landing 的 Token 列表区块。
 - merged landing 与 token detail 统一渲染用户控制台 footer，包含控制台标题、GitHub 链接与版本展示/加载态。
 - Storybook 与自动化断言不再把 dashboard/tokens 当成两张独立页面。
 
@@ -68,17 +68,17 @@
 - 用户访问 `/console`
   - 默认进入 merged landing。
   - 账户概览区块位于上方，Token 列表区块位于下方。
-- 用户访问 `/console#/dashboard`
+- 用户访问 `/console/dashboard`
   - 进入 merged landing。
   - 页面自动定位到账户概览区块。
-- 用户访问 `/console#/tokens`
+- 用户访问 `/console/tokens`
   - 进入 merged landing。
   - 页面自动定位到 Token 列表区块。
 - 用户在 Token 列表点击详情
-  - 进入 `/console#/tokens/:id`。
+  - 进入 `/console/tokens/:id`。
   - detail 页继续保留 token probe、日志与客户端接入模块。
 - 用户在 token detail 点击返回
-  - 回到 `/console#/tokens`。
+  - 回到 `/console/tokens`。
   - merged landing 自动定位到 Token 列表区块。
 
 ### Edge cases / errors
@@ -107,17 +107,17 @@ None
   When 页面完成首屏渲染
   Then 账户概览区块与 Token 列表区块同时存在，且不再只能显示其中一个页面状态。
 
-- Given 用户访问 `/console#/dashboard`
+- Given 用户访问 `/console/dashboard`
   When 页面渲染完成
   Then merged landing 自动定位到账户概览区块。
 
-- Given 用户访问 `/console#/tokens`
+- Given 用户访问 `/console/tokens`
   When 页面渲染完成
   Then merged landing 自动定位到 Token 列表区块。
 
-- Given 用户从 merged landing 的 Token 列表进入 `/console#/tokens/:id`
+- Given 用户从 merged landing 的 Token 列表进入 `/console/tokens/:id`
   When 点击返回按钮
-  Then 返回 `/console#/tokens`，并回到 Token 列表区块而不是页面顶部。
+  Then 返回 `/console/tokens`，并回到 Token 列表区块而不是页面顶部。
 
 - Given Token 列表为空
   When 用户停留在 merged landing

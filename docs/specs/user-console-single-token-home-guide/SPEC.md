@@ -2,7 +2,7 @@
 
 ## 背景 / 问题陈述
 
-- `2nx74` 已将 `/console` landing 合并为“账户概览 + Token 列表”单页，但客户端接入指南仍只出现在 `#/tokens/:id` detail 页。
+- `2nx74` 已将 `/console` landing 合并为“账户概览 + Token 列表”单页，但客户端接入指南仍只出现在 `/console/tokens/:id` detail 页。
 - 当用户实际上只拥有 1 个可见 token 时，首页已经具备足够上下文，却仍需要额外进入 detail 页才能看到接入方法，增加首次接入路径。
 - 多 token 用户仍需要在 detail 视图中按 token 区分接入上下文，因此本轮不能把 landing 逻辑扩展为“所有 token 都显示一份通用指南”。
 
@@ -44,7 +44,7 @@
 
 - `/console` landing 在且仅在 `tokens.length === 1` 时渲染接入指南区块，位置固定在 Token 列表之后。
 - landing guide 使用唯一 token 的 masked id（如 `th-a1b2-************************`），不读取 token secret 明文。
-- `/console#/tokens/:id` 保留现有独立 detail guide；本轮不移除、不替换。
+- `/console/tokens/:id` 保留现有独立 detail guide；本轮不移除、不替换。
 - Storybook controls 与 preset stories 必须能区分 `Single Token` / `Multiple Tokens` / `Empty`。
 - 自动化测试必须覆盖 landing guide 的显示条件与示例 token 解析逻辑。
 
@@ -57,12 +57,12 @@
 
 ### Core flows
 
-- 用户访问 `/console#/tokens`，且 token 列表只有 1 条
+- 用户访问 `/console/tokens`，且 token 列表只有 1 条
   - 页面顺序为：账户概览 → Token 列表 → 客户端接入。
   - guide 中的示例 token 使用唯一 token id 的 masked 形式。
-- 用户访问 `/console#/tokens`，且 token 列表多于 1 条
+- 用户访问 `/console/tokens`，且 token 列表多于 1 条
   - 仍只显示账户概览与 Token 列表；landing 不出现 guide。
-- 用户访问 `/console#/tokens/:id`
+- 用户访问 `/console/tokens/:id`
   - detail 页继续展示原有 guide、probe、logs 与 token secret 交互。
 
 ### Edge cases / errors
@@ -72,15 +72,15 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 用户进入 `/console#/tokens` 且只有 1 个 token
+- Given 用户进入 `/console/tokens` 且只有 1 个 token
   When 页面渲染完成
   Then Token 列表下方出现 `客户端接入` 区块，并包含现有 guide tabs/片段。
 
-- Given 用户进入 `/console#/tokens` 且有 2 个 token
+- Given 用户进入 `/console/tokens` 且有 2 个 token
   When 页面渲染完成
   Then landing 不出现 `客户端接入` 区块。
 
-- Given 用户进入 `/console#/tokens/:id`
+- Given 用户进入 `/console/tokens/:id`
   When 页面渲染完成
   Then token detail 仍显示原有 guide 区块，且示例 token 取自 detail token id。
 

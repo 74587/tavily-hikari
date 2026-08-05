@@ -74,7 +74,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 用户在 `/console#/tokens/:id` 点击 `检测 MCP`
+- Given 用户在 `/console/tokens/:id` 点击 `检测 MCP`
   When probe 成功执行
   Then UI 依次完成 `initialize -> notifications/initialized -> ping -> tools/list -> tools/call`，并在气泡中先展示 control-plane steps，再展示每个广告工具的 `tools/call`。
 

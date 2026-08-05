@@ -4,9 +4,9 @@
 
 ## Current Status
 
-- Implementation: completed
-- Lifecycle: done
-- Catalog note: backend deterministic time seam + slow-test de-wallclocking
+- Implementation: partial
+- Lifecycle: active
+- Catalog note: backend deterministic time seam and slow-test de-wallclocking are implemented; residual behavioral UTC reads remain
 
 ## Implemented Now
 
@@ -83,6 +83,10 @@
 
 ## Remaining Gaps
 
+- `src/store/key_store_sessions.rs` 仍直接用 `Utc::now()` 更新 request-log catalog rollup 时间。
+- `src/store/key_store_request_stats_flush_and_public_metrics.rs` 仍直接用 `Utc::now()` 写入持久化 rollup `updated_at`。
+- `src/store/key_store_users_and_oauth.rs` 仍直接用 `Utc::now()` 写入 billing ledger `updated_at` / `settled_at`。
+- 上述行为性时间读取必须改走 `BackendTime` 并补充 manual-clock 回归测试后，本主题才能恢复为 completed。
 - 当前 slowdown 相关的真实 wall-clock 热点已迁完；后续若继续扩面，应优先审计残留历史 `Utc::now()` / `tokio::time::sleep(...)` 是否仍属于行为路径，而不是继续加 shard 掩盖。
 - `BackendTime` 的 manual clock 设施已就位，但并未把所有测试都强行切成 paused runtime；DB-heavy 测试仍需按需采用显式持久化时间戳或局部可控时钟。
 - `lib-request-rollup` 的关键不稳点已收敛到 `tests::request_` 前缀串行运行；若要继续压时长，下一步应优先消除这组 GC / retention 测试中残留的真实 runtime / SQLite busy-time 依赖，而不是继续扩大线程数。

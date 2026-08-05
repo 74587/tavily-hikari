@@ -26,6 +26,6 @@
 
 - [x] M1: 新建 follow-up spec 并冻结单页合并边界
 - [x] M2: `/console` landing 重构为账户概览 + Token 列表单页
-- [x] M3: 旧 `#/dashboard` / `#/tokens` hash 收敛为同页自动定位
+- [x] M3: `/console/dashboard` / `/console/tokens` 收敛为同页自动定位
 - [x] M4: Storybook 与自动化测试更新到 merged landing 验收口径
 - [x] M5: fast-track 验证、PR 与 review-loop 收敛

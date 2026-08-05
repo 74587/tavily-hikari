@@ -56,7 +56,7 @@
   Then 响应仍保持当前 `401` 语义，不会退化成匿名 `404`。
 - Given 已鉴权的 `/mcp/*` 本地拒绝
   When 日志落盘
-  Then `request_logs` 与 `auth_token_logs` 都能看到该请求，`request_kind` 为 `mcp:raw:<full_path>`，`result_status=error`，`failure_kind=mcp_path_404`，`counts_business_quota=false`，`business_credits=NULL`，`api_key_id=NULL`，`key_effect_code=none`。
+  Then `request_logs` 与 `auth_token_logs` 都能看到该请求，`request_kind` 为 `mcp:unsupported-path` 且 detail 保留完整 path，`result_status=error`，`failure_kind=mcp_path_404`，`counts_business_quota=false`，`business_credits=NULL`，`api_key_id=NULL`，`key_effect_code=none`。
 - Given 根路径 `/mcp` 的正常请求
   When 请求访问 `/mcp`
   Then 继续走现有 proxy/billing/日志逻辑，不受子路径拒绝改动影响。

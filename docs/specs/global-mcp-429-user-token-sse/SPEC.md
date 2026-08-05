@@ -10,7 +10,7 @@ contracts or session pinning, and expose live request-log snapshots on the user 
 - Apply MCP follow-up recovery globally for every client that uses `/mcp`.
 - Keep `initialize` placement global and health-aware without adding probe-only routing.
 - Keep every MCP session pinned to its original upstream key.
-- Add a user-owned SSE endpoint for `/console#/tokens/:id` live request logs.
+- Add a user-owned SSE endpoint for `/console/tokens/:id` live request logs.
 
 ## Non-Goals
 
@@ -73,7 +73,7 @@ Add `GET /api/user/tokens/:id/events`:
 
 ## Frontend Changes
 
-On `/console#/tokens/:id`:
+On `/console/tokens/:id`:
 
 - open `EventSource` against `/api/user/tokens/:id/events`
 - refresh token detail metrics and recent request rows from `snapshot`
@@ -87,14 +87,14 @@ On `/console#/tokens/:id`:
 - Upstream `429 + Retry-After` causes one same-session retry after waiting.
 - Successful retry returns success to the client without moving the session.
 - `/api/user/tokens/:id/events` enforces `401`/`404` correctly and streams updated snapshots.
-- `/console#/tokens/:id` updates recent request logs live through SSE.
+- `/console/tokens/:id` updates recent request logs live through SSE.
 
 ## Visual Evidence
 
 - source_type: `storybook_canvas`
   story_id_or_title: `User Console/UserConsole · Token Detail Live Logs`
   state: `live logs connected`
-  evidence_note: verifies `/console#/tokens/:id` keeps the request list updating from streamed snapshots without adding a persistent visible status badge.
+  evidence_note: verifies `/console/tokens/:id` keeps the request list updating from streamed snapshots without adding a persistent visible status badge.
 
 ![User token live logs](./assets/user-console-live-logs-full.png)
 

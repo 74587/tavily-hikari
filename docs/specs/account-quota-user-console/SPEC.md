@@ -68,7 +68,7 @@
   When 回调结束
   Then 跳转 `/console`；且已登录用户访问 `/` 自动跳转 `/console`。
 
-- Given 进入 `/console#/dashboard`
+- Given 进入 `/console/dashboard`
   Then 能看到账户维度用量与限额（hourly-any/hour/day/month）。
 
 - Given 进入 `/console/billing`
@@ -86,19 +86,19 @@
   When 页面完成首次布局与滚动位置同步
   Then 当前月卡片默认处于选中状态并驱动下方详情；桌面端仍可同时展示上月 / 本月 / 下月卡片。
 
-- Given 进入 `/console#/tokens`
+- Given 进入 `/console/tokens`
   Then 能看到 token 列表列（token id、状态与最近使用、成功统计、复制、详情入口），且不再把账户级共享配额或内部备注字段重复渲染到前台 token 行。
 
 - Given 用户分享 `/console/setup?token=a1b2&guide=hikariCli`
   When 接收者直接打开该链接
   Then Setup Guide 页面必须预选 `a1b2` 对应 Token，并直接定位到 `CLI + Skills` guide 面板。
 
-- Given 用户在 `/console#/tokens/:id` 点击 `检测 MCP`
+- Given 用户在 `/console/tokens/:id` 点击 `检测 MCP`
   When 浏览器发起 `tools/list` 探测
   Then 请求必须显式声明 `Accept: application/json, text/event-stream`，且前端可同时解析 JSON 与 SSE `data:` 响应体、从 SSE 中提取真正的 JSON-RPC response envelope，并把格式损坏的 2xx 响应判为失败。
 
 - Given token 已达业务配额上限（hour/day/month 任一窗口）
-  When 用户在 `/console#/tokens/:id` 点击 `检测 MCP`
+  When 用户在 `/console/tokens/:id` 点击 `检测 MCP`
   Then UI 先用详情页 quota snapshot 做前置判定；若缓存命中 blocked，会先复核最新 token detail 再决定是否跳过 billable `ping`；若现场 `ping` 返回 `quota_exceeded`，也会立即刷新 detail 供后续点击复用 blocked 状态，并继续执行 `tools/list` 做非计费连通验证，最终给出部分通过或受阻状态。
 
 ## 质量门槛（Quality Gates）
@@ -183,7 +183,7 @@ Storybook `User Console/UserConsole/Console Home Tokens Focus`: verifies the `/c
 
 ![Storybook mobile token card without quota-window rows](./assets/console-token-list-storybook-mobile.png)
 
-Local `/console#/tokens`: verifies the live user-console token list matches the Storybook contract on both desktop and mobile, with no repeated account-level shared quota fields in either layout.
+Local `/console/tokens`: verifies the live user-console token list matches the Storybook contract on both desktop and mobile, with no repeated account-level shared quota fields in either layout.
 
 ![Live desktop /console token list without quota-window column](./assets/console-token-list-live-desktop.png)
 

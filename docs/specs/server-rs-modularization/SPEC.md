@@ -44,17 +44,17 @@
 - 业务统计口径变更。
 - 非必要行为优化（仅允许错误日志与非 2xx 细节微调）。
 
-## 成功响应契约基线
+## 行为兼容边界
 
 - `POST /api/tavily/search`
 - `POST /api/tavily/extract`
 - `POST /api/tavily/crawl`
 - `POST /api/tavily/map`
 - `GET /api/tavily/usage`
-- `ANY /mcp` 与 `ANY /mcp/*path`
+- `ANY /mcp`
 - `GET /health`
 
-以上端点在成功路径下的状态码与核心字段必须保持兼容。
+模块拆分本身不得改变以上端点在成功路径下的状态码与核心字段。端点后续语义由对应主题 Spec 持有；其中 `/mcp/*path` 的当前本地拒绝合同见 `../mcp-subpath-local-rejection/SPEC.md`。
 
 ## 验收标准（Acceptance Criteria）
 

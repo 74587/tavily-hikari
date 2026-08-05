@@ -80,7 +80,7 @@
   When jobs key 分组气泡打开
   Then 气泡渲染在 portal 层，不依赖局部伪元素。
 
-- Given `/console#/tokens/:id` 或 `User Console/Fragments/Connectivity Checks -- State Gallery`
+- Given `/console/tokens/:id` 或 `User Console/Fragments/Connectivity Checks -- State Gallery`
   When probe bubble 可见
   Then bubble 不再依赖按钮局部 absolute 定位，且在窄视口内仍保持可见。
 

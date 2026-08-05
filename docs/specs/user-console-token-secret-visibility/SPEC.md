@@ -2,7 +2,7 @@
 
 ## 背景 / 问题陈述
 
-- `/console#/tokens/:id` 当前只展示固定的 `th-<id>-********` 占位值，并提供复制按钮，但无法在详情页中按需查看完整明文。
+- `/console/tokens/:id` 当前只展示固定的 `th-<id>-********` 占位值，并提供复制按钮，但无法在详情页中按需查看完整明文。
 - 公共首页已经有“眼睛按钮 + 复制”这一套 token 输入交互，用户控制台却仍停留在只读占位态，体验不一致。
 - 本轮只需要补齐用户控制台 Token Detail 的明文切换能力，不应扩大到首页、管理员页或后端契约变更。
 
@@ -10,7 +10,7 @@
 
 ### Goals
 
-- 在 `/console#/tokens/:id` 的 Token 输入框右侧增加眼睛按钮。
+- 在 `/console/tokens/:id` 的 Token 输入框右侧增加眼睛按钮。
 - 默认继续显示 `th-<id>-********` 形式的字面占位值，而不是统一密码圆点。
 - 首次点击“显示”时，按需调用既有 `GET /api/user/tokens/:id/secret` 读取完整 token。
 - 明文展示后允许再次切回隐藏态，并在前端内存中清空已读取明文。
@@ -50,7 +50,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 用户进入 `/console#/tokens/:id`
+- Given 用户进入 `/console/tokens/:id`
   When 页面完成加载
   Then Token 输入框默认仍显示 `th-<id>-********` 的占位值，并在右侧显示眼睛按钮与 Copy 按钮。
 
@@ -84,7 +84,7 @@
 
 ### UI / Browser
 
-- `/console#/tokens/:id` 的 token 行在 desktop 与 mobile 下都不挤压 Copy 按钮。
+- `/console/tokens/:id` 的 token 行在 desktop 与 mobile 下都不挤压 Copy 按钮。
 - 切换显隐时不出现 placeholder 闪烁成空值或残缺字符串。
 
 ## 风险 / 开放问题 / 假设

@@ -71,7 +71,7 @@
 
 ### Core flows
 
-- 用户在 `/console#/tokens` 或 `/console#/tokens/:id` 点击复制完整 token：
+- 用户在 `/console/tokens` 或 `/console/tokens/:id` 点击复制完整 token：
   - 先尝试 `navigator.clipboard.writeText`
   - 若失败则尝试 `execCommand('copy')`
   - 若仍失败，则在触发按钮旁弹出手动复制气泡，显示完整 token 与只读输入框。
@@ -185,8 +185,8 @@
 
 - 2026-03-12: Chrome DevTools 手工冒烟
   - `http://127.0.0.1:55174/#a1b2`：可见原文入口在双路径复制失败后不重复弹 bubble，但会自动 reveal 并选中当前 token，便于立即手动复制。
-  - `http://127.0.0.1:55174/console#/tokens`：列表复制失败后弹出手动复制气泡，输入框默认聚焦且全选；同一按钮下次复制成功后旧气泡会自动关闭。
-  - `http://127.0.0.1:55174/console#/tokens/a1b2`：detail 页由于复制按钮旁已有 Token 字段，复制失败时不再弹额外气泡，而是直接 reveal 并选中现有只读字段，便于手动复制。
+  - `http://127.0.0.1:55174/console/tokens`：列表复制失败后弹出手动复制气泡，输入框默认聚焦且全选；同一按钮下次复制成功后旧气泡会自动关闭。
+  - `http://127.0.0.1:55174/console/tokens/a1b2`：detail 页由于复制按钮旁已有 Token 字段，复制失败时不再弹额外气泡，而是直接 reveal 并选中现有只读字段，便于手动复制。
   - `http://127.0.0.1:58089/admin/tokens`：新建 token、复制完整 token、复制分享链接在失败时均弹出手动复制气泡。
   - `http://127.0.0.1:58089/admin/tokens/m87I`：rotate secret 失败时复用现有对话框，展示只读 textarea 并自动全选，不额外弹 bubble。
   - `http://127.0.0.1:58089/admin/tokens`：列表初次加载仅请求 `summary/profile/tokens/...` 等基础数据，不再自动拉取 `/api/tokens/:id/secret` 或 `/api/keys/:id/secret`；hover 到复制按钮后才按需触发 secret 请求。

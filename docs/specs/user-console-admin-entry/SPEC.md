@@ -64,7 +64,7 @@
   Then 可直接看到管理员入口显示/隐藏差异，而无需依赖内部场景名。
 
 - Given 服务未启用用户 OAuth 登录
-  When 用户访问 `/console` 或 `/console#/tokens`
+  When 用户访问 `/console` 或 `/console/tokens`
   Then 页面展示友好的不可用说明，不出现裸 `404` 或页面内接口 `404` 报错。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
@@ -90,7 +90,7 @@
 
 ![未启用用户 OAuth 时的 `/console` 友好不可用态](./assets/console-real-unavailable-preview.png)
 
-- 证据类型：真实应用预览态 `/console#/tokens` 页面截图。
+- 证据类型：真实应用预览态 `/console/tokens` 页面截图。
 - 证明点：用户 OAuth 未启用时，真实 `/console` 仍返回 SPA 并展示友好的不可用说明。
 - 证明点：管理员入口仍可见，页面不再暴露裸 `404`。
 

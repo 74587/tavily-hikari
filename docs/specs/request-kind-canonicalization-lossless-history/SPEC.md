@@ -11,7 +11,7 @@
 ### Goals
 
 - 把 `request_kind_*` 扶正为主 canonical 分类字段，只允许白名单稳定 key 落库与对外返回。
-- 为 `request_logs` 与 `auth_token_logs` 新增 `legacy_request_kind_key/label/detail`，无损保留旧主字段快照。
+- 将历史动态 key 无损收敛到 canonical 主字段，并通过既有请求事实字段和 canonical detail 保留审计所需信息。
 - 新写入与查询 facet 全部切到 canonical 分类，不再产生 path/tool-name 动态 key。
 - 保留原始 `method/path/query/request_body/response_body` 事实字段，并把必要的 path / method / tool-name 细节放入 canonical `request_kind_detail`。
 - 提供独立 backfill binary，并要求启动初始化在对外提供服务前补齐未完成批次，确保服务启动成功即可视为 request kind 历史升级完成。
@@ -19,7 +19,7 @@
 ### Non-goals
 
 - 不删除历史日志，不压缩日志，不篡改请求/响应事实字段。
-- 不在本次兼容窗口内删除 `legacy_request_kind_*`。
+- 不恢复已经由 `request-kind-legacy-snapshot-removal` 删除的 legacy snapshot 列或 API 字段。
 - 不改变计费真相源：`business_credits`、`counts_business_quota`、`failure_kind`、`key_effect_*` 仍按现有语义工作。
 
 ## 范围（Scope）
@@ -32,26 +32,23 @@
   - 固化 canonical request kind catalog。
   - 去掉 path/tool-name 动态主 key 生成。
   - 提供 legacy alias -> canonical 映射与 request/request-log canonical 化辅助函数。
-- `src/models.rs`
-  - 为 `RequestLogRecord`、`TokenLogRecord` 增加 `legacy_request_kind_*` 字段。
 - `src/store/mod.rs`
-  - 两张日志表 schema 新增 `legacy_request_kind_*`。
   - 查询、facet、过滤统一按 canonical kind 工作。
   - 新增历史 canonical backfill 所需的持久化/游标辅助能力，并在启动初始化中强制收敛未完成批次。
 - `src/server/{dto,proxy}.rs`
-  - DTO/view 暴露 canonical `requestKind*` 与新增 `legacyRequestKind*` 审计字段。
+  - DTO/view 暴露 canonical `requestKind*` 字段。
   - `request_kind` 查询参数兼容 legacy alias，但默认命中 canonical 结果。
 - `src/bin/request_kind_canonical_backfill.rs`
   - 新增独立维护二进制，分批扫描并 canonical 化两张日志表。
 - `web/src/**`
   - 第一方 Admin / Key / Token 日志面板统一消费 canonical request kind catalog，不再展示历史 per-path / per-tool 爆炸项。
 - `src/tests/**`
-  - 补齐 canonical 分类、legacy alias 过滤、历史回填、无损快照、前端 catalog 回归测试。
+  - 补齐 canonical 分类、legacy alias 过滤、历史回填与前端 catalog 回归测试。
 
 ### Out of scope
 
 - 第三方客户端的独立适配说明。
-- 兼容窗口结束后的 legacy 列清理。
+- legacy snapshot 列与 API 字段的删除；该边界由 `../request-kind-legacy-snapshot-removal/SPEC.md` 持有。
 - 任何与 request kind 无关的运营指标重算。
 
 ## Canonical 分类合同
@@ -104,18 +101,9 @@
 
 ## 数据库 / API 合同
 
-- `request_logs`、`auth_token_logs` 新增：
-  - `legacy_request_kind_key TEXT`
-  - `legacy_request_kind_label TEXT`
-  - `legacy_request_kind_detail TEXT`
 - 主 `request_kind_key/label/detail` 输出 canonical 真相。
-- 若历史主字段与 canonical 结果不一致：
-  - 优先把旧主字段快照写入 `legacy_request_kind_*`
-  - 再将主字段改写为 canonical 值
-- 日志 API item 新增：
-  - `legacyRequestKindKey`
-  - `legacyRequestKindLabel`
-  - `legacyRequestKindDetail`
+- 若历史主字段与 canonical 结果不一致，回填将主字段改写为 canonical 值；原始 method、path、query 与请求/响应事实字段保持不变。
+- 日志 API item 不暴露已经移除的 `legacyRequestKind*` 字段。
 - `requestKindOptions` 只返回 canonical 聚合项。
 - `request_kind` 过滤参数接受 legacy alias，但后端必须先 canonical 化再查询。
 
@@ -130,11 +118,10 @@
 - 若启动期 schema self-heal 或结构重建重新补回 request kind 相关列，必须先清除该迁移的 done / cursor / upper-bound markers，再重新执行同一数据库迁移，避免旧 done marker 让历史行保持空白 request kind。
 - 每批处理规则：
   - 计算该行 canonical request kind。
-  - 若主字段与 canonical 三元组不同且 legacy 快照为空，则先写入 `legacy_request_kind_*`。
   - 将主字段回写成 canonical 三元组。
   - 不改 `method/path/query/request_body/response_body/failure_kind/business_credits/key_effect_*`。
 - 批次事务若命中瞬时 `SQLITE_BUSY` / `SQLITE_LOCKED`，必须在迁移内部重试并续跑同一批，而不是把服务启动直接打断。
-- binary 必须幂等：重复运行不覆盖已存在的 legacy 快照，也不重复改写已 canonical 化的行。
+- binary 必须幂等：重复运行不重复改写已 canonical 化的行。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -143,13 +130,13 @@
   Then 主 `request_kind_key` 只能是白名单 canonical key，不再出现 `mcp:raw:/mcp/search`、`api:raw:*`、`mcp:tool:*`。
 - Given 历史样本 `mcp:raw:/mcp/search`
   When 被 canonical backfill 处理
-  Then 主字段改成 `mcp:unsupported-path`，detail 保留 `/mcp/search`，旧值可通过 `legacyRequestKind*` 取回。
+  Then 主字段改成 `mcp:unsupported-path`，detail 保留 `/mcp/search`。
 - Given 历史样本 `api:raw:/api/custom/raw`
   When 被 canonical backfill 处理
-  Then 主字段改成 `api:unknown-path`，detail 保留 `/api/custom/raw`，旧值可通过 `legacyRequestKind*` 取回。
+  Then 主字段改成 `api:unknown-path`，detail 保留 `/api/custom/raw`。
 - Given 历史样本 `mcp:tool:acme-lookup`
   When 被 canonical backfill 处理
-  Then 主字段改成 `mcp:third-party-tool`，detail 保留 `acme-lookup`，旧值可通过 `legacyRequestKind*` 取回。
+  Then 主字段改成 `mcp:third-party-tool`，detail 保留 `acme-lookup`。
 - Given Admin / Key / Token 日志筛选
   When 打开请求类型下拉
   Then 不再看到 `/mcp/search`、`/mcp/extract`、`mcp:tool:*` 这类离散爆炸项，只显示 canonical 聚合项。
@@ -168,12 +155,11 @@
 
 ## 实现对齐说明
 
-- 主 `request_kind_*` 已切换为 canonical 真相源；两张日志表均新增 `legacy_request_kind_*`，并在读写路径中保留旧值快照。
+- 主 `request_kind_*` 已切换为 canonical 真相源；历史动态 key 已完成 canonical 回填。
 - 后端分类器与 SQL 聚合规则已统一到同一白名单 catalog；`mcp:raw:*`、`api:raw:*`、`mcp:tool:*` 不再作为主分类继续生成或聚合。
-- 日志 DTO / API 已新增 `legacyRequestKind*` 审计字段；`requestKindOptions` 与 `request_kind` 过滤都按 canonical key 工作，同时兼容 legacy alias。
+- `requestKindOptions` 与 `request_kind` 过滤都按 canonical key 工作，同时兼容 legacy alias；已删除的 `legacyRequestKind*` 审计字段不再属于当前 API 合同。
 - 第一方前端 catalog、badge 与筛选逻辑已切换到 canonical 口径，不再把历史 per-path / per-tool 脏值展示为独立请求类型。
-- 独立二进制 `request_kind_canonical_backfill` 与数据库迁移共享批量、幂等、可断点续跑的历史 canonical 化逻辑，并保留 legacy 快照。
-- `request_logs` 的 legacy 快照列现在会在启动迁移尾部再次自愈补齐；`request_kind_canonical_backfill` 也会在执行前自检两张日志表的 legacy 列，避免历史库因缺列卡死回填。
+- 独立二进制 `request_kind_canonical_backfill` 与数据库迁移共享批量、幂等、可断点续跑的历史 canonical 化逻辑。
 - request kind 数据库迁移的 `running` state 现在会把 owner PID 一起落库；重启时只有“lease 新鲜且 owner 仍活着”才会继续等待，从而避免已崩溃 owner 留下固定 5 分钟冷启动窗口。
 - request kind 历史回填批次现在对瞬时 SQLite 写锁冲突做内部重试，claim 阶段与实际 batch write 阶段都不会因为短暂 `busy/locked` 直接终止启动。
 
