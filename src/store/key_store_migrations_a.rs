@@ -1426,7 +1426,7 @@ impl KeyStore {
         let month_start = start_of_month(
             Utc.timestamp_opt(break_at, 0)
                 .single()
-                .unwrap_or_else(Utc::now),
+                .unwrap_or_else(|| self.backend_time.now_utc()),
         )
         .timestamp();
         sqlx::query(

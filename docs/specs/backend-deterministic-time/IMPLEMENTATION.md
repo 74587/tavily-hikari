@@ -83,7 +83,7 @@
 
 ## Remaining Gaps
 
-- `src/store/**` 中直接 `Utc::now()` 已清零；request-log catalog mutation、request-stats flush、summary test helper 与 billing settlement 统一使用注入的 `BackendTime`。
+- `src/store/**` 中直接 `Utc::now()` 已清零；request-log catalog mutation、request-stats flush、summary test helper、billing settlement，以及 migration/recharge/reconciliation/rollup 的异常时间戳 fallback 均统一使用注入的 `BackendTime`。
 - manual-clock 回归测试覆盖 rollup `updated_at`，以及零积分和正积分 settlement 的 `updated_at` / `settled_at`。
 - 当前 slowdown 相关的真实 wall-clock 热点已迁完；后续若继续扩面，应优先审计残留历史 `Utc::now()` / `tokio::time::sleep(...)` 是否仍属于行为路径，而不是继续加 shard 掩盖。
 - `BackendTime` 的 manual clock 设施已就位，但并未把所有测试都强行切成 paused runtime；DB-heavy 测试仍需按需采用显式持久化时间戳或局部可控时钟。
