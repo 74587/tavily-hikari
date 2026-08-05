@@ -13,12 +13,16 @@ fn parse_linuxdo_credit_recharge_quote_snapshot(
         .ok()
 }
 
-fn legacy_recharge_quote_month_start(created_at: i64, paid_at: Option<i64>) -> i64 {
+fn legacy_recharge_quote_month_start(
+    created_at: i64,
+    paid_at: Option<i64>,
+    fallback_now: chrono::DateTime<Utc>,
+) -> i64 {
     let anchor_ts = paid_at.unwrap_or(created_at);
     let local_time = Utc
         .timestamp_opt(anchor_ts, 0)
         .single()
-        .unwrap_or_else(Utc::now)
+        .unwrap_or(fallback_now)
         .with_timezone(&Local);
     start_of_local_month_utc_ts(local_time)
 }
@@ -260,6 +264,7 @@ impl KeyStore {
             let quote_month_start = legacy_recharge_quote_month_start(
                 row.try_get("created_at")?,
                 row.try_get("paid_at").unwrap_or(None),
+                self.backend_time.now_utc(),
             );
             let snapshot = serde_json::json!({
                 "version": 1,
@@ -939,7 +944,7 @@ impl KeyStore {
         let paid_month_start = start_of_local_month_utc_ts(
             Utc.timestamp_opt(paid_at, 0)
                 .single()
-                .unwrap_or_else(Utc::now)
+                .unwrap_or_else(|| self.backend_time.now_utc())
                 .with_timezone(&Local),
         );
         let cancel_after_at = recharge_order_cancel_after_at(&order);

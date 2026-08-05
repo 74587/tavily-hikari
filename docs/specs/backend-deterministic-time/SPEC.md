@@ -56,3 +56,7 @@
 - `docs/specs/ci-backend-test-split/SPEC.md`
 - `docs/specs/sqlite-write-lock-hardening/SPEC.md`
 - `docs/solutions/operations/sqlite-write-lock-contention.md`
+
+## Visual Evidence
+
+PR: none

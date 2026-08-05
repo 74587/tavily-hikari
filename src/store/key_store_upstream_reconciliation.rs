@@ -1250,7 +1250,7 @@ impl KeyStore {
         let attributed_utc = Utc
             .timestamp_opt(attributed_at, 0)
             .single()
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(|| self.backend_time.now_utc());
         let day_bucket = start_of_local_day_utc_ts(attributed_utc.with_timezone(&Local));
         let month_start = start_of_month(attributed_utc).timestamp();
         let mut tx = self.pool.begin().await?;

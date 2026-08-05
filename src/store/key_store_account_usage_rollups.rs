@@ -291,7 +291,7 @@ impl KeyStore {
             .timestamp_opt(created_at, 0)
             .single()
             .map(start_of_month)
-            .unwrap_or_else(Utc::now)
+            .unwrap_or_else(|| start_of_month(self.backend_time.now_utc()))
             .timestamp();
 
         for (bucket_kind, bucket_start) in [
@@ -551,7 +551,7 @@ impl KeyStore {
                     .timestamp_opt(created_at, 0)
                     .single()
                     .map(start_of_month)
-                    .unwrap_or_else(Utc::now)
+                    .unwrap_or_else(|| start_of_month(self.backend_time.now_utc()))
                     .timestamp();
                 *monthly_rollups.entry((user_id, month_bucket)).or_default() += credits;
             }

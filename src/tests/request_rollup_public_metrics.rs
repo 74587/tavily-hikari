@@ -162,6 +162,55 @@ async fn public_success_breakdown_flushes_pending_request_stats_for_current_wind
 }
 
 #[tokio::test]
+async fn public_request_stats_flush_uses_injected_time_for_persisted_rollups() {
+    let db_path = temp_db_path("request-stats-flush-injected-time");
+    let db_str = db_path.to_string_lossy().to_string();
+    let (backend_time, manual_clock) = BackendTime::manual_from_ts(PUBLIC_METRICS_TEST_NOW);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-request-stats-injected-time".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let key_id = proxy
+        .list_api_key_metrics()
+        .await
+        .expect("list key metrics")
+        .into_iter()
+        .next()
+        .expect("seeded key")
+        .id;
+
+    proxy
+        .key_store
+        .enqueue_request_stats_rollup_for_test(
+            Some(&key_id),
+            PUBLIC_METRICS_TEST_NOW - 10,
+            OUTCOME_SUCCESS,
+        )
+        .await;
+    let flushed_at = PUBLIC_METRICS_TEST_NOW + 123;
+    manual_clock.set_now_ts(flushed_at);
+    proxy
+        .key_store
+        .flush_request_stats_writes()
+        .await
+        .expect("flush request stats");
+
+    let persisted_updated_at: i64 =
+        sqlx::query_scalar("SELECT MAX(updated_at) FROM dashboard_request_rollup_buckets")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read persisted rollup timestamp");
+    assert_eq!(persisted_updated_at, flushed_at);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn public_success_breakdown_flushes_when_newer_pending_rollup_is_inside_window() {
     let db_path = temp_db_path("public-success-breakdown-mixed-pending-window");
     let db_str = db_path.to_string_lossy().to_string();

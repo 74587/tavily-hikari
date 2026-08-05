@@ -1,5 +1,62 @@
 use super::*;
 
+#[tokio::test]
+async fn billing_pending_settlement_uses_injected_time() {
+    let db_path = temp_db_path("pending-billing-injected-time");
+    let db_str = db_path.to_string_lossy().to_string();
+    let (backend_time, manual_clock) = BackendTime::manual_from_ts(1_700_000_000);
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+
+    for (index, credits) in [0_i64, 2_i64].into_iter().enumerate() {
+        let token = proxy
+            .create_access_token(Some(&format!("pending-billing-injected-time-{index}")))
+            .await
+            .expect("create token");
+        let log_id = proxy
+            .record_pending_billing_attempt(
+                &token.id,
+                &Method::POST,
+                "/api/tavily/search",
+                None,
+                Some(StatusCode::OK.as_u16() as i64),
+                Some(200),
+                true,
+                OUTCOME_SUCCESS,
+                Some("injected settlement time"),
+                credits,
+                None,
+            )
+            .await
+            .expect("record pending billing attempt");
+        let settled_at = 1_700_000_100 + index as i64;
+        manual_clock.set_now_ts(settled_at);
+
+        let outcome = proxy
+            .settle_pending_billing_attempt(log_id)
+            .await
+            .expect("settle pending billing attempt");
+        assert_eq!(outcome, PendingBillingSettleOutcome::Charged);
+        let timestamps: (i64, i64) = sqlx::query_as(
+            "SELECT updated_at, settled_at FROM billing_ledger WHERE auth_token_log_id = ?",
+        )
+        .bind(log_id)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read billing settlement timestamps");
+        assert_eq!(timestamps, (settled_at, settled_at));
+    }
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 #[test]
 fn build_account_quota_resolution_clamps_negative_tag_totals_to_zero() {
     let base = AccountQuotaLimits {

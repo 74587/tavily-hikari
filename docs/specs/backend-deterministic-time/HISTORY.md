@@ -12,6 +12,7 @@
 - 2026-06-16：确认当前剩余大头不再是“真实 sleep”，而是 shard runner 逐条 `--exact --test-threads=1` 造成的 test executable 重复启动与过滤开销；因此把 `run-shard` 提升为“安全前缀批量执行 + 少量 exact fallback”的混合模式。
 - 2026-06-16：在前缀批量执行后，新的关键路径收敛到 `forward_proxy::tests::` 干扰和 `bin-admin-api` 过高进程并发；因此把 `forward_proxy::tests::` 独立成 `lib-forward-proxy` shard，并给 shard runner 增加 per-shard `filtered_process_workers`，用更小的局部并发换取稳定的总墙钟下降。
 - 2026-08-05：taxonomy 语义审计确认三处产品持久化路径仍直接读取 `Utc::now()`；实现状态恢复为 partial，等待统一接入 `BackendTime` 后再收口。
+- 2026-08-05：后续实现先迁移已知的 request-log、rollup 与 billing persistence 路径，再经 review 补齐 migration、recharge、reconciliation 与 account rollup 的六个异常时间戳 fallback；`src/store/**` 的直接 `Utc::now()` 清零，并补齐 rollup 与 billing settlement 的 manual-clock 持久化回归，实现状态恢复为 completed。
 
 ## Boundary Notes
 
