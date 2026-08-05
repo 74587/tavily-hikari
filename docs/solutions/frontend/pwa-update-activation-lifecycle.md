@@ -10,7 +10,7 @@ tags:
   - state-machine
 status: active
 related_specs:
-  - docs/specs/2br7z-web-pwa-split-identities-offline-shells/SPEC.md
+  - docs/specs/web-pwa-split-identities-offline-shells/SPEC.md
 ---
 
 # PWA update activation lifecycle

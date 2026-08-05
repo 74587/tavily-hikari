@@ -16,7 +16,7 @@ const captures = [
 const baseUrl = process.env.STORYBOOK_BASE_URL ?? 'http://127.0.0.1:54590'
 const outputDir =
   process.env.OUTPUT_DIR ??
-  'docs/specs/qwwgt-admin-pressure-curves/assets'
+  'docs/specs/admin-pressure-curves/assets'
 
 const browser = await chromium.launch({ headless: true })
 

@@ -9,7 +9,7 @@ import { chromium } from '/Users/ivan/.cache/codex-runtimes/codex-primary-runtim
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '..')
 const chromeExecutable = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const evidenceDir = path.join(repoRoot, 'docs/specs/p7n4k-admin-user-rankings/assets')
+const evidenceDir = path.join(repoRoot, 'docs/specs/admin-user-rankings/assets')
 const liveBaseUrl = process.env.LIVE_BASE_URL ?? 'http://127.0.0.1:55174'
 const rankingsUrl = `${liveBaseUrl.replace(/\/$/, '')}/admin/rankings?demo=true`
 const themeStorageKey = 'tavily-hikari-theme-mode'

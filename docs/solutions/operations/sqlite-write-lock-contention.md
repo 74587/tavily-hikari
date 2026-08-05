@@ -10,9 +10,9 @@ tags:
   - mcp
 status: active
 related_specs:
-  - docs/specs/2wdrp-sqlite-write-lock-hardening/SPEC.md
-  - docs/specs/s2vd2-upstream-credits-billing/SPEC.md
-  - docs/specs/34pgu-mcp-session-privacy-affinity-hardening/SPEC.md
+  - docs/specs/sqlite-write-lock-hardening/SPEC.md
+  - docs/specs/upstream-credits-billing/SPEC.md
+  - docs/specs/mcp-session-privacy-affinity-hardening/SPEC.md
 ---
 
 # SQLite write-lock contention
