@@ -267,7 +267,7 @@
   the five-minute watchdog only resumes durable channel debt. Per-channel state records
   high-watermark deltas, an ingress-minus-delete estimate, and cumulative deletions without a
   hot-path `COUNT(*)`.
-- The CI shard manifest assigns `deferred_ha_gc_*` watchdog-debt regression coverage to `lib-misc`.
+- The CI shard manifest assigns `online_ha_gc_*` watchdog-debt regression coverage to `lib-misc`.
   `ci_backend_tests.py verify` requires every discovered backend test to have exactly one shard
   owner, so the continuation-recovery regression cannot silently disappear from the PR matrix.
 
