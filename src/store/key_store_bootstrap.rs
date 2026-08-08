@@ -632,6 +632,7 @@ impl KeyStore {
         let _schema_init_guard = Self::acquire_test_schema_init_guard().await;
         let startup_started = Instant::now();
         let layout = SqliteDatabaseLayout::from_database_path(database_path);
+        let _schema_startup_lock = acquire_schema_startup_lock(&layout.core_database_path)?;
         let observability_lock =
             acquire_observability_service_shared_lock(&layout.core_database_path)?;
         let startup_context =
@@ -728,6 +729,7 @@ impl KeyStore {
         #[cfg(test)]
         let _schema_init_guard = Self::acquire_test_schema_init_guard().await;
         let layout = SqliteDatabaseLayout::from_database_path(database_path);
+        let _schema_startup_lock = acquire_schema_startup_lock(&layout.core_database_path)?;
         let observability_lock =
             acquire_observability_service_shared_lock(&layout.core_database_path)?;
         let gc_context =

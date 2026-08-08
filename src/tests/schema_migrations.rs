@@ -119,6 +119,169 @@ async fn versioned_schema_migrations_reject_unknown_future_versions() {
 }
 
 #[tokio::test]
+async fn missing_meta_with_domain_data_fails_closed() {
+    let db_path = temp_db_path("schema-migration-missing-meta");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-missing-meta".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create production-shaped database");
+    sqlx::query("INSERT INTO announcements (id, content, display_kind, status, created_at, updated_at) VALUES ('migration-meta-announcement', 'durable data', 'info', 'active', 1, 1)")
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert domain row");
+    sqlx::query("DROP TABLE schema_migrations")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("isolate non-ledger domain classification");
+    sqlx::query("DROP TABLE meta")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove schema identity table");
+
+    let error = proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect_err("domain data without meta must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("domain data exists without main.meta")
+    );
+    let meta_exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("check meta remains absent");
+    assert_eq!(
+        meta_exists, 0,
+        "failed classification must not recreate meta"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn missing_meta_with_migration_ledger_fails_closed() {
+    let db_path = temp_db_path("schema-migration-missing-meta-ledger");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-missing-meta-ledger".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    sqlx::query("DROP TABLE meta")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove schema identity table");
+
+    let error = proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect_err("migration ledger without meta must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("schema_migrations exists without main.meta")
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn interrupted_new_database_bootstrap_retries_with_seed_rows() {
+    let db_path = temp_db_path("schema-migration-interrupted-new-database");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-interrupted-new-database".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    sqlx::query("DROP TABLE schema_migrations")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove migration ledger");
+    sqlx::query("DROP TABLE meta")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove schema identity table");
+    sqlx::query("CREATE TABLE schema_bootstrap_state (marker TEXT PRIMARY KEY NOT NULL)")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("create bootstrap marker table");
+    sqlx::query(
+        "INSERT INTO schema_bootstrap_state (marker) VALUES ('tavily-hikari-schema-bootstrap-v1')",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("record bootstrap marker");
+
+    assert!(
+        proxy
+            .key_store
+            .prepare_versioned_schema()
+            .await
+            .expect("interrupted bootstrap must be retryable")
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn schema_startup_lock_rejects_concurrent_startup() {
+    let db_path = temp_db_path("schema-migration-startup-lock");
+    let db_str = db_path.to_string_lossy().to_string();
+    let first_lock = acquire_schema_startup_lock(&db_str).expect("acquire first startup lock");
+    let error = acquire_schema_startup_lock(&db_str)
+        .expect_err("active startup lock must reject another startup");
+    assert!(error.to_string().contains("another schema startup"));
+
+    drop(first_lock);
+    let stem = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .expect("database stem");
+    let _ = std::fs::remove_file(db_path.with_file_name(format!("{stem}-schema-startup.lock")));
+}
+
+#[tokio::test]
+async fn schema_startup_lock_rejects_request_logs_gc_bootstrap() {
+    let db_path = temp_db_path("schema-migration-gc-startup-lock");
+    let db_str = db_path.to_string_lossy().to_string();
+    let first_lock = acquire_schema_startup_lock(&db_str).expect("acquire startup lock");
+    let error = KeyStore::open_for_request_logs_gc(&db_str)
+        .await
+        .expect_err("request logs GC bootstrap must honor startup lock");
+    assert!(error.to_string().contains("another schema startup"));
+
+    drop(first_lock);
+    let stem = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .expect("database stem");
+    let _ = std::fs::remove_file(db_path.with_file_name(format!("{stem}-schema-startup.lock")));
+}
+
+#[tokio::test]
 async fn baseline_adoption_records_compatible_existing_schema_without_full_bootstrap() {
     let db_path = temp_db_path("schema-migration-compatible-adoption");
     let db_str = db_path.to_string_lossy().to_string();

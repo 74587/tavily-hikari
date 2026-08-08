@@ -7,6 +7,7 @@ const GC_WORK_CHECKSUM: &str = "sha256:40e1bc657936ad891830471519d680e2";
 const RECONCILIATION_WORK_VERSION: i64 = 3;
 const RECONCILIATION_WORK_NAME: &str = "reconciliation-durable-work-projection-v1";
 const RECONCILIATION_WORK_CHECKSUM: &str = "sha256:7e94d5620f3e49a0a17587fb4e019a51";
+const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
     #[cfg(not(test))]
@@ -58,6 +59,76 @@ impl KeyStore {
 
     async fn schema_object_exists(&self, schema: &str, name: &str) -> Result<bool, ProxyError> {
         self.schema_named_object_exists(schema, "table", name).await
+    }
+
+    async fn schema_has_domain_rows_without_meta(&self) -> Result<bool, ProxyError> {
+        for schema in ["main", "observability"] {
+            let tables: Vec<String> = sqlx::query_scalar(&format!(
+                "SELECT name FROM {schema}.sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ))
+            .fetch_all(&self.pool)
+            .await?;
+            for table in tables {
+                let quoted_table = table.replace('"', "\"\"");
+                let sql = format!(
+                    "SELECT EXISTS(SELECT 1 FROM {schema}.\"{quoted_table}\" LIMIT 1)"
+                );
+                if sqlx::query_scalar::<_, i64>(&sql)
+                    .fetch_one(&self.pool)
+                    .await?
+                    != 0
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn new_database_bootstrap_in_progress(&self) -> Result<bool, ProxyError> {
+        if !self
+            .schema_object_exists("main", "schema_bootstrap_state")
+            .await?
+        {
+            return Ok(false);
+        }
+        let markers: Vec<String> =
+            sqlx::query_scalar("SELECT marker FROM schema_bootstrap_state")
+                .fetch_all(&self.pool)
+                .await?;
+        if markers == [NEW_DATABASE_BOOTSTRAP_MARKER] {
+            return Ok(true);
+        }
+        Err(ProxyError::Other(
+            "schema migration adoption rejected: invalid bootstrap marker".to_string(),
+        ))
+    }
+
+    async fn begin_new_database_bootstrap(&self) -> Result<(), ProxyError> {
+        let mut transaction = begin_immediate_sqlite_connection(&self.pool).await?;
+        sqlx::query(
+            "CREATE TABLE schema_bootstrap_state (marker TEXT PRIMARY KEY NOT NULL)",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("INSERT INTO schema_bootstrap_state (marker) VALUES (?)")
+            .bind(NEW_DATABASE_BOOTSTRAP_MARKER)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await
+    }
+
+    async fn clear_new_database_bootstrap_marker(&self) -> Result<(), ProxyError> {
+        if self
+            .schema_object_exists("main", "schema_bootstrap_state")
+            .await?
+        {
+            sqlx::query("DROP TABLE schema_bootstrap_state")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn schema_table_has_column(
@@ -697,6 +768,25 @@ impl KeyStore {
         let started = std::time::Instant::now();
         let existing_database = self.schema_object_exists("main", "meta").await?;
         if !existing_database {
+            if self
+                .schema_object_exists("main", "schema_migrations")
+                .await?
+            {
+                return Err(ProxyError::Other(
+                    "schema migration adoption rejected: schema_migrations exists without main.meta"
+                        .to_string(),
+                ));
+            }
+            if self.new_database_bootstrap_in_progress().await? {
+                return Ok(true);
+            }
+            if self.schema_has_domain_rows_without_meta().await? {
+                return Err(ProxyError::Other(
+                    "schema migration adoption rejected: domain data exists without main.meta"
+                        .to_string(),
+                ));
+            }
+            self.begin_new_database_bootstrap().await?;
             return Ok(true);
         }
         let ledger_preexisting = self
@@ -734,6 +824,7 @@ impl KeyStore {
             self.apply_reconciliation_work_migration().await?;
         }
         self.validate_applied_migration_objects().await?;
+        self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
             component = "schema_migration",
             event = "verified",
@@ -764,6 +855,7 @@ impl KeyStore {
             self.apply_reconciliation_work_migration().await?;
         }
         self.validate_applied_migration_objects().await?;
+        self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
             component = "schema_migration",
             event = "baseline_adopted",
@@ -787,6 +879,7 @@ impl KeyStore {
         self.apply_gc_work_migration().await?;
         self.apply_reconciliation_work_migration().await?;
         self.validate_applied_migration_objects().await?;
+        self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
             component = "schema_migration",
             event = "baseline_adopted",

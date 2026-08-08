@@ -41,6 +41,10 @@ pub(crate) fn sqlite_lock_sidecar_path(database_path: &str) -> String {
     sqlite_sidecar_path(database_path, "observability-migrate.lock")
 }
 
+fn schema_startup_lock_sidecar_path(database_path: &str) -> String {
+    sqlite_sidecar_path(database_path, "schema-startup.lock")
+}
+
 fn flock_nonblocking(file: &File, operation: libc::c_int) -> std::io::Result<()> {
     let rc = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
     if rc == 0 {
@@ -71,6 +75,21 @@ pub(crate) fn acquire_observability_service_shared_lock(
     flock_nonblocking(&file, libc::LOCK_SH).map_err(|err| {
         ProxyError::Other(format!(
             "failed to acquire shared observability service lock {lock_path}: {err}"
+        ))
+    })?;
+    Ok(file)
+}
+
+pub(crate) fn acquire_schema_startup_lock(database_path: &str) -> Result<File, ProxyError> {
+    let lock_path = schema_startup_lock_sidecar_path(database_path);
+    let file = open_observability_lock_file(&lock_path, true).map_err(|err| {
+        ProxyError::Other(format!(
+            "failed to open schema startup lock file {lock_path}: {err}"
+        ))
+    })?;
+    flock_nonblocking(&file, libc::LOCK_EX).map_err(|err| {
+        ProxyError::Other(format!(
+            "another schema startup is already in progress for {database_path}: {err}"
         ))
     })?;
     Ok(file)
