@@ -1738,6 +1738,23 @@ impl KeyStore {
         }
     }
 
+    pub(crate) async fn quota_cache_generation(
+        &self,
+        user_id: &str,
+    ) -> (u64, u64) {
+        let global = self
+            .account_quota_resolution_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let user = self
+            .account_quota_resolution_user_generations
+            .read()
+            .await
+            .get(user_id)
+            .copied()
+            .unwrap_or(0);
+        (global, user)
+    }
+
     pub(crate) async fn invalidate_account_quota_resolution(&self, user_id: &str) {
         let mut generations = self.account_quota_resolution_user_generations.write().await;
         let generation = generations.entry(user_id.to_string()).or_default();

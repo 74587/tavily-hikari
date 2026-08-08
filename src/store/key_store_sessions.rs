@@ -2692,17 +2692,7 @@ impl KeyStore {
         if let Some(cached) = self.cached_account_quota_resolution(user_id).await {
             return Ok(cached);
         }
-        let global_cache_generation = self
-            .account_quota_resolution_generation
-            .load(std::sync::atomic::Ordering::Acquire);
-        let user_cache_generation = self
-            .account_quota_resolution_user_generations
-            .read()
-            .await
-            .get(user_id)
-            .copied()
-            .unwrap_or(0);
-        let cache_generation = (global_cache_generation, user_cache_generation);
+        let cache_generation = self.quota_cache_generation(user_id).await;
 
         let base = self.ensure_account_quota_limits(user_id).await?;
         let tags = self.list_user_tag_bindings_for_user(user_id).await?;
