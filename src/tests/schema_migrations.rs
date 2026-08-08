@@ -119,7 +119,44 @@ async fn versioned_schema_migrations_reject_unknown_future_versions() {
 }
 
 #[tokio::test]
-async fn baseline_adoption_self_heals_supported_additive_schema() {
+async fn baseline_adoption_records_compatible_existing_schema_without_full_bootstrap() {
+    let db_path = temp_db_path("schema-migration-compatible-adoption");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-compatible-adoption".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create compatible database");
+    sqlx::query("DROP TABLE schema_migrations")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate a pre-ledger production database");
+
+    assert!(
+        !proxy
+            .key_store
+            .prepare_versioned_schema()
+            .await
+            .expect("adopt compatible database"),
+        "compatible adoption must enter the warm path"
+    );
+    let versions: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
+            .fetch_all(&proxy.key_store.pool)
+            .await
+            .expect("read adopted ledger");
+    assert_eq!(versions, vec![1, 2, 3]);
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn baseline_adoption_rejects_runtime_schema_drift() {
     let db_path = temp_db_path("schema-migration-incomplete-baseline");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -144,43 +181,21 @@ async fn baseline_adoption_self_heals_supported_additive_schema() {
         .await
         .expect("remove a runtime-required historical column");
 
-    sqlx::query("DROP TABLE observability.dashboard_rollup_integrity_gaps")
-        .execute(&proxy.key_store.pool)
-        .await
-        .expect("remove a rebuildable observability table");
-
-    assert!(
-        proxy
-            .key_store
-            .prepare_versioned_schema()
-            .await
-            .expect("pre-ledger source schema remains compatible"),
-        "interrupted adoption must resume the one-time additive bootstrap"
-    );
-    proxy
+    let error = proxy
         .key_store
-        .initialize_schema()
+        .prepare_versioned_schema()
         .await
-        .expect("repair supported additive schema");
-    proxy
-        .key_store
-        .finish_new_database_schema_migrations()
-        .await
-        .expect("record repaired schema baseline");
+        .expect_err("runtime schema drift must reject adoption");
     assert!(
-        proxy
-            .key_store
-            .table_column_exists("users", "debug_info_shared")
-            .await
-            .expect("check repaired column")
+        error
+            .to_string()
+            .contains("missing main.users.debug_info_shared")
     );
-    let repaired_derived_table: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM observability.sqlite_master WHERE type = 'table' AND name = 'dashboard_rollup_integrity_gaps')",
-    )
-    .fetch_one(&proxy.key_store.pool)
-    .await
-    .expect("check repaired derived table");
-    assert_eq!(repaired_derived_table, 1);
+    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations")
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("check interrupted ledger");
+    assert_eq!(recorded, 0, "rejected drift must not record a baseline");
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
