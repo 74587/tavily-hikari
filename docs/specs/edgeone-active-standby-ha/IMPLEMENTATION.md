@@ -2,6 +2,9 @@
 
 ## Backend
 
+- Ordinary administrator HA status reads `HaPeerObservationStore`; the background owner probes every 30 seconds with a five-second timeout, retains last-good observations, and marks them stale after 90 seconds without success. Dangerous control-plane operations continue to probe live.
+- Online outbox GC persists independent control, billing, and runtime eligibility plus claim generation. Round-robin selection skips deferred channels, and the scheduler uses the earliest typed continuation instead of parsing GC log text.
+
 - Added `src/ha.rs` with HA mode, role state machine, runtime status view, and Tencent TC3-signed EdgeOne client calls.
 - Added HA startup role detection from EdgeOne current origin.
 - Added dual-active leader-key startup seeding and authority refresh through `meta.ha_full_master_node_id_v1`, so `HA_CORE_DUAL_ACTIVE=1` with `HA_SOURCE_KIND=origin_group` uses the persisted leader key instead of treating the current EdgeOne route as the only serving authority.
