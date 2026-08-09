@@ -299,3 +299,83 @@ async fn reconciliation_ignores_429_text_in_non_429_responses() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn claimed_backoff_recovery_leaves_representative_for_scheduler_continuation() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-continuation-fence"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let queued = proxy
+        .scheduled_job_enqueue("upstream_reconciliation", "auto", None, 1)
+        .await
+        .expect("enqueue reconciliation representative");
+    let claim = proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim reconciliation representative")
+        .expect("representative job becomes running");
+
+    proxy
+        .key_store
+        .update_upstream_reconciliation_local_backoff_claimed(
+            false,
+            now,
+            queued.job_id,
+            claim.claim_generation,
+        )
+        .await
+        .expect("clear claimed backoff without finishing job");
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(queued.job_id)
+            .await
+            .expect("read representative job")
+            .expect("representative job exists")
+            .status,
+        "running"
+    );
+
+    let continuation = proxy
+        .scheduled_job_finish_and_enqueue_auto_at(
+            queued.job_id,
+            claim.claim_generation,
+            "upstream_reconciliation",
+            None,
+            1,
+            Some("settled=0 continuation_at=next"),
+            now + 60,
+        )
+        .await
+        .expect("scheduler finishes claimed representative and queues continuation");
+    assert!(continuation.created);
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(queued.job_id)
+            .await
+            .expect("read completed representative job")
+            .expect("completed representative job exists")
+            .status,
+        "success"
+    );
+    assert_eq!(
+        proxy
+            .scheduled_job_by_id(continuation.job_id)
+            .await
+            .expect("read continuation job")
+            .expect("continuation job exists")
+            .status,
+        "queued"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}

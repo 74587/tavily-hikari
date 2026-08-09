@@ -584,30 +584,31 @@ impl KeyStore {
         .await?
         .unwrap_or(0);
         if let Some((job_id, claim_generation)) = claimed_job {
-            let updated = if available_at > now {
-                sqlx::query(
-                    r#"UPDATE scheduled_jobs
-                       SET status = 'queued', available_at = ?, started_at = NULL,
-                           finished_at = NULL, message = 'reconciliation backoff active'
-                       WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
+            if available_at <= now {
+                if !Self::reconciliation_claim_is_current_locked(
+                    transaction,
+                    Some((job_id, claim_generation)),
                 )
-                .bind(available_at)
-                .bind(job_id)
-                .bind(claim_generation)
-                .execute(&mut **transaction)
                 .await?
-            } else {
-                sqlx::query(
-                    r#"UPDATE scheduled_jobs
-                       SET status = 'success', finished_at = ?, message = 'reconciliation completed'
-                       WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
-                )
-                .bind(now)
-                .bind(job_id)
-                .bind(claim_generation)
-                .execute(&mut **transaction)
-                .await?
-            };
+                {
+                    return Err(ProxyError::StaleClaim {
+                        job_id,
+                        claim_generation,
+                    });
+                }
+                return Ok(());
+            }
+            let updated = sqlx::query(
+                r#"UPDATE scheduled_jobs
+                   SET status = 'queued', available_at = ?, started_at = NULL,
+                       finished_at = NULL, message = 'reconciliation backoff active'
+                   WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
+            )
+            .bind(available_at)
+            .bind(job_id)
+            .bind(claim_generation)
+            .execute(&mut **transaction)
+            .await?;
             if updated.rows_affected() == 0 {
                 return Err(ProxyError::StaleClaim {
                     job_id,
