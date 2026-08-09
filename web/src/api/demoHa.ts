@@ -69,7 +69,7 @@ type DemoHaState = {
         cursorState: 'healthy' | 'catching_up' | 'baseline_required' | 'expired_backlog'
         retentionSecs: number
         expiredBacklog: boolean
-        gcState: 'idle' | 'draining' | 'deferred' | 'stalled' | 'unknown'
+        gcState: 'eligible' | 'idle' | 'draining' | 'deferred' | 'recovering' | 'stalled' | 'unknown' | 'stale'
         oldestAgeSecs: number | null
         lastProgressAt: number | null
         lastDeferReason: string | null

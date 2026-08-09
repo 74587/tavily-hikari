@@ -47,8 +47,36 @@ describe('HaNodeDetailPanel Storybook proofs', () => {
     expect(markup).toContain('复制 ACK 与 GC 健康')
     expect(markup).toContain('追赶中')
     expect(markup).toContain('存在过期积压')
+    expect(markup).toContain('可执行')
+    expect(stories.Eligible).toBeDefined()
+    expect(stories.Draining).toBeDefined()
+    expect(stories.Deferred).toBeDefined()
+    expect(stories.Recovering).toBeDefined()
     expect(stories.BaselineRequired).toBeDefined()
     expect(stories.Stalled).toBeDefined()
+    expect(stories.Unknown).toBeDefined()
+    expect(stories.Stale).toBeDefined()
+    expect(stories.StateGallery).toBeDefined()
+    expect(stories.Mobile393x852).toBeDefined()
+    expect(stories.MobileStateGallery).toBeDefined()
     expect(stories.Mobile).toBeDefined()
+  })
+
+  it('renders stale and missing GC state as bilingual compatible states', () => {
+    const staleMarkup = renderToStaticMarkup(
+      createElement((meta.component ?? (() => null)) as never, {
+        ...(meta.args ?? {}),
+        ...(stories.Stale.args ?? {}),
+      }),
+    )
+    const unknownMarkup = renderToStaticMarkup(
+      createElement((meta.component ?? (() => null)) as never, {
+        ...(meta.args ?? {}),
+        ...(stories.Unknown.args ?? {}),
+      }),
+    )
+
+    expect(staleMarkup).toContain('已过期')
+    expect(unknownMarkup).toContain('未知')
   })
 })

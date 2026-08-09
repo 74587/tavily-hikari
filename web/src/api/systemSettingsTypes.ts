@@ -126,6 +126,7 @@ export interface UpstreamPrivacyStatus {
   reconciliationLastDurationMs?: number | null
   reconciliationLastAttempted?: number
   reconciliationLastSettled?: number
+  reconciliationLastNoAdjustment?: number
   reconciliationLastUpstream429?: number
   reconciliationLastBudgetExhausted?: boolean
   reconciliationObservation: ReconciliationObservation
