@@ -379,3 +379,62 @@ async fn claimed_backoff_recovery_leaves_representative_for_scheduler_continuati
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn startup_resume_schedules_pending_research_with_default_poll_time() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-research-restart"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time.clone(),
+    )
+    .await
+    .expect("create first proxy");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_research (
+            request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+        ) VALUES ('default-poll-research', 'default-poll-token', 'default-poll-key',
+                  '2026-07-15/S1', ?, NULL, ?)
+        "#,
+    )
+    .bind(now)
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("persist historical pending research with default poll time");
+    drop(proxy);
+
+    let restarted = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-research-restart"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("restart proxy");
+    restarted
+        .ensure_upstream_reconciliation_representative_job()
+        .await
+        .expect("resume historical pending research");
+    let representative: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*), MIN(available_at)
+        FROM scheduled_jobs
+        WHERE job_type = 'upstream_reconciliation'
+          AND status IN ('queued', 'running')
+        "#,
+    )
+    .fetch_one(&restarted.key_store.pool)
+    .await
+    .expect("read resumed representative job");
+    assert_eq!(representative, (1, now));
+
+    let _ = std::fs::remove_file(db_path);
+}

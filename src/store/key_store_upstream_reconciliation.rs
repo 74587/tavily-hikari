@@ -504,11 +504,12 @@ impl KeyStore {
         .await?;
         let research_at: Option<i64> = sqlx::query_scalar(
             r#"
-            SELECT MIN(next_poll_at)
+            SELECT MIN(CASE WHEN next_poll_at > 0 THEN next_poll_at ELSE ? END)
             FROM upstream_reconciliation_research
-            WHERE terminal_at IS NULL AND next_poll_at > 0
+            WHERE terminal_at IS NULL
             "#,
         )
+        .bind(now)
         .fetch_one(&self.pool)
         .await?;
         let Some(pending_at) = (match (work_at, research_at) {
