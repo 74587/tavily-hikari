@@ -412,6 +412,7 @@ impl KeyStore {
             .bind(channel.as_str())
             .fetch_optional(&mut *conn)
             .await?;
+        let gc_state_unknown = gc_state_row.is_none();
         let (
             last_progress_at,
             last_deleted_rows,
@@ -440,14 +441,18 @@ impl KeyStore {
             0,
         ));
         let now = self.backend_time.now_ts();
-        let gc_state = if consecutive_no_progress >= 3 {
+        let gc_state = if gc_state_unknown || gc_observed_at.is_none() {
+            "unknown"
+        } else if consecutive_no_progress >= 3 {
             "stalled"
+        } else if gc_debt_mode == "recovering" {
+            "recovering"
         } else if last_deleted_rows > 0 {
             "draining"
         } else if last_defer_reason.is_some() {
             "deferred"
         } else {
-            "idle"
+            "eligible"
         };
         let cursor_state = if expired_backlog {
             "expired_backlog"

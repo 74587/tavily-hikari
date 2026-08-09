@@ -252,6 +252,7 @@ impl TavilyProxy {
             reconciliation_last_duration_ms,
             reconciliation_last_attempted,
             reconciliation_last_settled,
+            reconciliation_last_no_adjustment,
             reconciliation_last_upstream_429,
             reconciliation_last_budget_exhausted,
         ) = self
@@ -327,6 +328,7 @@ impl TavilyProxy {
             reconciliation_last_duration_ms,
             reconciliation_last_attempted,
             reconciliation_last_settled,
+            reconciliation_last_no_adjustment,
             reconciliation_last_upstream_429,
             reconciliation_last_budget_exhausted,
             reconciliation_observation,
@@ -1753,6 +1755,7 @@ impl TavilyProxy {
                     _previous_duration_ms,
                     _previous_attempted,
                     _previous_settled,
+                    _previous_no_adjustment,
                     _previous_upstream_429,
                     previous_budget_exhausted,
                 ) = await_reconciliation_post_process(
@@ -1766,6 +1769,7 @@ impl TavilyProxy {
                         started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
                         attempted_candidate_count,
                         settled,
+                        no_adjustment,
                         upstream_429_retry_windows,
                         budget_exhausted,
                     ),
@@ -1798,6 +1802,8 @@ impl TavilyProxy {
                         candidate_count,
                         attempted_candidate_count,
                         settled_count = settled,
+                        completed_count = completed,
+                        no_adjustment_count = no_adjustment,
                         rate_limited_429_count = upstream_429_retry_windows,
                         budget_exhausted,
                     );
@@ -2648,7 +2654,7 @@ impl TavilyProxy {
         duration_ms: i64,
     ) -> Result<(), ProxyError> {
         self.key_store
-            .record_upstream_reconciliation_run_stats(duration_ms, 0, 0, 0, true)
+            .record_upstream_reconciliation_run_stats(duration_ms, 0, 0, 0, 0, true)
             .await
     }
 

@@ -534,6 +534,11 @@ async fn online_ha_gc_enters_recovery_after_low_pressure_window() {
     assert_eq!(channel.slo_state, "breached");
     assert_eq!(channel.slo_state_transition.as_deref(), Some("breached"));
     assert!(matches!(report.continuation_delay_secs, Some(1) | Some(30)));
+    let health = proxy
+        .ha_peer_channel_health(HaSyncChannel::Control, "recovery-observer")
+        .await
+        .expect("read recovery channel health");
+    assert_eq!(health.gc_state, "recovering");
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
