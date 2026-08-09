@@ -52,7 +52,7 @@ use webauthn_rs::prelude::{
 };
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SummarySig {
-    freshness: DashboardOverviewFreshness,
+    freshness: Arc<DashboardOverviewFreshness>,
 }
 use std::time::Duration;
 use tavily_hikari::{

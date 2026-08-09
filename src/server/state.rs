@@ -47,8 +47,8 @@ struct DashboardOverviewFreshness {
 
 #[derive(Debug, Clone)]
 struct CachedDashboardOverviewSnapshot {
-    snapshot: DashboardOverviewSnapshot,
-    freshness: DashboardOverviewFreshness,
+    snapshot: Arc<DashboardOverviewSnapshot>,
+    freshness: Arc<DashboardOverviewFreshness>,
 }
 
 #[derive(Debug, Clone)]

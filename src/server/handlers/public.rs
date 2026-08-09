@@ -875,7 +875,7 @@ struct DashboardOverviewPayload {
 #[derive(Debug, Clone)]
 struct DashboardOverviewSnapshot {
     payload: DashboardOverviewPayload,
-    freshness: DashboardOverviewFreshness,
+    freshness: Arc<DashboardOverviewFreshness>,
 }
 
 struct DashboardOverviewLoadGuard {
@@ -945,11 +945,11 @@ async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DashboardSnapshot {
+struct DashboardSnapshot<'a> {
     #[serde(flatten)]
-    overview: DashboardOverviewPayload,
-    keys: Vec<ApiKeyView>,
-    logs: Vec<RequestLogView>,
+    overview: &'a DashboardOverviewPayload,
+    keys: &'a [ApiKeyView],
+    logs: &'a [RequestLogView],
 }
 
 fn build_dashboard_trend(logs: &[RequestLogView]) -> DashboardTrendView {
@@ -1025,7 +1025,7 @@ async fn get_dashboard_overview(
                     ..Default::default()
                 },
             );
-            Json(snapshot.payload)
+            Json(snapshot.payload.clone())
         })
         .map_err(|err| {
             eprintln!("dashboard overview error: {err}");
@@ -1349,7 +1349,7 @@ async fn build_dashboard_overview_payload(
             recent_jobs: recent_jobs.into_iter().map(JobLogView::from).collect(),
             recent_alerts: recent_alerts_view,
         },
-        freshness: DashboardOverviewFreshness {
+        freshness: Arc::new(DashboardOverviewFreshness {
             summary: [
                 summary.total_requests,
                 summary.success_count,
@@ -1396,7 +1396,7 @@ async fn build_dashboard_overview_payload(
             request_log_retention_days,
             hourly_window_anchor,
             retention_since,
-        },
+        }),
     })
 }
 
@@ -1680,7 +1680,7 @@ async fn compute_dashboard_overview_freshness(
 
 async fn load_dashboard_overview_snapshot(
     state: &Arc<AppState>,
-) -> Result<DashboardOverviewSnapshot, ProxyError> {
+) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
     let perf = tavily_hikari::RuntimePerfScope::start();
     loop {
         let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
@@ -1758,7 +1758,7 @@ async fn load_dashboard_overview_snapshot(
             let mut cache = cache_handle.lock().await;
             cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
             if let Some(cached) = cache.cached.as_ref()
-                && cached.freshness == freshness
+                && cached.freshness.as_ref() == &freshness
             {
                 tavily_hikari::emit_low_memory_protection_decision(
                     "admin_read",
@@ -1821,7 +1821,7 @@ async fn load_dashboard_overview_snapshot(
         let load_generation = load_generation.expect("dashboard overview loader generation should be assigned");
         let payload_started = Instant::now();
         let mut load_guard = DashboardOverviewLoadGuard::new(cache_handle.clone(), load_generation);
-        let result = build_dashboard_overview_payload(state).await;
+        let result = build_dashboard_overview_payload(state).await.map(Arc::new);
         tavily_hikari::emit_sampled_perf_log(
             tavily_hikari::DbLogStatus::Info,
             "admin_read",
@@ -1890,9 +1890,9 @@ async fn load_dashboard_overview_snapshot(
 async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySig)> {
     let overview = load_dashboard_overview_snapshot(state).await.ok()?;
     let payload = DashboardSnapshot {
-        keys: overview.payload.exhausted_keys.clone(),
-        logs: overview.payload.recent_logs.clone(),
-        overview: overview.payload,
+        keys: &overview.payload.exhausted_keys,
+        logs: &overview.payload.recent_logs,
+        overview: &overview.payload,
     };
 
     let serialize_started = Instant::now();
@@ -1914,7 +1914,7 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySi
     Some((
         Event::default().event("snapshot").data(json),
         SummarySig {
-            freshness: overview.freshness,
+            freshness: overview.freshness.clone(),
         },
     ))
 }
@@ -1941,10 +1941,15 @@ async fn compute_signatures(
         let unchanged = cache
             .cached
             .as_ref()
-            .is_some_and(|cached| cached.freshness == freshness);
+            .is_some_and(|cached| cached.freshness.as_ref() == &freshness);
         cache.last_freshness_probe_at = unchanged.then(tokio::time::Instant::now);
     }
-    Ok((Some(SummarySig { freshness }), latest_id))
+    Ok((
+        Some(SummarySig {
+            freshness: Arc::new(freshness),
+        }),
+        latest_id,
+    ))
 }
 
 // ---- Jobs listing ----
