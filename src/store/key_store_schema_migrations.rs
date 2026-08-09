@@ -7,6 +7,9 @@ const GC_WORK_CHECKSUM: &str = "sha256:40e1bc657936ad891830471519d680e2";
 const RECONCILIATION_WORK_VERSION: i64 = 3;
 const RECONCILIATION_WORK_NAME: &str = "reconciliation-durable-work-projection-v1";
 const RECONCILIATION_WORK_CHECKSUM: &str = "sha256:7e94d5620f3e49a0a17587fb4e019a51";
+const RECONCILIATION_OUTCOME_VERSION: i64 = 4;
+const RECONCILIATION_OUTCOME_NAME: &str = "reconciliation-terminal-outcomes-v1";
+const RECONCILIATION_OUTCOME_CHECKSUM: &str = "sha256:4d6fd3e8c7a3a806a5d420ef07fa4f3c";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -618,6 +621,11 @@ impl KeyStore {
                 RECONCILIATION_WORK_NAME,
                 RECONCILIATION_WORK_CHECKSUM,
             ),
+            (
+                RECONCILIATION_OUTCOME_VERSION,
+                RECONCILIATION_OUTCOME_NAME,
+                RECONCILIATION_OUTCOME_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -678,6 +686,33 @@ impl KeyStore {
         {
             return Err(ProxyError::Other(
                 "schema migration object validation failed at version 3".to_string(),
+            ));
+        }
+        if self
+            .schema_migration_applied(RECONCILIATION_OUTCOME_VERSION)
+            .await?
+            && (!self
+                .table_column_exists("upstream_reconciliation_work", "work_generation")
+                .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "completed_generation")
+                    .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "next_attempt_at")
+                    .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "last_outcome")
+                    .await?
+                || !self
+                    .schema_named_object_exists(
+                        "main",
+                        "trigger",
+                        "trg_upstream_reconciliation_usage_work_update",
+                    )
+                    .await?)
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 4".to_string(),
             ));
         }
         Ok(())
@@ -789,6 +824,118 @@ impl KeyStore {
         .await
     }
 
+    async fn apply_reconciliation_outcome_migration(&self) -> Result<(), ProxyError> {
+        for (column, definition) in [
+            ("work_generation", "INTEGER NOT NULL DEFAULT 1"),
+            ("completed_generation", "INTEGER NOT NULL DEFAULT 0"),
+            ("next_attempt_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_outcome", "TEXT"),
+        ] {
+            if !self
+                .table_column_exists("upstream_reconciliation_work", column)
+                .await?
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE upstream_reconciliation_work ADD COLUMN {column} {definition}",
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_upstream_reconciliation_work_pending ON upstream_reconciliation_work(next_attempt_at, period_end, scheduling_key_id, token_id, period_code)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("DROP TRIGGER IF EXISTS trg_upstream_reconciliation_usage_work_insert")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DROP TRIGGER IF EXISTS trg_upstream_reconciliation_usage_work_update")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS trg_upstream_reconciliation_usage_work_insert
+               AFTER INSERT ON upstream_reconciliation_usage
+               BEGIN
+                 INSERT INTO upstream_reconciliation_work (
+                   token_id, period_code, project_id, billing_subject, settlement_mode,
+                   period_start, period_end, scheduling_key_id, updated_at,
+                   work_generation, completed_generation, next_attempt_at, last_outcome
+                 ) VALUES (
+                   NEW.token_id, NEW.period_code, NEW.project_id, NEW.billing_subject,
+                   NEW.settlement_mode, NEW.period_start, NEW.period_end, NEW.key_id, NEW.updated_at,
+                   1, 0, 0, NULL
+                 )
+                 ON CONFLICT(token_id, period_code) DO UPDATE SET
+                   project_id = MIN(upstream_reconciliation_work.project_id, excluded.project_id),
+                   billing_subject = MIN(upstream_reconciliation_work.billing_subject, excluded.billing_subject),
+                   settlement_mode = MIN(upstream_reconciliation_work.settlement_mode, excluded.settlement_mode),
+                   period_start = MIN(upstream_reconciliation_work.period_start, excluded.period_start),
+                   period_end = MAX(upstream_reconciliation_work.period_end, excluded.period_end),
+                   scheduling_key_id = MIN(upstream_reconciliation_work.scheduling_key_id, excluded.scheduling_key_id),
+                   updated_at = MAX(upstream_reconciliation_work.updated_at, excluded.updated_at),
+                   work_generation = upstream_reconciliation_work.work_generation + 1,
+                   next_attempt_at = 0,
+                   last_outcome = NULL;
+               END"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TRIGGER IF NOT EXISTS trg_upstream_reconciliation_usage_work_update
+               AFTER UPDATE ON upstream_reconciliation_usage
+               BEGIN
+                 INSERT INTO upstream_reconciliation_work (
+                   token_id, period_code, project_id, billing_subject, settlement_mode,
+                   period_start, period_end, scheduling_key_id, updated_at,
+                   work_generation, completed_generation, next_attempt_at, last_outcome
+                 ) VALUES (
+                   NEW.token_id, NEW.period_code, NEW.project_id, NEW.billing_subject,
+                   NEW.settlement_mode, NEW.period_start, NEW.period_end, NEW.key_id, NEW.updated_at,
+                   1, 0, 0, NULL
+                 )
+                 ON CONFLICT(token_id, period_code) DO UPDATE SET
+                   project_id = MIN(upstream_reconciliation_work.project_id, excluded.project_id),
+                   billing_subject = MIN(upstream_reconciliation_work.billing_subject, excluded.billing_subject),
+                   settlement_mode = MIN(upstream_reconciliation_work.settlement_mode, excluded.settlement_mode),
+                   period_start = MIN(upstream_reconciliation_work.period_start, excluded.period_start),
+                   period_end = MAX(upstream_reconciliation_work.period_end, excluded.period_end),
+                   scheduling_key_id = MIN(upstream_reconciliation_work.scheduling_key_id, excluded.scheduling_key_id),
+                   updated_at = MAX(upstream_reconciliation_work.updated_at, excluded.updated_at),
+                   work_generation = upstream_reconciliation_work.work_generation + 1,
+                   next_attempt_at = 0,
+                   last_outcome = NULL;
+               END"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"UPDATE upstream_reconciliation_work
+               SET completed_generation = work_generation,
+                   last_outcome = CASE
+                       WHEN EXISTS (
+                           SELECT 1 FROM upstream_reconciliation_settlements s
+                           WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                             AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
+                       ) THEN 'settled'
+                       ELSE last_outcome
+                   END
+               WHERE EXISTS (
+                   SELECT 1 FROM upstream_reconciliation_settlements s
+                   WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                     AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
+               )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            RECONCILIATION_OUTCOME_VERSION,
+            RECONCILIATION_OUTCOME_NAME,
+            RECONCILIATION_OUTCOME_CHECKSUM,
+        )
+        .await
+    }
+
     pub(crate) async fn prepare_versioned_schema(&self) -> Result<bool, ProxyError> {
         let started = std::time::Instant::now();
         let existing_database = self.schema_object_exists("main", "meta").await?;
@@ -850,6 +997,12 @@ impl KeyStore {
         {
             self.apply_reconciliation_work_migration().await?;
         }
+        if !self
+            .schema_migration_applied(RECONCILIATION_OUTCOME_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_outcome_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -873,6 +1026,7 @@ impl KeyStore {
         .await?;
         self.apply_gc_work_migration().await?;
         self.apply_reconciliation_work_migration().await?;
+        self.apply_reconciliation_outcome_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -880,7 +1034,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 3_i64,
+            migration_count = 4_i64,
         );
         Ok(())
     }

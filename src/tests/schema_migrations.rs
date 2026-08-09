@@ -28,7 +28,7 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4]);
     sqlx::query("UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 2")
         .execute(&pool)
         .await
@@ -80,6 +80,44 @@ async fn versioned_schema_migrations_reject_missing_recorded_objects() {
         error
             .to_string()
             .contains("object validation failed at version 3")
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn terminal_outcome_migration_rejects_a_missing_usage_update_trigger() {
+    let db_path = temp_db_path("schema-migration-terminal-outcome-trigger");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-terminal-outcome".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    drop(proxy);
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_update")
+        .execute(&pool)
+        .await
+        .expect("remove terminal outcome trigger");
+    pool.close().await;
+
+    let error = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-terminal-outcome".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect_err("missing terminal outcome trigger must reject startup");
+    assert!(
+        error
+            .to_string()
+            .contains("object validation failed at version 4")
     );
 
     let _ = std::fs::remove_file(&db_path);
@@ -348,7 +386,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

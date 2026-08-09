@@ -842,22 +842,6 @@ fn spawn_token_usage_rollup_scheduler(state: Arc<AppState>) {
     });
 }
 
-fn spawn_upstream_reconciliation_scheduler(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        loop {
-            let _ = enqueue_scheduled_job_logged(
-                state.as_ref(),
-                "upstream_reconciliation",
-                None,
-                TRIGGER_SOURCE_SCHEDULER,
-                "upstream-reconciliation",
-            )
-            .await;
-            state.proxy.backend_time().sleep(Duration::from_secs(60)).await;
-        }
-    });
-}
-
 fn spawn_auth_token_logs_gc_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
@@ -2597,11 +2581,9 @@ async fn run_manual_claimed_job(
             )
             .await
             {
-                Ok(Ok((_settled, true))) => true,
-                Ok(Ok((settled, false))) => {
-                    let now = state.proxy.backend_time().now_ts();
-                    match state.proxy.upstream_reconciliation_backoff_until().await {
-                        Ok(available_at) if available_at > now => state
+                Ok(Ok((settled, _))) => {
+                    match state.proxy.upstream_reconciliation_continuation_at().await {
+                        Ok(Some(available_at)) => state
                             .proxy
                             .scheduled_job_finish_and_enqueue_auto_at(
                                 job_id,
@@ -2609,12 +2591,12 @@ async fn run_manual_claimed_job(
                                 "upstream_reconciliation",
                                 None,
                                 1,
-                                Some(&format!("settled={settled} backoff_until={available_at}")),
+                                Some(&format!("settled={settled} continuation_at={available_at}")),
                                 available_at,
                             )
                             .await
                             .is_ok(),
-                        Ok(_) => finish(state, "success", format!("settled={settled}")).await,
+                        Ok(None) => finish(state, "success", format!("settled={settled}")).await,
                         Err(err) => finish(state, "error", err.to_string()).await,
                     }
                 }
@@ -2637,8 +2619,20 @@ async fn run_manual_claimed_job(
                             err = %err,
                         );
                     }
-                    finish(state, "success", "settled=unknown budget_exhausted=true".to_string())
+                    let available_at = state.proxy.backend_time().now_ts().saturating_add(300);
+                    state
+                        .proxy
+                        .scheduled_job_finish_and_enqueue_auto_at(
+                            job_id,
+                            claim_generation,
+                            "upstream_reconciliation",
+                            None,
+                            1,
+                            Some("settled=unknown budget_exhausted=true"),
+                            available_at,
+                        )
                         .await
+                        .is_ok()
                 }
             }
         }

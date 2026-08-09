@@ -695,6 +695,165 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
 }
 
 #[tokio::test]
+async fn reconciliation_no_adjustment_completes_only_the_current_usage_generation() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-no-adjustment"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    settings.upstream_precise_reconciliation_enabled = false;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("save reconciliation settings");
+    let token = proxy
+        .create_access_token(Some("reconciliation-no-adjustment"))
+        .await
+        .expect("create token");
+    let key_id = proxy
+        .add_or_undelete_key("tvly-reconciliation-no-adjustment")
+        .await
+        .expect("create upstream key");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, '2026-07-15/S1', 'project-no-adjustment', ?, ?, ?, 1, ?, ?, ?, 'shadow')
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(format!("token:{}", token.id))
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert due reconciliation usage");
+
+    let usage_hits = Arc::new(AtomicUsize::new(0));
+    let app_hits = Arc::clone(&usage_hits);
+    let app = Router::new().route(
+        "/usage",
+        get(move || {
+            let app_hits = Arc::clone(&app_hits);
+            async move {
+                app_hits.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({ "key": { "usage": 0 } }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .expect("serve no-adjustment upstream");
+    });
+
+    assert_eq!(
+        proxy
+            .run_upstream_reconciliation_once(&format!("http://{addr}"))
+            .await
+            .expect("settle no-adjustment generation"),
+        1
+    );
+    let first_generation: (i64, i64, String) = sqlx::query_as(
+        "SELECT work_generation, completed_generation, last_outcome FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read completed no-adjustment generation");
+    assert_eq!(first_generation, (1, 1, "no_adjustment".to_string()));
+    assert_eq!(
+        proxy
+            .key_store
+            .upstream_reconciliation_continuation_at()
+            .await
+            .expect("read continuation after completion"),
+        None
+    );
+    let queued_continuations: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' AND status = 'queued'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("count queued continuations");
+    assert_eq!(
+        queued_continuations, 0,
+        "a completed no-adjustment generation must not create a minute retry loop"
+    );
+    assert_eq!(
+        proxy
+            .run_upstream_reconciliation_once(&format!("http://{addr}"))
+            .await
+            .expect("skip completed no-adjustment generation"),
+        0
+    );
+    assert_eq!(usage_hits.load(Ordering::SeqCst), 1);
+
+    sqlx::query(
+        r#"
+        UPDATE upstream_reconciliation_usage
+        SET request_count = request_count + 1, updated_at = updated_at + 1
+        WHERE token_id = ? AND key_id = ? AND period_code = '2026-07-15/S1'
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("record new usage in the same settlement window");
+    assert_eq!(
+        proxy
+            .run_upstream_reconciliation_once(&format!("http://{addr}"))
+            .await
+            .expect("settle new no-adjustment generation"),
+        1
+    );
+    let second_generation: (i64, i64, String) = sqlx::query_as(
+        "SELECT work_generation, completed_generation, last_outcome FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read completed replacement generation");
+    assert_eq!(second_generation, (2, 2, "no_adjustment".to_string()));
+    assert_eq!(usage_hits.load(Ordering::SeqCst), 2);
+    let adjustment_delta: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(delta_credits), 0) FROM billing_reconciliation_shadow_adjustments WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("sum durable shadow adjustment impact");
+    assert_eq!(
+        adjustment_delta, 0,
+        "zero deltas must not alter billing truth even when shadow audit state is retained"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn reconciliation_request_cap_never_settles_partially_observed_candidate() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
@@ -1067,8 +1226,78 @@ async fn reconciliation_global_backoff_counts_only_attempted_candidates() {
         .await
         .expect("read global backoff state");
     assert_eq!(pressure_streak, 3);
-    assert_eq!(backoff_level, 1);
-    assert_eq!(backoff_until, now + 902 + 120);
+    assert_eq!(backoff_level, 3);
+    assert_eq!(backoff_until, now + 902 + 600);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn upstream_429_backoff_escalates_persists_across_restart_and_resets() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-429-states"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    for (level, delay_secs) in [(1_i64, 120_i64), (2, 300), (3, 600), (4, 1_800)] {
+        let attempted_at = now + level * 10_000;
+        let state = proxy
+            .key_store
+            .update_upstream_reconciliation_global_backoff(true, attempted_at, None)
+            .await
+            .expect("persist upstream 429 backoff");
+        assert_eq!(state, (level, level, attempted_at + delay_secs));
+    }
+    let retry_after_until = now + 100_000;
+    assert_eq!(
+        proxy
+            .key_store
+            .update_upstream_reconciliation_global_backoff(
+                true,
+                now + 50_000,
+                Some(retry_after_until)
+            )
+            .await
+            .expect("honor upstream retry-after"),
+        (5, 4, retry_after_until)
+    );
+
+    drop(proxy);
+    let (restart_time, _) = BackendTime::manual_from_ts(now + 50_001);
+    let restarted = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-429-states"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        restart_time,
+    )
+    .await
+    .expect("restart proxy");
+    assert_eq!(
+        restarted
+            .key_store
+            .upstream_reconciliation_global_backoff_state()
+            .await
+            .expect("read persisted 429 backoff"),
+        (5, 4, retry_after_until)
+    );
+    assert_eq!(
+        restarted
+            .key_store
+            .update_upstream_reconciliation_global_backoff(false, now + 50_002, None)
+            .await
+            .expect("reset after successful reconciliation"),
+        (0, 0, 0)
+    );
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -1121,7 +1350,26 @@ async fn local_reconciliation_pressure_is_separate_from_upstream_backoff() {
     .expect("read atomic delayed representative");
     assert_eq!(queued, (1, local_until));
 
-    proxy
+    drop(proxy);
+    let (restart_time, _) = BackendTime::manual_from_ts(now + 3);
+    let restarted = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-local-pressure"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        restart_time,
+    )
+    .await
+    .expect("restart proxy");
+    assert_eq!(
+        restarted
+            .key_store
+            .upstream_reconciliation_local_backoff_state()
+            .await
+            .expect("read persisted local pressure state"),
+        (local_streak, local_level, local_until)
+    );
+    restarted
         .key_store
         .update_upstream_reconciliation_local_backoff(false, now + 3)
         .await
@@ -1129,7 +1377,7 @@ async fn local_reconciliation_pressure_is_separate_from_upstream_backoff() {
     let queued_after_recovery: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' AND status = 'queued' AND trigger_source = 'auto'",
     )
-    .fetch_one(&proxy.key_store.pool)
+    .fetch_one(&restarted.key_store.pool)
     .await
     .expect("read recovered representative state");
     assert_eq!(queued_after_recovery, 0);

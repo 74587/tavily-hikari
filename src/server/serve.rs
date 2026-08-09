@@ -1534,7 +1534,6 @@ fn spawn_business_background_tasks(state: Arc<AppState>) {
     spawn_scheduled_job_stale_reaper(state.clone());
     spawn_quota_sync_scheduler(state.clone());
     spawn_token_usage_rollup_scheduler(state.clone());
-    spawn_upstream_reconciliation_scheduler(state.clone());
     spawn_auth_token_logs_gc_scheduler(state.clone());
     spawn_ha_outbox_gc_scheduler(state.clone());
     spawn_mcp_sessions_gc_scheduler(state.clone());
