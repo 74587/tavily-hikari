@@ -572,6 +572,96 @@ async fn user_business_calls_1h_series_keeps_late_arriving_older_events_in_order
 }
 
 #[tokio::test]
+async fn user_business_calls_1h_backfill_pages_same_timestamp_without_gaps() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_200_000);
+    let db_path = temp_db_path("user-business-calls-1h-backfill-page-cursor");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time.clone(),
+    )
+    .await
+    .expect("proxy created");
+    let user = proxy
+        .upsert_oauth_account(&OAuthAccountProfile {
+            provider: "github".to_string(),
+            provider_user_id: "business-calls-page-cursor".to_string(),
+            username: Some("business_calls_page_cursor".to_string()),
+            name: Some("Business Calls Page Cursor".to_string()),
+            avatar_template: None,
+            active: true,
+            trust_level: None,
+            raw_payload_json: None,
+        })
+        .await
+        .expect("upsert user");
+    let now = manual_clock.now_ts();
+    sqlx::query(
+        r#"
+        WITH RECURSIVE sequence(value) AS (
+            VALUES(1)
+            UNION ALL
+            SELECT value + 1 FROM sequence WHERE value < 501
+        )
+        INSERT INTO request_logs (
+            method, path, status_code, tavily_status_code, result_status,
+            request_kind_key, request_kind_label, counts_business_quota,
+            request_user_id, upstream_operation, created_at
+        )
+        SELECT 'POST', '/api/tavily/search', 200, 200, 'success',
+               'api:search', 'API | search', 1, ?, 'http_search', ?
+        FROM sequence
+        "#,
+    )
+    .bind(&user.user_id)
+    .bind(now - 20 * SECS_PER_MINUTE)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed one full page plus one same-timestamp row");
+    sqlx::query(
+        r#"
+        INSERT INTO request_logs (
+            method, path, status_code, tavily_status_code, result_status,
+            request_kind_key, request_kind_label, counts_business_quota,
+            request_user_id, upstream_operation, created_at
+        ) VALUES ('POST', '/api/tavily/search', 500, 500, 'error',
+                  'api:search', 'API | search', 1, ?, 'http_search', ?)
+        "#,
+    )
+    .bind(&user.user_id)
+    .bind(now - 20 * SECS_PER_MINUTE)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed same-timestamp second page row");
+    drop(proxy);
+
+    let reopened = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("reopen with paged backfill");
+    let summary = reopened
+        .user_dashboard_summary(&user.user_id, None)
+        .await
+        .expect("load paged backfill summary");
+    assert_eq!(summary.business_calls_1h.success_count, 501);
+    assert_eq!(summary.business_calls_1h.failure_count, 1);
+    assert_eq!(summary.business_calls_1h.total_count, 502);
+
+    drop(reopened);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn user_business_calls_1h_backfill_preserves_live_events_after_snapshot_upper_bound() {
     let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_300_000);
     let db_path = temp_db_path("user-business-calls-1h-backfill-preserves-live-events");

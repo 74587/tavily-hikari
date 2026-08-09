@@ -88,6 +88,39 @@ async fn versioned_schema_migrations_reject_missing_recorded_objects() {
 }
 
 #[tokio::test]
+async fn warm_schema_verification_rejects_missing_backfill_time_index() {
+    let db_path = temp_db_path("schema-migration-missing-backfill-time-index");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-missing-backfill-time-index".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    sqlx::query("DROP INDEX observability.idx_request_logs_time")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove backfill index");
+
+    let error = proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect_err("missing backfill index must reject startup");
+    assert!(
+        error
+            .to_string()
+            .contains("missing observability.idx_request_logs_time")
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn versioned_schema_migrations_reject_unknown_future_versions() {
     let db_path = temp_db_path("schema-migration-future-version");
     let db_str = db_path.to_string_lossy().to_string();

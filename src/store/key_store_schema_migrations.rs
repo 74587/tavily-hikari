@@ -243,6 +243,15 @@ impl KeyStore {
                 )));
             }
         }
+        if !self
+            .schema_named_object_exists("observability", "index", "idx_request_logs_time")
+            .await?
+        {
+            return Err(ProxyError::Other(
+                "schema migration baseline rejected: missing observability.idx_request_logs_time"
+                    .to_string(),
+            ));
+        }
         for (schema, table, columns) in [
             (
                 "main",
