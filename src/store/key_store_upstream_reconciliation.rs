@@ -9,6 +9,12 @@ pub(crate) const RECONCILIATION_RETRY_REASON_LOCAL_USAGE_RATE_LIMIT: &str =
     "local_usage_rate_limit";
 pub(crate) const RECONCILIATION_RETRY_REASON_UPSTREAM_429: &str = "upstream429";
 pub(crate) const RECONCILIATION_RETRY_REASON_OTHER: &str = "other";
+pub(crate) const RECONCILIATION_OUTCOME_SETTLED: &str = "settled";
+pub(crate) const RECONCILIATION_OUTCOME_NO_ADJUSTMENT: &str = "no_adjustment";
+pub(crate) const RECONCILIATION_OUTCOME_UPSTREAM_429: &str = "upstream_429";
+pub(crate) const RECONCILIATION_OUTCOME_TRANSPORT_FAILURE: &str = "transport_failure";
+pub(crate) const RECONCILIATION_OUTCOME_SEMANTIC_FAILURE: &str = "semantic_failure";
+pub(crate) const RECONCILIATION_OUTCOME_LOCAL_PRESSURE: &str = "local_pressure";
 const RECONCILIATION_RECENT_LANE_BUDGET: i64 = 12;
 const RECONCILIATION_BACKLOG_LANE_BUDGET: i64 = 8;
 const RECONCILIATION_QUEUE_ESTIMATE_LIMIT: i64 = 64;
@@ -27,8 +33,21 @@ type UpstreamReconciliationCandidateRow = (
     i64,
     i64,
     i64,
+    i64,
     String,
 );
+
+#[derive(Clone)]
+struct UpstreamReconciliationCandidateWork {
+    candidate: UpstreamReconciliationCandidate,
+    work_generation: i64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReconciliationWorkFence {
+    pub(crate) work_generation: i64,
+    pub(crate) claimed_job: Option<(i64, i64)>,
+}
 
 fn upstream_reconciliation_shadow_ready(settings: &SystemSettings) -> bool {
     settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
@@ -50,7 +69,7 @@ pub(crate) fn classify_reconciliation_retry_reason(reason: Option<&str>) -> &'st
     if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
         return RECONCILIATION_RETRY_REASON_UPSTREAM_429;
     }
-    if reason.contains("usage http error 429") || reason.contains("429 Too Many Requests") {
+    if reason.starts_with("usage http error 429 ") {
         return RECONCILIATION_RETRY_REASON_UPSTREAM_429;
     }
     RECONCILIATION_RETRY_REASON_OTHER
@@ -78,6 +97,98 @@ impl KeyStore {
             cooldown_until,
             retry_after_secs,
         }))
+    }
+
+    pub(crate) async fn arm_api_key_transient_backoff_claimed(
+        &self,
+        arm: ApiKeyTransientBackoffArm<'_>,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<Option<ApiKeyTransientBackoffState>, ProxyError> {
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(
+            &mut transaction,
+            Some((job_id, claim_generation)),
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
+        let previous_cooldown = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT cooldown_until
+            FROM api_key_transient_backoffs
+            WHERE key_id = ? AND scope = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(arm.key_id)
+        .bind(arm.scope)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO api_key_transient_backoffs (
+                key_id, scope, cooldown_until, retry_after_secs, reason_code,
+                source_request_log_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key_id, scope) DO UPDATE SET
+                cooldown_until = MAX(api_key_transient_backoffs.cooldown_until, excluded.cooldown_until),
+                retry_after_secs = CASE
+                    WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until
+                        THEN excluded.retry_after_secs
+                    ELSE api_key_transient_backoffs.retry_after_secs
+                END,
+                reason_code = CASE
+                    WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until
+                        THEN COALESCE(excluded.reason_code, api_key_transient_backoffs.reason_code)
+                    ELSE api_key_transient_backoffs.reason_code
+                END,
+                source_request_log_id = COALESCE(
+                    excluded.source_request_log_id,
+                    api_key_transient_backoffs.source_request_log_id
+                ),
+                updated_at = CASE
+                    WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until
+                        THEN excluded.updated_at
+                    ELSE api_key_transient_backoffs.updated_at
+                END
+            "#,
+        )
+        .bind(arm.key_id)
+        .bind(arm.scope)
+        .bind(arm.cooldown_until)
+        .bind(arm.retry_after_secs)
+        .bind(arm.reason_code)
+        .bind(arm.source_request_log_id)
+        .bind(arm.now)
+        .bind(arm.now)
+        .execute(&mut *transaction)
+        .await?;
+        let current = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT cooldown_until, retry_after_secs
+            FROM api_key_transient_backoffs
+            WHERE key_id = ? AND scope = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(arm.key_id)
+        .bind(arm.scope)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let state = previous_cooldown.is_none_or(|previous| previous < current.0).then_some(
+            ApiKeyTransientBackoffState {
+                cooldown_until: current.0,
+                retry_after_secs: current.1,
+            },
+        );
+        transaction.commit().await?;
+        Ok(state)
     }
 
     pub(crate) async fn count_active_upstream_mcp_sessions(
@@ -190,10 +301,12 @@ impl KeyStore {
                 LEFT JOIN upstream_reconciliation_settlements s
                   ON s.settlement_key = 'v1:' || w.token_id || ':' || w.period_code
                 WHERE w.period_end + 600 <= ?
-                  AND (s.settlement_key IS NULL OR (
-                      s.status IN ('pending', 'waiting', 'rate_limited')
-                      AND COALESCE(s.next_attempt_at, 0) <= ?
-                  ))
+                  AND w.work_generation > w.completed_generation
+                  AND MAX(
+                      w.next_attempt_at,
+                      CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
+                           THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+                  ) <= ?
                   AND (
                       w.period_end + 86400 <= ?
                       OR NOT EXISTS (
@@ -220,10 +333,12 @@ impl KeyStore {
             LEFT JOIN upstream_reconciliation_settlements s
               ON s.settlement_key = 'v1:' || w.token_id || ':' || w.period_code
             WHERE w.period_end + 600 <= ?
-              AND (s.settlement_key IS NULL OR (
-                  s.status IN ('pending', 'waiting', 'rate_limited')
-                  AND COALESCE(s.next_attempt_at, 0) <= ?
-              ))
+              AND w.work_generation > w.completed_generation
+              AND MAX(
+                  w.next_attempt_at,
+                  CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
+                       THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+              ) <= ?
               AND (
                   w.period_end + 86400 <= ?
                   OR NOT EXISTS (
@@ -254,10 +369,12 @@ impl KeyStore {
                         LEFT JOIN upstream_reconciliation_settlements s
                           ON s.settlement_key = 'v1:' || w.token_id || ':' || w.period_code
                         WHERE w.period_end + 600 <= ?
-                          AND (s.settlement_key IS NULL OR (
-                              s.status IN ('pending', 'waiting', 'rate_limited')
-                              AND COALESCE(s.next_attempt_at, 0) <= ?
-                          ))
+                          AND w.work_generation > w.completed_generation
+                          AND MAX(
+                              w.next_attempt_at,
+                              CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
+                                   THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+                          ) <= ?
                           AND (
                               w.period_end + 86400 <= ?
                               OR NOT EXISTS (
@@ -354,6 +471,106 @@ impl KeyStore {
         self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1).await
     }
 
+    pub(crate) async fn upstream_reconciliation_continuation_at(
+        &self,
+    ) -> Result<Option<i64>, ProxyError> {
+        let now = self.backend_time.now_ts();
+        let work_at: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT MIN(MAX(
+                w.next_attempt_at,
+                w.period_end + 600,
+                CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
+                     THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+            ))
+            FROM upstream_reconciliation_work w
+            LEFT JOIN upstream_reconciliation_settlements s
+              ON s.settlement_key = 'v1:' || w.token_id || ':' || w.period_code
+            WHERE w.work_generation > w.completed_generation
+              AND (
+                  w.period_end + 86400 <= ?
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM upstream_reconciliation_research r
+                      WHERE r.token_id = w.token_id
+                        AND r.period_code = w.period_code
+                        AND r.terminal_at IS NULL
+                  )
+              )
+            "#,
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        let research_at: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT MIN(CASE WHEN next_poll_at > 0 THEN next_poll_at ELSE ? END)
+            FROM upstream_reconciliation_research
+            WHERE terminal_at IS NULL
+            "#,
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        let Some(pending_at) = (match (work_at, research_at) {
+            (Some(work_at), Some(research_at)) => Some(work_at.min(research_at)),
+            (Some(work_at), None) => Some(work_at),
+            (None, Some(research_at)) => Some(research_at),
+            (None, None) => None,
+        }) else {
+            return Ok(None);
+        };
+        let global_until = self
+            .get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1)
+            .await?
+            .unwrap_or(0);
+        let local_until = self
+            .get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
+            .await?
+            .unwrap_or(0);
+        Ok(Some(pending_at.max(global_until).max(local_until).max(now)))
+    }
+
+    pub(crate) async fn ensure_upstream_reconciliation_representative_job(
+        &self,
+    ) -> Result<(), ProxyError> {
+        let Some(available_at) = self.upstream_reconciliation_continuation_at().await? else {
+            return Ok(());
+        };
+        self.scheduled_job_enqueue_at(
+            "upstream_reconciliation",
+            "auto",
+            None,
+            1,
+            available_at,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn reconciliation_claim_is_current_locked(
+        transaction: &mut ImmediateSqliteTransaction,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<bool, ProxyError> {
+        let Some((job_id, claim_generation)) = claimed_job else {
+            return Ok(true);
+        };
+        let current: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM scheduled_jobs
+                WHERE id = ? AND status = 'running' AND claim_generation = ?
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(claim_generation)
+        .fetch_one(&mut **transaction)
+        .await?;
+        Ok(current != 0)
+    }
+
     async fn sync_upstream_reconciliation_representative_locked(
         transaction: &mut ImmediateSqliteTransaction,
         now: i64,
@@ -368,30 +585,31 @@ impl KeyStore {
         .await?
         .unwrap_or(0);
         if let Some((job_id, claim_generation)) = claimed_job {
-            let updated = if available_at > now {
-                sqlx::query(
-                    r#"UPDATE scheduled_jobs
-                       SET status = 'queued', available_at = ?, started_at = NULL,
-                           finished_at = NULL, message = 'reconciliation backoff active'
-                       WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
+            if available_at <= now {
+                if !Self::reconciliation_claim_is_current_locked(
+                    transaction,
+                    Some((job_id, claim_generation)),
                 )
-                .bind(available_at)
-                .bind(job_id)
-                .bind(claim_generation)
-                .execute(&mut **transaction)
                 .await?
-            } else {
-                sqlx::query(
-                    r#"UPDATE scheduled_jobs
-                       SET status = 'success', finished_at = ?, message = 'reconciliation completed'
-                       WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
-                )
-                .bind(now)
-                .bind(job_id)
-                .bind(claim_generation)
-                .execute(&mut **transaction)
-                .await?
-            };
+                {
+                    return Err(ProxyError::StaleClaim {
+                        job_id,
+                        claim_generation,
+                    });
+                }
+                return Ok(());
+            }
+            let updated = sqlx::query(
+                r#"UPDATE scheduled_jobs
+                   SET status = 'queued', available_at = ?, started_at = NULL,
+                       finished_at = NULL, message = 'reconciliation backoff active'
+                   WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
+            )
+            .bind(available_at)
+            .bind(job_id)
+            .bind(claim_generation)
+            .execute(&mut **transaction)
+            .await?;
             if updated.rows_affected() == 0 {
                 return Err(ProxyError::StaleClaim {
                     job_id,
@@ -467,6 +685,14 @@ impl KeyStore {
             (0, 0, 0)
         };
         let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
         sqlx::query(
             r#"INSERT INTO meta (key, value) VALUES (?, ?), (?, ?), (?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
@@ -602,6 +828,14 @@ impl KeyStore {
             (0, 0, 0)
         };
         let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
         sqlx::query(
             r#"INSERT INTO meta (key, value) VALUES (?, ?), (?, ?), (?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
@@ -675,11 +909,43 @@ impl KeyStore {
         &self,
         timestamp: i64,
     ) -> Result<(), ProxyError> {
-        self.set_meta_i64(
-            META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1,
+        self.mark_upstream_reconciliation_research_sweep_at_inner(timestamp, None)
+            .await
+    }
+
+    pub(crate) async fn mark_upstream_reconciliation_research_sweep_at_claimed(
+        &self,
+        timestamp: i64,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<(), ProxyError> {
+        self.mark_upstream_reconciliation_research_sweep_at_inner(
             timestamp,
+            Some((job_id, claim_generation)),
         )
         .await
+    }
+
+    async fn mark_upstream_reconciliation_research_sweep_at_inner(
+        &self,
+        timestamp: i64,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<(), ProxyError> {
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
+        sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1)
+            .bind(timestamp.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await
     }
 
     pub(crate) async fn record_upstream_reconciliation_usage(
@@ -755,6 +1021,7 @@ impl KeyStore {
             .await?;
         }
         tx.commit().await?;
+        self.ensure_upstream_reconciliation_representative_job().await?;
         Ok(Some(period))
     }
 
@@ -779,7 +1046,38 @@ impl KeyStore {
         &self,
         request_id: &str,
     ) -> Result<bool, ProxyError> {
+        self.mark_upstream_reconciliation_research_terminal_inner(request_id, None)
+            .await
+    }
+
+    pub(crate) async fn mark_upstream_reconciliation_research_terminal_claimed(
+        &self,
+        request_id: &str,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<bool, ProxyError> {
+        self.mark_upstream_reconciliation_research_terminal_inner(
+            request_id,
+            Some((job_id, claim_generation)),
+        )
+        .await
+    }
+
+    async fn mark_upstream_reconciliation_research_terminal_inner(
+        &self,
+        request_id: &str,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<bool, ProxyError> {
         let now = self.backend_time.now_ts();
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
         let changed = sqlx::query(
             r#"
             UPDATE upstream_reconciliation_research
@@ -797,16 +1095,17 @@ impl KeyStore {
         .bind(now)
         .bind(now)
         .bind(request_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?
         .rows_affected();
         if changed > 0 {
-            self.set_meta_i64(
-                META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1,
-                now,
-            )
-            .await?;
+            sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1)
+                .bind(now.to_string())
+                .execute(&mut *transaction)
+                .await?;
         }
+        transaction.commit().await?;
         Ok(changed > 0)
     }
 
@@ -886,7 +1185,53 @@ impl KeyStore {
         outcome: &str,
         error_kind: Option<&str>,
     ) -> Result<(), ProxyError> {
+        self.record_upstream_reconciliation_research_poll_inner(
+            request_id,
+            next_poll_at,
+            outcome,
+            error_kind,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_upstream_reconciliation_research_poll_claimed(
+        &self,
+        request_id: &str,
+        next_poll_at: i64,
+        outcome: &str,
+        error_kind: Option<&str>,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<(), ProxyError> {
+        self.record_upstream_reconciliation_research_poll_inner(
+            request_id,
+            next_poll_at,
+            outcome,
+            error_kind,
+            Some((job_id, claim_generation)),
+        )
+        .await
+    }
+
+    async fn record_upstream_reconciliation_research_poll_inner(
+        &self,
+        request_id: &str,
+        next_poll_at: i64,
+        outcome: &str,
+        error_kind: Option<&str>,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<(), ProxyError> {
         let now = self.backend_time.now_ts();
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
         sqlx::query(
             r#"
             UPDATE upstream_reconciliation_research
@@ -901,16 +1246,16 @@ impl KeyStore {
         .bind(error_kind)
         .bind(now)
         .bind(request_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(())
+        transaction.commit().await
     }
 
     fn build_upstream_reconciliation_candidates(
         &self,
         rows: Vec<UpstreamReconciliationCandidateRow>,
         now: i64,
-    ) -> Vec<UpstreamReconciliationCandidate> {
+    ) -> Vec<UpstreamReconciliationCandidateWork> {
         rows.into_iter()
             .filter_map(
                 |(
@@ -922,6 +1267,7 @@ impl KeyStore {
                     period_start,
                     period_end,
                     pending_research,
+                    work_generation,
                     _scheduling_key_id,
                 )| {
                     let degraded = pending_research > 0
@@ -929,16 +1275,19 @@ impl KeyStore {
                     if pending_research > 0 && !degraded {
                         return None;
                     }
-                    Some(UpstreamReconciliationCandidate {
-                        token_id,
-                        period_code,
-                        project_id,
-                        billing_subject,
-                        settlement_mode,
-                        period_start,
-                        period_end,
-                        pending_research,
-                        degraded,
+                    Some(UpstreamReconciliationCandidateWork {
+                        candidate: UpstreamReconciliationCandidate {
+                            token_id,
+                            period_code,
+                            project_id,
+                            billing_subject,
+                            settlement_mode,
+                            period_start,
+                            period_end,
+                            pending_research,
+                            degraded,
+                        },
+                        work_generation,
                     })
                 },
             )
@@ -990,7 +1339,7 @@ impl KeyStore {
         limit: i64,
         newest_first: bool,
         scope: ReconciliationCandidateScope,
-    ) -> Result<Vec<UpstreamReconciliationCandidate>, ProxyError> {
+    ) -> Result<Vec<UpstreamReconciliationCandidateWork>, ProxyError> {
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
             r#"
             WITH eligible AS (
@@ -1003,6 +1352,7 @@ impl KeyStore {
                 w.period_start,
                 w.period_end,
                 w.scheduling_key_id,
+                w.work_generation,
                 CASE WHEN EXISTS (
                     SELECT 1
                     FROM upstream_reconciliation_research r
@@ -1017,14 +1367,15 @@ impl KeyStore {
         );
         query
             .push_bind(now)
-            .push(
-                r#"
-              AND (s.settlement_key IS NULL OR (
-                    s.status IN ('pending', 'waiting', 'rate_limited')
-                    AND COALESCE(s.next_attempt_at, 0) <= "#,
-            )
+            .push(r#"
+              AND w.work_generation > w.completed_generation
+              AND MAX(
+                  w.next_attempt_at,
+                  CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
+                       THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+              ) <= "#)
             .push_bind(now)
-            .push(" ))");
+            .push(" ");
         match scope {
             ReconciliationCandidateScope::Recent { start, end } => {
                 query
@@ -1075,6 +1426,7 @@ impl KeyStore {
                 period_start,
                 period_end,
                 pending_research,
+                work_generation,
                 scheduling_key_id
             FROM ranked
             ORDER BY key_slot ASC, period_end "#,
@@ -1148,22 +1500,39 @@ impl KeyStore {
         let extra_backlog = std::cmp::min(extra_backlog_available, remaining_capacity);
         backlog_candidate_count += extra_backlog;
 
-        let mut candidates =
+        let mut selected =
             Vec::with_capacity((recent_candidate_count + backlog_candidate_count) as usize);
-        candidates.extend(
+        selected.extend(
             recent_candidates
                 .iter()
                 .take(recent_candidate_count as usize)
                 .cloned(),
         );
-        candidates.extend(
+        selected.extend(
             backlog_candidates
                 .iter()
                 .take(backlog_candidate_count as usize)
                 .cloned(),
         );
+        let work_generation_by_candidate = selected
+            .iter()
+            .map(|work| {
+                (
+                    (
+                        work.candidate.token_id.clone(),
+                        work.candidate.period_code.clone(),
+                    ),
+                    work.work_generation,
+                )
+            })
+            .collect();
+        let candidates = selected
+            .into_iter()
+            .map(|work| work.candidate)
+            .collect();
         Ok(UpstreamReconciliationCandidateBatch {
             candidates,
+            work_generation_by_candidate,
             recent_lane_budget,
             backlog_lane_budget,
             recent_candidate_count,
@@ -1297,16 +1666,150 @@ impl KeyStore {
         Ok(Ok(()))
     }
 
+    async fn lock_reconciliation_work_generation(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        candidate: &UpstreamReconciliationCandidate,
+        fence: Option<ReconciliationWorkFence>,
+    ) -> Result<bool, ProxyError> {
+        let Some(fence) = fence else {
+            return Ok(true);
+        };
+        let expected_generation = fence.work_generation;
+        let expected_claim = fence.claimed_job;
+        let (claim_job_id, claim_generation) = expected_claim
+            .map(|(job_id, generation)| (Some(job_id), Some(generation)))
+            .unwrap_or((None, None));
+        let locked = sqlx::query(
+            r#"
+            UPDATE upstream_reconciliation_work
+            SET updated_at = updated_at
+            WHERE token_id = ? AND period_code = ?
+              AND work_generation = ?
+              AND completed_generation < work_generation
+              AND (
+                  ? IS NULL
+                  OR EXISTS (
+                      SELECT 1 FROM scheduled_jobs
+                      WHERE id = ? AND status = 'running' AND claim_generation = ?
+                  )
+              )
+            "#,
+        )
+        .bind(&candidate.token_id)
+        .bind(&candidate.period_code)
+        .bind(expected_generation)
+        .bind(claim_job_id)
+        .bind(claim_job_id)
+        .bind(claim_generation)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        Ok(locked > 0)
+    }
+
+    async fn claim_reconciliation_work_completion(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        candidate: &UpstreamReconciliationCandidate,
+        fence: Option<ReconciliationWorkFence>,
+        outcome: &str,
+        now: i64,
+    ) -> Result<bool, ProxyError> {
+        let Some(fence) = fence else {
+            return Ok(true);
+        };
+        let expected_generation = fence.work_generation;
+        let expected_claim = fence.claimed_job;
+        let (claim_job_id, claim_generation) = expected_claim
+            .map(|(job_id, generation)| (Some(job_id), Some(generation)))
+            .unwrap_or((None, None));
+        let claimed = sqlx::query(
+            r#"
+            UPDATE upstream_reconciliation_work
+            SET completed_generation = ?,
+                next_attempt_at = 0,
+                last_outcome = ?,
+                updated_at = ?
+            WHERE token_id = ? AND period_code = ?
+              AND work_generation = ?
+              AND completed_generation < work_generation
+              AND (
+                  ? IS NULL
+                  OR EXISTS (
+                      SELECT 1 FROM scheduled_jobs
+                      WHERE id = ? AND status = 'running' AND claim_generation = ?
+                  )
+              )
+            "#,
+        )
+        .bind(expected_generation)
+        .bind(outcome)
+        .bind(now)
+        .bind(&candidate.token_id)
+        .bind(&candidate.period_code)
+        .bind(expected_generation)
+        .bind(claim_job_id)
+        .bind(claim_job_id)
+        .bind(claim_generation)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        Ok(claimed > 0)
+    }
+
+    async fn mark_reconciliation_work_completed(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        candidate: &UpstreamReconciliationCandidate,
+        expected_generation: Option<i64>,
+        outcome: &str,
+        now: i64,
+    ) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            UPDATE upstream_reconciliation_work
+            SET completed_generation = COALESCE(?, work_generation),
+                next_attempt_at = 0,
+                last_outcome = ?,
+                updated_at = ?
+            WHERE token_id = ? AND period_code = ?
+              AND completed_generation < work_generation
+              AND (? IS NULL OR work_generation = ?)
+            "#,
+        )
+        .bind(expected_generation)
+        .bind(outcome)
+        .bind(now)
+        .bind(&candidate.token_id)
+        .bind(&candidate.period_code)
+        .bind(expected_generation)
+        .bind(expected_generation)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn mark_reconciliation_retry(
         &self,
         candidate: &UpstreamReconciliationCandidate,
         status: &str,
         next_attempt_at: i64,
         reason: Option<&str>,
+        outcome: &str,
+        fence: Option<ReconciliationWorkFence>,
     ) -> Result<(), ProxyError> {
         let now = self.backend_time.now_ts();
         let settlement_key = format!("v1:{}:{}", candidate.token_id, candidate.period_code);
         let normalized_reason = reason.map(|value| classify_reconciliation_retry_reason(Some(value)));
+        let mut tx = self.pool.begin().await?;
+        if !self
+            .lock_reconciliation_work_generation(&mut tx, candidate, fence)
+            .await?
+        {
+            return Ok(());
+        }
+        let expected_generation = fence.map(|fence| fence.work_generation);
         sqlx::query(
             r#"
             INSERT INTO upstream_reconciliation_settlements (
@@ -1334,8 +1837,28 @@ impl KeyStore {
         .bind(next_attempt_at)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            r#"
+            UPDATE upstream_reconciliation_work
+            SET next_attempt_at = ?, last_outcome = ?, updated_at = ?
+            WHERE token_id = ? AND period_code = ?
+              AND completed_generation < work_generation
+              AND (? IS NULL OR work_generation = ?)
+            "#,
+        )
+        .bind(next_attempt_at)
+        .bind(outcome)
+        .bind(now)
+        .bind(&candidate.token_id)
+        .bind(&candidate.period_code)
+        .bind(expected_generation)
+        .bind(expected_generation)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.ensure_upstream_reconciliation_representative_job().await?;
         Ok(())
     }
 
@@ -1344,6 +1867,7 @@ impl KeyStore {
         candidate: &UpstreamReconciliationCandidate,
         upstream_usage: i64,
         local_billed_credits: i64,
+        fence: Option<ReconciliationWorkFence>,
     ) -> Result<bool, ProxyError> {
         let now = self.backend_time.now_ts();
         let settlement_key = format!("v1:{}:{}", candidate.token_id, candidate.period_code);
@@ -1359,6 +1883,76 @@ impl KeyStore {
         let day_bucket = start_of_local_day_utc_ts(attributed_utc.with_timezone(&Local));
         let month_start = start_of_month(attributed_utc).timestamp();
         let mut tx = self.pool.begin().await?;
+        let completion_outcome = if delta == 0 {
+            RECONCILIATION_OUTCOME_NO_ADJUSTMENT
+        } else {
+            RECONCILIATION_OUTCOME_SETTLED
+        };
+        let expected_generation = fence.map(|fence| fence.work_generation);
+        if !self
+            .claim_reconciliation_work_completion(
+                &mut tx,
+                candidate,
+                fence,
+                completion_outcome,
+                now,
+            )
+            .await?
+        {
+            return Ok(false);
+        }
+        if delta == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO upstream_reconciliation_settlements (
+                    settlement_key, token_id, period_code, project_id, billing_subject,
+                    period_start, period_end, status, upstream_usage, local_billed_credits,
+                    delta_credits, degraded_reason, next_attempt_at, attempt_count,
+                    created_at, updated_at, settled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, 1, ?, ?, ?)
+                ON CONFLICT(settlement_key) DO UPDATE SET
+                    status = excluded.status,
+                    upstream_usage = excluded.upstream_usage,
+                    local_billed_credits = excluded.local_billed_credits,
+                    delta_credits = excluded.delta_credits,
+                    degraded_reason = excluded.degraded_reason,
+                    next_attempt_at = NULL,
+                    attempt_count = upstream_reconciliation_settlements.attempt_count + 1,
+                    updated_at = excluded.updated_at,
+                    settled_at = excluded.settled_at
+                "#,
+            )
+            .bind(&settlement_key)
+            .bind(&candidate.token_id)
+            .bind(&candidate.period_code)
+            .bind(&candidate.project_id)
+            .bind(&candidate.billing_subject)
+            .bind(candidate.period_start)
+            .bind(candidate.period_end)
+            .bind(if candidate.degraded {
+                RECONCILIATION_STATUS_DEGRADED
+            } else {
+                RECONCILIATION_STATUS_SETTLED
+            })
+            .bind(upstream_usage)
+            .bind(local_billed_credits)
+            .bind(candidate.degraded.then_some("research_timeout_24h"))
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            self.mark_reconciliation_work_completed(
+                &mut tx,
+                candidate,
+                expected_generation,
+                RECONCILIATION_OUTCOME_NO_ADJUSTMENT,
+                now,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
         let inserted = sqlx::query(
             r#"
             INSERT OR IGNORE INTO billing_reconciliation_adjustments (
@@ -1380,7 +1974,15 @@ impl KeyStore {
         .await?
         .rows_affected();
         if inserted == 0 {
-            tx.rollback().await?;
+            self.mark_reconciliation_work_completed(
+                &mut tx,
+                candidate,
+                expected_generation,
+                RECONCILIATION_OUTCOME_SETTLED,
+                now,
+            )
+            .await?;
+            tx.commit().await?;
             return Ok(false);
         }
         let (subject_kind, subject_id) = candidate
@@ -1485,6 +2087,14 @@ impl KeyStore {
         .bind(now)
         .execute(&mut *tx)
         .await?;
+        self.mark_reconciliation_work_completed(
+            &mut tx,
+            candidate,
+            expected_generation,
+            RECONCILIATION_OUTCOME_SETTLED,
+            now,
+        )
+        .await?;
         tx.commit().await?;
         Ok(true)
     }
@@ -1494,6 +2104,7 @@ impl KeyStore {
         candidate: &UpstreamReconciliationCandidate,
         upstream_usage: i64,
         local_billed_credits: i64,
+        fence: Option<ReconciliationWorkFence>,
     ) -> Result<bool, ProxyError> {
         let started_at = std::time::Instant::now();
         let now = self.backend_time.now_ts();
@@ -1501,6 +2112,100 @@ impl KeyStore {
         let delta = upstream_usage.saturating_sub(local_billed_credits);
         let attributed_at = candidate.period_end.saturating_sub(60);
         let mut tx = self.pool.begin().await?;
+        let completion_outcome = if delta == 0 {
+            RECONCILIATION_OUTCOME_NO_ADJUSTMENT
+        } else {
+            RECONCILIATION_OUTCOME_SETTLED
+        };
+        let expected_generation = fence.map(|fence| fence.work_generation);
+        if !self
+            .claim_reconciliation_work_completion(
+                &mut tx,
+                candidate,
+                fence,
+                completion_outcome,
+                now,
+            )
+            .await?
+        {
+            return Ok(false);
+        }
+        if delta == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO upstream_reconciliation_settlements (
+                    settlement_key, token_id, period_code, project_id, billing_subject,
+                    period_start, period_end, status, upstream_usage, local_billed_credits,
+                    delta_credits, degraded_reason, next_attempt_at, attempt_count,
+                    created_at, updated_at, settled_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, 1, ?, ?, ?)
+                ON CONFLICT(settlement_key) DO UPDATE SET
+                    status = excluded.status,
+                    upstream_usage = excluded.upstream_usage,
+                    local_billed_credits = excluded.local_billed_credits,
+                    delta_credits = excluded.delta_credits,
+                    degraded_reason = excluded.degraded_reason,
+                    next_attempt_at = NULL,
+                    attempt_count = upstream_reconciliation_settlements.attempt_count + 1,
+                    updated_at = excluded.updated_at,
+                    settled_at = excluded.settled_at
+                "#,
+            )
+            .bind(&settlement_key)
+            .bind(&candidate.token_id)
+            .bind(&candidate.period_code)
+            .bind(&candidate.project_id)
+            .bind(&candidate.billing_subject)
+            .bind(candidate.period_start)
+            .bind(candidate.period_end)
+            .bind(if candidate.degraded {
+                RECONCILIATION_STATUS_SHADOW_DEGRADED
+            } else {
+                RECONCILIATION_STATUS_SHADOW_SETTLED
+            })
+            .bind(upstream_usage)
+            .bind(local_billed_credits)
+            .bind(candidate.degraded.then_some("research_timeout_24h"))
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO billing_reconciliation_shadow_adjustments (
+                    settlement_key, token_id, billing_subject, period_code, delta_credits,
+                    attributed_at, degraded_reason, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&settlement_key)
+            .bind(&candidate.token_id)
+            .bind(&candidate.billing_subject)
+            .bind(&candidate.period_code)
+            .bind(attributed_at)
+            .bind(candidate.degraded.then_some("research_timeout_24h"))
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            set_meta_i64_executor(
+                &mut *tx,
+                META_KEY_UPSTREAM_RECONCILIATION_LAST_SHADOW_ADJUSTMENT_AT_V1,
+                now,
+            )
+            .await?;
+            self.mark_reconciliation_work_completed(
+                &mut tx,
+                candidate,
+                expected_generation,
+                RECONCILIATION_OUTCOME_NO_ADJUSTMENT,
+                now,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
         let inserted = sqlx::query(
             r#"
             INSERT OR IGNORE INTO billing_reconciliation_shadow_adjustments (
@@ -1522,7 +2227,15 @@ impl KeyStore {
         .await?
         .rows_affected();
         if inserted == 0 {
-            tx.rollback().await?;
+            self.mark_reconciliation_work_completed(
+                &mut tx,
+                candidate,
+                expected_generation,
+                RECONCILIATION_OUTCOME_SETTLED,
+                now,
+            )
+            .await?;
+            tx.commit().await?;
             return Ok(false);
         }
         sqlx::query(
@@ -1569,6 +2282,14 @@ impl KeyStore {
         set_meta_i64_executor(
             &mut *tx,
             META_KEY_UPSTREAM_RECONCILIATION_LAST_SHADOW_ADJUSTMENT_AT_V1,
+            now,
+        )
+        .await?;
+        self.mark_reconciliation_work_completed(
+            &mut tx,
+            candidate,
+            expected_generation,
+            RECONCILIATION_OUTCOME_SETTLED,
             now,
         )
         .await?;

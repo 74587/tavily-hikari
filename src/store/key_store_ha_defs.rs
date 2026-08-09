@@ -156,6 +156,7 @@ const HA_RUNTIME_BASELINE_TABLES: &[&str] = &[
     "upstream_reconciliation_research",
     "upstream_reconciliation_settlements",
     "upstream_reconciliation_usage",
+    "upstream_reconciliation_work",
     "upstream_usage_rate_attempts",
     "user_primary_api_key_affinity",
 ];
@@ -175,6 +176,7 @@ const HA_RUNTIME_EVENT_TABLES: &[&str] = &[
     "upstream_reconciliation_research",
     "upstream_reconciliation_settlements",
     "upstream_reconciliation_usage",
+    "upstream_reconciliation_work",
     "upstream_usage_rate_attempts",
     "user_primary_api_key_affinity",
 ];

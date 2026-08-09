@@ -675,6 +675,23 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
     });
 }
 
+fn spawn_upstream_reconciliation_startup_resume(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        match state
+            .proxy
+            .ensure_upstream_reconciliation_representative_job()
+            .await
+        {
+            Ok(()) => maintenance_worker_wake_for_state(state.as_ref()).notify_one(),
+            Err(err) => tracing::error!(
+                component = "reconciliation",
+                event = "startup_resume_enqueue_failed",
+                err = %err,
+            ),
+        }
+    });
+}
+
 fn spawn_scheduled_job_stale_reaper(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
@@ -693,6 +710,18 @@ fn spawn_scheduled_job_stale_reaper(state: Arc<AppState>) {
                 Err(err) => tracing::error!(
                     component = "scheduler",
                     event = "stale_job_reaper_failed",
+                    err = %err,
+                ),
+            }
+            match state
+                .proxy
+                .ensure_upstream_reconciliation_representative_job()
+                .await
+            {
+                Ok(()) => maintenance_worker_wake_for_state(state.as_ref()).notify_one(),
+                Err(err) => tracing::debug!(
+                    component = "reconciliation",
+                    event = "resume_watcher_enqueue_failed",
                     err = %err,
                 ),
             }
@@ -822,22 +851,6 @@ fn spawn_token_usage_rollup_scheduler(state: Arc<AppState>) {
 
             // Run rollup every 5 minutes to keep charts reasonably fresh
             state.proxy.backend_time().sleep(Duration::from_secs(300)).await;
-        }
-    });
-}
-
-fn spawn_upstream_reconciliation_scheduler(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        loop {
-            let _ = enqueue_scheduled_job_logged(
-                state.as_ref(),
-                "upstream_reconciliation",
-                None,
-                TRIGGER_SOURCE_SCHEDULER,
-                "upstream-reconciliation",
-            )
-            .await;
-            state.proxy.backend_time().sleep(Duration::from_secs(60)).await;
         }
     });
 }
@@ -2556,11 +2569,9 @@ async fn run_manual_claimed_job(
             )
             .await
             {
-                Ok(Ok((_settled, true))) => true,
-                Ok(Ok((settled, false))) => {
-                    let now = state.proxy.backend_time().now_ts();
-                    match state.proxy.upstream_reconciliation_backoff_until().await {
-                        Ok(available_at) if available_at > now => state
+                Ok(Ok(settled)) => {
+                    match state.proxy.upstream_reconciliation_continuation_at().await {
+                        Ok(Some(available_at)) => state
                             .proxy
                             .scheduled_job_finish_and_enqueue_auto_at(
                                 job_id,
@@ -2568,12 +2579,12 @@ async fn run_manual_claimed_job(
                                 "upstream_reconciliation",
                                 None,
                                 1,
-                                Some(&format!("settled={settled} backoff_until={available_at}")),
+                                Some(&format!("settled={settled} continuation_at={available_at}")),
                                 available_at,
                             )
                             .await
                             .is_ok(),
-                        Ok(_) => finish(state, "success", format!("settled={settled}")).await,
+                        Ok(None) => finish(state, "success", format!("settled={settled}")).await,
                         Err(err) => finish(state, "error", err.to_string()).await,
                     }
                 }
@@ -2596,8 +2607,20 @@ async fn run_manual_claimed_job(
                             err = %err,
                         );
                     }
-                    finish(state, "success", "settled=unknown budget_exhausted=true".to_string())
+                    let available_at = state.proxy.backend_time().now_ts().saturating_add(300);
+                    state
+                        .proxy
+                        .scheduled_job_finish_and_enqueue_auto_at(
+                            job_id,
+                            claim_generation,
+                            "upstream_reconciliation",
+                            None,
+                            1,
+                            Some("settled=unknown budget_exhausted=true"),
+                            available_at,
+                        )
                         .await
+                        .is_ok()
                 }
             }
         }
