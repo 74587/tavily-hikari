@@ -7,8 +7,6 @@ use tavily_hikari::{
     decode_linuxdo_credit_refund_external_success_marker,
     format_ha_outbox_gc_report_message, format_linuxdo_credit_money,
     HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
-    HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS,
-    HA_OUTBOX_GC_LOW_PRESSURE_RPS,
     linuxdo_credit_recharge_system_refund_retry_delay_secs,
     linuxdo_credit_refund_params as shared_linuxdo_credit_refund_params,
     linuxdo_credit_refund_url as shared_linuxdo_credit_refund_url,
@@ -73,20 +71,6 @@ const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
 static SCHEDULED_JOB_QUEUE_WAIT_WARN_WINDOWS: OnceLock<StdMutex<HashMap<String, Instant>>> =
     OnceLock::new();
-
-fn ha_gc_continuation_delay_secs(report_delay_secs: Option<i64>, foreground_rps: i64) -> i64 {
-    let report_delay_secs =
-        report_delay_secs.unwrap_or(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS);
-    if report_delay_secs == HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS {
-        // Legacy-only scans make no retention progress. Keep their deliberate
-        // five-minute yield even when foreground traffic arrives.
-        report_delay_secs
-    } else if foreground_rps > HA_OUTBOX_GC_LOW_PRESSURE_RPS {
-        HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS
-    } else {
-        report_delay_secs
-    }
-}
 
 fn should_warn_scheduled_job_queue_wait(job_type: &str) -> bool {
     let now = Instant::now();
@@ -1299,17 +1283,10 @@ async fn run_ha_outbox_gc_claimed_job(
 
     match result {
         Ok(report) => {
-            let needs_continuation = report.has_more || !report.completed;
-            let foreground_rps_after_slice = needs_continuation.then(foreground_activity_rps);
-            let effective_continuation_delay_secs = foreground_rps_after_slice.map_or(
-                report.continuation_delay_secs,
-                |foreground_rps| {
-                    Some(ha_gc_continuation_delay_secs(
-                        report.continuation_delay_secs,
-                        foreground_rps,
-                    ))
-                },
-            );
+            // The durable controller has already selected the next fair channel
+            // and its wake. The scheduler only persists that typed wake; it must
+            // not turn a defer for one channel into a global delay.
+            let continuation_delay_secs = report.continuation_delay_secs;
             if report.max_batch_elapsed_ms > tavily_hikari::HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
                 tracing::warn!(
                     component = "ha_outbox_gc",
@@ -1341,9 +1318,7 @@ async fn run_ha_outbox_gc_claimed_job(
                         debt_mode = channel.debt_mode.as_str(),
                         slo_state = channel.slo_state.as_str(),
                         has_more = channel.has_more,
-                        continuation_delay_secs = effective_continuation_delay_secs,
-                        next_retry_at = effective_continuation_delay_secs
-                            .map(|delay| channel.observed_at.saturating_add(delay)),
+                        controller_wake_delay_secs = continuation_delay_secs,
                         elapsed_ms = report.elapsed_ms as u64,
                     );
                 }
@@ -1372,33 +1347,17 @@ async fn run_ha_outbox_gc_claimed_job(
                     }
                 }
             }
-            if needs_continuation {
-                // A request may arrive while the one-second slice is running.
-                // Finish that slice, but do not immediately start another one.
-                let foreground_rps_after_slice = foreground_rps_after_slice
-                    .expect("foreground RPS must be sampled when GC continuation is required");
-                let continuation_delay_secs = effective_continuation_delay_secs
-                    .expect("continuation delay must be set when GC continuation is required");
-                let defer_reason = if foreground_rps_after_slice > HA_OUTBOX_GC_LOW_PRESSURE_RPS {
-                    "foreground_pressure"
-                } else if continuation_delay_secs == HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS {
-                    "legacy_scan"
-                } else if continuation_delay_secs < HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS {
-                    "fast_progress"
-                } else {
-                    "slice_budget_exhausted"
-                };
+            if let Some(continuation_delay_secs) = continuation_delay_secs {
                 tracing::debug!(
                     component = "ha_outbox_gc",
                     event = "deferred",
                     job_id,
                     claim_generation,
-                    defer_reason,
+                    defer_reason = "controller_wake",
                     deleted_rows = report.deleted_rows,
                     active_elapsed_ms = report.active_elapsed_ms as u64,
                     max_batch_elapsed_ms = report.max_batch_elapsed_ms as u64,
                     elapsed_ms = report.elapsed_ms as u64,
-                    foreground_rps_after_slice,
                     continuation_delay_secs,
                 );
                 return finish_ha_gc_with_continuation(
@@ -1406,7 +1365,7 @@ async fn run_ha_outbox_gc_claimed_job(
                     job_id,
                     claim_generation,
                     format!(
-                        "deferred={defer_reason} {}",
+                        "controller_wake_delay_secs={continuation_delay_secs} {}",
                         format_ha_outbox_gc_report_message(&report, 1)
                     ),
                     continuation_delay_secs,

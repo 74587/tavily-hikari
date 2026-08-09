@@ -65,7 +65,8 @@ impl KeyStore {
                 slo_state TEXT NOT NULL DEFAULT 'unknown',
                 foreground_rps INTEGER NOT NULL DEFAULT 0,
                 claim_generation INTEGER NOT NULL DEFAULT 0,
-                claim_started_at INTEGER
+                claim_started_at INTEGER,
+                legacy_cursor_seq INTEGER NOT NULL DEFAULT 0
             )"#,
         )
         .execute(&self.pool)
@@ -85,6 +86,7 @@ impl KeyStore {
             ("foreground_rps", "INTEGER NOT NULL DEFAULT 0"),
             ("claim_generation", "INTEGER NOT NULL DEFAULT 0"),
             ("claim_started_at", "INTEGER"),
+            ("legacy_cursor_seq", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             if !self
                 .table_column_exists("ha_outbox_gc_channel_state", column)
@@ -105,6 +107,23 @@ impl KeyStore {
             .execute(&self.pool)
             .await?;
         }
+        // New workers keep each bounded legacy scan with the channel that owns
+        // its claim. Retain the former shared columns for rolling-upgrade
+        // compatibility, but only seed an untouched per-channel cursor from them.
+        sqlx::query(
+            r#"
+            UPDATE ha_outbox_gc_channel_state
+               SET legacy_cursor_seq = CASE channel
+                   WHEN 'control' THEN (SELECT last_legacy_control_seq FROM ha_outbox_gc_state WHERE id = 'local')
+                   WHEN 'billing' THEN (SELECT last_legacy_billing_seq FROM ha_outbox_gc_state WHERE id = 'local')
+                   WHEN 'runtime' THEN (SELECT last_legacy_runtime_seq FROM ha_outbox_gc_state WHERE id = 'local')
+                   ELSE legacy_cursor_seq
+               END
+             WHERE legacy_cursor_seq = 0
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }

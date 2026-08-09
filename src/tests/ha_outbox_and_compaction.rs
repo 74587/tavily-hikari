@@ -167,6 +167,197 @@ async fn online_ha_gc_skips_a_deferred_channel_without_freezing_other_debt() {
 }
 
 #[tokio::test]
+async fn online_ha_gc_manual_clock_advances_fair_scheduled_wakes() {
+    let db_path = temp_db_path("ha-outbox-gc-manual-clock-fair-wake");
+    let db_str = db_path.to_string_lossy().to_string();
+    let now = 1_700_010_000_i64;
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-ha-gc-manual-clock".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET next_channel = 'control', pending_channel_mask = 7 WHERE id = 'local'",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed channel debt");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_channel_state SET next_retry_at = ? WHERE channel = 'control'",
+    )
+    .bind(now + 300)
+    .execute(&pool)
+    .await
+    .expect("defer control channel");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_billing_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'billing_ledger', 'manual-clock-billing', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(now - 15 * SECS_PER_DAY)
+    .execute(&pool)
+    .await
+    .expect("seed eligible billing event");
+
+    let initial = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "test", None, 1)
+        .await
+        .expect("enqueue initial GC worker");
+    let initial_claim = proxy
+        .scheduled_job_mark_running(initial.job_id)
+        .await
+        .expect("claim initial GC worker")
+        .expect("initial GC worker is due");
+    let first = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("billing fair wake");
+    assert_eq!(first.channels[0].channel, HaSyncChannel::Billing);
+    assert_eq!(first.channels[0].deleted_rows, 1);
+    assert_eq!(
+        first.continuation_delay_secs,
+        Some(HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS),
+        "an eligible runtime channel must be woken in one second while control is deferred"
+    );
+    let continuation = proxy
+        .scheduled_job_finish_and_enqueue_auto_at(
+            initial.job_id,
+            initial_claim.claim_generation,
+            "ha_outbox_gc",
+            None,
+            1,
+            Some("controller_wake_delay_secs=1"),
+            proxy.backend_time().now_ts()
+                + first
+                    .continuation_delay_secs
+                    .expect("controller produces the fair wake"),
+        )
+        .await
+        .expect("atomically queue the controller wake");
+    let (queued_at, available_at): (i64, i64) =
+        sqlx::query_as("SELECT queued_at, available_at FROM scheduled_jobs WHERE id = ?")
+            .bind(continuation.job_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read durable fair wake");
+    assert_eq!(available_at.saturating_sub(queued_at), 1);
+    clock.advance_wall(Duration::from_secs(1));
+    let second_claim = proxy
+        .scheduled_job_mark_running(continuation.job_id)
+        .await
+        .expect("claim fair continuation")
+        .expect("manual clock makes the one-second continuation due");
+    let second = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("runtime fair wake");
+    assert_eq!(second.channels[0].channel, HaSyncChannel::Runtime);
+    assert!(second.continuation_delay_secs.is_some());
+    proxy
+        .scheduled_job_finish_claimed(
+            continuation.job_id,
+            second_claim.claim_generation,
+            "success",
+            Some("test completed"),
+        )
+        .await
+        .expect("finish fair continuation");
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_busy_defer_keeps_other_channels_eligible() {
+    let db_path = temp_db_path("ha-outbox-gc-busy-channel-local");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-busy-channel-local".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let now = proxy.backend_time().now_ts();
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET next_channel = 'control', pending_channel_mask = 7 WHERE id = 'local'",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed channel debt");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_channel_state SET claim_generation = 11, claim_started_at = ? WHERE channel = 'control'",
+    )
+    .bind(now)
+    .execute(&pool)
+    .await
+    .expect("seed control claim");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_billing_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'billing_ledger', 'busy-defer-billing', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(now - 15 * SECS_PER_DAY)
+    .execute(&pool)
+    .await
+    .expect("seed eligible billing event");
+
+    let report = proxy
+        .key_store
+        .defer_claimed_ha_gc_channel_for_busy(
+            HaSyncChannel::Control,
+            11,
+            7,
+            HaOutboxGcOptions::online(),
+            0,
+            Instant::now(),
+        )
+        .await
+        .expect("persist channel-local busy defer");
+    assert_eq!(
+        report.continuation_delay_secs,
+        Some(HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS),
+        "the controller must wake billing instead of waiting for control's busy backoff"
+    );
+    let (busy_delay, defer_reason, claim_started_at): (i64, String, Option<i64>) = sqlx::query_as(
+        "SELECT next_retry_at - last_attempt_at, last_defer_reason, claim_started_at FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read persisted busy defer");
+    assert_eq!(busy_delay, HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS);
+    assert_eq!(defer_reason, "sqlite_busy");
+    assert_eq!(claim_started_at, None);
+
+    let billing = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("billing fair wake");
+    assert_eq!(billing.channels[0].channel, HaSyncChannel::Billing);
+    assert_eq!(billing.channels[0].deleted_rows, 1);
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn online_ha_gc_does_not_steal_an_active_channel_claim() {
     let db_path = temp_db_path("ha-outbox-gc-active-channel-claim");
     let db_str = db_path.to_string_lossy().to_string();
@@ -504,24 +695,27 @@ async fn online_ha_gc_uses_a_short_continuation_while_a_large_debt_is_draining()
     assert!(
         matches!(
             report.continuation_delay_secs,
-            Some(HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS)
+            Some(HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS)
+                | Some(HA_OUTBOX_GC_FAST_CONTINUATION_DELAY_SECS)
                 | Some(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
         ),
-        "a productive slice must continue quickly unless an individual SQL batch exceeded its budget"
+        "a productive slice must either hand off fairly or continue quickly unless an individual SQL batch exceeded its budget"
     );
 
-    let (last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark):
-        (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    let (last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark,
+        channel_delay_secs): (i64, i64, i64, i64, Option<i64>) = sqlx::query_as(
+        "SELECT last_attempt_at, next_retry_at, total_deleted_rows, last_high_watermark, last_continuation_delay_secs FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
     )
     .fetch_one(&pool)
     .await
     .expect("read GC continuation state");
     assert_eq!(
         next_retry_at.saturating_sub(last_attempt_at),
-        report
-            .continuation_delay_secs
-            .expect("continuation is scheduled")
+        channel_delay_secs.expect("control continuation is persisted")
+    );
+    assert_ne!(
+        channel_delay_secs, report.continuation_delay_secs,
+        "the next global wake may be shorter than the deferred channel's own continuation"
     );
     assert_eq!(total_deleted_rows, 1_000);
     assert_eq!(last_high_watermark, 1_250);
@@ -652,13 +846,22 @@ async fn online_ha_gc_does_not_fast_loop_while_only_legacy_scanning_remains() {
     .expect("insert old invalid legacy event beyond the first cursor window");
     tx.commit().await.expect("commit seed transaction");
 
-    let report = proxy.gc_ha_outbox_online().await.expect("online GC");
-    assert_eq!(report.deleted_rows, 0);
-    assert!(report.has_more);
+    let control = proxy.gc_ha_outbox_online().await.expect("control GC");
+    assert_eq!(control.deleted_rows, 0);
+    assert!(control.has_more);
     assert_eq!(
-        report.continuation_delay_secs,
+        control.continuation_delay_secs,
+        Some(HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS),
+        "the controller must promptly discover other channels before honoring one channel's legacy defer"
+    );
+    let billing = proxy.gc_ha_outbox_online().await.expect("billing GC");
+    assert_eq!(billing.channels[0].channel, HaSyncChannel::Billing);
+    let runtime = proxy.gc_ha_outbox_online().await.expect("runtime GC");
+    assert_eq!(runtime.channels[0].channel, HaSyncChannel::Runtime);
+    assert_eq!(
+        runtime.continuation_delay_secs,
         Some(HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS),
-        "legacy cursor progress must not form a fast maintenance loop"
+        "once the other channels are clear, the legacy cursor keeps its own five-minute defer"
     );
 
     pool.close().await;
@@ -714,7 +917,7 @@ async fn online_ha_gc_scans_legacy_rows_by_persisted_sequence_cursor() {
             .await
             .expect("read remaining resources");
     let cursor: i64 = sqlx::query_scalar(
-        "SELECT last_legacy_control_seq FROM ha_outbox_gc_state WHERE id = 'local'",
+        "SELECT legacy_cursor_seq FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
     )
     .fetch_one(&pool)
     .await
@@ -1059,6 +1262,43 @@ async fn ha_outbox_cursor_validation_query_prefers_resource_created_seq_index() 
     assert!(
         joined.contains("idx_ha_outbox_resource_created_seq"),
         "expected resource/time/seq index in query plan, got:\n{joined}"
+    );
+
+    let retention_plan = explain_query_plan_details(
+        &pool,
+        r#"
+        EXPLAIN QUERY PLAN
+        SELECT seq
+        FROM ha_outbox
+        WHERE created_at < 1
+          AND resource IN ('meta', 'users', 'api_keys', 'api_key_quarantines', 'api_key_maintenance_records', 'system_settings')
+        ORDER BY created_at ASC, seq ASC
+        LIMIT 250
+        "#,
+    )
+    .await;
+    let retention_joined = retention_plan.join("\n");
+    assert!(
+        retention_joined.contains("idx_ha_outbox_resource_created_seq"),
+        "the bounded online retention page must use the resource/time index, got:\n{retention_joined}"
+    );
+
+    let legacy_plan = explain_query_plan_details(
+        &pool,
+        r#"
+        EXPLAIN QUERY PLAN
+        SELECT seq, resource
+        FROM ha_outbox
+        WHERE seq > 0
+        ORDER BY seq ASC
+        LIMIT 250
+        "#,
+    )
+    .await;
+    let legacy_joined = legacy_plan.join("\n");
+    assert!(
+        legacy_joined.contains("INTEGER PRIMARY KEY"),
+        "the legacy cursor page must use its primary-key range, got:\n{legacy_joined}"
     );
 
     let _ = std::fs::remove_file(db_path);
