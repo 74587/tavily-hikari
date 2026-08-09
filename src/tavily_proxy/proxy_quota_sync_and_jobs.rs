@@ -1099,6 +1099,7 @@ impl TavilyProxy {
             let mut cooling_keys = HashSet::<String>::new();
             let mut remote_request_started = false;
             let mut request_start_cutoff_reached = false;
+            let mut remote_attempt_limit_reached = false;
             let main_preparation_blocked = preparation_budget_exhausted;
             let mut observed_candidates = Vec::<(
                 UpstreamReconciliationCandidate,
@@ -1149,6 +1150,7 @@ impl TavilyProxy {
                 }
                 for key_id in key_ids {
                     if remote_request_count >= ReconciliationEngine::MAX_REMOTE_ATTEMPTS {
+                        remote_attempt_limit_reached = true;
                         budget_exhausted = true;
                         break 'candidates;
                     }
@@ -1415,7 +1417,7 @@ impl TavilyProxy {
                 !main_preparation_blocked
                     && started_at.elapsed()
                         >= std::time::Duration::from_secs(remote_request_start_budget_secs);
-            Ok::<(i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, bool, Option<i64>), ProxyError>((
+            Ok::<(i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, bool, bool, Option<i64>), ProxyError>((
                 settled,
                 settled_recent,
                 settled_backlog,
@@ -1427,6 +1429,7 @@ impl TavilyProxy {
                 attempted_candidate_count,
                 budget_exhausted,
                 request_start_cutoff_reached,
+                remote_attempt_limit_reached,
                 max_retry_after_until,
             ))
         }
@@ -1473,8 +1476,12 @@ impl TavilyProxy {
                 attempted_candidate_count,
                 mut budget_exhausted,
                 _request_start_cutoff_reached,
+                remote_attempt_limit_reached,
                 max_retry_after_until,
             )) => {
+                // The cap stops partial settlement, but it is not a time or local
+                // preparation budget exhaustion in the persisted observation.
+                budget_exhausted &= !remote_attempt_limit_reached;
                 budget_exhausted |= research_budget_exhausted;
                 tracing::debug!(
                     component = "reconciliation",

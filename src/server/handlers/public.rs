@@ -877,6 +877,7 @@ struct DashboardOverviewPayload {
 struct DashboardOverviewSnapshot {
     payload: DashboardOverviewPayload,
     http_json: Bytes,
+    sse_snapshot_frame: Bytes,
     freshness: Arc<DashboardOverviewFreshness>,
 }
 
@@ -1041,7 +1042,7 @@ async fn get_dashboard_overview(
 async fn sse_dashboard(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, axum::http::Error>>>, StatusCode> {
+) -> Result<Response<Body>, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -1059,23 +1060,20 @@ async fn sse_dashboard(
                         emitted_at.elapsed() >= DASHBOARD_SSE_SNAPSHOT_MIN_INTERVAL
                     });
                     if snapshot_due && (last_sig.is_none() || sig != last_sig || latest_id != last_log_id) {
-                        if let Some((event, emitted_sig)) = build_snapshot_event(&state).await {
-                            yield Ok(event);
+                        if let Some((frame, emitted_sig)) = build_snapshot_frame(&state).await {
+                            yield Ok::<Bytes, std::convert::Infallible>(frame);
                             last_log_id = emitted_sig.freshness.latest_request_log_id;
                             last_sig = Some(emitted_sig);
                             last_snapshot_at = Some(tokio::time::Instant::now());
                         } else {
-                            let degraded = Event::default().event("degraded").data("{}");
-                            yield Ok(degraded);
+                            yield Ok(Bytes::from_static(b"event: degraded\ndata: {}\n\n"));
                         }
                     } else {
-                        let keep = Event::default().event("ping").data("{}");
-                        yield Ok(keep);
+                        yield Ok(Bytes::from_static(b"event: ping\ndata: {}\n\n"));
                     }
                 }
                 Err(_e) => {
-                    let degraded = Event::default().event("degraded").data("{}");
-                    yield Ok(degraded);
+                    yield Ok(Bytes::from_static(b"event: degraded\ndata: {}\n\n"));
                 }
             }
 
@@ -1083,7 +1081,11 @@ async fn sse_dashboard(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("")))
+    Response::builder()
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(stream))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[derive(Deserialize)]
@@ -1361,10 +1363,22 @@ async fn build_dashboard_overview_payload(
     let http_json = serde_json::to_vec(&payload)
         .map(Bytes::from)
         .map_err(|error| ProxyError::Other(format!("serialize dashboard overview: {error}")))?;
+    let snapshot = DashboardSnapshot {
+        keys: &payload.exhausted_keys,
+        logs: &payload.recent_logs,
+        overview: &payload,
+    };
+    let snapshot_json = serde_json::to_vec(&snapshot)
+        .map_err(|error| ProxyError::Other(format!("serialize dashboard SSE snapshot: {error}")))?;
+    let mut sse_snapshot_frame = Vec::with_capacity(snapshot_json.len().saturating_add(24));
+    sse_snapshot_frame.extend_from_slice(b"event: snapshot\ndata: ");
+    sse_snapshot_frame.extend_from_slice(&snapshot_json);
+    sse_snapshot_frame.extend_from_slice(b"\n\n");
 
     Ok(DashboardOverviewSnapshot {
         payload,
         http_json,
+        sse_snapshot_frame: Bytes::from(sse_snapshot_frame),
         freshness: Arc::new(DashboardOverviewFreshness {
             summary: [
                 summary.total_requests,
@@ -1903,6 +1917,17 @@ async fn load_dashboard_overview_snapshot(
     }
 }
 
+async fn build_snapshot_frame(state: &Arc<AppState>) -> Option<(Bytes, SummarySig)> {
+    let overview = load_dashboard_overview_snapshot(state).await.ok()?;
+    Some((
+        overview.sse_snapshot_frame.clone(),
+        SummarySig {
+            freshness: overview.freshness.clone(),
+        },
+    ))
+}
+
+#[cfg(test)]
 async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySig)> {
     let overview = load_dashboard_overview_snapshot(state).await.ok()?;
     let payload = DashboardSnapshot {
