@@ -27,7 +27,6 @@ struct ReconciliationRunResult {
     skipped_by_key_backoff: i64,
     attempted_candidate_count: i64,
     budget_exhausted: bool,
-    request_start_cutoff_reached: bool,
     remote_attempt_limit_reached: bool,
     max_retry_after_until: Option<i64>,
 }
@@ -596,6 +595,7 @@ impl TavilyProxy {
         started_at: &std::time::Instant,
         request_start_budget_secs: u64,
         request_deadline: std::time::Instant,
+        claimed_job: Option<(i64, i64)>,
     ) -> Result<(i64, i64, i64, i64, i64, bool), ProxyError> {
         let now = self.backend_time.now_ts();
         let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
@@ -681,6 +681,17 @@ impl TavilyProxy {
                 ),
             )
             .await;
+            if let Some((job_id, claim_generation)) = claimed_job
+                && !self
+                    .key_store
+                    .scheduled_job_claim_is_current(job_id, claim_generation)
+                    .await?
+            {
+                return Err(ProxyError::StaleClaim {
+                    job_id,
+                    claim_generation,
+                });
+            }
             match research_result {
                 Err(_) => {
                     budget_exhausted = true;
@@ -821,6 +832,17 @@ impl TavilyProxy {
         if remaining.is_zero() {
             budget_exhausted = true;
         } else {
+            if let Some((job_id, claim_generation)) = claimed_job
+                && !self
+                    .key_store
+                    .scheduled_job_claim_is_current(job_id, claim_generation)
+                    .await?
+            {
+                return Err(ProxyError::StaleClaim {
+                    job_id,
+                    claim_generation,
+                });
+            }
             match tokio::time::timeout(
                 remaining,
                 self.key_store.mark_upstream_reconciliation_research_sweep_at(now),
@@ -864,7 +886,6 @@ impl TavilyProxy {
     ) -> Result<i64, ProxyError> {
         self.run_upstream_reconciliation_once_inner(usage_base, None)
             .await
-            .map(|(settled, _)| settled)
     }
 
     #[doc(hidden)]
@@ -873,7 +894,7 @@ impl TavilyProxy {
         usage_base: &str,
         job_id: i64,
         claim_generation: i64,
-    ) -> Result<(i64, bool), ProxyError> {
+    ) -> Result<i64, ProxyError> {
         self.run_upstream_reconciliation_once_inner(
             usage_base,
             Some((job_id, claim_generation)),
@@ -885,7 +906,7 @@ impl TavilyProxy {
         &self,
         usage_base: &str,
         claimed_job: Option<(i64, i64)>,
-    ) -> Result<(i64, bool), ProxyError> {
+    ) -> Result<i64, ProxyError> {
         let started_at = std::time::Instant::now();
         if let Some((job_id, claim_generation)) = claimed_job
             && !self
@@ -899,7 +920,7 @@ impl TavilyProxy {
                 job_id,
                 claim_generation,
             );
-            return Ok((0, false));
+            return Ok(0);
         }
         let settings = self.key_store.get_system_settings().await?;
         let shadow_ready = settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
@@ -924,7 +945,7 @@ impl TavilyProxy {
                 candidate_count = 0_i64,
                 settled_count = 0_i64,
             );
-            return Ok((0, false));
+            return Ok(0);
         }
         let now = self.backend_time.now_ts();
         let (_, global_backoff_level, global_backoff_until) = self
@@ -942,7 +963,7 @@ impl TavilyProxy {
                 backoff_level = global_backoff_level,
                 backoff_until = global_backoff_until,
             );
-            return Ok((0, false));
+            return Ok(0);
         }
         let (_, local_backoff_level, local_backoff_until) = self
             .key_store
@@ -959,7 +980,7 @@ impl TavilyProxy {
                 backoff_level = local_backoff_level,
                 backoff_until = local_backoff_until,
             );
-            return Ok((0, false));
+            return Ok(0);
         }
         let preparation_deadline = started_at
             + std::time::Duration::from_secs(Self::RECONCILIATION_MAIN_PREP_BUDGET_SECS);
@@ -998,7 +1019,7 @@ impl TavilyProxy {
         let mut preparation_budget_exhausted = false;
         let candidate_remaining = preparation_deadline
             .saturating_duration_since(std::time::Instant::now());
-        let mut candidate_batch;
+        let candidate_batch;
         if candidate_remaining.is_zero() {
             preparation_budget_exhausted = true;
             candidate_batch = empty_candidate_batch();
@@ -1018,51 +1039,7 @@ impl TavilyProxy {
         }
         preparation_budget_exhausted |=
             std::time::Instant::now() >= preparation_deadline;
-        let mut pre_main_research = (0_i64, 0_i64, 0_i64, 0_i64, 0_i64, false);
-        let pre_main_research_ran =
-            candidate_batch.candidates.is_empty() && !preparation_budget_exhausted;
-        // If there is no main work, research is the only way to make a window
-        // eligible. Run one bounded sweep before hydrating the now-eligible
-        // page; this does not delay an already eligible settlement.
-        if candidate_batch.candidates.is_empty() && !preparation_budget_exhausted {
-            pre_main_research = self
-                .run_research_terminal_sweep(
-                    usage_base,
-                    &started_at,
-                    research_start_budget_secs,
-                    remote_request_deadline,
-                )
-                .await?;
-            if pre_main_research.1 > 0 {
-                let remaining = finalization_deadline
-                    .saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    preparation_budget_exhausted = true;
-                } else {
-                    candidate_batch = match tokio::time::timeout(
-                        remaining,
-                        self.key_store.next_upstream_reconciliation_candidates(20),
-                    )
-                    .await
-                    {
-                        Ok(batch) => batch?,
-                        Err(_) => {
-                            preparation_budget_exhausted = true;
-                            empty_candidate_batch()
-                        }
-                    };
-                }
-            }
-        }
-        // A terminal research sweep can make a previously ineligible window
-        // settleable after the two-second local-preparation window. Give that
-        // newly eligible page the remaining total budget for its bounded
-        // hydrate instead of dropping it until the next scheduler run.
-        let candidate_hydration_deadline = if pre_main_research_ran && pre_main_research.1 > 0 {
-            remote_request_deadline
-        } else {
-            preparation_deadline
-        };
+        let candidate_hydration_deadline = preparation_deadline;
         let recent_candidate_count = candidate_batch.recent_candidate_count;
         let backlog_candidate_count = candidate_batch.backlog_candidate_count;
         let recent_lane_budget = candidate_batch.recent_lane_budget;
@@ -1164,9 +1141,7 @@ impl TavilyProxy {
             let mut max_retry_after_until = None::<i64>;
             let mut cooling_keys = HashSet::<String>::new();
             let mut remote_request_started = false;
-            let mut request_start_cutoff_reached = false;
             let mut remote_attempt_limit_reached = false;
-            let main_preparation_blocked = preparation_budget_exhausted;
             let mut observed_candidates = Vec::<(
                 UpstreamReconciliationCandidate,
                 i64,
@@ -1180,7 +1155,6 @@ impl TavilyProxy {
                 if started_at.elapsed()
                     >= std::time::Duration::from_secs(remote_request_start_budget_secs)
                 {
-                    request_start_cutoff_reached = true;
                     budget_exhausted = true;
                     break;
                 }
@@ -1243,7 +1217,6 @@ impl TavilyProxy {
                         .saturating_duration_since(std::time::Instant::now());
                     let request_timeout = Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS);
                     if remote_remaining < request_timeout {
-                        request_start_cutoff_reached = true;
                         budget_exhausted = true;
                         break;
                     }
@@ -1334,6 +1307,17 @@ impl TavilyProxy {
                     break;
                 }
                     if let (Some(retry_reason), Some(retry_key_id)) = (retry_reason, retry_key_id) {
+                        if let Some((job_id, claim_generation)) = claimed_job
+                            && !self
+                                .key_store
+                                .scheduled_job_claim_is_current(job_id, claim_generation)
+                                .await?
+                        {
+                            return Err(ProxyError::StaleClaim {
+                                job_id,
+                                claim_generation,
+                            });
+                        }
                         let reason_kind =
                             classify_reconciliation_retry_reason(Some(retry_reason.as_str()));
                         if reason_kind == RECONCILIATION_RETRY_REASON_UPSTREAM_429
@@ -1506,8 +1490,10 @@ impl TavilyProxy {
                                         &candidate,
                                         upstream_usage,
                                         local_billed,
-                                        Some(work_generation),
-                                        claimed_job,
+                                        Some(ReconciliationWorkFence {
+                                            work_generation,
+                                            claimed_job,
+                                        }),
                                     )
                                     .await
                             } else {
@@ -1516,8 +1502,10 @@ impl TavilyProxy {
                                         &candidate,
                                         upstream_usage,
                                         local_billed,
-                                        Some(work_generation),
-                                        claimed_job,
+                                        Some(ReconciliationWorkFence {
+                                            work_generation,
+                                            claimed_job,
+                                        }),
                                     )
                                     .await
                             }
@@ -1545,10 +1533,6 @@ impl TavilyProxy {
                     }
                 }
             }
-            request_start_cutoff_reached |=
-                !main_preparation_blocked
-                    && started_at.elapsed()
-                        >= std::time::Duration::from_secs(remote_request_start_budget_secs);
             Ok::<ReconciliationRunResult, ProxyError>(ReconciliationRunResult {
                 settled,
                 completed,
@@ -1564,21 +1548,29 @@ impl TavilyProxy {
                 skipped_by_key_backoff,
                 attempted_candidate_count,
                 budget_exhausted,
-                request_start_cutoff_reached,
                 remote_attempt_limit_reached,
                 max_retry_after_until,
             })
         }
         .await;
+        if let Some((job_id, claim_generation)) = claimed_job
+            && !self
+                .key_store
+                .scheduled_job_claim_is_current(job_id, claim_generation)
+                .await?
+        {
+            tracing::debug!(
+                component = "reconciliation",
+                event = "stale_claim_rejected",
+                job_id,
+                claim_generation,
+            );
+            return Ok(0);
+        }
         let main_budget_exhausted = result
             .as_ref()
             .map(|value| value.budget_exhausted)
             .unwrap_or(true);
-        let main_request_start_cutoff_reached = result
-            .as_ref()
-            .map(|value| value.request_start_cutoff_reached)
-            .unwrap_or(false);
-        let pre_main_research_happened = pre_main_research_ran;
         let (
             research_polled_count,
             research_terminal_count,
@@ -1586,16 +1578,32 @@ impl TavilyProxy {
             research_retry_count,
             research_skipped_cooldown_count,
             research_budget_exhausted,
-        ) = if pre_main_research_happened {
-            pre_main_research
-        } else if result.is_ok() && (!main_budget_exhausted || main_request_start_cutoff_reached) {
-            self.run_research_terminal_sweep(
-                usage_base,
-                &started_at,
-                research_start_budget_secs,
-                remote_request_deadline,
-            )
-            .await?
+        ) = if result.is_ok() {
+            match self
+                .run_research_terminal_sweep(
+                    usage_base,
+                    &started_at,
+                    research_start_budget_secs,
+                    remote_request_deadline,
+                    claimed_job,
+                )
+                .await
+            {
+                Ok(research) => research,
+                Err(ProxyError::StaleClaim {
+                    job_id,
+                    claim_generation,
+                }) => {
+                    tracing::debug!(
+                        component = "reconciliation",
+                        event = "stale_claim_rejected",
+                        job_id,
+                        claim_generation,
+                    );
+                    return Ok(0);
+                }
+                Err(err) => return Err(err),
+            }
         } else {
             (0, 0, 0, 0, 0, main_budget_exhausted)
         };
@@ -1621,7 +1629,6 @@ impl TavilyProxy {
                 skipped_by_key_backoff,
                 attempted_candidate_count,
                 mut budget_exhausted,
-                request_start_cutoff_reached: _,
                 remote_attempt_limit_reached,
                 max_retry_after_until,
             }) => {
@@ -1707,7 +1714,11 @@ impl TavilyProxy {
                         budget_exhausted,
                     );
                 }
-                let remote_pressure = upstream_429_retry_windows > 0;
+                let upstream_429_observed = upstream_429_retry_windows > 0;
+                let qualified_remote_pressure = upstream_429_observed
+                    && completed == 0
+                    && upstream_429_retry_windows.saturating_mul(2)
+                        >= attempted_candidate_count.max(1);
                 let local_pressure = local_usage_rate_limit_windows > 0
                     || ((candidate_count > 0 || preparation_budget_exhausted)
                         && attempted_candidate_count == 0
@@ -1715,7 +1726,7 @@ impl TavilyProxy {
                 let reconciliation_outcome = ReconciliationEngine::outcome(
                     completed,
                     no_adjustment,
-                    remote_pressure,
+                    upstream_429_observed,
                     local_pressure,
                     transport_failure_windows > 0,
                     semantic_failure_windows > 0,
@@ -1727,25 +1738,58 @@ impl TavilyProxy {
                 .await?;
                 let (local_pressure_streak, local_backoff_level, local_backoff_until) =
                     if local_pressure {
-                            await_reconciliation_post_process(
-                                post_process_deadline,
-                                self.key_store.update_upstream_reconciliation_local_backoff(
-                                    true,
-                                    self.backend_time.now_ts(),
-                                ),
-                            )
-                            .await?
+                        let now = self.backend_time.now_ts();
+                        match claimed_job {
+                            Some((job_id, claim_generation)) => {
+                                await_reconciliation_post_process(
+                                    post_process_deadline,
+                                    self.key_store
+                                        .update_upstream_reconciliation_local_backoff_claimed(
+                                            true,
+                                            now,
+                                            job_id,
+                                            claim_generation,
+                                        ),
+                                )
+                                .await?
+                            }
+                            None => {
+                                await_reconciliation_post_process(
+                                    post_process_deadline,
+                                    self.key_store
+                                        .update_upstream_reconciliation_local_backoff(true, now),
+                                )
+                                .await?
+                            }
+                        }
                     } else if reconciliation_outcome
                         .is_some_and(ReconciliationEngine::clears_local_pressure)
                     {
-                            await_reconciliation_post_process(
-                                post_process_deadline,
-                                self.key_store.update_upstream_reconciliation_local_backoff(
-                                    false,
-                                    self.backend_time.now_ts(),
-                                ),
-                            )
-                            .await?
+                        let now = self.backend_time.now_ts();
+                        match claimed_job {
+                            Some((job_id, claim_generation)) => {
+                                await_reconciliation_post_process(
+                                    post_process_deadline,
+                                    self.key_store
+                                        .update_upstream_reconciliation_local_backoff_claimed(
+                                            false,
+                                            now,
+                                            job_id,
+                                            claim_generation,
+                                        ),
+                                )
+                                .await?
+                            }
+                            None => {
+                                await_reconciliation_post_process(
+                                    post_process_deadline,
+                                    self.key_store.update_upstream_reconciliation_local_backoff(
+                                        false, now,
+                                    ),
+                                )
+                                .await?
+                            }
+                        }
                     } else {
                         self.key_store.upstream_reconciliation_local_backoff_state().await?
                     };
@@ -1772,28 +1816,64 @@ impl TavilyProxy {
                     self.key_store.upstream_reconciliation_global_backoff_state(),
                 )
                 .await?;
-                let (pressure_streak, backoff_level, backoff_until) = if remote_pressure {
-                        await_reconciliation_post_process(
-                            post_process_deadline,
-                            self.key_store.update_upstream_reconciliation_global_backoff(
-                                true,
-                                self.backend_time.now_ts(),
-                                max_retry_after_until,
-                            ),
-                        )
-                        .await?
+                let (pressure_streak, backoff_level, backoff_until) = if qualified_remote_pressure {
+                    let now = self.backend_time.now_ts();
+                    match claimed_job {
+                        Some((job_id, claim_generation)) => {
+                            await_reconciliation_post_process(
+                                post_process_deadline,
+                                self.key_store
+                                    .update_upstream_reconciliation_global_backoff_claimed(
+                                        true,
+                                        now,
+                                        max_retry_after_until,
+                                        job_id,
+                                        claim_generation,
+                                    ),
+                            )
+                            .await?
+                        }
+                        None => {
+                            await_reconciliation_post_process(
+                                post_process_deadline,
+                                self.key_store.update_upstream_reconciliation_global_backoff(
+                                    true,
+                                    now,
+                                    max_retry_after_until,
+                                ),
+                            )
+                            .await?
+                        }
+                    }
                 } else if reconciliation_outcome
                     .is_some_and(ReconciliationEngine::clears_upstream_429)
                 {
-                        await_reconciliation_post_process(
-                            post_process_deadline,
-                            self.key_store.update_upstream_reconciliation_global_backoff(
-                                false,
-                                self.backend_time.now_ts(),
-                                None,
-                            ),
-                        )
-                        .await?
+                    let now = self.backend_time.now_ts();
+                    match claimed_job {
+                        Some((job_id, claim_generation)) => {
+                            await_reconciliation_post_process(
+                                post_process_deadline,
+                                self.key_store
+                                    .update_upstream_reconciliation_global_backoff_claimed(
+                                        false,
+                                        now,
+                                        None,
+                                        job_id,
+                                        claim_generation,
+                                    ),
+                            )
+                            .await?
+                        }
+                        None => {
+                            await_reconciliation_post_process(
+                                post_process_deadline,
+                                self.key_store.update_upstream_reconciliation_global_backoff(
+                                    false, now, None,
+                                ),
+                            )
+                            .await?
+                        }
+                    }
                 } else {
                     self.key_store.upstream_reconciliation_global_backoff_state().await?
                 };
@@ -1817,7 +1897,7 @@ impl TavilyProxy {
                         previous_backoff_level,
                     );
                 }
-                Ok((settled, false))
+                Ok(settled)
             }
             Err(err) => {
                 tracing::warn!(

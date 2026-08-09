@@ -729,6 +729,18 @@ fn spawn_scheduled_job_stale_reaper(state: Arc<AppState>) {
                     err = %err,
                 ),
             }
+            match state
+                .proxy
+                .ensure_upstream_reconciliation_representative_job()
+                .await
+            {
+                Ok(()) => maintenance_worker_wake_for_state(state.as_ref()).notify_one(),
+                Err(err) => tracing::debug!(
+                    component = "reconciliation",
+                    event = "resume_watcher_enqueue_failed",
+                    err = %err,
+                ),
+            }
         }
     });
 }
@@ -2598,7 +2610,7 @@ async fn run_manual_claimed_job(
             )
             .await
             {
-                Ok(Ok((settled, _))) => {
+                Ok(Ok(settled)) => {
                     match state.proxy.upstream_reconciliation_continuation_at().await {
                         Ok(Some(available_at)) => state
                             .proxy
