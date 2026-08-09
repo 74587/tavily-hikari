@@ -98,7 +98,7 @@ use super::upstream_support_and_manual_jobs::*;
         .bind(&token.id)
         .bind(&key_id)
         .bind(request_log_id)
-        .bind(created_at + 1)
+        .bind(created_at)
         .fetch_one(&pool)
         .await
         .expect("insert token log");

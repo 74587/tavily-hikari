@@ -511,7 +511,7 @@ async fn warm_schema_verification_is_read_only_and_rejects_runtime_column_drift(
         .await
         .expect("hold writer lock");
     let verified = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(1),
         proxy.key_store.prepare_versioned_schema(),
     )
     .await

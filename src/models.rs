@@ -1042,6 +1042,7 @@ pub struct UpstreamReconciliationResearchCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamReconciliationCandidateBatch {
     pub candidates: Vec<UpstreamReconciliationCandidate>,
+    pub(crate) work_generation_by_candidate: std::collections::HashMap<(String, String), i64>,
     pub recent_lane_budget: i64,
     pub backlog_lane_budget: i64,
     pub recent_candidate_count: i64,

@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use tokio::sync::Notify;
 
 fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
     match Local.with_ymd_and_hms(year, month, day, hour, minute, 0) {
@@ -271,14 +272,14 @@ async fn signed_reconciliation_adjustment_is_idempotent_and_restores_quota() {
     assert!(
         proxy
             .key_store
-            .settle_upstream_reconciliation(&candidate, 7, 10)
+            .settle_upstream_reconciliation(&candidate, 7, 10, None, None)
             .await
             .expect("first settlement")
     );
     assert!(
         !proxy
             .key_store
-            .settle_upstream_reconciliation(&candidate, 7, 10)
+            .settle_upstream_reconciliation(&candidate, 7, 10, None, None)
             .await
             .expect("duplicate settlement")
     );
@@ -508,7 +509,7 @@ async fn shadow_reconciliation_keeps_zero_delta_usage_and_updates_runtime_marker
     assert!(
         proxy
             .key_store
-            .settle_upstream_reconciliation_shadow(&candidate, 7, 7)
+            .settle_upstream_reconciliation_shadow(&candidate, 7, 7, None, None)
             .await
             .expect("shadow zero-delta settlement")
     );
@@ -849,6 +850,309 @@ async fn reconciliation_no_adjustment_completes_only_the_current_usage_generatio
         adjustment_delta, 0,
         "zero deltas must not alter billing truth even when shadow audit state is retained"
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_usage_generation_changed_during_remote_fetch() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-generation-fence"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    settings.upstream_precise_reconciliation_enabled = false;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("save reconciliation settings");
+    let token = proxy
+        .create_access_token(Some("reconciliation-generation-fence"))
+        .await
+        .expect("create token");
+    let key_id = proxy
+        .add_or_undelete_key("tvly-reconciliation-generation-fence")
+        .await
+        .expect("create upstream key");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, '2026-07-15/S1', 'project-generation-fence', ?, ?, ?, 1, ?, ?, ?, 'shadow')
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(format!("token:{}", token.id))
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert due reconciliation usage");
+
+    let fetch_started = Arc::new(Notify::new());
+    let release_first_fetch = Arc::new(Notify::new());
+    let fetch_count = Arc::new(AtomicUsize::new(0));
+    let route_started = Arc::clone(&fetch_started);
+    let route_release = Arc::clone(&release_first_fetch);
+    let route_count = Arc::clone(&fetch_count);
+    let app = Router::new().route(
+        "/usage",
+        get(move || {
+            let route_started = Arc::clone(&route_started);
+            let route_release = Arc::clone(&route_release);
+            let route_count = Arc::clone(&route_count);
+            async move {
+                if route_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    route_started.notify_one();
+                    route_release.notified().await;
+                }
+                Json(serde_json::json!({ "key": { "usage": 0 } }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .expect("serve generation-fence upstream");
+    });
+
+    let first_run_proxy = proxy.clone();
+    let first_run = tokio::spawn(async move {
+        first_run_proxy
+            .run_upstream_reconciliation_once(&format!("http://{addr}"))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), fetch_started.notified())
+        .await
+        .expect("first upstream fetch starts");
+    sqlx::query(
+        r#"
+        UPDATE upstream_reconciliation_usage
+        SET request_count = request_count + 1, updated_at = updated_at + 1
+        WHERE token_id = ? AND key_id = ? AND period_code = '2026-07-15/S1'
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("record usage while the remote result is in flight");
+    release_first_fetch.notify_one();
+
+    assert_eq!(
+        first_run
+            .await
+            .expect("join first reconciliation")
+            .expect("finish stale reconciliation"),
+        0,
+        "the stale remote result must not settle a newer work generation"
+    );
+    let stale_generation: (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT work_generation, completed_generation, last_outcome FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read fenced generation");
+    assert_eq!(stale_generation, (2, 0, None));
+    assert_eq!(
+        proxy
+            .key_store
+            .upstream_reconciliation_continuation_at()
+            .await
+            .expect("read continuation for newer generation"),
+        Some(now),
+    );
+
+    assert_eq!(
+        proxy
+            .run_upstream_reconciliation_once(&format!("http://{addr}"))
+            .await
+            .expect("settle current generation"),
+        1
+    );
+    let current_generation: (i64, i64, String) = sqlx::query_as(
+        "SELECT work_generation, completed_generation, last_outcome FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read completed current generation");
+    assert_eq!(current_generation, (2, 2, "no_adjustment".to_string()));
+    assert_eq!(fetch_count.load(Ordering::SeqCst), 2);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_startup_resume_keeps_one_pending_representative_job() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-startup-resume"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let token = proxy
+        .create_access_token(Some("reconciliation-startup-resume"))
+        .await
+        .expect("create token");
+    let key_id = proxy
+        .add_or_undelete_key("tvly-reconciliation-startup-resume")
+        .await
+        .expect("create upstream key");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, '2026-07-15/S1', 'project-startup-resume', ?, ?, ?, 1, ?, ?, ?, 'shadow')
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(format!("token:{}", token.id))
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed durable pending work without a live request wake");
+
+    proxy
+        .ensure_upstream_reconciliation_representative_job()
+        .await
+        .expect("resume pending reconciliation work on startup");
+    proxy
+        .ensure_upstream_reconciliation_representative_job()
+        .await
+        .expect("coalesce repeated startup resume");
+    let representative_jobs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' AND status IN ('queued', 'running')",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("count startup representative jobs");
+    assert_eq!(representative_jobs, 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_reclaimed_scheduled_job_claim() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-stale-claim"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let token = proxy
+        .create_access_token(Some("reconciliation-stale-claim"))
+        .await
+        .expect("create token");
+    let key_id = proxy
+        .add_or_undelete_key("tvly-reconciliation-stale-claim")
+        .await
+        .expect("create upstream key");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, '2026-07-15/S1', 'project-stale-claim', ?, ?, ?, 1, ?, ?, ?, 'shadow')
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(format!("token:{}", token.id))
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed durable reconciliation work");
+    proxy
+        .ensure_upstream_reconciliation_representative_job()
+        .await
+        .expect("enqueue representative job");
+    let job = proxy
+        .fetch_queued_scheduled_jobs(1)
+        .await
+        .expect("load representative job")
+        .into_iter()
+        .next()
+        .expect("representative job is queued");
+    let claimed = proxy
+        .scheduled_job_mark_running(job.id)
+        .await
+        .expect("claim representative job")
+        .expect("representative job became running");
+    clock.set_now_ts(now + 61);
+    assert_eq!(
+        proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover stale representative job"),
+        1
+    );
+
+    assert_eq!(
+        proxy
+            .run_upstream_reconciliation_once_claimed(
+                "http://127.0.0.1:9",
+                claimed.id,
+                claimed.claim_generation,
+            )
+            .await
+            .expect("reject stale claimed worker"),
+        (0, false)
+    );
+    let work: (i64, i64) = sqlx::query_as(
+        "SELECT work_generation, completed_generation FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read pending work after stale claim rejection");
+    assert_eq!(work, (1, 0));
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -2142,7 +2446,7 @@ async fn s3_next_day_settlement_does_not_restore_current_hour_quota() {
     assert!(
         proxy
             .key_store
-            .settle_upstream_reconciliation(&candidate, 7, 10)
+            .settle_upstream_reconciliation(&candidate, 7, 10, None, None)
             .await
             .expect("s3 settlement")
     );

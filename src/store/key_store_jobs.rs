@@ -1006,6 +1006,27 @@ impl KeyStore {
         .map_err(ProxyError::from)
     }
 
+    pub(crate) async fn scheduled_job_claim_is_current(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<bool, ProxyError> {
+        let current: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM scheduled_jobs
+                WHERE id = ? AND status = 'running' AND claim_generation = ?
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(claim_generation)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(current != 0)
+    }
+
     pub(crate) async fn scheduled_job_claim(
         &self,
         job_type: &str,

@@ -691,6 +691,23 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
     });
 }
 
+fn spawn_upstream_reconciliation_startup_resume(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        match state
+            .proxy
+            .ensure_upstream_reconciliation_representative_job()
+            .await
+        {
+            Ok(()) => maintenance_worker_wake_for_state(state.as_ref()).notify_one(),
+            Err(err) => tracing::error!(
+                component = "reconciliation",
+                event = "startup_resume_enqueue_failed",
+                err = %err,
+            ),
+        }
+    });
+}
+
 fn spawn_scheduled_job_stale_reaper(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {

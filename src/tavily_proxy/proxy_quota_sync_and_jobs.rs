@@ -884,9 +884,23 @@ impl TavilyProxy {
     async fn run_upstream_reconciliation_once_inner(
         &self,
         usage_base: &str,
-        _claimed_job: Option<(i64, i64)>,
+        claimed_job: Option<(i64, i64)>,
     ) -> Result<(i64, bool), ProxyError> {
         let started_at = std::time::Instant::now();
+        if let Some((job_id, claim_generation)) = claimed_job
+            && !self
+                .key_store
+                .scheduled_job_claim_is_current(job_id, claim_generation)
+                .await?
+        {
+            tracing::debug!(
+                component = "reconciliation",
+                event = "stale_claim_rejected",
+                job_id,
+                claim_generation,
+            );
+            return Ok((0, false));
+        }
         let settings = self.key_store.get_system_settings().await?;
         let shadow_ready = settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
             && settings.api_rebalance_enabled
@@ -975,6 +989,7 @@ impl TavilyProxy {
         let remote_request_start_budget_secs = research_start_budget_secs;
         let empty_candidate_batch = || UpstreamReconciliationCandidateBatch {
             candidates: Vec::new(),
+            work_generation_by_candidate: std::collections::HashMap::new(),
             recent_lane_budget: 0,
             backlog_lane_budget: 0,
             recent_candidate_count: 0,
@@ -1052,6 +1067,7 @@ impl TavilyProxy {
         let backlog_candidate_count = candidate_batch.backlog_candidate_count;
         let recent_lane_budget = candidate_batch.recent_lane_budget;
         let backlog_lane_budget = candidate_batch.backlog_lane_budget;
+        let work_generation_by_candidate = candidate_batch.work_generation_by_candidate;
         let candidates = candidate_batch.candidates;
         let candidate_count = candidates.len() as i64;
         let candidate_keys = candidates
@@ -1155,6 +1171,7 @@ impl TavilyProxy {
                 UpstreamReconciliationCandidate,
                 i64,
                 bool,
+                i64,
             )>::new();
             'candidates: for (index, candidate) in candidates.iter().cloned().enumerate() {
                 if budget_exhausted {
@@ -1168,6 +1185,14 @@ impl TavilyProxy {
                     break;
                 }
                 let in_recent_lane = index < recent_candidate_count as usize;
+                let work_generation = work_generation_by_candidate
+                    .get(&(candidate.token_id.clone(), candidate.period_code.clone()))
+                    .copied()
+                    .ok_or_else(|| {
+                        ProxyError::Other(
+                            "missing reconciliation work generation for candidate".to_string(),
+                        )
+                    })?;
                 let key_ids = key_ids_by_candidate
                     .get(&(candidate.token_id.clone(), candidate.period_code.clone()))
                     .cloned()
@@ -1382,6 +1407,10 @@ impl TavilyProxy {
                                 cooldown_until,
                                 Some(retry_reason.as_str()),
                                 retry_outcome.as_str(),
+                                Some(ReconciliationWorkFence {
+                                    work_generation,
+                                    claimed_job,
+                                }),
                             ),
                         )
                         .await
@@ -1423,7 +1452,7 @@ impl TavilyProxy {
                     budget_exhausted = true;
                     break;
                 }
-                observed_candidates.push((candidate, upstream_usage, in_recent_lane));
+                observed_candidates.push((candidate, upstream_usage, in_recent_lane, work_generation));
             }
 
             // Billing can become charged while the remote request is in flight. Re-read
@@ -1433,7 +1462,7 @@ impl TavilyProxy {
             if !observed_candidates.is_empty() {
                 let observed = observed_candidates
                     .iter()
-                    .map(|(candidate, _, _)| candidate.clone())
+                    .map(|(candidate, _, _, _)| candidate.clone())
                     .collect::<Vec<_>>();
                 let remaining = finalization_deadline
                     .saturating_duration_since(std::time::Instant::now());
@@ -1459,7 +1488,7 @@ impl TavilyProxy {
                 // request has already succeeded. Do not let that later timeout discard
                 // observations that still fit the bounded finalization window.
                 if let Some(fresh_local_billed_by_candidate) = fresh_local_billed_by_candidate {
-                    for (candidate, upstream_usage, in_recent_lane) in observed_candidates {
+                    for (candidate, upstream_usage, in_recent_lane, work_generation) in observed_candidates {
                         let remaining = finalization_deadline
                             .saturating_duration_since(std::time::Instant::now());
                         if remaining.is_zero() {
@@ -1477,6 +1506,8 @@ impl TavilyProxy {
                                         &candidate,
                                         upstream_usage,
                                         local_billed,
+                                        Some(work_generation),
+                                        claimed_job,
                                     )
                                     .await
                             } else {
@@ -1485,6 +1516,8 @@ impl TavilyProxy {
                                         &candidate,
                                         upstream_usage,
                                         local_billed,
+                                        Some(work_generation),
+                                        claimed_job,
                                     )
                                     .await
                             }
@@ -1497,11 +1530,11 @@ impl TavilyProxy {
                                 break;
                             }
                         };
-                        completed += 1;
-                        if upstream_usage == local_billed {
-                            no_adjustment += 1;
-                        }
                         if did_settle {
+                            completed += 1;
+                            if upstream_usage == local_billed {
+                                no_adjustment += 1;
+                            }
                             settled += 1;
                             if in_recent_lane {
                                 settled_recent += 1;
@@ -2432,6 +2465,14 @@ impl TavilyProxy {
         &self,
     ) -> Result<Option<i64>, ProxyError> {
         self.key_store.upstream_reconciliation_continuation_at().await
+    }
+
+    pub async fn ensure_upstream_reconciliation_representative_job(
+        &self,
+    ) -> Result<(), ProxyError> {
+        self.key_store
+            .ensure_upstream_reconciliation_representative_job()
+            .await
     }
 
     pub async fn record_upstream_reconciliation_budget_exhausted(
