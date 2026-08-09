@@ -826,8 +826,12 @@ impl KeyStore {
         } else {
             false
         };
-        if !ledger_preexisting || interrupted_adoption {
+        if !ledger_preexisting {
             self.validate_schema_adoption_source().await?;
+            return Ok(true);
+        }
+        if interrupted_adoption {
+            self.validate_schema_baseline().await?;
             return Ok(true);
         }
         self.validate_schema_baseline().await?;

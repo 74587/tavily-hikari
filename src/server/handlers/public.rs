@@ -875,6 +875,7 @@ struct DashboardOverviewPayload {
 #[derive(Debug, Clone)]
 struct DashboardOverviewSnapshot {
     payload: DashboardOverviewPayload,
+    http_json: Bytes,
     freshness: Arc<DashboardOverviewFreshness>,
 }
 
@@ -1009,7 +1010,7 @@ struct DashboardForwardProxyView {
 async fn get_dashboard_overview(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<DashboardOverviewPayload>, StatusCode> {
+) -> Result<Response<Body>, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -1025,7 +1026,10 @@ async fn get_dashboard_overview(
                     ..Default::default()
                 },
             );
-            Json(snapshot.payload.clone())
+            Response::builder()
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(snapshot.http_json.clone()))
+                .expect("static dashboard response is valid")
         })
         .map_err(|err| {
             eprintln!("dashboard overview error: {err}");
@@ -1322,8 +1326,7 @@ async fn build_dashboard_overview_payload(
         .collect::<Vec<_>>();
     let recent_alerts_view = DashboardRecentAlertsView::from(recent_alerts.clone());
 
-    Ok(DashboardOverviewSnapshot {
-        payload: DashboardOverviewPayload {
+    let payload = DashboardOverviewPayload {
             summary: summary.clone().into(),
             summary_windows: SummaryWindowsView::from(summary_windows.clone()),
             hourly_request_window: DashboardHourlyRequestWindowView::from(hourly_request_window),
@@ -1348,7 +1351,14 @@ async fn build_dashboard_overview_payload(
             recent_logs,
             recent_jobs: recent_jobs.into_iter().map(JobLogView::from).collect(),
             recent_alerts: recent_alerts_view,
-        },
+        };
+    let http_json = serde_json::to_vec(&payload)
+        .map(Bytes::from)
+        .map_err(|error| ProxyError::Other(format!("serialize dashboard overview: {error}")))?;
+
+    Ok(DashboardOverviewSnapshot {
+        payload,
+        http_json,
         freshness: Arc::new(DashboardOverviewFreshness {
             summary: [
                 summary.total_requests,

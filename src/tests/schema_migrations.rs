@@ -331,13 +331,18 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
         .expect("simulate a pre-ledger production database");
 
     assert!(
-        !proxy
+        proxy
             .key_store
             .prepare_versioned_schema()
             .await
             .expect("adopt compatible database"),
-        "compatible adoption must enter the warm path"
+        "compatible adoption must converge schema before recording the baseline"
     );
+    proxy
+        .key_store
+        .finish_new_database_schema_migrations()
+        .await
+        .expect("record compatible schema baseline");
     let versions: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM schema_migrations ORDER BY version")
             .fetch_all(&proxy.key_store.pool)
