@@ -51,7 +51,7 @@ pub use runtime_logging::{
 pub use store::{
     DbLogStatus, HaApplyResult, HaBaselineApplyMode, HaBaselineApplySession, HaEventsApplySession,
     HaEventsReadSession, PerfLogScope, emit_low_memory_protection_decision, emit_perf_log,
-    is_transient_sqlite_write_error,
+    emit_sampled_perf_log, is_transient_sqlite_write_error,
 };
 pub use tavily_proxy::*;
 pub use upstream_privacy::*;

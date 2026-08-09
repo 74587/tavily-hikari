@@ -38,7 +38,7 @@ impl TavilyProxy {
                 DashboardQuotaChargeLoadGuard::new(self.dashboard_quota_charge_cache.clone());
             let rebuild_started = Instant::now();
             let snapshot = self.key_store.fetch_dashboard_quota_charge_snapshot(bounds).await;
-            crate::emit_perf_log(
+            crate::emit_sampled_perf_log(
                 crate::DbLogStatus::Info,
                 "admin_read",
                 "dashboard_overview_phase",
@@ -99,7 +99,7 @@ impl TavilyProxy {
                 DashboardRecentAlertsLoadGuard::new(self.dashboard_recent_alerts_cache.clone());
             let rebuild_started = Instant::now();
             let summary = self.key_store.fetch_recent_alerts_summary(window_hours).await;
-            crate::emit_perf_log(
+            crate::emit_sampled_perf_log(
                 crate::DbLogStatus::Info,
                 "admin_read",
                 "dashboard_overview_phase",

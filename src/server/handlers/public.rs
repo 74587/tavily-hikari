@@ -1710,7 +1710,7 @@ async fn load_dashboard_overview_snapshot(
         };
 
         if let Some(waiter) = waiter {
-            tavily_hikari::emit_perf_log(
+            tavily_hikari::emit_sampled_perf_log(
                 tavily_hikari::DbLogStatus::Info,
                 "admin_read",
                 "dashboard_overview_phase",
@@ -1739,7 +1739,7 @@ async fn load_dashboard_overview_snapshot(
 
         let freshness_started = Instant::now();
         let freshness = compute_dashboard_overview_freshness(state).await?;
-        tavily_hikari::emit_perf_log(
+        tavily_hikari::emit_sampled_perf_log(
             tavily_hikari::DbLogStatus::Info,
             "admin_read",
             "dashboard_overview_phase",
@@ -1770,7 +1770,7 @@ async fn load_dashboard_overview_snapshot(
                         ..Default::default()
                     },
                 );
-                tavily_hikari::emit_perf_log(
+                tavily_hikari::emit_sampled_perf_log(
                     tavily_hikari::DbLogStatus::Info,
                     "admin_read",
                     "dashboard_snapshot_cache_hit",
@@ -1822,7 +1822,7 @@ async fn load_dashboard_overview_snapshot(
         let payload_started = Instant::now();
         let mut load_guard = DashboardOverviewLoadGuard::new(cache_handle.clone(), load_generation);
         let result = build_dashboard_overview_payload(state).await;
-        tavily_hikari::emit_perf_log(
+        tavily_hikari::emit_sampled_perf_log(
             tavily_hikari::DbLogStatus::Info,
             "admin_read",
             "dashboard_overview_phase",
@@ -1866,7 +1866,7 @@ async fn load_dashboard_overview_snapshot(
                     ..Default::default()
                 },
             );
-            tavily_hikari::emit_perf_log(
+            tavily_hikari::emit_sampled_perf_log(
                 tavily_hikari::DbLogStatus::Info,
                 "admin_read",
                 "dashboard_snapshot_rebuilt",
@@ -1897,7 +1897,7 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySi
 
     let serialize_started = Instant::now();
     let json = serde_json::to_string(&payload).ok()?;
-    tavily_hikari::emit_perf_log(
+    tavily_hikari::emit_sampled_perf_log(
         tavily_hikari::DbLogStatus::Info,
         "admin_read",
         "dashboard_overview_phase",
@@ -1944,8 +1944,7 @@ async fn compute_signatures(
             .is_some_and(|cached| cached.freshness == freshness);
         cache.last_freshness_probe_at = unchanged.then(tokio::time::Instant::now);
     }
-    let sig: Option<SummarySig> = Some(SummarySig { freshness });
-    Ok((sig, latest_id))
+    Ok((Some(SummarySig { freshness }), latest_id))
 }
 
 // ---- Jobs listing ----

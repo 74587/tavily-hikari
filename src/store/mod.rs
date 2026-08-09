@@ -8,6 +8,7 @@ use sqlx::Connection;
 use sqlx::Row;
 use sqlx::SqliteConnection;
 use std::fs::{File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
 use std::sync::{Mutex as StdMutex, OnceLock as StdOnceLock};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -246,6 +247,91 @@ pub struct PerfLogScope<'a> {
     pub outbox_row_count: Option<i64>,
     pub outbox_oldest_age_secs: Option<i64>,
     pub outbox_ack_lag: Option<i64>,
+    pub sampled_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SampledPerfLogWindow {
+    emitted_at: Instant,
+    suppressed_count: u64,
+}
+
+fn sampled_perf_log_windows() -> &'static StdMutex<HashMap<u64, SampledPerfLogWindow>> {
+    static WINDOWS: StdOnceLock<StdMutex<HashMap<u64, SampledPerfLogWindow>>> = StdOnceLock::new();
+    WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn sampled_perf_log_key(
+    component: &'static str,
+    event: &'static str,
+    scope: &PerfLogScope<'_>,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    component.hash(&mut hasher);
+    event.hash(&mut hasher);
+    scope.route.unwrap_or("").hash(&mut hasher);
+    scope.scope.unwrap_or("").hash(&mut hasher);
+    scope.phase.unwrap_or("").hash(&mut hasher);
+    scope.degraded.unwrap_or("").hash(&mut hasher);
+    scope.channel.unwrap_or("").hash(&mut hasher);
+    hasher.finish()
+}
+
+fn sampled_perf_log_count_at(
+    windows: &mut HashMap<u64, SampledPerfLogWindow>,
+    component: &'static str,
+    event: &'static str,
+    scope: &PerfLogScope<'_>,
+    now: Instant,
+) -> Option<u64> {
+    const MAX_SAMPLED_PERF_LOG_WINDOWS: usize = 256;
+    let key = sampled_perf_log_key(component, event, scope);
+    if !windows.contains_key(&key) && windows.len() >= MAX_SAMPLED_PERF_LOG_WINDOWS {
+        windows.clear();
+    }
+    let std::collections::hash_map::Entry::Occupied(mut entry) = windows.entry(key) else {
+        windows.insert(
+            key,
+            SampledPerfLogWindow {
+                emitted_at: now,
+                suppressed_count: 0,
+            },
+        );
+        return Some(1);
+    };
+    let window = entry.get_mut();
+    if now.saturating_duration_since(window.emitted_at) < Duration::from_secs(60) {
+        window.suppressed_count = window.suppressed_count.saturating_add(1);
+        return None;
+    }
+    let sampled_count = window.suppressed_count.saturating_add(1);
+    window.emitted_at = now;
+    window.suppressed_count = 0;
+    Some(sampled_count)
+}
+
+/// Emits low-overhead normal-operation diagnostics at most once per minute for each scope.
+/// Slow and error paths remain immediate through `emit_perf_log`.
+pub fn emit_sampled_perf_log(
+    level: DbLogStatus,
+    component: &'static str,
+    event: &'static str,
+    elapsed: Duration,
+    mut scope: PerfLogScope<'_>,
+) {
+    if matches!(level, DbLogStatus::Info) {
+        let sampled_count = {
+            let mut windows = sampled_perf_log_windows()
+                .lock()
+                .expect("sampled perf log window lock");
+            sampled_perf_log_count_at(&mut windows, component, event, &scope, Instant::now())
+        };
+        let Some(sampled_count) = sampled_count else {
+            return;
+        };
+        scope.sampled_count = Some(sampled_count);
+    }
+    emit_perf_log(level, component, event, elapsed, scope);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -291,6 +377,7 @@ pub fn emit_perf_log(
                 outbox_row_count = scope.outbox_row_count.unwrap_or_default(),
                 outbox_oldest_age_secs = scope.outbox_oldest_age_secs.unwrap_or_default(),
                 outbox_ack_lag = scope.outbox_ack_lag.unwrap_or_default(),
+                sampled_count = scope.sampled_count.unwrap_or(1),
                 memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
                 memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
                 cgroup_anon_bytes = memory.cgroup_anon_bytes.unwrap_or_default(),
@@ -324,6 +411,7 @@ pub fn emit_perf_log(
                 outbox_row_count = scope.outbox_row_count.unwrap_or_default(),
                 outbox_oldest_age_secs = scope.outbox_oldest_age_secs.unwrap_or_default(),
                 outbox_ack_lag = scope.outbox_ack_lag.unwrap_or_default(),
+                sampled_count = scope.sampled_count.unwrap_or(1),
                 memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
                 memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
                 cgroup_anon_bytes = memory.cgroup_anon_bytes.unwrap_or_default(),
@@ -357,6 +445,7 @@ pub fn emit_perf_log(
                 outbox_row_count = scope.outbox_row_count.unwrap_or_default(),
                 outbox_oldest_age_secs = scope.outbox_oldest_age_secs.unwrap_or_default(),
                 outbox_ack_lag = scope.outbox_ack_lag.unwrap_or_default(),
+                sampled_count = scope.sampled_count.unwrap_or(1),
                 memory_current_bytes = memory.memory_current_bytes.unwrap_or_default(),
                 memory_limit_bytes = memory.memory_limit_bytes.unwrap_or_default(),
                 cgroup_anon_bytes = memory.cgroup_anon_bytes.unwrap_or_default(),

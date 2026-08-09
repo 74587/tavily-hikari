@@ -165,3 +165,47 @@ fn low_memory_protection_duplicate_logs_are_sampled() {
         .collect::<Vec<_>>();
     assert_eq!(records.len(), 1);
 }
+
+#[test]
+fn sampled_perf_logs_aggregate_normal_activity_by_phase() {
+    let scope = PerfLogScope {
+        route: Some("/api/dashboard/overview"),
+        scope: Some("dashboard"),
+        phase: Some("overview_serialize"),
+        degraded: Some("snapshot_sse"),
+        ..Default::default()
+    };
+    let now = Instant::now();
+    let mut windows = std::collections::HashMap::new();
+
+    assert_eq!(
+        sampled_perf_log_count_at(
+            &mut windows,
+            "admin_read",
+            "dashboard_overview_phase",
+            &scope,
+            now,
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        sampled_perf_log_count_at(
+            &mut windows,
+            "admin_read",
+            "dashboard_overview_phase",
+            &scope,
+            now + Duration::from_secs(1),
+        ),
+        None
+    );
+    assert_eq!(
+        sampled_perf_log_count_at(
+            &mut windows,
+            "admin_read",
+            "dashboard_overview_phase",
+            &scope,
+            now + Duration::from_secs(60),
+        ),
+        Some(2)
+    );
+}
