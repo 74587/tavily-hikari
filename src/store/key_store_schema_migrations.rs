@@ -535,7 +535,6 @@ impl KeyStore {
             ("main", "api_keys"),
             ("main", "auth_tokens"),
             ("main", "billing_ledger"),
-            ("observability", "request_logs"),
         ] {
             if !self.schema_object_exists(schema, table).await? {
                 return Err(ProxyError::Other(format!(
@@ -558,11 +557,6 @@ impl KeyStore {
                     "created_at",
                 ][..],
             ),
-            (
-                "observability",
-                "request_logs",
-                &["id", "method", "path", "created_at"][..],
-            ),
         ] {
             for column in columns {
                 if !self.schema_table_has_column(schema, table, column).await? {
@@ -570,6 +564,28 @@ impl KeyStore {
                         "schema migration adoption rejected: missing source column {schema}.{table}.{column}"
                     )));
                 }
+            }
+        }
+        let request_logs_schema = if self
+            .schema_object_exists("observability", "request_logs")
+            .await?
+        {
+            "observability"
+        } else if self.schema_object_exists("main", "request_logs").await? {
+            "main"
+        } else {
+            return Err(ProxyError::Other(
+                "schema migration adoption rejected: missing source request_logs table".to_string(),
+            ));
+        };
+        for column in ["id", "method", "path", "created_at"] {
+            if !self
+                .schema_table_has_column(request_logs_schema, "request_logs", column)
+                .await?
+            {
+                return Err(ProxyError::Other(format!(
+                    "schema migration adoption rejected: missing source column {request_logs_schema}.request_logs.{column}"
+                )));
             }
         }
         Ok(())
@@ -812,9 +828,7 @@ impl KeyStore {
         };
         if !ledger_preexisting || interrupted_adoption {
             self.validate_schema_adoption_source().await?;
-            self.validate_schema_baseline().await?;
-            self.finish_existing_database_schema_adoption().await?;
-            return Ok(false);
+            return Ok(true);
         }
         self.validate_schema_baseline().await?;
         self.verify_recorded_schema_migrations().await?;
@@ -841,38 +855,6 @@ impl KeyStore {
             elapsed_ms = started.elapsed().as_millis() as u64,
         );
         Ok(false)
-    }
-
-    async fn finish_existing_database_schema_adoption(&self) -> Result<(), ProxyError> {
-        let started = std::time::Instant::now();
-        self.ensure_schema_migration_ledger().await?;
-        if !self.schema_migration_applied(SCHEMA_BASELINE_VERSION).await? {
-            self.record_schema_migration(
-                SCHEMA_BASELINE_VERSION,
-                SCHEMA_BASELINE_NAME,
-                SCHEMA_BASELINE_CHECKSUM,
-            )
-            .await?;
-        }
-        if !self.schema_migration_applied(GC_WORK_VERSION).await? {
-            self.apply_gc_work_migration().await?;
-        }
-        if !self
-            .schema_migration_applied(RECONCILIATION_WORK_VERSION)
-            .await?
-        {
-            self.apply_reconciliation_work_migration().await?;
-        }
-        self.validate_applied_migration_objects().await?;
-        self.clear_new_database_bootstrap_marker().await?;
-        tracing::info!(
-            component = "schema_migration",
-            event = "baseline_adopted",
-            outcome = "applied",
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 3_i64,
-        );
-        Ok(())
     }
 
     pub(crate) async fn finish_new_database_schema_migrations(&self) -> Result<(), ProxyError> {
