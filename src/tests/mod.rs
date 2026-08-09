@@ -42,6 +42,7 @@ mod request_rollup_public_metrics;
 mod schema_migrations;
 mod support;
 mod upstream_reconciliation;
+mod upstream_reconciliation_fencing;
 mod usage_series_and_backfills;
 mod user_business_calls_1h;
 mod user_pressure_analysis;

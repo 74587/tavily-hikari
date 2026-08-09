@@ -69,7 +69,7 @@ pub(crate) fn classify_reconciliation_retry_reason(reason: Option<&str>) -> &'st
     if reason == RECONCILIATION_RETRY_REASON_UPSTREAM_429 {
         return RECONCILIATION_RETRY_REASON_UPSTREAM_429;
     }
-    if reason.contains("usage http error 429") || reason.contains("429 Too Many Requests") {
+    if reason.starts_with("usage http error 429 ") {
         return RECONCILIATION_RETRY_REASON_UPSTREAM_429;
     }
     RECONCILIATION_RETRY_REASON_OTHER
@@ -97,6 +97,98 @@ impl KeyStore {
             cooldown_until,
             retry_after_secs,
         }))
+    }
+
+    pub(crate) async fn arm_api_key_transient_backoff_claimed(
+        &self,
+        arm: ApiKeyTransientBackoffArm<'_>,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<Option<ApiKeyTransientBackoffState>, ProxyError> {
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(
+            &mut transaction,
+            Some((job_id, claim_generation)),
+        )
+        .await?
+        {
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
+        let previous_cooldown = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT cooldown_until
+            FROM api_key_transient_backoffs
+            WHERE key_id = ? AND scope = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(arm.key_id)
+        .bind(arm.scope)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO api_key_transient_backoffs (
+                key_id, scope, cooldown_until, retry_after_secs, reason_code,
+                source_request_log_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key_id, scope) DO UPDATE SET
+                cooldown_until = MAX(api_key_transient_backoffs.cooldown_until, excluded.cooldown_until),
+                retry_after_secs = CASE
+                    WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until
+                        THEN excluded.retry_after_secs
+                    ELSE api_key_transient_backoffs.retry_after_secs
+                END,
+                reason_code = CASE
+                    WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until
+                        THEN COALESCE(excluded.reason_code, api_key_transient_backoffs.reason_code)
+                    ELSE api_key_transient_backoffs.reason_code
+                END,
+                source_request_log_id = COALESCE(
+                    excluded.source_request_log_id,
+                    api_key_transient_backoffs.source_request_log_id
+                ),
+                updated_at = CASE
+                    WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until
+                        THEN excluded.updated_at
+                    ELSE api_key_transient_backoffs.updated_at
+                END
+            "#,
+        )
+        .bind(arm.key_id)
+        .bind(arm.scope)
+        .bind(arm.cooldown_until)
+        .bind(arm.retry_after_secs)
+        .bind(arm.reason_code)
+        .bind(arm.source_request_log_id)
+        .bind(arm.now)
+        .bind(arm.now)
+        .execute(&mut *transaction)
+        .await?;
+        let current = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT cooldown_until, retry_after_secs
+            FROM api_key_transient_backoffs
+            WHERE key_id = ? AND scope = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(arm.key_id)
+        .bind(arm.scope)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let state = previous_cooldown.is_none_or(|previous| previous < current.0).then_some(
+            ApiKeyTransientBackoffState {
+                cooldown_until: current.0,
+                retry_after_secs: current.1,
+            },
+        );
+        transaction.commit().await?;
+        Ok(state)
     }
 
     pub(crate) async fn count_active_upstream_mcp_sessions(
@@ -815,11 +907,43 @@ impl KeyStore {
         &self,
         timestamp: i64,
     ) -> Result<(), ProxyError> {
-        self.set_meta_i64(
-            META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1,
+        self.mark_upstream_reconciliation_research_sweep_at_inner(timestamp, None)
+            .await
+    }
+
+    pub(crate) async fn mark_upstream_reconciliation_research_sweep_at_claimed(
+        &self,
+        timestamp: i64,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<(), ProxyError> {
+        self.mark_upstream_reconciliation_research_sweep_at_inner(
             timestamp,
+            Some((job_id, claim_generation)),
         )
         .await
+    }
+
+    async fn mark_upstream_reconciliation_research_sweep_at_inner(
+        &self,
+        timestamp: i64,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<(), ProxyError> {
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
+        sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1)
+            .bind(timestamp.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await
     }
 
     pub(crate) async fn record_upstream_reconciliation_usage(
@@ -920,7 +1044,38 @@ impl KeyStore {
         &self,
         request_id: &str,
     ) -> Result<bool, ProxyError> {
+        self.mark_upstream_reconciliation_research_terminal_inner(request_id, None)
+            .await
+    }
+
+    pub(crate) async fn mark_upstream_reconciliation_research_terminal_claimed(
+        &self,
+        request_id: &str,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<bool, ProxyError> {
+        self.mark_upstream_reconciliation_research_terminal_inner(
+            request_id,
+            Some((job_id, claim_generation)),
+        )
+        .await
+    }
+
+    async fn mark_upstream_reconciliation_research_terminal_inner(
+        &self,
+        request_id: &str,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<bool, ProxyError> {
         let now = self.backend_time.now_ts();
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
         let changed = sqlx::query(
             r#"
             UPDATE upstream_reconciliation_research
@@ -938,16 +1093,17 @@ impl KeyStore {
         .bind(now)
         .bind(now)
         .bind(request_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?
         .rows_affected();
         if changed > 0 {
-            self.set_meta_i64(
-                META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1,
-                now,
-            )
-            .await?;
+            sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1)
+                .bind(now.to_string())
+                .execute(&mut *transaction)
+                .await?;
         }
+        transaction.commit().await?;
         Ok(changed > 0)
     }
 
@@ -1027,7 +1183,53 @@ impl KeyStore {
         outcome: &str,
         error_kind: Option<&str>,
     ) -> Result<(), ProxyError> {
+        self.record_upstream_reconciliation_research_poll_inner(
+            request_id,
+            next_poll_at,
+            outcome,
+            error_kind,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_upstream_reconciliation_research_poll_claimed(
+        &self,
+        request_id: &str,
+        next_poll_at: i64,
+        outcome: &str,
+        error_kind: Option<&str>,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<(), ProxyError> {
+        self.record_upstream_reconciliation_research_poll_inner(
+            request_id,
+            next_poll_at,
+            outcome,
+            error_kind,
+            Some((job_id, claim_generation)),
+        )
+        .await
+    }
+
+    async fn record_upstream_reconciliation_research_poll_inner(
+        &self,
+        request_id: &str,
+        next_poll_at: i64,
+        outcome: &str,
+        error_kind: Option<&str>,
+        claimed_job: Option<(i64, i64)>,
+    ) -> Result<(), ProxyError> {
         let now = self.backend_time.now_ts();
+        let mut transaction = ImmediateSqliteTransaction::begin(self.pool.acquire().await?).await?;
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            });
+        }
         sqlx::query(
             r#"
             UPDATE upstream_reconciliation_research
@@ -1042,9 +1244,9 @@ impl KeyStore {
         .bind(error_kind)
         .bind(now)
         .bind(request_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
-        Ok(())
+        transaction.commit().await
     }
 
     fn build_upstream_reconciliation_candidates(

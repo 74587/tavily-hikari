@@ -1,0 +1,301 @@
+use super::upstream_reconciliation::{local_ts, reconciliation_test_db_path};
+use super::*;
+
+#[tokio::test]
+async fn reconciliation_rejects_reclaimed_claim_before_research_writes() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-stale-research"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    for request_id in ["stale-research-terminal", "stale-research-poll"] {
+        sqlx::query(
+            r#"
+            INSERT INTO upstream_reconciliation_research (
+                request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+            ) VALUES (?, 'stale-research-token', 'stale-research-key', '2026-07-15/S1', ?, NULL, ?)
+            "#,
+        )
+        .bind(request_id)
+        .bind(now)
+        .bind(now)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert pending research");
+    }
+    let queued = proxy
+        .scheduled_job_enqueue("upstream_reconciliation", "auto", None, 1)
+        .await
+        .expect("enqueue representative job");
+    let claim = proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim representative job")
+        .expect("representative job becomes running");
+    clock.set_now_ts(now + 61);
+    assert_eq!(
+        proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover stale representative job"),
+        1
+    );
+
+    assert!(matches!(
+        proxy
+            .key_store
+            .mark_upstream_reconciliation_research_terminal_claimed(
+                "stale-research-terminal",
+                claim.id,
+                claim.claim_generation,
+            )
+            .await,
+        Err(ProxyError::StaleClaim { .. })
+    ));
+    assert!(matches!(
+        proxy
+            .key_store
+            .arm_api_key_transient_backoff_claimed(
+                ApiKeyTransientBackoffArm {
+                    key_id: "stale-research-key",
+                    scope: "period_reconciliation",
+                    cooldown_until: now + 300,
+                    retry_after_secs: 300,
+                    reason_code: Some(RECONCILIATION_RETRY_REASON_UPSTREAM_429),
+                    source_request_log_id: None,
+                    now,
+                },
+                claim.id,
+                claim.claim_generation,
+            )
+            .await,
+        Err(ProxyError::StaleClaim { .. })
+    ));
+    assert!(matches!(
+        proxy
+            .key_store
+            .record_upstream_reconciliation_research_poll_claimed(
+                "stale-research-poll",
+                now + 120,
+                "pending",
+                None,
+                claim.id,
+                claim.claim_generation,
+            )
+            .await,
+        Err(ProxyError::StaleClaim { .. })
+    ));
+    assert!(matches!(
+        proxy
+            .key_store
+            .mark_upstream_reconciliation_research_sweep_at_claimed(
+                now + 61,
+                claim.id,
+                claim.claim_generation,
+            )
+            .await,
+        Err(ProxyError::StaleClaim { .. })
+    ));
+
+    let research_rows: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
+        r#"
+        SELECT request_id, terminal_at, poll_attempt_count
+        FROM upstream_reconciliation_research
+        ORDER BY request_id
+        "#,
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read unchanged research rows");
+    assert_eq!(
+        research_rows,
+        vec![
+            ("stale-research-poll".to_string(), None, 0),
+            ("stale-research-terminal".to_string(), None, 0),
+        ]
+    );
+    assert_eq!(
+        proxy
+            .key_store
+            .get_meta_i64("upstream_reconciliation_last_research_sweep_at_v1")
+            .await
+            .expect("read unchanged research sweep marker"),
+        None
+    );
+    let transient_backoff_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_key_transient_backoffs WHERE key_id = 'stale-research-key' AND scope = 'period_reconciliation'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read unchanged key backoff");
+    assert_eq!(transient_backoff_count, 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_ignores_429_text_in_non_429_responses() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-real-status"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    settings.upstream_precise_reconciliation_enabled = false;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("save reconciliation settings");
+    let token = proxy
+        .create_access_token(Some("reconciliation-real-status"))
+        .await
+        .expect("create token");
+    let key_id = proxy
+        .add_or_undelete_key("tvly-reconciliation-real-status")
+        .await
+        .expect("create upstream key");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, '2026-07-15/S1', 'project-real-status', ?, ?, ?, 1, ?, ?, ?, 'shadow')
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(format!("token:{}", token.id))
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert main reconciliation usage");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, '2026-07-15/S2', 'project-real-status-research', ?, ?, ?, 1, ?, ?, ?, 'shadow')
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(format!("token:{}", token.id))
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert research reconciliation usage");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_research (
+            request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+        ) VALUES ('research-real-status', ?, ?, '2026-07-15/S2', ?, NULL, ?)
+        "#,
+    )
+    .bind(&token.id)
+    .bind(&key_id)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert pending research");
+
+    let app = Router::new()
+        .route(
+            "/usage",
+            get(|| async {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "429 Too Many Requests" })),
+                )
+            }),
+        )
+        .route(
+            "/research/research-real-status",
+            get(|| async {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "429 Too Many Requests" })),
+                )
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .expect("serve misleading 429 upstream");
+    });
+
+    assert_eq!(
+        proxy
+            .run_upstream_reconciliation_once(&format!("http://{addr}"))
+            .await
+            .expect("run reconciliation with non-429 failures"),
+        0
+    );
+    assert_eq!(
+        proxy
+            .key_store
+            .upstream_reconciliation_global_backoff_state()
+            .await
+            .expect("read global backoff state"),
+        (0, 0, 0)
+    );
+    let transient_backoff_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_key_transient_backoffs WHERE key_id = ? AND scope = 'period_reconciliation'",
+    )
+    .bind(&key_id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read key backoff state");
+    assert_eq!(transient_backoff_count, 0);
+    let main_status: String = sqlx::query_scalar(
+        "SELECT status FROM upstream_reconciliation_settlements WHERE token_id = ? AND period_code = '2026-07-15/S1'",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read semantic failure settlement");
+    assert_eq!(main_status, "waiting");
+    let research_poll: (String, Option<String>) = sqlx::query_as(
+        "SELECT last_poll_outcome, last_poll_error_kind FROM upstream_reconciliation_research WHERE request_id = 'research-real-status'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read semantic failure research poll");
+    assert_eq!(
+        research_poll,
+        ("retry".to_string(), Some("other".to_string()))
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}

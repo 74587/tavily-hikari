@@ -6,14 +6,14 @@ use std::sync::{
 };
 use tokio::sync::Notify;
 
-fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+pub(super) fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
     match Local.with_ymd_and_hms(year, month, day, hour, minute, 0) {
         LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => value.timestamp(),
         LocalResult::None => panic!("local time is unavailable"),
     }
 }
 
-fn reconciliation_test_db_path() -> PathBuf {
+pub(super) fn reconciliation_test_db_path() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "tavily-hikari-reconciliation-{}-{}",
         std::process::id(),
