@@ -3,6 +3,92 @@ use super::core_support_and_parsing::*;
 use super::linuxdo_oauth_and_admin_keys::*;
 use super::upstream_support_and_manual_jobs::*;
 
+async fn create_legacy_meta_table(pool: &sqlx::SqlitePool) {
+    sqlx::query(
+        r#"
+        CREATE TABLE meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("create legacy meta");
+}
+
+async fn create_legacy_adoption_source_tables(pool: &sqlx::SqlitePool) {
+    for statement in [
+        r#"
+        CREATE TABLE billing_ledger (
+            auth_token_log_id INTEGER PRIMARY KEY,
+            token_id TEXT NOT NULL,
+            billing_subject TEXT,
+            billing_state TEXT NOT NULL DEFAULT 'none',
+            business_credits INTEGER,
+            request_user_id TEXT,
+            api_key_id TEXT,
+            request_log_id INTEGER,
+            result_status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            settled_at INTEGER,
+            error_message TEXT
+        )
+        "#,
+    ] {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .expect("create legacy schema adoption source");
+    }
+}
+
+async fn create_legacy_identity_source_tables(pool: &sqlx::SqlitePool) {
+    for statement in [
+        r#"
+        CREATE TABLE users (
+            id TEXT PRIMARY KEY,
+            display_name TEXT,
+            username TEXT,
+            avatar_template TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            debug_info_shared INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_login_at INTEGER
+        )
+        "#,
+        r#"
+        CREATE TABLE auth_tokens (
+            id TEXT PRIMARY KEY,
+            secret TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            note TEXT,
+            group_name TEXT,
+            total_requests INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            last_used_at INTEGER,
+            deleted_at INTEGER
+        )
+        "#,
+    ] {
+        sqlx::query(statement)
+            .execute(pool)
+            .await
+            .expect("create legacy identity source");
+    }
+}
+
+async fn create_legacy_request_logs_source(pool: &sqlx::SqlitePool) {
+    sqlx::query(
+        "CREATE TABLE request_logs (id INTEGER PRIMARY KEY, method TEXT NOT NULL, path TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    )
+    .execute(pool)
+    .await
+    .expect("create legacy request logs source");
+}
+
     #[tokio::test]
     async fn key_and_token_logs_catalog_scope_and_cache_ttl_work() {
         let db_path = temp_db_path("key-token-logs-catalog");
@@ -1035,6 +1121,9 @@ use super::upstream_support_and_manual_jobs::*;
             .connect_with(options)
             .await
             .expect("open db pool");
+        create_legacy_meta_table(&pool).await;
+        create_legacy_adoption_source_tables(&pool).await;
+        create_legacy_identity_source_tables(&pool).await;
 
         sqlx::query(
             r#"
@@ -1425,6 +1514,8 @@ use super::upstream_support_and_manual_jobs::*;
             .connect_with(options)
             .await
             .expect("open legacy db pool");
+        create_legacy_meta_table(&pool).await;
+        create_legacy_adoption_source_tables(&pool).await;
 
         sqlx::query(
             r#"
@@ -1604,6 +1695,8 @@ use super::upstream_support_and_manual_jobs::*;
             .connect_with(options)
             .await
             .expect("open rollback db pool");
+        create_legacy_meta_table(&pool).await;
+        create_legacy_adoption_source_tables(&pool).await;
 
         sqlx::query(
             r#"
@@ -1764,6 +1857,8 @@ use super::upstream_support_and_manual_jobs::*;
             .connect_with(options)
             .await
             .expect("open unrelated orphan db pool");
+        create_legacy_meta_table(&pool).await;
+        create_legacy_adoption_source_tables(&pool).await;
 
         sqlx::query(
             r#"
@@ -1909,6 +2004,8 @@ use super::upstream_support_and_manual_jobs::*;
             .connect_with(options)
             .await
             .expect("open not-null db pool");
+        create_legacy_meta_table(&pool).await;
+        create_legacy_adoption_source_tables(&pool).await;
 
         sqlx::query(
             r#"
@@ -2138,6 +2235,10 @@ use super::upstream_support_and_manual_jobs::*;
             .connect_with(options)
             .await
             .expect("open db pool");
+        create_legacy_meta_table(&pool).await;
+        create_legacy_adoption_source_tables(&pool).await;
+        create_legacy_identity_source_tables(&pool).await;
+        create_legacy_request_logs_source(&pool).await;
 
         sqlx::query(
             r#"

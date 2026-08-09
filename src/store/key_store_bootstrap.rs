@@ -632,6 +632,7 @@ impl KeyStore {
         let _schema_init_guard = Self::acquire_test_schema_init_guard().await;
         let startup_started = Instant::now();
         let layout = SqliteDatabaseLayout::from_database_path(database_path);
+        let _schema_startup_lock = acquire_schema_startup_lock(&layout.core_database_path)?;
         let observability_lock =
             acquire_observability_service_shared_lock(&layout.core_database_path)?;
         let startup_context =
@@ -665,7 +666,10 @@ impl KeyStore {
             pool,
             backend_time,
             token_binding_cache: RwLock::new(HashMap::new()),
-            account_quota_resolution_cache: RwLock::new(HashMap::new()),
+            account_quota_resolution_cache: Arc::new(RwLock::new(HashMap::new())),
+            account_quota_resolution_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            account_quota_resolution_transitions: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            account_quota_resolution_user_generations: RwLock::new(HashMap::new()),
             request_logs_catalog_cache: RwLock::new(HashMap::new()),
             request_log_retention_cache: RwLock::new(None),
             user_debug_info_shared_cache: RwLock::new(HashMap::new()),
@@ -677,12 +681,33 @@ impl KeyStore {
             dashboard_overview_read_pause: Arc::new(Mutex::new(None)),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
         };
-        instrument_db_operation(
-            "sqlite startup initialize schema",
-            Some(startup_context.as_str()),
-            store.initialize_schema(),
-        )
-        .await?;
+        #[cfg(test)]
+        {
+            instrument_db_operation(
+                "sqlite startup initialize schema",
+                Some(startup_context.as_str()),
+                store.initialize_schema(),
+            )
+            .await?;
+            if store.prepare_versioned_schema().await? {
+                store.finish_new_database_schema_migrations().await?;
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let full_bootstrap = store.prepare_versioned_schema().await?;
+            if full_bootstrap {
+                instrument_db_operation(
+                    "sqlite startup initialize schema",
+                    Some(startup_context.as_str()),
+                    store.initialize_schema(),
+                )
+                .await?;
+                store.finish_new_database_schema_migrations().await?;
+            } else {
+                store.run_warm_schema_semantic_maintenance().await?;
+            }
+        }
         store.reset_dashboard_rollup_integrity_pending_work_on_startup().await?;
         log_slow_db_operation(
             "sqlite startup total",
@@ -704,6 +729,7 @@ impl KeyStore {
         #[cfg(test)]
         let _schema_init_guard = Self::acquire_test_schema_init_guard().await;
         let layout = SqliteDatabaseLayout::from_database_path(database_path);
+        let _schema_startup_lock = acquire_schema_startup_lock(&layout.core_database_path)?;
         let observability_lock =
             acquire_observability_service_shared_lock(&layout.core_database_path)?;
         let gc_context =
@@ -737,7 +763,10 @@ impl KeyStore {
             pool,
             backend_time,
             token_binding_cache: RwLock::new(HashMap::new()),
-            account_quota_resolution_cache: RwLock::new(HashMap::new()),
+            account_quota_resolution_cache: Arc::new(RwLock::new(HashMap::new())),
+            account_quota_resolution_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            account_quota_resolution_transitions: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            account_quota_resolution_user_generations: RwLock::new(HashMap::new()),
             request_logs_catalog_cache: RwLock::new(HashMap::new()),
             request_log_retention_cache: RwLock::new(None),
             user_debug_info_shared_cache: RwLock::new(HashMap::new()),

@@ -1,5 +1,5 @@
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     proxy: TavilyProxy,
     static_dir: Option<PathBuf>,
     forward_auth: ForwardAuthConfig,
@@ -47,8 +47,8 @@ struct DashboardOverviewFreshness {
 
 #[derive(Debug, Clone)]
 struct CachedDashboardOverviewSnapshot {
-    snapshot: DashboardOverviewSnapshot,
-    freshness: DashboardOverviewFreshness,
+    snapshot: Arc<DashboardOverviewSnapshot>,
+    freshness: Arc<DashboardOverviewFreshness>,
 }
 
 #[derive(Debug, Clone)]

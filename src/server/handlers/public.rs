@@ -837,6 +837,7 @@ const DASHBOARD_TREND_WINDOW_SIZE: usize = 8;
 const DASHBOARD_RECENT_JOBS_LIMIT: usize = 5;
 const DASHBOARD_OVERVIEW_LOADING_STALE_AFTER: Duration = Duration::from_secs(30);
 const DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const DASHBOARD_SSE_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 const DASHBOARD_RECENT_ALERTS_TOKEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
@@ -875,7 +876,9 @@ struct DashboardOverviewPayload {
 #[derive(Debug, Clone)]
 struct DashboardOverviewSnapshot {
     payload: DashboardOverviewPayload,
-    freshness: DashboardOverviewFreshness,
+    http_json: Bytes,
+    sse_snapshot_frame: Bytes,
+    freshness: Arc<DashboardOverviewFreshness>,
 }
 
 struct DashboardOverviewLoadGuard {
@@ -945,11 +948,11 @@ async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DashboardSnapshot {
+struct DashboardSnapshot<'a> {
     #[serde(flatten)]
-    overview: DashboardOverviewPayload,
-    keys: Vec<ApiKeyView>,
-    logs: Vec<RequestLogView>,
+    overview: &'a DashboardOverviewPayload,
+    keys: &'a [ApiKeyView],
+    logs: &'a [RequestLogView],
 }
 
 fn build_dashboard_trend(logs: &[RequestLogView]) -> DashboardTrendView {
@@ -1009,7 +1012,7 @@ struct DashboardForwardProxyView {
 async fn get_dashboard_overview(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<DashboardOverviewPayload>, StatusCode> {
+) -> Result<Response<Body>, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -1025,7 +1028,10 @@ async fn get_dashboard_overview(
                     ..Default::default()
                 },
             );
-            Json(snapshot.payload)
+            Response::builder()
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(snapshot.http_json.clone()))
+                .expect("static dashboard response is valid")
         })
         .map_err(|err| {
             eprintln!("dashboard overview error: {err}");
@@ -1036,7 +1042,7 @@ async fn get_dashboard_overview(
 async fn sse_dashboard(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, axum::http::Error>>>, StatusCode> {
+) -> Result<Response<Body>, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -1045,27 +1051,29 @@ async fn sse_dashboard(
     let stream = stream! {
         let mut last_sig: Option<SummarySig> = None;
         let mut last_log_id: Option<i64> = None;
+        let mut last_snapshot_at: Option<tokio::time::Instant> = None;
 
         loop {
             match compute_signatures(&state).await {
                 Ok((sig, latest_id)) => {
-                    if last_sig.is_none() || sig != last_sig || latest_id != last_log_id {
-                        if let Some((event, emitted_sig)) = build_snapshot_event(&state).await {
-                            yield Ok(event);
+                    let snapshot_due = last_snapshot_at.is_none_or(|emitted_at| {
+                        emitted_at.elapsed() >= DASHBOARD_SSE_SNAPSHOT_MIN_INTERVAL
+                    });
+                    if snapshot_due && (last_sig.is_none() || sig != last_sig || latest_id != last_log_id) {
+                        if let Some((frame, emitted_sig)) = build_snapshot_frame(&state).await {
+                            yield Ok::<Bytes, std::convert::Infallible>(frame);
                             last_log_id = emitted_sig.freshness.latest_request_log_id;
                             last_sig = Some(emitted_sig);
+                            last_snapshot_at = Some(tokio::time::Instant::now());
                         } else {
-                            let degraded = Event::default().event("degraded").data("{}");
-                            yield Ok(degraded);
+                            yield Ok(Bytes::from_static(b"event: degraded\ndata: {}\n\n"));
                         }
                     } else {
-                        let keep = Event::default().event("ping").data("{}");
-                        yield Ok(keep);
+                        yield Ok(Bytes::from_static(b"event: ping\ndata: {}\n\n"));
                     }
                 }
                 Err(_e) => {
-                    let degraded = Event::default().event("degraded").data("{}");
-                    yield Ok(degraded);
+                    yield Ok(Bytes::from_static(b"event: degraded\ndata: {}\n\n"));
                 }
             }
 
@@ -1073,7 +1081,11 @@ async fn sse_dashboard(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("")))
+    Response::builder()
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(stream))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[derive(Deserialize)]
@@ -1322,8 +1334,7 @@ async fn build_dashboard_overview_payload(
         .collect::<Vec<_>>();
     let recent_alerts_view = DashboardRecentAlertsView::from(recent_alerts.clone());
 
-    Ok(DashboardOverviewSnapshot {
-        payload: DashboardOverviewPayload {
+    let payload = DashboardOverviewPayload {
             summary: summary.clone().into(),
             summary_windows: SummaryWindowsView::from(summary_windows.clone()),
             hourly_request_window: DashboardHourlyRequestWindowView::from(hourly_request_window),
@@ -1348,8 +1359,27 @@ async fn build_dashboard_overview_payload(
             recent_logs,
             recent_jobs: recent_jobs.into_iter().map(JobLogView::from).collect(),
             recent_alerts: recent_alerts_view,
-        },
-        freshness: DashboardOverviewFreshness {
+        };
+    let http_json = serde_json::to_vec(&payload)
+        .map(Bytes::from)
+        .map_err(|error| ProxyError::Other(format!("serialize dashboard overview: {error}")))?;
+    let snapshot = DashboardSnapshot {
+        keys: &payload.exhausted_keys,
+        logs: &payload.recent_logs,
+        overview: &payload,
+    };
+    let snapshot_json = serde_json::to_vec(&snapshot)
+        .map_err(|error| ProxyError::Other(format!("serialize dashboard SSE snapshot: {error}")))?;
+    let mut sse_snapshot_frame = Vec::with_capacity(snapshot_json.len().saturating_add(24));
+    sse_snapshot_frame.extend_from_slice(b"event: snapshot\ndata: ");
+    sse_snapshot_frame.extend_from_slice(&snapshot_json);
+    sse_snapshot_frame.extend_from_slice(b"\n\n");
+
+    Ok(DashboardOverviewSnapshot {
+        payload,
+        http_json,
+        sse_snapshot_frame: Bytes::from(sse_snapshot_frame),
+        freshness: Arc::new(DashboardOverviewFreshness {
             summary: [
                 summary.total_requests,
                 summary.success_count,
@@ -1396,7 +1426,7 @@ async fn build_dashboard_overview_payload(
             request_log_retention_days,
             hourly_window_anchor,
             retention_since,
-        },
+        }),
     })
 }
 
@@ -1680,7 +1710,7 @@ async fn compute_dashboard_overview_freshness(
 
 async fn load_dashboard_overview_snapshot(
     state: &Arc<AppState>,
-) -> Result<DashboardOverviewSnapshot, ProxyError> {
+) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
     let perf = tavily_hikari::RuntimePerfScope::start();
     loop {
         let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
@@ -1710,7 +1740,7 @@ async fn load_dashboard_overview_snapshot(
         };
 
         if let Some(waiter) = waiter {
-            tavily_hikari::emit_perf_log(
+            tavily_hikari::emit_sampled_perf_log(
                 tavily_hikari::DbLogStatus::Info,
                 "admin_read",
                 "dashboard_overview_phase",
@@ -1739,7 +1769,7 @@ async fn load_dashboard_overview_snapshot(
 
         let freshness_started = Instant::now();
         let freshness = compute_dashboard_overview_freshness(state).await?;
-        tavily_hikari::emit_perf_log(
+        tavily_hikari::emit_sampled_perf_log(
             tavily_hikari::DbLogStatus::Info,
             "admin_read",
             "dashboard_overview_phase",
@@ -1758,7 +1788,7 @@ async fn load_dashboard_overview_snapshot(
             let mut cache = cache_handle.lock().await;
             cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
             if let Some(cached) = cache.cached.as_ref()
-                && cached.freshness == freshness
+                && cached.freshness.as_ref() == &freshness
             {
                 tavily_hikari::emit_low_memory_protection_decision(
                     "admin_read",
@@ -1770,7 +1800,7 @@ async fn load_dashboard_overview_snapshot(
                         ..Default::default()
                     },
                 );
-                tavily_hikari::emit_perf_log(
+                tavily_hikari::emit_sampled_perf_log(
                     tavily_hikari::DbLogStatus::Info,
                     "admin_read",
                     "dashboard_snapshot_cache_hit",
@@ -1821,8 +1851,8 @@ async fn load_dashboard_overview_snapshot(
         let load_generation = load_generation.expect("dashboard overview loader generation should be assigned");
         let payload_started = Instant::now();
         let mut load_guard = DashboardOverviewLoadGuard::new(cache_handle.clone(), load_generation);
-        let result = build_dashboard_overview_payload(state).await;
-        tavily_hikari::emit_perf_log(
+        let result = build_dashboard_overview_payload(state).await.map(Arc::new);
+        tavily_hikari::emit_sampled_perf_log(
             tavily_hikari::DbLogStatus::Info,
             "admin_read",
             "dashboard_overview_phase",
@@ -1866,7 +1896,7 @@ async fn load_dashboard_overview_snapshot(
                     ..Default::default()
                 },
             );
-            tavily_hikari::emit_perf_log(
+            tavily_hikari::emit_sampled_perf_log(
                 tavily_hikari::DbLogStatus::Info,
                 "admin_read",
                 "dashboard_snapshot_rebuilt",
@@ -1887,17 +1917,28 @@ async fn load_dashboard_overview_snapshot(
     }
 }
 
+async fn build_snapshot_frame(state: &Arc<AppState>) -> Option<(Bytes, SummarySig)> {
+    let overview = load_dashboard_overview_snapshot(state).await.ok()?;
+    Some((
+        overview.sse_snapshot_frame.clone(),
+        SummarySig {
+            freshness: overview.freshness.clone(),
+        },
+    ))
+}
+
+#[cfg(test)]
 async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySig)> {
     let overview = load_dashboard_overview_snapshot(state).await.ok()?;
     let payload = DashboardSnapshot {
-        keys: overview.payload.exhausted_keys.clone(),
-        logs: overview.payload.recent_logs.clone(),
-        overview: overview.payload,
+        keys: &overview.payload.exhausted_keys,
+        logs: &overview.payload.recent_logs,
+        overview: &overview.payload,
     };
 
     let serialize_started = Instant::now();
     let json = serde_json::to_string(&payload).ok()?;
-    tavily_hikari::emit_perf_log(
+    tavily_hikari::emit_sampled_perf_log(
         tavily_hikari::DbLogStatus::Info,
         "admin_read",
         "dashboard_overview_phase",
@@ -1914,7 +1955,7 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySi
     Some((
         Event::default().event("snapshot").data(json),
         SummarySig {
-            freshness: overview.freshness,
+            freshness: overview.freshness.clone(),
         },
     ))
 }
@@ -1941,11 +1982,15 @@ async fn compute_signatures(
         let unchanged = cache
             .cached
             .as_ref()
-            .is_some_and(|cached| cached.freshness == freshness);
+            .is_some_and(|cached| cached.freshness.as_ref() == &freshness);
         cache.last_freshness_probe_at = unchanged.then(tokio::time::Instant::now);
     }
-    let sig: Option<SummarySig> = Some(SummarySig { freshness });
-    Ok((sig, latest_id))
+    Ok((
+        Some(SummarySig {
+            freshness: Arc::new(freshness),
+        }),
+        latest_id,
+    ))
 }
 
 // ---- Jobs listing ----

@@ -1792,21 +1792,10 @@ impl UserBusinessCalls1hWindow {
     async fn backfill_recent_impl(&self) -> Result<(), ProxyError> {
         let now_ts = self.backend_time.now_ts();
         let since_ts = now_ts.saturating_sub(self.retention_secs);
-        let upper_bound_request_log_id = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COALESCE(MAX(id), 0)
-            FROM request_logs
-            WHERE created_at >= ?
-              AND request_user_id IS NOT NULL
-              AND counts_business_quota = 1
-              AND result_status != ?
-              AND upstream_operation IS NOT NULL
-            "#,
-        )
-        .bind(since_ts)
-        .bind(OUTCOME_QUOTA_EXHAUSTED)
-        .fetch_one(&self.store.pool)
-        .await?;
+        let upper_bound_request_log_id =
+            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(id), 0) FROM request_logs")
+                .fetch_one(&self.store.pool)
+                .await?;
         if upper_bound_request_log_id == 0 {
             self.backend
                 .replace_from_backfill(&[], upper_bound_request_log_id, now_ts, self.retention_secs)
@@ -1816,24 +1805,28 @@ impl UserBusinessCalls1hWindow {
         self.backend
             .begin_backfill(upper_bound_request_log_id, now_ts, self.retention_secs)
             .await;
+        let mut cursor_created_at = since_ts.saturating_sub(1);
         let mut cursor_id = 0_i64;
         loop {
             let rows = sqlx::query(
                 r#"
                 SELECT id, request_user_id, created_at, result_status
-                FROM request_logs
+                FROM request_logs INDEXED BY idx_request_logs_time
                 WHERE created_at >= ?
                   AND request_user_id IS NOT NULL
                   AND counts_business_quota = 1
                   AND result_status != ?
                   AND upstream_operation IS NOT NULL
-                  AND id > ? AND id <= ?
-                ORDER BY id ASC
+                  AND (created_at > ? OR (created_at = ? AND id > ?))
+                  AND id <= ?
+                ORDER BY created_at ASC, id ASC
                 LIMIT 500
                 "#,
             )
             .bind(since_ts)
             .bind(OUTCOME_QUOTA_EXHAUSTED)
+            .bind(cursor_created_at)
+            .bind(cursor_created_at)
             .bind(cursor_id)
             .bind(upper_bound_request_log_id)
             .fetch_all(&self.store.pool)
@@ -1841,10 +1834,12 @@ impl UserBusinessCalls1hWindow {
             if rows.is_empty() {
                 break;
             }
-            cursor_id = rows
-                .last()
-                .and_then(|row| row.try_get::<i64, _>("id").ok())
-                .unwrap_or(cursor_id);
+            if let Some(row) = rows.last() {
+                cursor_created_at = row
+                    .try_get::<i64, _>("created_at")
+                    .unwrap_or(cursor_created_at);
+                cursor_id = row.try_get::<i64, _>("id").unwrap_or(cursor_id);
+            }
             let events = rows
                 .into_iter()
                 .filter_map(|row| {
