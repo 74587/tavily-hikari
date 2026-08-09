@@ -837,6 +837,7 @@ const DASHBOARD_TREND_WINDOW_SIZE: usize = 8;
 const DASHBOARD_RECENT_JOBS_LIMIT: usize = 5;
 const DASHBOARD_OVERVIEW_LOADING_STALE_AFTER: Duration = Duration::from_secs(30);
 const DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const DASHBOARD_SSE_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 const DASHBOARD_RECENT_ALERTS_TOKEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
@@ -1049,15 +1050,20 @@ async fn sse_dashboard(
     let stream = stream! {
         let mut last_sig: Option<SummarySig> = None;
         let mut last_log_id: Option<i64> = None;
+        let mut last_snapshot_at: Option<tokio::time::Instant> = None;
 
         loop {
             match compute_signatures(&state).await {
                 Ok((sig, latest_id)) => {
-                    if last_sig.is_none() || sig != last_sig || latest_id != last_log_id {
+                    let snapshot_due = last_snapshot_at.is_none_or(|emitted_at| {
+                        emitted_at.elapsed() >= DASHBOARD_SSE_SNAPSHOT_MIN_INTERVAL
+                    });
+                    if snapshot_due && (last_sig.is_none() || sig != last_sig || latest_id != last_log_id) {
                         if let Some((event, emitted_sig)) = build_snapshot_event(&state).await {
                             yield Ok(event);
                             last_log_id = emitted_sig.freshness.latest_request_log_id;
                             last_sig = Some(emitted_sig);
+                            last_snapshot_at = Some(tokio::time::Instant::now());
                         } else {
                             let degraded = Event::default().event("degraded").data("{}");
                             yield Ok(degraded);
