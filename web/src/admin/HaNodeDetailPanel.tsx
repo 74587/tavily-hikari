@@ -62,8 +62,10 @@ function channelStateLabel(state: string, language: 'en' | 'zh'): string {
     expired_backlog: ['存在过期积压', 'Expired backlog'],
     unavailable: ['源端不可用', 'Source unavailable'],
     source: ['源端', 'Source'],
+    unknown: ['未知', 'Unknown'],
   }
-  return labels[state]?.[language === 'zh' ? 0 : 1] ?? state
+  const normalizedState = state.trim() || 'unknown'
+  return labels[normalizedState]?.[language === 'zh' ? 0 : 1] ?? normalizedState
 }
 
 function gcStateLabel(state: string | null | undefined, language: 'en' | 'zh'): string {
