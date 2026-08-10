@@ -446,7 +446,11 @@ impl KeyStore {
             let mut active_elapsed_ms = 0_u128;
             let mut max_batch_elapsed_ms = 0_u128;
             let mut observed_foreground_rps = foreground_rps;
-            let mut foreground_yielded = false;
+            // Foreground pressure observed before the slice is authoritative:
+            // claim/fairness state may advance, but no deletion transaction may
+            // start until a later eligible wake.
+            let mut foreground_yielded =
+                foreground_rps > crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS;
             let mut batch_conn = Some(
                 pooled_conn
                     .take()
@@ -456,7 +460,7 @@ impl KeyStore {
 
             // A slice owns one persisted channel. Advancing the cursor after every
             // slice keeps a hot control stream from monopolizing online maintenance.
-            while batches < max_batches && Instant::now() < deadline {
+            while !foreground_yielded && batches < max_batches && Instant::now() < deadline {
                 // Do not start another writer transaction after foreground work
                 // arrives. The batch already in progress is allowed to finish so
                 // the controller never leaks an open transaction.

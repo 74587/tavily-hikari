@@ -650,6 +650,55 @@ async fn online_ha_gc_does_not_start_another_batch_after_foreground_arrives() {
 }
 
 #[tokio::test]
+async fn online_ha_gc_does_not_delete_when_foreground_pressure_precedes_slice() {
+    let db_path = temp_db_path("ha-outbox-gc-foreground-pressure-at-start");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-foreground-at-start".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let old_ts = Utc::now().timestamp() - (15 * SECS_PER_DAY);
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'users', 'foreground-at-start', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(old_ts)
+    .execute(&pool)
+    .await
+    .expect("insert expired control event");
+
+    let report = proxy
+        .gc_ha_outbox_online_with_foreground_rps(HA_OUTBOX_GC_LOW_PRESSURE_RPS + 1)
+        .await
+        .expect("defer GC slice under foreground pressure");
+    let channel = report.channels.first().expect("control channel report");
+    assert_eq!(channel.batches, 0);
+    assert_eq!(channel.deleted_rows, 0);
+    assert!(channel.has_more);
+    assert_eq!(channel.debt_mode, "foreground_pressure");
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ha_outbox WHERE resource_id = 'foreground-at-start'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read retained event");
+    assert_eq!(retained, 1);
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     let db_path = temp_db_path("ha-outbox-online-gc-round-robin");
     let db_str = db_path.to_string_lossy().to_string();

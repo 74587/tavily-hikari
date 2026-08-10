@@ -2682,6 +2682,31 @@ async fn run_manual_claimed_job(
         }
         "upstream_reconciliation" => {
             drop(_job_execution_gate);
+            let foreground_rps = foreground_activity_rps();
+            if foreground_rps > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+                let available_at = state.proxy.backend_time().now_ts().saturating_add(30);
+                tracing::debug!(
+                    component = "reconciliation",
+                    event = "foreground_deferred",
+                    job_id,
+                    claim_generation,
+                    foreground_rps,
+                    available_at,
+                );
+                return state
+                    .proxy
+                    .scheduled_job_finish_and_enqueue_auto_at(
+                        job_id,
+                        claim_generation,
+                        "upstream_reconciliation",
+                        None,
+                        1,
+                        Some("outcome=foreground_pressure"),
+                        available_at,
+                    )
+                    .await
+                    .is_ok();
+            }
             match tokio::time::timeout(
                 Duration::from_secs(20),
                 state
