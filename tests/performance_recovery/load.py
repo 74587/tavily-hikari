@@ -79,6 +79,31 @@ def request(
         connection.close()
 
 
+def create_test_credentials(host: str, port: int) -> str:
+    def create(path: str, payload: dict[str, str]) -> dict[str, object]:
+        connection = http.client.HTTPConnection(host, port, timeout=10)
+        try:
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            body = response.read()
+            if response.status != 201:
+                raise RuntimeError(f"test credential bootstrap failed: {path} status={response.status}")
+            return json.loads(body)
+        finally:
+            connection.close()
+
+    create("/api/keys", {"api_key": "tvly-load-key"})
+    token = create("/api/tokens", {"note": "snapshot recovery comparison"}).get("token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("test credential bootstrap returned no access token")
+    return token
+
+
 def periodic(
     stop: threading.Event,
     interval_secs: float,
@@ -114,11 +139,13 @@ def business_lane(
     recorder: Recorder,
     host: str,
     port: int,
+    access_token: str,
 ) -> None:
     payload = json.dumps(
         {"query": "snapshot recovery comparison", "search_depth": "basic", "max_results": 1}
     ).encode()
     headers = {
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
     periodic(
@@ -189,6 +216,7 @@ def main() -> None:
 
     recorder = Recorder()
     stop = threading.Event()
+    access_token = create_test_credentials(args.host, args.port)
     threads = [
         threading.Thread(
             target=dashboard_lane,
@@ -204,7 +232,7 @@ def main() -> None:
     threads += [
         threading.Thread(
             target=business_lane,
-            args=(stop, recorder, args.host, args.port),
+            args=(stop, recorder, args.host, args.port, access_token),
             daemon=True,
         ),
         threading.Thread(target=interrupted_ha_export, args=(stop, recorder, args.host, args.port), daemon=True),

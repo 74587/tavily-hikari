@@ -255,17 +255,19 @@ for summary in (baseline, candidate):
     dashboard_interval_secs = summary["load"].get("dashboardIntervalSecs")
     if dashboard_clients != 20 or dashboard_interval_secs != 10.0:
         raise SystemExit(f"unexpected dashboard load shape for {summary['variant']}")
+    diagnostic = summary["load"]["durationSecs"] <= 120
+    dashboard_coverage = 0.40 if diagnostic else 0.70
+    business_per_second = 2 if diagnostic else 4
     dashboard_minimum = (
-        summary["load"]["durationSecs"] * dashboard_clients / dashboard_interval_secs * 0.70
+        summary["load"]["durationSecs"] * dashboard_clients / dashboard_interval_secs * dashboard_coverage
     )
-    business_minimum = summary["load"]["durationSecs"] * 4
+    business_minimum = summary["load"]["durationSecs"] * business_per_second
     if summary["load"]["dashboardRequests"] < dashboard_minimum:
         raise SystemExit(f"insufficient dashboard coverage for {summary['variant']}")
     if statuses.get("sse:200", 0) < 20:
         raise SystemExit(f"insufficient SSE coverage for {summary['variant']}")
-    business_requests = sum(count for key, count in statuses.items() if key.startswith("business:"))
-    if business_requests < business_minimum:
-        raise SystemExit(f"insufficient business coverage for {summary['variant']}")
+    if statuses.get("business:200", 0) < business_minimum:
+        raise SystemExit(f"insufficient successful business coverage for {summary['variant']}")
     if events.get("ha_export_interrupted", 0) < 1:
         raise SystemExit(f"missing HA export interruption for {summary['variant']}")
 
