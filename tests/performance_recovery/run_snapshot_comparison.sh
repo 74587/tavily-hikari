@@ -60,6 +60,10 @@ cleanup_compose() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 
+cleanup_app_image() {
+  docker image rm -f "${COMPOSE_PROJECT}-app:latest" >/dev/null 2>&1 || true
+}
+
 remove_variant_data() {
   local variant_dir="$1"
   case "$variant_dir" in
@@ -69,7 +73,7 @@ remove_variant_data() {
   rm -rf -- "$variant_dir"
 }
 
-trap cleanup_compose EXIT
+trap 'cleanup_compose; cleanup_app_image' EXIT
 mkdir -p "$ARTIFACTS_DIR" "$WORK_DIR"
 
 write_compose() {
@@ -82,10 +86,10 @@ write_compose() {
   cat > "$WORK_DIR/compose.yml" <<EOF
 services:
   upstream:
-    build:
-      context: $CANDIDATE_REPO
-      dockerfile: tests/ha/Dockerfile.mock
-    command: ["/usr/local/bin/mock_tavily", "--bind", "0.0.0.0:9001", "--preseeded-keys", "tvly-load-key"]
+    image: python:3.12-alpine
+    command: ["python", "/work/mock_upstream.py", "--bind", "0.0.0.0", "--port", "9001"]
+    volumes:
+      - $CANDIDATE_REPO/tests/performance_recovery:/work:ro
     networks: [recovery]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FSETID, FOWNER, MKNOD, NET_RAW, SETGID, SETUID, SETPCAP, NET_BIND_SERVICE, SYS_CHROOT, KILL, AUDIT_WRITE]
@@ -181,7 +185,7 @@ run_variant() {
   # The testbox is deliberately isolated from production services. Reusing its
   # locked base-image cache keeps a transient registry failure out of the
   # baseline/candidate comparison.
-  compose build app upstream
+  compose build app
   compose up -d app upstream
   wait_for_dashboard_readiness "$artifact_dir"
   sample_rss "$artifact_dir/rss_kib.txt" &
@@ -227,6 +231,7 @@ summary = {
 (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 PY
   cleanup_compose
+  cleanup_app_image
   remove_variant_data "$variant_dir"
 }
 

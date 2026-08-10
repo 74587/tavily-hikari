@@ -132,30 +132,6 @@ def create_test_access_token(host: str, port: int) -> str:
         time.sleep(0.5)
 
 
-def configure_stub_success(host: str, port: int) -> None:
-    """Keep the isolated stub deterministic for keys retained in the snapshot.
-
-    The live snapshot intentionally retains historical API keys, while the
-    internal mock only knows test keys. A forced successful response exercises
-    the application's key selection, request logging, billing, and restart
-    paths without turning the mock's private key list into a false 401 rate.
-    """
-    connection = http.client.HTTPConnection(host, port, timeout=10)
-    try:
-        connection.request(
-            "POST",
-            "/admin/force-response",
-            body=json.dumps({"structured_status": 200}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        response = connection.getresponse()
-        response.read()
-        if response.status != 200:
-            raise RuntimeError(f"test upstream bootstrap failed: status={response.status}")
-    finally:
-        connection.close()
-
-
 def periodic(
     stop: threading.Event,
     interval_secs: float,
@@ -263,14 +239,11 @@ def main() -> None:
     parser.add_argument("--duration-secs", type=int, required=True)
     parser.add_argument("--host", default="app")
     parser.add_argument("--port", type=int, default=8787)
-    parser.add_argument("--upstream-host", default="upstream")
-    parser.add_argument("--upstream-port", type=int, default=9001)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
     recorder = Recorder()
     stop = threading.Event()
-    configure_stub_success(args.upstream_host, args.upstream_port)
     create_test_api_key(args.host, args.port)
     access_token = create_test_access_token(args.host, args.port)
     threads = [
