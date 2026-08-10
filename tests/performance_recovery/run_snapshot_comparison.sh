@@ -179,9 +179,14 @@ run_variant() {
     compose restart app
   ) &
   restart_pid=$!
-  compose run --rm load python /work/load.py \
-    --duration-secs "$DURATION_SECS" \
-    --output "/artifacts/load.json" &
+  (
+    if ! compose run --rm load python /work/load.py \
+      --duration-secs "$DURATION_SECS" \
+      --output "/artifacts/load.json"; then
+      compose logs --no-color >&2 || true
+      exit 1
+    fi
+  ) &
   load_pid=$!
   wait "$load_pid"
   wait "$restart_pid"
