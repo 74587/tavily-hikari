@@ -60,7 +60,10 @@ REMOTE_RUN="$(printf '%s\n' "$snapshot_output" | awk -F= '/^REMOTE_RUN=/{print $
 }
 
 echo "Preparing baseline source at ${BASELINE_REF}..."
-git -C "$ROOT_DIR" archive "$BASELINE_REF" | tar -xf - -C "$TMP_DIR"
+BASELINE_ARCHIVE="$TMP_DIR/baseline-source.tar"
+git -C "$ROOT_DIR" archive --output="$BASELINE_ARCHIVE" "$BASELINE_REF"
+tar -xf "$BASELINE_ARCHIVE" -C "$TMP_DIR"
+rm -f "$BASELINE_ARCHIVE"
 ssh -o BatchMode=yes "$TESTBOX_HOST" "mkdir -p '$REMOTE_RUN/baseline-repo' && chmod 700 '$REMOTE_RUN/baseline-repo'"
 rsync -az --delete --exclude '.git/' "$TMP_DIR/" "$TESTBOX_HOST:$REMOTE_RUN/baseline-repo/"
 
