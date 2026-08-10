@@ -28,6 +28,9 @@ related_specs:
 - If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
   same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
   gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
+- If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
+  same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
+  gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
 - Startup schema work is ledgered in `schema_migrations`; a warm process verifies the critical layout and skips already-applied DDL.
 - Administrator peer status reads an observation cache. A normal GET never waits for the five-second peer network probe.
 - A transport or semantic reconciliation failure does not clear an existing upstream-429 circuit. Only a real settlement or a real remote attempt follows the recovery contract.
