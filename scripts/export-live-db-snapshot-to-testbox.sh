@@ -137,7 +137,10 @@ trap cleanup_failed_run EXIT
 
 manifest_get() {
   local key="$1"
-  printf '%s\n' "$SOURCE_MANIFEST" | awk -F= -v target="$key" '$1 == target { sub($1"=",""); print; exit }'
+  # Avoid a producer/consumer pipeline here: awk intentionally stops after
+  # the first match, which can otherwise make printf fail with SIGPIPE under
+  # pipefail when the captured manifest grows.
+  awk -F= -v target="$key" '$1 == target { sub($1"=",""); print; exit }' <<<"$SOURCE_MANIFEST"
 }
 
 printf 'Preparing isolated codex-testbox run dir: %s\n' "$REMOTE_RUN"
