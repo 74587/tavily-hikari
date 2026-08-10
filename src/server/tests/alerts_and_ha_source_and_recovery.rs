@@ -158,6 +158,94 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
 }
 
 #[tokio::test]
+async fn ha_gc_writer_lock_uses_bounded_continuation_persistence_retry() {
+    let db_path = temp_db_path("ha-gc-writer-lock-continuation-retry");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("create proxy");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let initial = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "test", None, 1)
+        .await
+        .expect("enqueue HA GC job");
+    let initial_claim = proxy
+        .scheduled_job_mark_running(initial.job_id)
+        .await
+        .expect("claim HA GC job")
+        .expect("HA GC job is due");
+    let lock_options = SqliteConnectOptions::new()
+        .filename(&db_str)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_millis(0));
+    let mut lock_conn = sqlx::SqliteConnection::connect_with(&lock_options)
+        .await
+        .expect("connect writer lock holder");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut lock_conn)
+        .await
+        .expect("hold SQLite writer lock");
+
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        admin_passkey: AdminPasskeyOptions::disabled(),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+        dev_open_admin: false,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+        dashboard_overview_cache: new_dashboard_overview_cache(),
+    });
+    let run = tokio::spawn(run_ha_outbox_gc_claimed_job(
+        state.clone(),
+        ClaimedScheduledJob {
+            job_id: initial_claim.id,
+            claim_generation: initial_claim.claim_generation,
+            _job_execution_gate: None,
+        },
+    ));
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    sqlx::query("ROLLBACK")
+        .execute(&mut lock_conn)
+        .await
+        .expect("release SQLite writer lock");
+    lock_conn.close().await.expect("close writer lock holder");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .expect("GC worker returns promptly")
+            .expect("GC worker task completes")
+    );
+
+    let mut queued = false;
+    for _ in 0..20 {
+        queued = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE job_type = 'ha_outbox_gc' AND status = 'queued')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read deferred HA GC job state");
+        if queued {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(queued, "writer lock release must recover the continuation promptly");
+
+    drop(state);
+    pool.close().await;
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     let db_path = temp_db_path("ha-outbox-stats");
     let db_str = db_path.to_string_lossy().to_string();

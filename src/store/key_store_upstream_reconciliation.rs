@@ -474,6 +474,7 @@ impl KeyStore {
     pub(crate) async fn upstream_reconciliation_continuation_at(
         &self,
     ) -> Result<Option<i64>, ProxyError> {
+        const CURSOR_KEY: &str = "upstream_reconciliation_work_cursor_v1";
         let now = self.backend_time.now_ts();
         let work_at: Option<i64> = sqlx::query_scalar(
             r#"
@@ -512,11 +513,28 @@ impl KeyStore {
         .bind(now)
         .fetch_one(&self.pool)
         .await?;
-        let Some(pending_at) = (match (work_at, research_at) {
-            (Some(work_at), Some(research_at)) => Some(work_at.min(research_at)),
-            (Some(work_at), None) => Some(work_at),
-            (None, Some(research_at)) => Some(research_at),
-            (None, None) => None,
+        // The durable work projection is intentionally paged. Its source cursor is itself work:
+        // once a fully-settled page drains, the representative job must advance the next page
+        // instead of treating an empty projected table as a terminal reconciliation state.
+        let projection_cursor = self.get_meta_i64(CURSOR_KEY).await?.unwrap_or(0);
+        let projection_pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM upstream_reconciliation_usage WHERE rowid > ? LIMIT 1)",
+        )
+        .bind(projection_cursor)
+        .fetch_one(&self.pool)
+        .await?;
+        let projection_at = projection_pending.then_some(now);
+        let Some(pending_at) = (match (work_at, research_at, projection_at) {
+            (Some(work_at), Some(research_at), Some(projection_at)) => {
+                Some(work_at.min(research_at).min(projection_at))
+            }
+            (Some(work_at), Some(research_at), None) => Some(work_at.min(research_at)),
+            (Some(work_at), None, Some(projection_at)) => Some(work_at.min(projection_at)),
+            (None, Some(research_at), Some(projection_at)) => Some(research_at.min(projection_at)),
+            (Some(work_at), None, None) => Some(work_at),
+            (None, Some(research_at), None) => Some(research_at),
+            (None, None, Some(projection_at)) => Some(projection_at),
+            (None, None, None) => None,
         }) else {
             return Ok(None);
         };

@@ -25,6 +25,9 @@ related_specs:
   controller must atomically fence a channel claim, persist that channel's defer and compute the
   earliest eligible wake across all channels; a scheduler must never infer controller state from a
   log message or a single representative job's delay.
+- If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
+  same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
+  gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
 - Startup schema work is ledgered in `schema_migrations`; a warm process verifies the critical layout and skips already-applied DDL.
 - Administrator peer status reads an observation cache. A normal GET never waits for the five-second peer network probe.
 - A transport or semantic reconciliation failure does not clear an existing upstream-429 circuit. Only a real settlement or a real remote attempt follows the recovery contract.

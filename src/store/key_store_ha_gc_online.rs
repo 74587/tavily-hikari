@@ -234,20 +234,42 @@ impl KeyStore {
         foreground_rps: i64,
         low_pressure_since_floor: i64,
     ) -> Result<HaOutboxGcReport, ProxyError> {
+        self.gc_ha_outbox_online_with_foreground_activity(
+            foreground_rps,
+            low_pressure_since_floor,
+            move || foreground_rps,
+        )
+        .await
+    }
+
+    pub(crate) async fn gc_ha_outbox_online_with_foreground_activity<F>(
+        &self,
+        foreground_rps: i64,
+        low_pressure_since_floor: i64,
+        foreground_rps_now: F,
+    ) -> Result<HaOutboxGcReport, ProxyError>
+    where
+        F: Fn() -> i64,
+    {
         self.gc_ha_outbox_online_with_options(
             HaOutboxGcOptions::online(),
             foreground_rps,
             low_pressure_since_floor,
+            foreground_rps_now,
         )
-            .await
+        .await
     }
 
-    async fn gc_ha_outbox_online_with_options(
+    async fn gc_ha_outbox_online_with_options<F>(
         &self,
         options: HaOutboxGcOptions,
         foreground_rps: i64,
         low_pressure_since_floor: i64,
-    ) -> Result<HaOutboxGcReport, ProxyError> {
+        foreground_rps_now: F,
+    ) -> Result<HaOutboxGcReport, ProxyError>
+    where
+        F: Fn() -> i64,
+    {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
         let mut pooled_conn = Some(
@@ -423,6 +445,8 @@ impl KeyStore {
             let mut legacy_cursor_advanced = false;
             let mut active_elapsed_ms = 0_u128;
             let mut max_batch_elapsed_ms = 0_u128;
+            let mut observed_foreground_rps = foreground_rps;
+            let mut foreground_yielded = false;
             let mut batch_conn = Some(
                 pooled_conn
                     .take()
@@ -433,6 +457,16 @@ impl KeyStore {
             // A slice owns one persisted channel. Advancing the cursor after every
             // slice keeps a hot control stream from monopolizing online maintenance.
             while batches < max_batches && Instant::now() < deadline {
+                // Do not start another writer transaction after foreground work
+                // arrives. The batch already in progress is allowed to finish so
+                // the controller never leaks an open transaction.
+                if batches > 0 {
+                    observed_foreground_rps = foreground_rps_now();
+                    if observed_foreground_rps > crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+                        foreground_yielded = true;
+                        break;
+                    }
+                }
                 let batch_started = Instant::now();
                 let mut transaction = ImmediateSqliteTransaction::begin(
                     batch_conn
@@ -555,12 +589,25 @@ impl KeyStore {
             sqlx::query(
                 r#"
                 UPDATE ha_outbox_gc_state
-                   SET next_channel = ?, pending_channel_mask = ?, updated_at = ?
+                   SET next_channel = ?,
+                       pending_channel_mask = ?,
+                       low_pressure_since = CASE WHEN ? > ? THEN NULL ELSE low_pressure_since END,
+                       recovery_mode = CASE WHEN ? > ? THEN 0 ELSE recovery_mode END,
+                       recovery_deadline_at = CASE WHEN ? > ? THEN NULL ELSE recovery_deadline_at END,
+                       last_foreground_rps = ?,
+                       updated_at = ?
                  WHERE id = 'local'
                 "#,
             )
             .bind(next_channel.as_str())
             .bind(next_pending_channel_mask)
+            .bind(observed_foreground_rps)
+            .bind(crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS)
+            .bind(observed_foreground_rps)
+            .bind(crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS)
+            .bind(observed_foreground_rps)
+            .bind(crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS)
+            .bind(observed_foreground_rps)
             .bind(self.backend_time.now_ts())
             .execute(&mut **conn)
             .await?;
@@ -571,7 +618,7 @@ impl KeyStore {
                     true,
                     max_batch_elapsed_ms,
                     recovery_mode,
-                    foreground_rps,
+                    observed_foreground_rps,
                 )
             } else if legacy_has_more {
                 Some(crate::HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS)
@@ -604,7 +651,9 @@ impl KeyStore {
             let defer_reason = channel_continuation_delay_secs.map(|delay| {
                 if delay == crate::HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS {
                     "legacy_scan"
-                } else if foreground_rps > crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+                } else if foreground_yielded
+                    || observed_foreground_rps > crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS
+                {
                     "foreground_pressure"
                 } else if max_batch_elapsed_ms > crate::HA_OUTBOX_GC_ACTIVE_BUDGET_MS {
                     "slow_slice"
@@ -633,16 +682,18 @@ impl KeyStore {
             let observed_deleted_rows_per_minute = elapsed_since_last_attempt_secs
                 .map(|elapsed| deleted_rows.saturating_mul(60) as f64 / elapsed as f64)
                 .unwrap_or(persisted_deleted_rows_per_minute);
-            let debt_mode = if recovery_mode {
-                "recovering"
-            } else if foreground_rps > crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+            let debt_mode = if observed_foreground_rps > crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
                 "foreground_pressure"
+            } else if recovery_mode {
+                "recovering"
             } else if channel_has_more {
                 "draining"
             } else {
                 "normal"
             };
-            let slo_state = if recovery_mode {
+            let slo_state = if recovery_mode
+                && observed_foreground_rps <= crate::HA_OUTBOX_GC_LOW_PRESSURE_RPS
+            {
                 match oldest_deletable_age_secs {
                     Some(age) if age > retention_secs.saturating_add(60 * 60) => "breached",
                     Some(_) => "on_track",
@@ -709,7 +760,7 @@ impl KeyStore {
             .bind(observed_deleted_rows_per_minute)
             .bind(recovery_deadline_at)
             .bind(slo_state)
-            .bind(foreground_rps)
+            .bind(observed_foreground_rps)
             .bind(channel.as_str())
             .bind(claim.generation)
             .execute(&mut **conn)
@@ -743,7 +794,7 @@ impl KeyStore {
                     recovery_deadline_at,
                     slo_state: slo_state.to_string(),
                     slo_state_transition,
-                    foreground_rps,
+                    foreground_rps: observed_foreground_rps,
                     observed_at: now,
                 }],
                 wal_checkpoint_busy: false,
@@ -769,7 +820,7 @@ impl KeyStore {
                         claim.generation,
                         pending_channel_mask,
                         options,
-                        foreground_rps,
+                        observed_foreground_rps,
                         started,
                     )
                     .await

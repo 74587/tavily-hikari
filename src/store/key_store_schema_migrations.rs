@@ -10,6 +10,9 @@ const RECONCILIATION_WORK_CHECKSUM: &str = "sha256:7e94d5620f3e49a0a17587fb4e019
 const RECONCILIATION_OUTCOME_VERSION: i64 = 4;
 const RECONCILIATION_OUTCOME_NAME: &str = "reconciliation-terminal-outcomes-v1";
 const RECONCILIATION_OUTCOME_CHECKSUM: &str = "sha256:4d6fd3e8c7a3a806a5d420ef07fa4f3c";
+const RECONCILIATION_TERMINAL_REFRESH_VERSION: i64 = 5;
+const RECONCILIATION_TERMINAL_REFRESH_NAME: &str = "reconciliation-terminal-usage-refresh-v1";
+const RECONCILIATION_TERMINAL_REFRESH_CHECKSUM: &str = "sha256:8e4f4cc3f832d24d4f7d7dc3d6f2a8c1";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -626,6 +629,11 @@ impl KeyStore {
                 RECONCILIATION_OUTCOME_NAME,
                 RECONCILIATION_OUTCOME_CHECKSUM,
             ),
+            (
+                RECONCILIATION_TERMINAL_REFRESH_VERSION,
+                RECONCILIATION_TERMINAL_REFRESH_NAME,
+                RECONCILIATION_TERMINAL_REFRESH_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -936,6 +944,41 @@ impl KeyStore {
         .await
     }
 
+    async fn apply_reconciliation_terminal_refresh_migration(&self) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"UPDATE upstream_reconciliation_work
+               SET completed_generation = 0,
+                   last_outcome = NULL
+               WHERE completed_generation >= work_generation
+                 AND EXISTS (
+                     SELECT 1
+                     FROM upstream_reconciliation_settlements s
+                     WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                       AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
+                 )
+                 AND EXISTS (
+                     SELECT 1
+                     FROM upstream_reconciliation_usage u
+                     WHERE u.token_id = upstream_reconciliation_work.token_id
+                       AND u.period_code = upstream_reconciliation_work.period_code
+                       AND u.updated_at > COALESCE((
+                           SELECT MAX(s.settled_at)
+                           FROM upstream_reconciliation_settlements s
+                           WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                             AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
+                       ), 0)
+                 )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            RECONCILIATION_TERMINAL_REFRESH_VERSION,
+            RECONCILIATION_TERMINAL_REFRESH_NAME,
+            RECONCILIATION_TERMINAL_REFRESH_CHECKSUM,
+        )
+        .await
+    }
+
     pub(crate) async fn prepare_versioned_schema(&self) -> Result<bool, ProxyError> {
         let started = std::time::Instant::now();
         let existing_database = self.schema_object_exists("main", "meta").await?;
@@ -1003,6 +1046,12 @@ impl KeyStore {
         {
             self.apply_reconciliation_outcome_migration().await?;
         }
+        if !self
+            .schema_migration_applied(RECONCILIATION_TERMINAL_REFRESH_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_terminal_refresh_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1027,6 +1076,7 @@ impl KeyStore {
         self.apply_gc_work_migration().await?;
         self.apply_reconciliation_work_migration().await?;
         self.apply_reconciliation_outcome_migration().await?;
+        self.apply_reconciliation_terminal_refresh_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1034,7 +1084,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 4_i64,
+            migration_count = 5_i64,
         );
         Ok(())
     }

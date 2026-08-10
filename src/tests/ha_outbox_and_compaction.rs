@@ -583,6 +583,73 @@ async fn online_ha_gc_burst_between_slices_resets_low_pressure_tenure() {
 }
 
 #[tokio::test]
+async fn online_ha_gc_does_not_start_another_batch_after_foreground_arrives() {
+    let db_path = temp_db_path("ha-outbox-gc-foreground-yield-between-batches");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-ha-gc-foreground-yield".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let old_ts = Utc::now().timestamp() - (15 * SECS_PER_DAY);
+    let mut tx = pool.begin().await.expect("begin expired control seed");
+    for index in 0..500 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("foreground-yield-{index}"))
+        .bind(old_ts)
+        .execute(&mut *tx)
+        .await
+        .expect("insert expired control event");
+    }
+    tx.commit().await.expect("commit expired control seed");
+
+    let foreground_rps = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+        HA_OUTBOX_GC_LOW_PRESSURE_RPS + 1,
+    ));
+    let foreground_rps_now = foreground_rps.clone();
+    let report = proxy
+        .gc_ha_outbox_online_with_foreground_activity(0, 0, move || {
+            foreground_rps_now.load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .await
+        .expect("GC yields after its in-flight batch");
+
+    let channel = report.channels.first().expect("control channel report");
+    assert_eq!(channel.channel, HaSyncChannel::Control);
+    assert_eq!(channel.batches, 1);
+    assert_eq!(channel.deleted_rows, 250);
+    assert!(channel.has_more);
+    assert_eq!(channel.debt_mode, "foreground_pressure");
+    assert_eq!(channel.foreground_rps, HA_OUTBOX_GC_LOW_PRESSURE_RPS + 1);
+    let (persisted_rps, channel_delay_secs): (i64, Option<i64>) = sqlx::query_as(
+        "SELECT foreground_rps, last_continuation_delay_secs FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read durable foreground yield state");
+    assert_eq!(persisted_rps, HA_OUTBOX_GC_LOW_PRESSURE_RPS + 1);
+    assert_eq!(
+        channel_delay_secs,
+        Some(HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS)
+    );
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn online_ha_gc_persists_one_channel_rotation_between_slices() {
     let db_path = temp_db_path("ha-outbox-online-gc-round-robin");
     let db_str = db_path.to_string_lossy().to_string();

@@ -7,6 +7,7 @@ use tavily_hikari::{
     decode_linuxdo_credit_refund_external_success_marker,
     format_ha_outbox_gc_report_message, format_linuxdo_credit_money,
     HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
+    HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS,
     linuxdo_credit_recharge_system_refund_retry_delay_secs,
     linuxdo_credit_refund_params as shared_linuxdo_credit_refund_params,
     linuxdo_credit_refund_url as shared_linuxdo_credit_refund_url,
@@ -58,6 +59,7 @@ const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
 const HA_OUTBOX_GC_RECHECK_SECS: u64 = 5 * 60;
 const HA_OUTBOX_GC_BASELINE_SECS: i64 = 60 * 60;
+const HA_OUTBOX_GC_CONTINUATION_PERSIST_RETRY_DELAYS_MS: [u64; 5] = [100, 200, 400, 800, 1_600];
 const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
 const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE: &str =
     "auth_token_logs_alert_index_ensure";
@@ -1225,9 +1227,16 @@ async fn finish_ha_gc_with_continuation(
                 claim_generation,
                 continuation_delay_secs,
                 err = %err,
-                "HA outbox GC continuation hit a transient SQLite conflict; stale reaper will recover it"
+                "HA outbox GC continuation hit a transient SQLite conflict; scheduling bounded persistence retries"
             );
-            return false;
+            spawn_ha_gc_continuation_persistence_retries(
+                state.clone(),
+                job_id,
+                claim_generation,
+                message,
+                continuation_delay_secs,
+            );
+            return true;
         }
         Err(err) => {
             tracing::error!(
@@ -1255,6 +1264,93 @@ async fn finish_ha_gc_with_continuation(
         }
     }
     true
+}
+
+fn spawn_ha_gc_continuation_persistence_retries(
+    state: Arc<AppState>,
+    job_id: i64,
+    claim_generation: i64,
+    message: String,
+    continuation_delay_secs: i64,
+) {
+    tokio::spawn(async move {
+        for retry_delay_ms in HA_OUTBOX_GC_CONTINUATION_PERSIST_RETRY_DELAYS_MS {
+            tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+            let available_at = state
+                .proxy
+                .backend_time()
+                .now_ts()
+                .saturating_add(continuation_delay_secs);
+            match state
+                .proxy
+                .scheduled_job_finish_and_enqueue_auto_at(
+                    job_id,
+                    claim_generation,
+                    "ha_outbox_gc",
+                    None,
+                    1,
+                    Some(&message),
+                    available_at,
+                )
+                .await
+            {
+                Ok(result) => {
+                    tracing::debug!(
+                        component = "ha_outbox_gc",
+                        event = "continuation_persist_recovered",
+                        job_id,
+                        claim_generation,
+                        continuation_job_id = result.job_id,
+                        continuation_created = result.created,
+                        continuation_delay_secs,
+                        retry_delay_ms,
+                    );
+                    maintenance_worker_wake_for_state(state.as_ref()).notify_one();
+                    return;
+                }
+                Err(err) if err.is_stale_claim() => {
+                    tracing::debug!(
+                        component = "ha_outbox_gc",
+                        event = "stale_claim_ignored",
+                        job_id,
+                        claim_generation,
+                        "bounded HA GC continuation persistence retry observed a stale claim"
+                    );
+                    return;
+                }
+                Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {
+                    tracing::debug!(
+                        component = "ha_outbox_gc",
+                        event = "continuation_persist_retry_deferred",
+                        job_id,
+                        claim_generation,
+                        retry_delay_ms,
+                        err = %err,
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        component = "ha_outbox_gc",
+                        event = "continuation_transaction_failed",
+                        job_id,
+                        claim_generation,
+                        retry_delay_ms,
+                        err = %err,
+                        "bounded HA GC continuation persistence retry stopped on a permanent error"
+                    );
+                    return;
+                }
+            }
+        }
+        tracing::warn!(
+            component = "ha_outbox_gc",
+            event = "continuation_persist_retry_exhausted",
+            job_id,
+            claim_generation,
+            retry_count = HA_OUTBOX_GC_CONTINUATION_PERSIST_RETRY_DELAYS_MS.len(),
+            "HA outbox GC continuation persistence retries exhausted; stale reaper remains the final recovery path"
+        );
+    });
 }
 
 async fn run_ha_outbox_gc_claimed_job(
@@ -1288,9 +1384,10 @@ async fn run_ha_outbox_gc_claimed_job(
     };
     let result = state
         .proxy
-        .gc_ha_outbox_online_with_foreground_pressure(
+        .gc_ha_outbox_online_with_foreground_activity(
             foreground_activity_rps(),
             foreground_activity_low_pressure_since_floor(),
+            foreground_activity_rps,
         )
         .await;
 
@@ -1430,7 +1527,7 @@ async fn run_ha_outbox_gc_claimed_job(
                 job_id,
                 claim_generation,
                 format!("deferred=sqlite_busy error={err}"),
-                HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
+                HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS,
             )
             .await;
         }

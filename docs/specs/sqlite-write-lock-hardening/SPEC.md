@@ -262,8 +262,9 @@ source when a usable persisted runtime already exists.
   earliest eligible channel and must not turn one channel's delay into a global freeze.
 - An expired scheduled-job claim returns an internal stale-claim result. It cannot finish, enqueue a
   continuation, or mutate a newer claim with the same job id. HA continuation persistence is part of
-  the finish transaction; the stale reaper is the only recovery path when that transaction cannot
-  commit.
+  the finish transaction; a transient conflict uses a fixed, bounded same-generation persistence
+  retry before the stale reaper becomes the final recovery path. It must never create an unbounded
+  background retry loop.
 - Reconciliation candidate selection is bounded by indexed pages before hydration. Three consecutive
   rounds with eligible candidates but no remote attempt and exhausted local budget enter a persisted
   short local backoff with one delayed representative job. Only actual upstream 429 attempts enter
@@ -347,7 +348,10 @@ source when a usable persisted runtime already exists.
   candidate page reports one retention context with cache hits for subsequent candidates.
 - Online HA outbox GC must use a non-blocking maintenance write lease and a one-second slice
   budget. If the lease or SQLite writer is busy, it must finish the current scheduled row and
-  persist a 30-second continuation instead of waiting through the scheduler's long retry window.
+  persist a bounded continuation handoff instead of waiting through the scheduler's long retry
+  window. A transient handoff conflict retries only on a fixed short schedule and then delegates to
+  the stale reaper; it must not leave the global representative `running` until the 120-second
+  stale threshold after the writer has already released.
   Productive retention slices whose slowest active database micro-batch stays within `50ms` must persist a
   five-second continuation and adapt their per-channel batch size within `25..250`; an over-budget
   slice halves its next batch before retrying. Legacy-resource cursor verification is not retention

@@ -67,6 +67,9 @@
 - 主结算候选页、key/cooldown hydrate 与 reservation 的本地准备预算最多 2 秒，主结算优先启动；terminal-research sweep 仅在主结算之后使用同一轮剩余预算，单轮总预算保持 20 秒。
 - 远端请求启动、观察结果、结算写入和 Research 状态落盘均受同一轮截止时间约束；最后的持久化收尾预算不得被新一轮远端请求抢占。
 - 本地预算耗尽只推进独立 local backoff，不增加 upstream 429 压力；local backoff 的持久化元数据随 HA meta 增量和 baseline 同步，接管后继续执行原退避而不是立即重试。
+- Usage source cursor itself is durable unfinished projection work. Draining a fully settled page
+  must enqueue the next source page until the cursor reaches the source tail; a usage update after
+  a terminal settlement must reopen that generation rather than wait for a later new insert.
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）

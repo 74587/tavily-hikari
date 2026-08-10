@@ -61,6 +61,9 @@
 - 相同 wire payload 的 UPDATE 不产生 HA outbox 事件；有效变化恰好产生一条兼容事件。
 - reconciliation 使用持久 work projection、公平 cursor 和原子 runtime state，并区分本地压力、429、
   transport、semantic failure 与 budget exhaustion。
+- Usage source cursor itself remains durable unfinished projection work. Draining a fully settled
+  projection page must enqueue the next source page until the cursor reaches the source tail; a
+  pre-trigger usage update after a terminal settlement must likewise reopen that usage generation.
 - 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通
@@ -96,7 +99,9 @@
 ### Edge cases / errors
 
 - Stale generation 的完成、失败或 continuation 均被拒绝，不能覆盖新 claim。
-- SQLite busy 在 250ms 内返回 typed deferred，不形成后台无限 retry loop。
+- SQLite busy 在 250ms 内返回 typed deferred。HA continuation handoff may use only a fixed,
+  bounded same-generation retry schedule before stale recovery; it must not form a background
+  infinite retry loop.
 - 单一 HA channel 的 eligibility 延迟不得阻塞其他 channel。
 - read model cold start 无可用 last-good 时显式 degraded，不在请求线程执行重聚合。
 - 滚动升级中的旧节点继续消费现有 wire payload；新字段或表仅以向后兼容方式扩展。
