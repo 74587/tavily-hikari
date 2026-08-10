@@ -96,6 +96,42 @@ def create_test_api_key(host: str, port: int) -> None:
         connection.close()
 
 
+def create_test_access_token(host: str, port: int) -> str:
+    """Create an isolated-load credential after snapshot startup settles.
+
+    The copied production-shaped database may still have one startup maintenance
+    writer when the comparison's listener is ready. Retrying only transient
+    server failures here prevents that fixture artifact from being classified as
+    business-lane coverage, while keeping all retry writes inside the COW test
+    database.
+    """
+    deadline = time.monotonic() + 60.0
+    while True:
+        connection = http.client.HTTPConnection(host, port, timeout=10)
+        try:
+            connection.request(
+                "POST",
+                "/api/tokens",
+                body=json.dumps({"note": "performance-recovery-load"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = response.read()
+            if response.status == 201:
+                token = json.loads(payload).get("token")
+                if isinstance(token, str) and token:
+                    return token
+                raise RuntimeError("test token bootstrap returned no token")
+            if response.status not in (500, 503) or time.monotonic() >= deadline:
+                raise RuntimeError(f"test token bootstrap failed: status={response.status}")
+        except (OSError, http.client.HTTPException, TimeoutError) as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("test token bootstrap did not become available") from error
+        finally:
+            connection.close()
+        time.sleep(0.5)
+
+
 def periodic(
     stop: threading.Event,
     interval_secs: float,
@@ -131,12 +167,14 @@ def business_lane(
     recorder: Recorder,
     host: str,
     port: int,
+    access_token: str,
 ) -> None:
     payload = json.dumps(
         {"query": "snapshot recovery comparison", "search_depth": "basic", "max_results": 1}
     ).encode()
     headers = {
         "Content-Type": "application/json",
+        "Authorization": f"Bearer {access_token}",
     }
     periodic(
         stop,
@@ -207,6 +245,7 @@ def main() -> None:
     recorder = Recorder()
     stop = threading.Event()
     create_test_api_key(args.host, args.port)
+    access_token = create_test_access_token(args.host, args.port)
     threads = [
         threading.Thread(
             target=dashboard_lane,
@@ -222,7 +261,7 @@ def main() -> None:
     threads += [
         threading.Thread(
             target=business_lane,
-            args=(stop, recorder, args.host, args.port),
+            args=(stop, recorder, args.host, args.port, access_token),
             daemon=True,
         ),
         threading.Thread(target=interrupted_ha_export, args=(stop, recorder, args.host, args.port), daemon=True),
