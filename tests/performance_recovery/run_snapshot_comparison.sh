@@ -12,7 +12,7 @@ Required environment:
   REMOTE_RUN        Isolated /srv/codex run directory
   CANDIDATE_REPO    Candidate source tree within REMOTE_RUN
   BASELINE_REPO     Baseline source tree within REMOTE_RUN
-  SNAPSHOT_DIR      Directory containing tavily_proxy.db and tavily_proxy-observability.db
+  SNAPSHOT_DIR      Directory containing manifest.env and compressed core/observability snapshots
   COMPOSE_PROJECT   Unique Docker Compose project name
 
 Optional environment:
@@ -31,10 +31,50 @@ BASELINE_REPO="${BASELINE_REPO:?BASELINE_REPO is required}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:?SNAPSHOT_DIR is required}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}"
 DURATION_SECS="${DURATION_SECS:-1800}"
-CORE_DB="${SNAPSHOT_DIR}/tavily_proxy.db"
-OBSERVABILITY_DB="${SNAPSHOT_DIR}/tavily_proxy-observability.db"
 ARTIFACTS_DIR="${REMOTE_RUN}/artifacts/performance-recovery"
 WORK_DIR="${REMOTE_RUN}/performance-recovery"
+
+manifest_get() {
+  local key="$1"
+  awk -F= -v target="$key" '$1 == target { sub($1"=", ""); print; exit }' \
+    "$SNAPSHOT_DIR/manifest.env"
+}
+
+MANIFEST_PATH="$SNAPSHOT_DIR/manifest.env"
+[[ -f "$MANIFEST_PATH" ]] || { echo "missing snapshot manifest" >&2; exit 2; }
+CORE_COMPRESSED_NAME="$(manifest_get core_compressed_snapshot_name)"
+SIDECAR_COMPRESSED_NAME="$(manifest_get sidecar_compressed_snapshot_name)"
+CORE_SNAPSHOT_SHA256="$(manifest_get core_snapshot_sha256)"
+SIDECAR_SNAPSHOT_SHA256="$(manifest_get sidecar_snapshot_sha256)"
+CORE_SNAPSHOT_PAGE_COUNT="$(manifest_get core_snapshot_page_count)"
+SIDECAR_SNAPSHOT_PAGE_COUNT="$(manifest_get sidecar_snapshot_page_count)"
+CORE_COMPRESSED_SNAPSHOT_SHA256="$(manifest_get core_compressed_snapshot_sha256)"
+SIDECAR_COMPRESSED_SNAPSHOT_SHA256="$(manifest_get sidecar_compressed_snapshot_sha256)"
+
+for snapshot_name in "$CORE_COMPRESSED_NAME" "$SIDECAR_COMPRESSED_NAME"; do
+  [[ "$snapshot_name" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+    echo "invalid compressed snapshot filename in manifest" >&2
+    exit 2
+  }
+done
+for expected in \
+  "$CORE_SNAPSHOT_SHA256" \
+  "$SIDECAR_SNAPSHOT_SHA256" \
+  "$CORE_COMPRESSED_SNAPSHOT_SHA256" \
+  "$SIDECAR_COMPRESSED_SNAPSHOT_SHA256"; do
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "invalid snapshot checksum in manifest" >&2
+    exit 2
+  }
+done
+for expected_pages in "$CORE_SNAPSHOT_PAGE_COUNT" "$SIDECAR_SNAPSHOT_PAGE_COUNT"; do
+  [[ "$expected_pages" =~ ^[1-9][0-9]*$ ]] || {
+    echo "invalid snapshot page count in manifest" >&2
+    exit 2
+  }
+done
+CORE_COMPRESSED_DB="$SNAPSHOT_DIR/$CORE_COMPRESSED_NAME"
+SIDECAR_COMPRESSED_DB="$SNAPSHOT_DIR/$SIDECAR_COMPRESSED_NAME"
 
 case "$REMOTE_RUN" in
   /srv/codex/workspaces/*/runs/*) ;;
@@ -48,7 +88,7 @@ esac
   echo "DURATION_SECS must be at least 60" >&2
   exit 2
 }
-for path in "$CANDIDATE_REPO" "$BASELINE_REPO" "$CORE_DB" "$OBSERVABILITY_DB"; do
+for path in "$CANDIDATE_REPO" "$BASELINE_REPO" "$CORE_COMPRESSED_DB" "$SIDECAR_COMPRESSED_DB"; do
   [[ -e "$path" ]] || { echo "missing required path: $path" >&2; exit 2; }
 done
 
@@ -71,6 +111,42 @@ remove_variant_data() {
     *) echo "refusing to remove unexpected variant directory: $variant_dir" >&2; exit 2 ;;
   esac
   rm -rf -- "$variant_dir"
+}
+
+verify_variant_database() {
+  local path="$1"
+  local expected_sha256="$2"
+  local expected_page_count="$3"
+  local actual_sha256 actual_page_count
+  actual_sha256="$(sha256sum "$path" | awk '{print $1}')"
+  actual_page_count="$(sqlite3 "$path" 'PRAGMA page_count;' | tr -d '\r')"
+  [[ "$actual_sha256" == "$expected_sha256" ]] || {
+    echo "expanded snapshot checksum mismatch for $path" >&2
+    exit 3
+  }
+  [[ "$actual_page_count" == "$expected_page_count" ]] || {
+    echo "expanded snapshot page count mismatch for $path" >&2
+    exit 3
+  }
+  [[ "$(sqlite3 "$path" 'PRAGMA integrity_check;' | tr -d '\r')" == "ok" ]] || {
+    echo "expanded snapshot integrity check failed for $path" >&2
+    exit 3
+  }
+}
+
+expand_variant_data() {
+  local variant_dir="$1"
+  zstd -q -d -c "$CORE_COMPRESSED_DB" > "$variant_dir/tavily_proxy.db"
+  zstd -q -d -c "$SIDECAR_COMPRESSED_DB" > "$variant_dir/tavily_proxy-observability.db"
+  chmod 600 "$variant_dir/tavily_proxy.db" "$variant_dir/tavily_proxy-observability.db"
+  verify_variant_database \
+    "$variant_dir/tavily_proxy.db" \
+    "$CORE_SNAPSHOT_SHA256" \
+    "$CORE_SNAPSHOT_PAGE_COUNT"
+  verify_variant_database \
+    "$variant_dir/tavily_proxy-observability.db" \
+    "$SIDECAR_SNAPSHOT_SHA256" \
+    "$SIDECAR_SNAPSHOT_PAGE_COUNT"
 }
 
 trap 'cleanup_compose; cleanup_app_image' EXIT
@@ -178,9 +254,7 @@ run_variant() {
   remove_variant_data "$variant_dir"
   rm -rf -- "$artifact_dir"
   mkdir -p "$variant_dir" "$artifact_dir"
-  cp --reflink=auto "$CORE_DB" "$variant_dir/tavily_proxy.db"
-  cp --reflink=auto "$OBSERVABILITY_DB" "$variant_dir/tavily_proxy-observability.db"
-  chmod 600 "$variant_dir/tavily_proxy.db" "$variant_dir/tavily_proxy-observability.db"
+  expand_variant_data "$variant_dir"
   write_compose "$repo" "$variant_dir" "$artifact_dir"
   # The testbox is deliberately isolated from production services. Reusing its
   # locked base-image cache keeps a transient registry failure out of the
@@ -234,6 +308,9 @@ PY
   cleanup_app_image
   remove_variant_data "$variant_dir"
 }
+
+test "$(sha256sum "$CORE_COMPRESSED_DB" | awk '{print $1}')" = "$CORE_COMPRESSED_SNAPSHOT_SHA256"
+test "$(sha256sum "$SIDECAR_COMPRESSED_DB" | awk '{print $1}')" = "$SIDECAR_COMPRESSED_SNAPSHOT_SHA256"
 
 run_variant baseline "$BASELINE_REPO"
 run_variant candidate "$CANDIDATE_REPO"
