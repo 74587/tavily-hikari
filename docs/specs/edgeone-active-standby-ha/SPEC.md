@@ -139,9 +139,10 @@ control, billing, and runtime. It also exposes `gcDebtMode`, `gcObservedAt`,
 
 Online GC persists per-channel attempt and progress state. Normal slices are DEBUG-level events;
 stalled, deferred, SLO-breached, and recovered states are logged only on persisted state
-transitions. A transient continuation-write failure uses a fixed bounded same-generation retry
-schedule; it never starts an unbounded retry task, and the stale-job reaper remains the final
-recovery path only after that schedule is exhausted.
+transitions. A transient continuation-write failure keeps the one representative claim in a
+same-generation, capped-cadence recovery loop until persistence succeeds or stale recovery fences
+the claim. It never fans out retry tasks; the stale-job reaper remains the independent final
+recovery path.
 
 Online retention debt is self-healing through a persisted per-channel controller. It keeps one
 channel per slice, starts at an adaptive `25..250` batch size, and measures each active database

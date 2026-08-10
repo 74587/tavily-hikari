@@ -363,9 +363,9 @@ month-tail public metrics scan.
 - A durable scheduler claim needs a generation as well as a status. Increment it on claim and stale
   recovery, then require `(id, generation, running)` for finish and continuation writes; this closes
   the ABA window where a timed-out future completes a newly reclaimed job.
-- Continuation persistence must have one owner. A short atomic attempt plus a periodic stale reaper
-  is bounded and observable; spawning an unbounded retry task per failed continuation amplifies
-  writer contention.
+- Continuation persistence must have one owner. Keep only the current generation's representative
+  retrying at a capped cadence until it persists or stale recovery fences it; retry fan-out per
+  failure amplifies writer contention, while a fixed timeout recreates a post-lock recovery gap.
 
 - Do not enable full SQL debug logging in production by default. Slow-statement logging is enough
   for this contention class and avoids dumping every statement or bind-heavy traffic path.

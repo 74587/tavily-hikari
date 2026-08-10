@@ -28,7 +28,7 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
     sqlx::query("UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 2")
         .execute(&pool)
         .await
@@ -126,11 +126,11 @@ async fn terminal_outcome_migration_rejects_a_missing_usage_update_trigger() {
 }
 
 #[tokio::test]
-async fn terminal_outcome_migration_reopens_usage_updated_after_prior_settlement() {
-    let db_path = temp_db_path("schema-migration-terminal-outcome-reopens-usage");
+async fn terminal_outcome_migration_reopens_same_second_usage_update_after_prior_settlement() {
+    let db_path = temp_db_path("schema-migration-terminal-outcome-reopens-same-second-usage");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-schema-migration-terminal-outcome-reopens".to_string()],
+        vec!["tvly-schema-migration-terminal-outcome-reopens-same-second".to_string()],
         DEFAULT_UPSTREAM,
         &db_str,
     )
@@ -151,8 +151,8 @@ async fn terminal_outcome_migration_reopens_usage_updated_after_prior_settlement
     .bind(now - 1_000)
     .bind(now - 300)
     .bind(now - 900)
-    .bind(now - 300)
-    .bind(now - 300)
+    .bind(now - 900)
+    .bind(now - 900)
     .execute(&proxy.key_store.pool)
     .await
     .expect("insert usage row");
@@ -181,16 +181,25 @@ async fn terminal_outcome_migration_reopens_usage_updated_after_prior_settlement
     .execute(&proxy.key_store.pool)
     .await
     .expect("shape pre-v4 work row");
-    sqlx::query("DELETE FROM schema_migrations WHERE version IN (4, 5)")
+    let recorded_v5_checksum: String =
+        sqlx::query_scalar("SELECT checksum FROM schema_migrations WHERE version = 5")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read immutable v5 checksum");
+    assert_eq!(
+        recorded_v5_checksum,
+        "sha256:8e4f4cc3f832d24d4f7d7dc3d6f2a8c1"
+    );
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 6")
         .execute(&proxy.key_store.pool)
         .await
-        .expect("remove terminal outcome migration records");
+        .expect("remove same-second repair migration record");
 
     proxy
         .key_store
         .prepare_versioned_schema()
         .await
-        .expect("reapply terminal outcome migration");
+        .expect("apply same-second repair migration after immutable v5");
     let reopened: (i64, i64, Option<String>) = sqlx::query_as(
         "SELECT work_generation, completed_generation, last_outcome FROM upstream_reconciliation_work WHERE token_id = 'migration-reopen-token'",
     )
@@ -466,7 +475,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

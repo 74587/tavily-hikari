@@ -64,6 +64,8 @@
 - Usage source cursor itself remains durable unfinished projection work. Draining a fully settled
   projection page must enqueue the next source page until the cursor reaches the source tail; a
   pre-trigger usage update after a terminal settlement must likewise reopen that usage generation.
+  Because persisted timestamps are second-resolution, an equal usage/settlement timestamp is
+  conservatively reopened too: a duplicate observation is acceptable, but a lost settlement is not.
 - 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通

@@ -210,7 +210,10 @@ async fn ha_gc_writer_lock_uses_bounded_continuation_persistence_retry() {
             _job_execution_gate: None,
         },
     ));
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Hold the writer beyond the old 3.1-second retry budget. The continuation
+    // must still hand off shortly after release instead of waiting for stale
+    // reaping at 120 seconds.
+    tokio::time::sleep(Duration::from_millis(3_600)).await;
     sqlx::query("ROLLBACK")
         .execute(&mut lock_conn)
         .await
