@@ -25,6 +25,8 @@ export interface HaChannelHealth {
   batchSize?: number | null
   gcDebtMode: string
   gcObservedAt: number | null
+  lastIngressSeqDelta?: number | null
+  lastNetRowsDeltaEstimate?: number | null
   gcDeletedRowsPerMinute: number
   gcRecoveryDeadlineAt: number | null
   gcSloState: string

@@ -42,6 +42,11 @@ function numberFormat(value: number, language: 'en' | 'zh'): string {
   return new Intl.NumberFormat(localeFor(language), { maximumFractionDigits: 1 }).format(value)
 }
 
+function formatSignedNumber(value: number | null | undefined, language: 'en' | 'zh'): string {
+  if (value == null) return '—'
+  return `${value > 0 ? '+' : ''}${numberFormat(value, language)}`
+}
+
 function channelLabel(channel: string, language: 'en' | 'zh'): string {
   if (language === 'zh') {
     return channel === 'control' ? 'Control' : channel === 'billing' ? 'Billing' : 'Runtime'
@@ -327,6 +332,8 @@ export default function HaNodeDetailPanel({
                     <div><dt>{language === 'zh' ? '让步原因' : 'Defer reason'}</dt><dd>{health.lastDeferReason ?? '—'}</dd></div>
                     <div><dt>{language === 'zh' ? '下次重试' : 'Next retry'}</dt><dd>{formatTimestamp(health.nextRetryAt, language)}</dd></div>
                     <div><dt>{language === 'zh' ? '债务模式' : 'Debt mode'}</dt><dd>{health.gcDebtMode || '—'}</dd></div>
+                    <div><dt>{language === 'zh' ? '入流增量' : 'Ingress delta'}</dt><dd>{formatSignedNumber(health.lastIngressSeqDelta, language)}</dd></div>
+                    <div><dt>{language === 'zh' ? '净回收' : 'Net recovery'}</dt><dd>{formatSignedNumber(health.lastNetRowsDeltaEstimate == null ? null : -health.lastNetRowsDeltaEstimate, language)}</dd></div>
                     <div><dt>{language === 'zh' ? '删除速率' : 'Delete rate'}</dt><dd>{numberFormat(health.gcDeletedRowsPerMinute, language)} / min</dd></div>
                     <div><dt>{language === 'zh' ? '前台 RPS' : 'Foreground RPS'}</dt><dd>{numberFormat(health.gcForegroundRps, language)}</dd></div>
                     <div><dt>{language === 'zh' ? 'GC SLO' : 'GC SLO'}</dt><dd>{gcSloLabel(health.gcSloState, language)}</dd></div>

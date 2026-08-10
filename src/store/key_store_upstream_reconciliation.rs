@@ -2300,17 +2300,33 @@ impl KeyStore {
         )
         .await?;
         tx.commit().await?;
-        tracing::info!(
-            component = "reconciliation",
-            event = "shadow_adjustment_written",
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            job_type = "upstream_reconciliation",
-            settlement_key,
-            period_code = %candidate.period_code,
-            delta_credits = delta,
-            degraded = candidate.degraded,
+        Self::emit_shadow_adjustment_written_log(
+            started_at.elapsed().as_millis() as u64,
+            &settlement_key,
+            &candidate.period_code,
+            delta,
+            candidate.degraded,
         );
         Ok(true)
+    }
+
+    fn emit_shadow_adjustment_written_log(
+        elapsed_ms: u64,
+        settlement_key: &str,
+        period_code: &str,
+        delta_credits: i64,
+        degraded: bool,
+    ) {
+        tracing::debug!(
+            component = "reconciliation",
+            event = "shadow_adjustment_written",
+            elapsed_ms,
+            job_type = "upstream_reconciliation",
+            settlement_key,
+            period_code,
+            delta_credits,
+            degraded,
+        );
     }
 
     pub(crate) async fn recent_reconciliation_adjustments(

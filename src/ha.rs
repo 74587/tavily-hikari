@@ -558,6 +558,10 @@ pub struct HaChannelHealthView {
     #[serde(default)]
     pub gc_observed_at: Option<i64>,
     #[serde(default)]
+    pub last_ingress_seq_delta: Option<i64>,
+    #[serde(default)]
+    pub last_net_rows_delta_estimate: Option<i64>,
+    #[serde(default)]
     pub gc_deleted_rows_per_minute: f64,
     #[serde(default)]
     pub gc_recovery_deadline_at: Option<i64>,
@@ -715,6 +719,10 @@ pub struct HaRuntime {
     peer_observations: Arc<HaPeerObservationStore>,
 }
 
+pub fn unknown_ha_channel_health() -> Vec<HaChannelHealthView> {
+    HaRuntime::unknown_peer_channel_health()
+}
+
 impl HaRuntime {
     fn unknown_peer_channel_health() -> Vec<HaChannelHealthView> {
         [
@@ -742,6 +750,8 @@ impl HaRuntime {
             batch_size: 250,
             gc_debt_mode: "unknown".to_string(),
             gc_observed_at: None,
+            last_ingress_seq_delta: None,
+            last_net_rows_delta_estimate: None,
             gc_deleted_rows_per_minute: 0.0,
             gc_recovery_deadline_at: None,
             gc_slo_state: "unknown".to_string(),

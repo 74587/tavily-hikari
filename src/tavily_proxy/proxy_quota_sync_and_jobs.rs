@@ -92,13 +92,13 @@ impl ReconciliationOutcome {
 }
 
 
-fn should_emit_reconciliation_summary(now: i64) -> bool {
-    let mut previous = LAST_RECONCILIATION_SUMMARY_LOG_AT.load(Ordering::Relaxed);
+fn should_emit_reconciliation_summary_at(last_emitted_at: &AtomicI64, now: i64) -> bool {
+    let mut previous = last_emitted_at.load(Ordering::Relaxed);
     loop {
         if previous > 0 && now.saturating_sub(previous) < 60 {
             return false;
         }
-        match LAST_RECONCILIATION_SUMMARY_LOG_AT.compare_exchange(
+        match last_emitted_at.compare_exchange(
             previous,
             now,
             Ordering::Relaxed,
@@ -108,6 +108,10 @@ fn should_emit_reconciliation_summary(now: i64) -> bool {
             Err(observed) => previous = observed,
         }
     }
+}
+
+fn should_emit_reconciliation_summary(now: i64) -> bool {
+    should_emit_reconciliation_summary_at(&LAST_RECONCILIATION_SUMMARY_LOG_AT, now)
 }
 
 async fn await_reconciliation_post_process<T>(
@@ -1786,7 +1790,7 @@ impl TavilyProxy {
                         attempted_candidate_count,
                     );
                 } else if !budget_exhausted && previous_budget_exhausted {
-                    tracing::info!(
+                    tracing::warn!(
                         component = "reconciliation",
                         event = "budget_recovered",
                         job_type = "upstream_reconciliation",
@@ -1899,7 +1903,7 @@ impl TavilyProxy {
                         budget_exhausted,
                     );
                 } else if previous_local_backoff_level > 0 && local_backoff_level == 0 {
-                    tracing::info!(
+                    tracing::warn!(
                         component = "reconciliation",
                         event = "local_backoff_recovered",
                         job_type = "upstream_reconciliation",
@@ -1984,7 +1988,7 @@ impl TavilyProxy {
                         attempted_candidate_count,
                     );
                 } else if previous_backoff_level > 0 && backoff_level == 0 {
-                    tracing::info!(
+                    tracing::warn!(
                         component = "reconciliation",
                         event = "global_backoff_recovered",
                         job_type = "upstream_reconciliation",
@@ -2764,7 +2768,20 @@ fn normalize_quota_sync_fetch_error(err: ProxyError) -> ProxyError {
 
 #[cfg(test)]
 mod reconciliation_engine_tests {
-    use super::{ReconciliationEngine, ReconciliationOutcome};
+    use std::sync::atomic::AtomicI64;
+
+    use super::{
+        ReconciliationEngine, ReconciliationOutcome, should_emit_reconciliation_summary_at,
+    };
+
+    #[test]
+    fn reconciliation_summary_logging_is_limited_to_one_per_minute() {
+        let last_emitted_at = AtomicI64::new(0);
+
+        assert!(should_emit_reconciliation_summary_at(&last_emitted_at, 1_000));
+        assert!(!should_emit_reconciliation_summary_at(&last_emitted_at, 1_059));
+        assert!(should_emit_reconciliation_summary_at(&last_emitted_at, 1_060));
+    }
 
     #[test]
     fn non_success_outcomes_do_not_clear_upstream_429_state() {
