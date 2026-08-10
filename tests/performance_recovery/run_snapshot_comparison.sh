@@ -85,7 +85,7 @@ services:
     build:
       context: $CANDIDATE_REPO
       dockerfile: tests/ha/Dockerfile.mock
-    command: ["/usr/local/bin/mock_tavily", "--bind", "0.0.0.0:9001"]
+    command: ["/usr/local/bin/mock_tavily", "--bind", "0.0.0.0:9001", "--preseeded-keys", "tvly-load-key"]
     networks: [recovery]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FSETID, FOWNER, MKNOD, NET_RAW, SETGID, SETUID, SETPCAP, NET_BIND_SERVICE, SYS_CHROOT, KILL, AUDIT_WRITE]
