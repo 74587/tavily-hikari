@@ -508,6 +508,10 @@
   activity in a lock-free one-second meter, and never waits for the HTTP maintenance read gate.
   Retention work is one-channel round-robin with adaptive `25..250` batches, a one-second slice, and
   one-second recovery continuations only after the persisted low-pressure window is satisfied.
+- The durable per-channel state is controller-owned: it records eligibility, claim generation,
+  batch adaptation, legacy cursor, progress and defer state together. Controller completion chooses
+  the earliest eligible wake, so a five-minute legacy scan or a 30-second busy defer cannot freeze
+  the other two channels.
 - `scheduled_jobs.claim_generation` fences stale finish/error/continuation writes. HA continuation
   enqueue is atomic with finish; failed persistence is left for stale reaper recovery instead of an
   unbounded retry task.
@@ -535,6 +539,9 @@
   candidate key/cooldown hydration. Local budget pressure is persisted separately from remote 429
   pressure, while HA GC normal progress is emitted through the existing per-channel 60-second
   sampling window.
+- Reconciliation terminal completion is typed. `no_adjustment` completes the exact usage generation
+  after a valid zero-delta observation, while transport, semantic, local-pressure and upstream-429
+  outcomes retain independent retry state instead of being collapsed into a generic retry.
 - The final reconciliation path separates request-start, remote-observation, settlement-finalization,
   and durable-postprocessing deadlines. Research bookkeeping writes are individually bounded, and
   local pressure metadata is included in the HA meta baseline so takeover preserves its backoff state.

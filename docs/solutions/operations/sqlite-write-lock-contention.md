@@ -21,6 +21,10 @@ related_specs:
 
 - Maintenance and reconciliation state transitions use one bounded immediate transaction; related circuit fields are updated atomically rather than as independent meta writes.
 - Online HA GC claims one eligible channel at a time. A deferred channel's `next_retry_at` cannot become a global scheduler delay for other channels.
+- Treat `ha_outbox_gc_channel_state` as the scheduling truth, not a diagnostic mirror. The
+  controller must atomically fence a channel claim, persist that channel's defer and compute the
+  earliest eligible wake across all channels; a scheduler must never infer controller state from a
+  log message or a single representative job's delay.
 - Startup schema work is ledgered in `schema_migrations`; a warm process verifies the critical layout and skips already-applied DDL.
 - Administrator peer status reads an observation cache. A normal GET never waits for the five-second peer network probe.
 - A transport or semantic reconciliation failure does not clear an existing upstream-429 circuit. Only a real settlement or a real remote attempt follows the recovery contract.

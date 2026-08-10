@@ -253,12 +253,13 @@ source when a usable persisted runtime already exists.
   claim after 60 seconds. Recovery increments the generation and applies the existing 30-second
   delay, making repeated reaper passes idempotent.
 
-- Online HA cleanup enters recovery mode only after a persisted 30-minute window at or below `5`
+- Online HA cleanup enters recovery mode only after a persisted five-minute window at or below `5`
   foreground requests per second. Recovery uses a one-second continuation while the current slice
   remains within its one-second wall-clock and 50ms active-SQL targets; foreground pressure, busy
-  writers, or slow work returns to a 30-second continuation. Every slice processes one channel and
-  persists the round-robin cursor, oldest deletable age, deletion rate, debt mode, recovery deadline,
-  and SLO state.
+  writers, or slow work returns the affected channel to a 30-second continuation. Every slice
+  processes one channel and persists the round-robin cursor, channel eligibility, oldest deletable
+  age, deletion rate, debt mode, recovery deadline, and SLO state. The scheduler wakes at the
+  earliest eligible channel and must not turn one channel's delay into a global freeze.
 - An expired scheduled-job claim returns an internal stale-claim result. It cannot finish, enqueue a
   continuation, or mutate a newer claim with the same job id. HA continuation persistence is part of
   the finish transaction; the stale reaper is the only recovery path when that transaction cannot
@@ -270,6 +271,9 @@ source when a usable persisted runtime already exists.
 - Reconciliation's main settlement pass owns the first remote-attempt budget. Research terminal
   polling is permitted only after the main pass (or when no eligible main candidate exists), and
   all remote requests plus their durable bookkeeping are bounded by the same per-run deadline.
+- A completed upstream observation with zero signed delta is a `no_adjustment` terminal outcome for
+  the matching usage generation. It must not recreate the representative job until a later usage
+  write projects new work.
 - Settlement finalization has a reserved tail budget for the fresh billing read, adjustment writes,
   and pressure-state markers; an observation that completes before that tail is not discarded merely
   because no new remote request may start.
