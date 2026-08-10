@@ -126,24 +126,33 @@ networks:
 EOF
 }
 
-wait_for_http_listener() {
+wait_for_dashboard_readiness() {
   local artifact_dir="$1"
-  for _ in $(seq 1 90); do
+  local health_status dashboard_status
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
     # A production-shaped snapshot can retain an Xray configuration. The test
     # deliberately replaces Xray with /bin/true, making the strict /health
     # readiness endpoint return 503 even though the HTTP server and SQLite
     # startup both completed. The comparison needs listener readiness here;
     # strict readiness remains observable in the captured status code.
-    local status
-    status="$(compose exec -T app sh -c 'curl -sS --max-time 1 -o /dev/null -w "%{http_code}" http://127.0.0.1:8787/health' 2>/dev/null || true)"
-    if [[ "$status" =~ ^[1-5][0-9][0-9]$ ]]; then
-      printf '%s\n' "$status" > "$artifact_dir/startup_health_status.txt"
+    health_status="$(compose exec -T app sh -c 'curl -sS --max-time 1 -o /dev/null -w "%{http_code}" http://127.0.0.1:8787/health' 2>/dev/null || true)"
+    if [[ "$health_status" =~ ^[1-5][0-9][0-9]$ ]]; then
+      printf '%s\n' "$health_status" > "$artifact_dir/startup_health_status.txt"
+    fi
+
+    # The comparison measures Dashboard traffic. Do not begin that workload
+    # until the snapshot's initial overview build has completed successfully.
+    dashboard_status="$(compose exec -T app sh -c 'curl -sS --max-time 10 -o /dev/null -w "%{http_code}" http://127.0.0.1:8787/api/dashboard/overview' 2>/dev/null || true)"
+    if [[ "$dashboard_status" == "200" ]]; then
+      printf '%s\n' "$dashboard_status" > "$artifact_dir/startup_dashboard_status.txt"
       return 0
     fi
+    printf '%s\n' "${dashboard_status:-unreachable}" > "$artifact_dir/startup_dashboard_status.txt"
     sleep 1
   done
   compose logs --no-color > "$artifact_dir/startup_failure.log" 2>&1 || true
-  echo "application HTTP listener did not become reachable" >&2
+  echo "Dashboard overview did not become ready" >&2
   return 1
 }
 
@@ -171,7 +180,7 @@ run_variant() {
   write_compose "$repo" "$variant_dir" "$artifact_dir"
   compose build --pull app upstream
   compose up -d app upstream
-  wait_for_http_listener "$artifact_dir"
+  wait_for_dashboard_readiness "$artifact_dir"
   sample_rss "$artifact_dir/rss_kib.txt" &
   rss_pid=$!
   (
