@@ -541,7 +541,7 @@ pub struct HaChannelHealthView {
     pub cursor_state: String,
     pub retention_secs: i64,
     pub expired_backlog: bool,
-    #[serde(default)]
+    #[serde(default = "default_gc_state")]
     pub gc_state: String,
     #[serde(default)]
     pub oldest_age_secs: Option<i64>,
@@ -565,6 +565,10 @@ pub struct HaChannelHealthView {
     pub gc_slo_state: String,
     #[serde(default)]
     pub gc_foreground_rps: i64,
+}
+
+fn default_gc_state() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2008,6 +2012,23 @@ impl HaConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_channel_health_defaults_missing_gc_state_to_unknown() {
+        let value = serde_json::json!({
+            "channel": "control",
+            "ackedSeq": null,
+            "highWatermark": 0,
+            "ackLag": null,
+            "cursorState": "unknown",
+            "retentionSecs": 0,
+            "expiredBacklog": false,
+        });
+
+        let health: HaChannelHealthView =
+            serde_json::from_value(value).expect("decode legacy channel health");
+        assert_eq!(health.gc_state, "unknown");
+    }
 
     #[tokio::test]
     async fn single_mode_starts_full_master() {

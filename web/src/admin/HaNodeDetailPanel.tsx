@@ -72,7 +72,7 @@ function gcStateLabel(state: string | null | undefined, language: 'en' | 'zh'): 
     stale: ['已过期', 'Stale'],
     unknown: ['未知', 'Unknown'],
   }
-  const normalizedState = state ?? 'unknown'
+  const normalizedState = state?.trim() || 'unknown'
   return labels[normalizedState]?.[language === 'zh' ? 0 : 1] ?? normalizedState
 }
 

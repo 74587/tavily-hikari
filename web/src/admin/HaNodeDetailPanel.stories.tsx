@@ -198,7 +198,7 @@ export const Stale: Story = {
     detail: withChannelHealth(
       'runtime',
       { gcState: 'stale', gcObservedAt: null, gcDebtMode: 'unknown' },
-      { stale: true },
+      { plannedCutoverEligible: false, stale: true },
     ),
   },
 }

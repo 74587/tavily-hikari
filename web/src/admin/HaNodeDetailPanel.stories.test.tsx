@@ -75,8 +75,25 @@ describe('HaNodeDetailPanel Storybook proofs', () => {
         ...(stories.Unknown.args ?? {}),
       }),
     )
+    const legacyMarkup = renderToStaticMarkup(
+      createElement((meta.component ?? (() => null)) as never, {
+        ...(meta.args ?? {}),
+        detail: {
+          ...(stories.Default.args?.detail ?? meta.args?.detail),
+          node: {
+            ...(stories.Default.args?.detail ?? meta.args?.detail)?.node,
+            channelHealth: (stories.Default.args?.detail ?? meta.args?.detail)?.node.channelHealth?.map((health) => ({
+              ...health,
+              gcState: '',
+            })),
+          },
+        },
+      }),
+    )
 
     expect(staleMarkup).toContain('已过期')
     expect(unknownMarkup).toContain('未知')
+    expect(staleMarkup).toMatch(/ha-node-panel-state[\s\S]*?已过期/)
+    expect(legacyMarkup).toContain('未知')
   })
 })
