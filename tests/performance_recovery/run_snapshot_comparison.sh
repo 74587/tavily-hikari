@@ -178,7 +178,10 @@ run_variant() {
   cp --reflink=auto "$OBSERVABILITY_DB" "$variant_dir/tavily_proxy-observability.db"
   chmod 600 "$variant_dir/tavily_proxy.db" "$variant_dir/tavily_proxy-observability.db"
   write_compose "$repo" "$variant_dir" "$artifact_dir"
-  compose build --pull app upstream
+  # The testbox is deliberately isolated from production services. Reusing its
+  # locked base-image cache keeps a transient registry failure out of the
+  # baseline/candidate comparison.
+  compose build app upstream
   compose up -d app upstream
   wait_for_dashboard_readiness "$artifact_dir"
   sample_rss "$artifact_dir/rss_kib.txt" &
