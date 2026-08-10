@@ -59,6 +59,7 @@ REMOTE_RUN="$(printf '%s\n' "$snapshot_output" | awk -F= '/^REMOTE_RUN=/{print $
   exit 2
 }
 
+echo "Preparing baseline source at ${BASELINE_REF}..."
 git -C "$ROOT_DIR" archive "$BASELINE_REF" | tar -xf - -C "$TMP_DIR"
 ssh -o BatchMode=yes "$TESTBOX_HOST" "mkdir -p '$REMOTE_RUN/baseline-repo' && chmod 700 '$REMOTE_RUN/baseline-repo'"
 rsync -az --delete --exclude '.git/' "$TMP_DIR/" "$TESTBOX_HOST:$REMOTE_RUN/baseline-repo/"
@@ -71,6 +72,7 @@ print(value[:63])
 PY
 )"
 
+echo "Running isolated baseline/candidate comparison on codex-testbox..."
 if ssh -o BatchMode=yes "$TESTBOX_HOST" "set -euo pipefail
 REMOTE_RUN='$REMOTE_RUN' \\
 CANDIDATE_REPO='$REMOTE_RUN/repo' \\
@@ -87,9 +89,11 @@ else
   exit "$testbox_status"
 fi
 
+echo "Collecting sanitized comparison summary..."
 mkdir -p "$TMP_DIR/result"
 rsync -az "$TESTBOX_HOST:$REMOTE_RUN/artifacts/performance-recovery/comparison.json" "$TMP_DIR/result/comparison.json"
 cat "$TMP_DIR/result/comparison.json"
+echo "Cleaning isolated codex-testbox run..."
 ssh -o BatchMode=yes "$TESTBOX_HOST" "rm -rf '$REMOTE_RUN' && test ! -e '$REMOTE_RUN'"
 completed=true
 echo "Performance recovery comparison passed and temporary snapshots were removed."
