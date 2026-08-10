@@ -21,6 +21,7 @@ class Recorder:
         self._lock = threading.Lock()
         self.dashboard_ms: list[float] = []
         self.dashboard_attempts = 0
+        self.business_attempts = 0
         self.statuses: Counter[str] = Counter()
         self.errors: Counter[str] = Counter()
         self.events: Counter[str] = Counter()
@@ -49,6 +50,7 @@ class Recorder:
             )
             return {
                 "dashboardAttempts": self.dashboard_attempts,
+                "businessAttempts": self.business_attempts,
                 "dashboardRequests": len(ordered),
                 "dashboardP95Ms": p95,
                 "dashboardMaxMs": max(ordered) if ordered else None,
@@ -72,6 +74,9 @@ def request(
     if lane == "dashboard":
         with recorder._lock:
             recorder.dashboard_attempts += 1
+    elif lane == "business":
+        with recorder._lock:
+            recorder.business_attempts += 1
     connection = http.client.HTTPConnection(host, port, timeout=10)
     try:
         connection.request(method, path, body=body, headers=headers or {})

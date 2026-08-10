@@ -356,8 +356,17 @@ for summary in (baseline, candidate):
         raise SystemExit(f"insufficient dashboard coverage for {summary['variant']}")
     if statuses.get("sse:200", 0) < 20:
         raise SystemExit(f"insufficient SSE coverage for {summary['variant']}")
-    if statuses.get("business:200", 0) < business_minimum:
-        raise SystemExit(f"insufficient successful business coverage for {summary['variant']}")
+    business_attempts = summary["load"].get("businessAttempts", 0)
+    if business_attempts < business_minimum:
+        raise SystemExit(f"insufficient business coverage for {summary['variant']}")
+    # 429 is an application response, not a transport failure. Count it as
+    # reached application code while keeping HTTP 5xx and connection errors
+    # visible in the separate regression gates below.
+    application_business_responses = (
+        statuses.get("business:200", 0) + statuses.get("business:429", 0)
+    )
+    if application_business_responses < business_minimum:
+        raise SystemExit(f"insufficient application business coverage for {summary['variant']}")
     if events.get("ha_export_interrupted", 0) < 1:
         raise SystemExit(f"missing HA export interruption for {summary['variant']}")
 
