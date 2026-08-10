@@ -60,6 +60,15 @@ cleanup_compose() {
   compose down -v --remove-orphans >/dev/null 2>&1 || true
 }
 
+remove_variant_data() {
+  local variant_dir="$1"
+  case "$variant_dir" in
+    "$WORK_DIR"/baseline|"$WORK_DIR"/candidate) ;;
+    *) echo "refusing to remove unexpected variant directory: $variant_dir" >&2; exit 2 ;;
+  esac
+  rm -rf -- "$variant_dir"
+}
+
 trap cleanup_compose EXIT
 mkdir -p "$ARTIFACTS_DIR" "$WORK_DIR"
 
@@ -153,7 +162,8 @@ run_variant() {
   local variant_dir="$WORK_DIR/$name"
   local artifact_dir="$ARTIFACTS_DIR/$name"
   local load_pid restart_pid rss_pid
-  rm -rf "$variant_dir" "$artifact_dir"
+  remove_variant_data "$variant_dir"
+  rm -rf -- "$artifact_dir"
   mkdir -p "$variant_dir" "$artifact_dir"
   cp --reflink=auto "$CORE_DB" "$variant_dir/tavily_proxy.db"
   cp --reflink=auto "$OBSERVABILITY_DB" "$variant_dir/tavily_proxy-observability.db"
@@ -200,6 +210,7 @@ summary = {
 (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 PY
   cleanup_compose
+  remove_variant_data "$variant_dir"
 }
 
 run_variant baseline "$BASELINE_REPO"
@@ -226,7 +237,13 @@ def assert_not_worse(metric, base, cand):
 for summary in (baseline, candidate):
     statuses = summary["load"]["statuses"]
     events = summary["load"]["events"]
-    dashboard_minimum = summary["load"]["durationSecs"] * 20 * 0.70
+    dashboard_clients = summary["load"].get("dashboardClients")
+    dashboard_interval_secs = summary["load"].get("dashboardIntervalSecs")
+    if dashboard_clients != 20 or dashboard_interval_secs != 10.0:
+        raise SystemExit(f"unexpected dashboard load shape for {summary['variant']}")
+    dashboard_minimum = (
+        summary["load"]["durationSecs"] * dashboard_clients / dashboard_interval_secs * 0.70
+    )
     business_minimum = summary["load"]["durationSecs"] * 4
     if summary["load"]["dashboardRequests"] < dashboard_minimum:
         raise SystemExit(f"insufficient dashboard coverage for {summary['variant']}")

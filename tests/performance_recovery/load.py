@@ -12,6 +12,10 @@ from collections import Counter
 from pathlib import Path
 
 
+DASHBOARD_CLIENTS = 20
+DASHBOARD_INTERVAL_SECS = 10.0
+
+
 class Recorder:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -75,11 +79,39 @@ def request(
         connection.close()
 
 
+def create_test_credentials(host: str, port: int) -> str:
+    def create(path: str, payload: dict[str, str]) -> dict[str, object]:
+        connection = http.client.HTTPConnection(host, port, timeout=10)
+        try:
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            body = response.read()
+            if response.status != 201:
+                raise RuntimeError(f"test credential bootstrap failed: {path} status={response.status}")
+            return json.loads(body)
+        finally:
+            connection.close()
+
+    create("/api/keys", {"api_key": "tvly-load-key"})
+    token = create("/api/tokens", {"note": "snapshot recovery comparison"}).get("token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("test credential bootstrap returned no access token")
+    return token
+
+
 def periodic(
     stop: threading.Event,
     interval_secs: float,
     action: callable,
+    initial_delay_secs: float = 0.0,
 ) -> None:
+    if stop.wait(initial_delay_secs):
+        return
     next_run = time.monotonic()
     while not stop.is_set():
         action()
@@ -87,16 +119,33 @@ def periodic(
         stop.wait(max(0.0, next_run - time.monotonic()))
 
 
-def dashboard_lane(stop: threading.Event, recorder: Recorder, host: str, port: int) -> None:
-    periodic(stop, 1.0, lambda: request(recorder, "dashboard", "GET", host, port, "/api/dashboard/overview"))
+def dashboard_lane(
+    stop: threading.Event,
+    recorder: Recorder,
+    host: str,
+    port: int,
+    client_index: int,
+) -> None:
+    periodic(
+        stop,
+        DASHBOARD_INTERVAL_SECS,
+        lambda: request(recorder, "dashboard", "GET", host, port, "/api/dashboard/overview"),
+        client_index * DASHBOARD_INTERVAL_SECS / DASHBOARD_CLIENTS,
+    )
 
 
-def business_lane(stop: threading.Event, recorder: Recorder, host: str, port: int) -> None:
+def business_lane(
+    stop: threading.Event,
+    recorder: Recorder,
+    host: str,
+    port: int,
+    access_token: str,
+) -> None:
     payload = json.dumps(
         {"query": "snapshot recovery comparison", "search_depth": "basic", "max_results": 1}
     ).encode()
     headers = {
-        "Authorization": "Bearer tvly-load-key",
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
     periodic(
@@ -167,16 +216,25 @@ def main() -> None:
 
     recorder = Recorder()
     stop = threading.Event()
+    access_token = create_test_credentials(args.host, args.port)
     threads = [
-        threading.Thread(target=dashboard_lane, args=(stop, recorder, args.host, args.port), daemon=True)
-        for _ in range(20)
+        threading.Thread(
+            target=dashboard_lane,
+            args=(stop, recorder, args.host, args.port, client_index),
+            daemon=True,
+        )
+        for client_index in range(DASHBOARD_CLIENTS)
     ]
     threads += [
         threading.Thread(target=sse_lane, args=(stop, recorder, args.host, args.port), daemon=True)
         for _ in range(20)
     ]
     threads += [
-        threading.Thread(target=business_lane, args=(stop, recorder, args.host, args.port), daemon=True),
+        threading.Thread(
+            target=business_lane,
+            args=(stop, recorder, args.host, args.port, access_token),
+            daemon=True,
+        ),
         threading.Thread(target=interrupted_ha_export, args=(stop, recorder, args.host, args.port), daemon=True),
         threading.Thread(target=trigger_ha_gc, args=(stop, recorder, args.host, args.port), daemon=True),
     ]
@@ -191,6 +249,8 @@ def main() -> None:
             thread.join(timeout=2)
     summary = recorder.summary()
     summary["durationSecs"] = args.duration_secs
+    summary["dashboardClients"] = DASHBOARD_CLIENTS
+    summary["dashboardIntervalSecs"] = DASHBOARD_INTERVAL_SECS
     summary["startedAt"] = int(started)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")

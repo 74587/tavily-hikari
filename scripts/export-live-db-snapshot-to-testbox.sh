@@ -408,7 +408,10 @@ CORE_SNAPSHOT_INTEGRITY="$(manifest_get core_snapshot_integrity)"
 SIDECAR_SNAPSHOT_INTEGRITY="$(manifest_get sidecar_snapshot_integrity)"
 
 REMOTE_AVAILABLE_BYTES="$(ssh -o BatchMode=yes "$TESTBOX_HOST" "df -B1 --output=avail '$REMOTE_DB_DIR' | tail -n1 | tr -d ' '")"
-REMOTE_REQUIRED_BYTES="$((CORE_SNAPSHOT_BYTES + SIDECAR_SNAPSHOT_BYTES + 1073741824))"
+# The comparison retains the immutable snapshot while one variant owns a
+# writable copy. Variants run sequentially, so reserve two database sets plus
+# bounded container and build overhead rather than three database sets.
+REMOTE_REQUIRED_BYTES="$(((CORE_SNAPSHOT_BYTES + SIDECAR_SNAPSHOT_BYTES) * 2 + 3 * 1073741824))"
 if (( REMOTE_AVAILABLE_BYTES < REMOTE_REQUIRED_BYTES )); then
   echo "insufficient testbox free space: available=${REMOTE_AVAILABLE_BYTES} required=${REMOTE_REQUIRED_BYTES}" >&2
   exit 2
