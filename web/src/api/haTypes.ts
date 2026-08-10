@@ -22,7 +22,7 @@ export interface HaChannelHealth {
   lastProgressAt: number | null
   lastDeferReason: string | null
   nextRetryAt: number | null
-  batchSize: number | null
+  batchSize?: number | null
   gcDebtMode: string
   gcObservedAt: number | null
   gcDeletedRowsPerMinute: number

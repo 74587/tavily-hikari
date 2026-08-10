@@ -1,3 +1,5 @@
+import type { HaChannelHealth } from './haTypes'
+
 type DemoHaState = {
   haStatus: {
     mode: string
@@ -61,27 +63,7 @@ type DemoHaState = {
       stale: boolean
       roleHint: 'standby_candidate' | 'observer'
       plannedCutoverEligible: boolean
-      channelHealth?: Array<{
-        channel: 'control' | 'billing' | 'runtime'
-        ackedSeq: number | null
-        highWatermark: number
-        ackLag: number | null
-        cursorState: 'healthy' | 'catching_up' | 'baseline_required' | 'expired_backlog'
-        retentionSecs: number
-        expiredBacklog: boolean
-        gcState: 'eligible' | 'idle' | 'draining' | 'deferred' | 'recovering' | 'stalled' | 'unknown' | 'stale'
-        oldestAgeSecs: number | null
-        lastProgressAt: number | null
-        lastDeferReason: string | null
-        nextRetryAt: number | null
-        batchSize: number | null
-        gcDebtMode: string
-        gcObservedAt: number | null
-        gcDeletedRowsPerMinute: number
-        gcRecoveryDeadlineAt: number | null
-        gcSloState: string
-        gcForegroundRps: number
-      }>
+      channelHealth?: HaChannelHealth[]
     }>
     plannedCutoverEligible: boolean
   }
