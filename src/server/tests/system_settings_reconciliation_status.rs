@@ -36,6 +36,14 @@ async fn admin_system_status_reports_reconciliation_diagnostic_timestamps() {
             "upstream_reconciliation_last_enqueue_error_at_v1",
             1_783_957_900_i64,
         ),
+        ("upstream_reconciliation_last_duration_ms_v1", 19_842_i64),
+        ("upstream_reconciliation_last_attempted_v1", 8_i64),
+        ("upstream_reconciliation_last_settled_v1", 5_i64),
+        (
+            "upstream_reconciliation_last_no_adjustment_v1",
+            3_i64,
+        ),
+        ("upstream_reconciliation_last_429_v1", 2_i64),
     ] {
         sqlx::query(
             r#"
@@ -161,6 +169,14 @@ async fn admin_system_status_reports_reconciliation_diagnostic_timestamps() {
         status_body["lastReconciliationEnqueueErrorAt"].as_i64(),
         Some(1_783_957_900)
     );
+    assert_eq!(status_body["reconciliationLastDurationMs"].as_i64(), Some(19_842));
+    assert_eq!(status_body["reconciliationLastAttempted"].as_i64(), Some(8));
+    assert_eq!(status_body["reconciliationLastSettled"].as_i64(), Some(5));
+    assert_eq!(
+        status_body["reconciliationLastNoAdjustment"].as_i64(),
+        Some(3)
+    );
+    assert_eq!(status_body["reconciliationLastUpstream429"].as_i64(), Some(2));
     assert_eq!(status_body["retryBuckets"]["upstream429"].as_i64(), Some(2));
     assert_eq!(
         status_body["retryBuckets"]["localUsageRateLimit"].as_i64(),

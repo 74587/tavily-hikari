@@ -9,6 +9,8 @@ type HaGcChannelStateRow = (
     i64,
     String,
     Option<i64>,
+    Option<i64>,
+    Option<i64>,
     f64,
     Option<i64>,
     String,
@@ -405,13 +407,15 @@ impl KeyStore {
             sqlx::query_as(
                 r#"SELECT last_progress_at, last_deleted_rows, last_defer_reason,
                           next_retry_at, batch_size, consecutive_no_progress,
-                          debt_mode, last_observed_at, deleted_rows_per_minute,
+                          debt_mode, last_observed_at, last_ingress_seq_delta,
+                          last_net_rows_delta_estimate, deleted_rows_per_minute,
                           recovery_deadline_at, slo_state, foreground_rps
                    FROM ha_outbox_gc_channel_state WHERE channel = ?"#,
             )
             .bind(channel.as_str())
             .fetch_optional(&mut *conn)
             .await?;
+        let gc_state_unknown = gc_state_row.is_none();
         let (
             last_progress_at,
             last_deleted_rows,
@@ -421,6 +425,8 @@ impl KeyStore {
             consecutive_no_progress,
             gc_debt_mode,
             gc_observed_at,
+            last_ingress_seq_delta,
+            last_net_rows_delta_estimate,
             gc_deleted_rows_per_minute,
             gc_recovery_deadline_at,
             gc_slo_state,
@@ -434,20 +440,26 @@ impl KeyStore {
             0,
             "unknown".to_string(),
             None,
+            None,
+            None,
             0.0,
             None,
             "unknown".to_string(),
             0,
         ));
         let now = self.backend_time.now_ts();
-        let gc_state = if consecutive_no_progress >= 3 {
+        let gc_state = if gc_state_unknown || gc_observed_at.is_none() {
+            "unknown"
+        } else if consecutive_no_progress >= 3 {
             "stalled"
+        } else if gc_debt_mode == "recovering" {
+            "recovering"
         } else if last_deleted_rows > 0 {
             "draining"
         } else if last_defer_reason.is_some() {
             "deferred"
         } else {
-            "idle"
+            "eligible"
         };
         let cursor_state = if expired_backlog {
             "expired_backlog"
@@ -476,6 +488,8 @@ impl KeyStore {
             batch_size,
             gc_debt_mode,
             gc_observed_at,
+            last_ingress_seq_delta,
+            last_net_rows_delta_estimate,
             gc_deleted_rows_per_minute,
             gc_recovery_deadline_at,
             gc_slo_state,

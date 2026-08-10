@@ -244,6 +244,7 @@ async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     assert_eq!(health.cursor_state, "catching_up");
     assert_eq!(health.retention_secs, 72 * 60 * 60);
     assert!(!health.expired_backlog);
+    assert_eq!(health.gc_state, "unknown");
 
     sqlx::query("DELETE FROM ha_outbox WHERE seq = 2")
         .execute(&pool)

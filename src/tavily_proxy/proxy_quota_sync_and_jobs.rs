@@ -92,13 +92,13 @@ impl ReconciliationOutcome {
 }
 
 
-fn should_emit_reconciliation_summary(now: i64) -> bool {
-    let mut previous = LAST_RECONCILIATION_SUMMARY_LOG_AT.load(Ordering::Relaxed);
+fn should_emit_reconciliation_summary_at(last_emitted_at: &AtomicI64, now: i64) -> bool {
+    let mut previous = last_emitted_at.load(Ordering::Relaxed);
     loop {
         if previous > 0 && now.saturating_sub(previous) < 60 {
             return false;
         }
-        match LAST_RECONCILIATION_SUMMARY_LOG_AT.compare_exchange(
+        match last_emitted_at.compare_exchange(
             previous,
             now,
             Ordering::Relaxed,
@@ -108,6 +108,10 @@ fn should_emit_reconciliation_summary(now: i64) -> bool {
             Err(observed) => previous = observed,
         }
     }
+}
+
+fn should_emit_reconciliation_summary(now: i64) -> bool {
+    should_emit_reconciliation_summary_at(&LAST_RECONCILIATION_SUMMARY_LOG_AT, now)
 }
 
 async fn await_reconciliation_post_process<T>(
@@ -252,6 +256,7 @@ impl TavilyProxy {
             reconciliation_last_duration_ms,
             reconciliation_last_attempted,
             reconciliation_last_settled,
+            reconciliation_last_no_adjustment,
             reconciliation_last_upstream_429,
             reconciliation_last_budget_exhausted,
         ) = self
@@ -327,6 +332,7 @@ impl TavilyProxy {
             reconciliation_last_duration_ms,
             reconciliation_last_attempted,
             reconciliation_last_settled,
+            reconciliation_last_no_adjustment,
             reconciliation_last_upstream_429,
             reconciliation_last_budget_exhausted,
             reconciliation_observation,
@@ -1753,6 +1759,7 @@ impl TavilyProxy {
                     _previous_duration_ms,
                     _previous_attempted,
                     _previous_settled,
+                    _previous_no_adjustment,
                     _previous_upstream_429,
                     previous_budget_exhausted,
                 ) = await_reconciliation_post_process(
@@ -1766,6 +1773,7 @@ impl TavilyProxy {
                         started_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
                         attempted_candidate_count,
                         settled,
+                        no_adjustment,
                         upstream_429_retry_windows,
                         budget_exhausted,
                     ),
@@ -1782,7 +1790,7 @@ impl TavilyProxy {
                         attempted_candidate_count,
                     );
                 } else if !budget_exhausted && previous_budget_exhausted {
-                    tracing::info!(
+                    tracing::warn!(
                         component = "reconciliation",
                         event = "budget_recovered",
                         job_type = "upstream_reconciliation",
@@ -1798,6 +1806,8 @@ impl TavilyProxy {
                         candidate_count,
                         attempted_candidate_count,
                         settled_count = settled,
+                        completed_count = completed,
+                        no_adjustment_count = no_adjustment,
                         rate_limited_429_count = upstream_429_retry_windows,
                         budget_exhausted,
                     );
@@ -1893,7 +1903,7 @@ impl TavilyProxy {
                         budget_exhausted,
                     );
                 } else if previous_local_backoff_level > 0 && local_backoff_level == 0 {
-                    tracing::info!(
+                    tracing::warn!(
                         component = "reconciliation",
                         event = "local_backoff_recovered",
                         job_type = "upstream_reconciliation",
@@ -1978,7 +1988,7 @@ impl TavilyProxy {
                         attempted_candidate_count,
                     );
                 } else if previous_backoff_level > 0 && backoff_level == 0 {
-                    tracing::info!(
+                    tracing::warn!(
                         component = "reconciliation",
                         event = "global_backoff_recovered",
                         job_type = "upstream_reconciliation",
@@ -2648,7 +2658,7 @@ impl TavilyProxy {
         duration_ms: i64,
     ) -> Result<(), ProxyError> {
         self.key_store
-            .record_upstream_reconciliation_run_stats(duration_ms, 0, 0, 0, true)
+            .record_upstream_reconciliation_run_stats(duration_ms, 0, 0, 0, 0, true)
             .await
     }
 
@@ -2758,7 +2768,20 @@ fn normalize_quota_sync_fetch_error(err: ProxyError) -> ProxyError {
 
 #[cfg(test)]
 mod reconciliation_engine_tests {
-    use super::{ReconciliationEngine, ReconciliationOutcome};
+    use std::sync::atomic::AtomicI64;
+
+    use super::{
+        ReconciliationEngine, ReconciliationOutcome, should_emit_reconciliation_summary_at,
+    };
+
+    #[test]
+    fn reconciliation_summary_logging_is_limited_to_one_per_minute() {
+        let last_emitted_at = AtomicI64::new(0);
+
+        assert!(should_emit_reconciliation_summary_at(&last_emitted_at, 1_000));
+        assert!(!should_emit_reconciliation_summary_at(&last_emitted_at, 1_059));
+        assert!(should_emit_reconciliation_summary_at(&last_emitted_at, 1_060));
+    }
 
     #[test]
     fn non_success_outcomes_do_not_clear_upstream_429_state() {

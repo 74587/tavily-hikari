@@ -217,6 +217,11 @@ const viewportOptions = {
     styles: { width: '390px', height: '640px' },
     type: 'mobile',
   },
+  '0393-admin-mobile': {
+    name: 'Admin mobile (393 x 852px)',
+    styles: { width: '393px', height: '852px' },
+    type: 'mobile',
+  },
   '0430-device-iphone-14-pro-max': {
     ...(INITIAL_VIEWPORTS.iphone14promax ?? INITIAL_VIEWPORTS.iphone12promax ?? {}),
     name: 'iPhone 14 Pro Max portrait (430px)',

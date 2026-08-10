@@ -534,6 +534,11 @@ async fn online_ha_gc_enters_recovery_after_low_pressure_window() {
     assert_eq!(channel.slo_state, "breached");
     assert_eq!(channel.slo_state_transition.as_deref(), Some("breached"));
     assert!(matches!(report.continuation_delay_secs, Some(1) | Some(30)));
+    let health = proxy
+        .ha_peer_channel_health(HaSyncChannel::Control, "recovery-observer")
+        .await
+        .expect("read recovery channel health");
+    assert_eq!(health.gc_state, "recovering");
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
@@ -798,6 +803,12 @@ async fn online_ha_gc_uses_a_short_continuation_while_a_large_debt_is_draining()
     assert_eq!(last_ingress_seq_delta, Some(50));
     assert_eq!(last_net_rows_delta_estimate, Some(-250));
     assert_eq!(total_deleted_rows, 1_300);
+    let health = recovered_proxy
+        .ha_peer_channel_health(HaSyncChannel::Control, "recovery-observer")
+        .await
+        .expect("project persisted GC deltas");
+    assert_eq!(health.last_ingress_seq_delta, Some(50));
+    assert_eq!(health.last_net_rows_delta_estimate, Some(-250));
     metrics_pool.close().await;
     drop(recovered_proxy);
     let _ = std::fs::remove_file(&db_path);

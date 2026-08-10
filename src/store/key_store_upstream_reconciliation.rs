@@ -748,7 +748,7 @@ impl KeyStore {
 
     pub(crate) async fn upstream_reconciliation_last_run_stats(
         &self,
-    ) -> Result<(Option<i64>, i64, i64, i64, bool), ProxyError> {
+    ) -> Result<(Option<i64>, i64, i64, i64, i64, bool), ProxyError> {
         Ok((
             self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_DURATION_MS_V1)
                 .await?,
@@ -756,6 +756,9 @@ impl KeyStore {
                 .await?
                 .unwrap_or(0),
             self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_SETTLED_V1)
+                .await?
+                .unwrap_or(0),
+            self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_NO_ADJUSTMENT_V1)
                 .await?
                 .unwrap_or(0),
             self.get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_429_V1)
@@ -773,12 +776,13 @@ impl KeyStore {
         duration_ms: i64,
         attempted: i64,
         settled: i64,
+        no_adjustment: i64,
         upstream_429: i64,
         budget_exhausted: bool,
     ) -> Result<(), ProxyError> {
         sqlx::query(
             r#"INSERT INTO meta (key, value) VALUES
-                   (?, ?), (?, ?), (?, ?), (?, ?), (?, ?)
+                   (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
         )
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_DURATION_MS_V1)
@@ -787,6 +791,8 @@ impl KeyStore {
         .bind(attempted.to_string())
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_SETTLED_V1)
         .bind(settled.to_string())
+        .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_NO_ADJUSTMENT_V1)
+        .bind(no_adjustment.to_string())
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_429_V1)
         .bind(upstream_429.to_string())
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_BUDGET_EXHAUSTED_V1)
@@ -2294,17 +2300,33 @@ impl KeyStore {
         )
         .await?;
         tx.commit().await?;
-        tracing::info!(
-            component = "reconciliation",
-            event = "shadow_adjustment_written",
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            job_type = "upstream_reconciliation",
-            settlement_key,
-            period_code = %candidate.period_code,
-            delta_credits = delta,
-            degraded = candidate.degraded,
+        Self::emit_shadow_adjustment_written_log(
+            started_at.elapsed().as_millis() as u64,
+            &settlement_key,
+            &candidate.period_code,
+            delta,
+            candidate.degraded,
         );
         Ok(true)
+    }
+
+    fn emit_shadow_adjustment_written_log(
+        elapsed_ms: u64,
+        settlement_key: &str,
+        period_code: &str,
+        delta_credits: i64,
+        degraded: bool,
+    ) {
+        tracing::debug!(
+            component = "reconciliation",
+            event = "shadow_adjustment_written",
+            elapsed_ms,
+            job_type = "upstream_reconciliation",
+            settlement_key,
+            period_code,
+            delta_credits,
+            degraded,
+        );
     }
 
     pub(crate) async fn recent_reconciliation_adjustments(

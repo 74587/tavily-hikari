@@ -505,6 +505,13 @@
   gap: 10px;
 }
 
+.ha-channel-health-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .ha-channel-health-row dl {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

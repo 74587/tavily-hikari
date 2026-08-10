@@ -104,6 +104,7 @@ function createUpstreamPrivacyStatus(diagnostics: ActivityDiagnostics): Upstream
     reconciliationLastDurationMs: 19_842,
     reconciliationLastAttempted: 20,
     reconciliationLastSettled: 0,
+    reconciliationLastNoAdjustment: 0,
     reconciliationLastUpstream429: 16,
     reconciliationLastBudgetExhausted: true,
     reconciliationObservation: {

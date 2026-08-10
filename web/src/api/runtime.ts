@@ -5,6 +5,7 @@ import {
 } from '../lib/mcpProbe'
 import type { TokenLogRequestKindOption } from '../tokenLogRequestKinds'
 import type { ClientIpHeaderValue } from './clientIp'
+import type { HaChannelHealth } from './haTypes'
 import type { RequestLogRetentionSettings } from './requestLogRetention'
 import type {
   AdminMcpSessionBindingsPage,
@@ -31,6 +32,8 @@ import {
   normalizeAdminUserTag,
   normalizeAdminUserTagList,
 } from './adminUserNormalization'
+
+export type { HaChannelHealth, HaGcState } from './haTypes'
 
 export interface Summary {
   total_requests: number
@@ -1464,9 +1467,9 @@ export interface HaPeerNode {
   lastSeenAt: number | null
   stale: boolean
   roleHint: 'standby_candidate' | 'observer'
-  plannedCutoverEligible: boolean; channelHealth?: HaChannelHealth[]
+  plannedCutoverEligible: boolean
+  channelHealth?: HaChannelHealth[]
 }
-export interface HaChannelHealth { channel: 'control' | 'billing' | 'runtime'; ackedSeq: number | null; highWatermark: number; ackLag: number | null; cursorState: 'healthy' | 'catching_up' | 'baseline_required' | 'expired_backlog' | string; retentionSecs: number; expiredBacklog: boolean; gcState: 'idle' | 'draining' | 'deferred' | 'stalled' | 'unknown' | string; oldestAgeSecs: number | null; lastProgressAt: number | null; lastDeferReason: string | null; nextRetryAt: number | null; batchSize: number; gcDebtMode: string; gcObservedAt: number | null; gcDeletedRowsPerMinute: number; gcRecoveryDeadlineAt: number | null; gcSloState: string; gcForegroundRps: number }
 
 export interface HaTimelineEvent {
   id: number

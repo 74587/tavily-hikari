@@ -7,7 +7,7 @@ import UpstreamPrivacyStatusModule from './UpstreamPrivacyStatusModule'
 import { translations } from '../i18n'
 
 describe('SystemStatusModule Storybook proofs', () => {
-  it('keeps the pending, blocked-session, compare, active, degraded, backoff, unknown, budget, empty, error, and gallery stories available', () => {
+  it('keeps the reconciliation state matrix and fallback stories available', () => {
     expect(meta).toMatchObject({
       title: 'Admin/Modules/SystemStatusModule',
     })
@@ -16,13 +16,19 @@ describe('SystemStatusModule Storybook proofs', () => {
     expect(systemStatusStories.BlockedBySessions).toMatchObject({})
     expect(systemStatusStories.CompareOnly).toMatchObject({})
     expect(systemStatusStories.Active).toMatchObject({})
+    expect(systemStatusStories.Healthy).toMatchObject({})
     expect(systemStatusStories.Degraded).toMatchObject({})
+    expect(systemStatusStories.LocalBackoff).toMatchObject({})
+    expect(systemStatusStories.UpstreamBackoff).toMatchObject({})
     expect(systemStatusStories.GlobalBackoff).toMatchObject({})
     expect(systemStatusStories.UnknownObservation).toMatchObject({})
     expect(systemStatusStories.BudgetExhausted).toMatchObject({})
+    expect(systemStatusStories.NoAdjustment).toMatchObject({})
     expect(systemStatusStories.EmptyState).toMatchObject({})
     expect(systemStatusStories.ErrorState).toMatchObject({})
     expect(systemStatusStories.LoadingState).toMatchObject({})
+    expect(systemStatusStories.Mobile393x852).toMatchObject({})
+    expect(systemStatusStories.MobileStateGallery).toMatchObject({})
     expect(systemStatusStories.Mobile).toMatchObject({})
     expect(systemStatusStories.Gallery).toMatchObject({})
     expect(systemStatusStories.InteractionContract).toMatchObject({})
@@ -38,6 +44,7 @@ describe('SystemStatusModule Storybook proofs', () => {
     expect(markup).toContain('对账落账模式')
     expect(markup).toContain('活跃 upstream_mcp session')
     expect(markup).toContain('最近对账运行')
+    expect(markup).toContain('最近对账结果')
     expect(markup).toContain('最近 shadow 调整')
     expect(markup).toContain('最近入队失败')
     expect(markup).toContain('重试原因分布')
@@ -61,12 +68,15 @@ describe('SystemStatusModule Storybook proofs', () => {
     expect(markup).toContain(translations.zh.admin.systemSettings.privacy.loadFailed)
   })
 
-  it('renders global reconciliation backoff as an actionable state', () => {
-    const args = { ...meta.args, ...systemStatusStories.GlobalBackoff.args }
-    const markup = renderToStaticMarkup(createElement(UpstreamPrivacyStatusModule, args))
+  it('renders local and upstream reconciliation backoff as distinct actionable states', () => {
+    const localArgs = { ...meta.args, ...systemStatusStories.LocalBackoff.args }
+    const upstreamArgs = { ...meta.args, ...systemStatusStories.UpstreamBackoff.args }
+    const localMarkup = renderToStaticMarkup(createElement(UpstreamPrivacyStatusModule, localArgs))
+    const upstreamMarkup = renderToStaticMarkup(createElement(UpstreamPrivacyStatusModule, upstreamArgs))
 
-    expect(markup).toContain('对账全局退避')
-    expect(markup).toContain('级别 1')
+    expect(localMarkup).toContain('对账本地退避')
+    expect(upstreamMarkup).toContain('对账上游退避')
+    expect(upstreamMarkup).toContain('级别 1')
   })
 
   it('renders reconciliation budget exhaustion with the last round aggregate', () => {
@@ -74,7 +84,16 @@ describe('SystemStatusModule Storybook proofs', () => {
     const markup = renderToStaticMarkup(createElement(UpstreamPrivacyStatusModule, args))
 
     expect(markup).toContain('20,000 ms')
-    expect(markup).toContain('20 / 0 / 16')
+    expect(markup).toContain('20 / 0 / 0 / 16')
+    expect(markup).toContain('预算耗尽')
     expect(markup).toContain('已耗尽')
+  })
+
+  it('renders no adjustment as a healthy non-error outcome', () => {
+    const args = { ...meta.args, ...systemStatusStories.NoAdjustment.args }
+    const markup = renderToStaticMarkup(createElement(UpstreamPrivacyStatusModule, args))
+
+    expect(markup).toContain('无需调整')
+    expect(markup).toContain('6 / 6 / 6 / 0')
   })
 })
