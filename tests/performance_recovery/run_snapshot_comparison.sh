@@ -338,6 +338,7 @@ for summary in (baseline, candidate):
     events = summary["load"]["events"]
     dashboard_clients = summary["load"].get("dashboardClients")
     dashboard_interval_secs = summary["load"].get("dashboardIntervalSecs")
+    dashboard_attempts = summary["load"].get("dashboardAttempts")
     if dashboard_clients != 20 or dashboard_interval_secs != 10.0:
         raise SystemExit(f"unexpected dashboard load shape for {summary['variant']}")
     diagnostic = summary["load"]["durationSecs"] <= 120
@@ -351,7 +352,7 @@ for summary in (baseline, candidate):
         summary["load"]["durationSecs"] * dashboard_clients / dashboard_interval_secs * dashboard_coverage
     )
     business_minimum = summary["load"]["durationSecs"] * business_per_second
-    if summary["load"]["dashboardRequests"] < dashboard_minimum:
+    if dashboard_attempts is None or dashboard_attempts < dashboard_minimum:
         raise SystemExit(f"insufficient dashboard coverage for {summary['variant']}")
     if statuses.get("sse:200", 0) < 20:
         raise SystemExit(f"insufficient SSE coverage for {summary['variant']}")

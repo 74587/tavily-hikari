@@ -20,6 +20,7 @@ class Recorder:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.dashboard_ms: list[float] = []
+        self.dashboard_attempts = 0
         self.statuses: Counter[str] = Counter()
         self.errors: Counter[str] = Counter()
         self.events: Counter[str] = Counter()
@@ -47,6 +48,7 @@ class Recorder:
                 else None
             )
             return {
+                "dashboardAttempts": self.dashboard_attempts,
                 "dashboardRequests": len(ordered),
                 "dashboardP95Ms": p95,
                 "dashboardMaxMs": max(ordered) if ordered else None,
@@ -67,6 +69,9 @@ def request(
     headers: dict[str, str] | None = None,
 ) -> None:
     started = time.monotonic()
+    if lane == "dashboard":
+        with recorder._lock:
+            recorder.dashboard_attempts += 1
     connection = http.client.HTTPConnection(host, port, timeout=10)
     try:
         connection.request(method, path, body=body, headers=headers or {})

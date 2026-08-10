@@ -1049,6 +1049,7 @@ async fn sse_dashboard(
     let state = state.clone();
 
     let stream = stream! {
+        let _dashboard_sse_subscription = subscribe_dashboard_sse();
         let mut last_sig: Option<SummarySig> = None;
         let mut last_log_id: Option<i64> = None;
         let mut last_snapshot_at: Option<tokio::time::Instant> = None;
