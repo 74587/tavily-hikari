@@ -557,6 +557,9 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                 let source_unavailable = source_health
                     .as_ref()
                     .is_some_and(|health| health.cursor_state == "unavailable");
+                let source_unknown = source_health
+                    .as_ref()
+                    .is_some_and(|health| health.cursor_state == "unknown");
                 let watermark_name = if state.ha.dual_active_enabled() {
                     format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
                 } else {
@@ -597,7 +600,10 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                         "unavailable"
                     } else if source_expired_backlog {
                         "expired_backlog"
-                    } else if source_health.is_none() || source_high_watermark.is_none() {
+                    } else if source_unknown
+                        || source_health.is_none()
+                        || source_high_watermark.is_none()
+                    {
                         // Older peers can answer successfully without the optional channel
                         // telemetry. Keep the probe result neutral during rolling upgrades.
                         "unknown"
