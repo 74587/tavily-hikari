@@ -3020,7 +3020,6 @@ fn spawn_forward_proxy_geo_refresh_scheduler(state: Arc<AppState>) -> tokio::tas
                     .await;
                 continue;
             }
-
             let sleep_secs = wait_secs.min(forward_proxy_geo_refresh_recheck_secs()) as u64;
             state
                 .proxy
@@ -3030,7 +3029,6 @@ fn spawn_forward_proxy_geo_refresh_scheduler(state: Arc<AppState>) -> tokio::tas
         }
     })
 }
-
 fn spawn_forward_proxy_maintenance_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
