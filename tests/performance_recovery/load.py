@@ -94,20 +94,28 @@ def request(
 
 
 def create_test_api_key(host: str, port: int) -> None:
-    connection = http.client.HTTPConnection(host, port, timeout=10)
-    try:
-        connection.request(
-            "POST",
-            "/api/keys",
-            body=json.dumps({"api_key": "tvly-load-key"}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        response = connection.getresponse()
-        response.read()
-        if response.status != 201:
-            raise RuntimeError(f"test API-key bootstrap failed: status={response.status}")
-    finally:
-        connection.close()
+    deadline = time.monotonic() + 60.0
+    while True:
+        connection = http.client.HTTPConnection(host, port, timeout=10)
+        try:
+            connection.request(
+                "POST",
+                "/api/keys",
+                body=json.dumps({"api_key": "tvly-load-key"}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            response.read()
+            if response.status == 201:
+                return
+            if response.status not in (500, 503) or time.monotonic() >= deadline:
+                raise RuntimeError(f"test API-key bootstrap failed: status={response.status}")
+        except (OSError, http.client.HTTPException, TimeoutError) as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("test API-key bootstrap did not become available") from error
+        finally:
+            connection.close()
+        time.sleep(0.5)
 
 
 def create_test_access_token(host: str, port: int) -> str:
