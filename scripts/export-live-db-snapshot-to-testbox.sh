@@ -13,6 +13,7 @@ Environment variables:
   SOURCE_HOST                 Defaults to 192.168.31.11
   SOURCE_SSH_TARGET           Defaults to SOURCE_HOST
   TESTBOX_HOST                Defaults to codex-testbox
+  TESTBOX_DIRECT_PULL         true/false, defaults to true; falls back to the local relay
   SOURCE_CONTAINER_NAME       Defaults to tavily-hikari
   SOURCE_CONTAINER_DB_DIR     Defaults to /srv/app/data
   SOURCE_HELPER_IMAGE         Defaults to python:3.12-alpine
@@ -47,6 +48,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_HOST="${SOURCE_HOST:-192.168.31.11}"
 SOURCE_SSH_TARGET="${SOURCE_SSH_TARGET:-$SOURCE_HOST}"
 TESTBOX_HOST="${TESTBOX_HOST:-codex-testbox}"
+TESTBOX_DIRECT_PULL="${TESTBOX_DIRECT_PULL:-true}"
 SOURCE_CONTAINER_NAME="${SOURCE_CONTAINER_NAME:-tavily-hikari}"
 SOURCE_CONTAINER_DB_DIR="${SOURCE_CONTAINER_DB_DIR:-/srv/app/data}"
 SOURCE_HELPER_IMAGE="${SOURCE_HELPER_IMAGE:-python:3.12-alpine}"
@@ -463,10 +465,23 @@ fi
 CORE_COMPRESSED_NAME="${SOURCE_CORE_DB_NAME}.zst"
 SIDECAR_COMPRESSED_NAME="${SOURCE_OBSERVABILITY_DB_NAME}.zst"
 printf 'Streaming compressed snapshot set to codex-testbox ...\n'
-ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$CORE_COMPRESSED_SNAPSHOT_PATH_REMOTE'" \
-  | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$CORE_COMPRESSED_NAME'; chmod 600 '$REMOTE_DB_DIR/$CORE_COMPRESSED_NAME'"
-ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$SIDECAR_COMPRESSED_SNAPSHOT_PATH_REMOTE'" \
-  | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$SIDECAR_COMPRESSED_NAME'; chmod 600 '$REMOTE_DB_DIR/$SIDECAR_COMPRESSED_NAME'"
+if [[ "$TESTBOX_DIRECT_PULL" == true ]] && ssh -A -o BatchMode=yes "$TESTBOX_HOST" \
+  "ssh -o BatchMode=yes -o ConnectTimeout=5 '$SOURCE_SSH_TARGET' true"; then
+  printf 'Using direct testbox pull from source staging ...\n'
+  for snapshot_path in \
+    "$CORE_COMPRESSED_SNAPSHOT_PATH_REMOTE" \
+    "$SIDECAR_COMPRESSED_SNAPSHOT_PATH_REMOTE"; do
+    snapshot_name="$(basename "$snapshot_path")"
+    ssh -A -o BatchMode=yes "$TESTBOX_HOST" \
+      "umask 077; rsync --partial --inplace -e 'ssh -o BatchMode=yes -o ConnectTimeout=5' '$SOURCE_SSH_TARGET:$snapshot_path' '$REMOTE_DB_DIR/$snapshot_name'; chmod 600 '$REMOTE_DB_DIR/$snapshot_name'"
+  done
+else
+  printf 'Direct testbox pull unavailable; using local SSH relay ...\n'
+  ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$CORE_COMPRESSED_SNAPSHOT_PATH_REMOTE'" \
+    | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$CORE_COMPRESSED_NAME'; chmod 600 '$REMOTE_DB_DIR/$CORE_COMPRESSED_NAME'"
+  ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$SIDECAR_COMPRESSED_SNAPSHOT_PATH_REMOTE'" \
+    | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$SIDECAR_COMPRESSED_NAME'; chmod 600 '$REMOTE_DB_DIR/$SIDECAR_COMPRESSED_NAME'"
+fi
 
 # shellcheck disable=SC2087 # Manifest values are expanded by this local script.
 ssh -o BatchMode=yes "$TESTBOX_HOST" "cat > '$REMOTE_DB_DIR/manifest.env'" <<EOF
