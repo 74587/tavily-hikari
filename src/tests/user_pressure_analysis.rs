@@ -1127,7 +1127,9 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
     .expect("proxy created");
     let now = manual_clock.now_ts();
 
-    assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
+    // Seed the first replay batch before the background task can drain it.
+    // The concurrent producer below then exercises the live handoff rather
+    // than relying on an unlocked test-only append racing the task itself.
     for index in 0..250_i64 {
         proxy
             .inject_server_pressure_buffered_event_for_test(
@@ -1137,6 +1139,19 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
             )
             .await;
     }
+    assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !proxy.server_pressure_rebuild_is_active_for_test() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("rebuild should become active before the live producer starts");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        proxy.server_pressure_rebuild_is_active_for_test(),
+        "the initial tail should keep the rebuild active while live events arrive"
+    );
     let producer = {
         let proxy = proxy.clone();
         tokio::spawn(async move {
