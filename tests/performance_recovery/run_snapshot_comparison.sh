@@ -315,15 +315,15 @@ test "$(sha256sum "$SIDECAR_COMPRESSED_DB" | awk '{print $1}')" = "$SIDECAR_COMP
 run_variant baseline "$BASELINE_REPO"
 run_variant candidate "$CANDIDATE_REPO"
 
-# Keep failed-gate diagnosis bounded and non-sensitive: load summaries plus
-# startup/schema event names are retained long enough to identify warm-restart
-# regressions, then the caller removes the exact run directory.
+# Keep failed-gate diagnosis bounded and non-sensitive. Stable event and
+# operation fields identify the writer owner without exposing SQL or payloads;
+# the caller removes the exact run directory after printing this tail.
 for variant in baseline candidate; do
     echo "--- ${variant} summary ---"
     cat "$ARTIFACTS_DIR/$variant/summary.json"
     echo "--- ${variant} startup events ---"
-    grep -E 'startup_|schema_migration|schema migration|database is locked|nested transaction' \
-        "$ARTIFACTS_DIR/$variant/compose.log" | tail -80 || true
+    grep -E 'startup_|schema_migration|schema migration|database is locked|nested transaction|sqlite_workload_window|slow_slice|ha_outbox_gc|upstream_reconciliation|maintenance_dequeue' \
+        "$ARTIFACTS_DIR/$variant/compose.log" | tail -160 || true
 done
 
 python3 - "$ARTIFACTS_DIR" <<'PY'
