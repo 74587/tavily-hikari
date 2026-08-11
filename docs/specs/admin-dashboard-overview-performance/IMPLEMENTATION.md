@@ -15,14 +15,19 @@
   `5m window` label for rolling `60m` business-call cap alerts.
 - Dashboard freshness probes and rebuilds are throttled to a 10-second minimum interval while the
   2-second SSE loop reuses the in-memory generation and shared singleflight last-good snapshot.
+- Warm HTTP and SSE reads never wait for freshness SQL or payload reconstruction. The first reader
+  after expiry claims one background refresh and immediately serves the immutable last-good
+  snapshot; concurrent readers reuse it, and only a cold start without last-good waits for a build.
+- SSE signature polling consumes the same shared snapshot loader and no longer runs an independent
+  freshness probe, preventing subscriber count from multiplying SQLite reads.
 - Alert candidate indexing is installed by an idempotent post-ready maintenance job rather than the
   startup schema path.
 - The existing dashboard contract remains a bounded 10-second rebuild budget with a 60-second
   unchanged freshness probe. This round changes HA/reconciliation status surfaces only and does not
   reuse older dashboard screenshots as PR evidence.
 
-- This round preserves the dashboard's 2-second SSE generation check and shared last-good snapshot;
-  no additional freshness SQL or rebuild trigger was added while HA/reconciliation diagnostics were extended.
+- The dashboard's 2-second SSE generation check and shared last-good snapshot remain the only warm
+  read path; HA/reconciliation diagnostics do not add freshness SQL or rebuild triggers.
 - The final reconciliation/HA review kept the dashboard read contract unchanged: new diagnostic
   state is served through the existing snapshot payload and does not add a freshness probe or rebuild.
 

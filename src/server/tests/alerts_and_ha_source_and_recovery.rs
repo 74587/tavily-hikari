@@ -801,9 +801,14 @@ async fn compute_signatures_tracks_recent_alert_summary_changes() {
         .bind(&token.id)
         .bind(now)
         .execute(&pool)
-        .await
-        .expect("insert recent alert auth token log");
+    .await
+    .expect("insert recent alert auth token log");
 
+    expire_dashboard_overview_freshness_probe(&state).await;
+    let _ = compute_signatures(&state)
+        .await
+        .expect("serve last-good signatures while alerts refresh");
+    let _ = wait_for_dashboard_overview_refresh(&state).await;
     let (after_sig, _) = compute_signatures(&state)
         .await
         .expect("compute signatures after alerts");

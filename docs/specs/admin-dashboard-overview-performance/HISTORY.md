@@ -49,6 +49,8 @@
 - 2026-07-07: 修正默认流量趋势绝对柱状图窗口为 24 个完整小时加当前未满小时，共 25 个小时槽，并用灰底与竖向虚线标识当前未满小时。
 - 2026-08-02: 确认本轮不扩大 dashboard 重建范围；现有 10 秒最短刷新与 60 秒无变化 freshness probe
   保持不变，旧 dashboard 截图不作为本轮 PR 视觉证据。
+- 2026-08-11: 生产形状回放确认 warm freshness probe 会同步阻塞 HTTP，且多个 SSE 订阅会复制 SQL；
+  将 warm probe/rebuild 收敛为后台 singleflight，所有 warm 读取立即返回 last-good，SSE 签名只消费共享快照。
 
 ## Legacy Identity
 

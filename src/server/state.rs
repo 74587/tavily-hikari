@@ -61,6 +61,8 @@ struct DashboardOverviewCacheState {
     notify: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     build_count: usize,
+    #[cfg(test)]
+    freshness_probe_count: usize,
 }
 
 impl Default for DashboardOverviewCacheState {
@@ -74,6 +76,8 @@ impl Default for DashboardOverviewCacheState {
             notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             build_count: 0,
+            #[cfg(test)]
+            freshness_probe_count: 0,
         }
     }
 }

@@ -93,8 +93,9 @@
 - 流量趋势图默认绝对柱状图必须使用滚动 25 个小时槽：24 个完整小时加当前未满小时，并以当前可见小时桶为右边界；前 4 个数据点不得再固定为自然日今日起点。
 - 绝对“调用结果”和“调用类型”图必须用灰色 plot-area 背景标识最后一个当前未满小时槽，并在前一小时与当前小时之间绘制竖向虚线分界；该视觉标识不得改变 payload、数值聚合、series 顺序或 tooltip 数据。
 - SSE 正常可用时，dashboard 活态增量更新只依赖 `snapshot`；不得再保留独立的 30 秒 dashboard signals polling。
-- SSE `compute_signatures()` 不得再调用会触发 flush-on-read 的 `summary_windows` / month-series
-  热路径；它只能消费 cheap freshness contract 与最近一次 shared snapshot freshness。
+- SSE `compute_signatures()` 不得直接执行 freshness SQL，也不得调用会触发 flush-on-read 的
+  `summary_windows` / month-series 热路径；它只能消费 shared snapshot freshness，并通过同一个
+  singleflight loader 请求后台刷新。
 - SSE 断线或 degraded 后，fallback polling 只能刷新 shell data + overview，不得回退到 `loadData()` 与 `loadDashboardOverview()` 双通路并发。
 - 手动刷新 dashboard 时，也只能触发 shell data + overview 的一次刷新。
 - `summary_windows` 与 `hourlyRequestWindow` 必须在日志写入的同一事务路径内保持近实时更新；不得依赖单独的异步 materialize job 才能看到当前小时变化。
@@ -108,6 +109,8 @@
   rebuild 在业务变化后最短间隔为 10 秒。
 - HTTP 与 SSE 共用同一个 singleflight snapshot。并发刷新、刷新超时或可选数据源失败时优先返回
   last-good；只有没有 last-good 的冷启动允许一次有界同步构建。
+- warm cache 到期后，第一个 HTTP/SSE 读取也必须立即返回 last-good；freshness probe 与 payload rebuild
+  由唯一后台 owner 完成，下一次 SSE tick 或 HTTP 读取再观察新 snapshot。
 - 无业务变化时最多每 60 秒执行一次安全 freshness probe，响应结构与 SSE 事件结构保持不变。
 - recent-alert 候选读取使用 ready 后后台创建的 partial time index；索引维护不得阻塞服务 ready。
 - 本轮 HA/对账状态扩展不改变 dashboard 的 10 秒最短重建和 60 秒无变化 probe 合同；状态模块
