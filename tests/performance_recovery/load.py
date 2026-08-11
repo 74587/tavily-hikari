@@ -14,6 +14,8 @@ from pathlib import Path
 
 DASHBOARD_CLIENTS = 20
 DASHBOARD_INTERVAL_SECS = 10.0
+BUSINESS_CLIENTS = 5
+BUSINESS_INTERVAL_SECS = 1.0
 
 
 class Recorder:
@@ -51,6 +53,8 @@ class Recorder:
             return {
                 "dashboardAttempts": self.dashboard_attempts,
                 "businessAttempts": self.business_attempts,
+                "businessClients": BUSINESS_CLIENTS,
+                "businessIntervalSecs": BUSINESS_INTERVAL_SECS,
                 "dashboardRequests": len(ordered),
                 "dashboardP95Ms": p95,
                 "dashboardMaxMs": max(ordered) if ordered else None,
@@ -188,7 +192,7 @@ def business_lane(
     }
     periodic(
         stop,
-        0.2,
+        BUSINESS_INTERVAL_SECS,
         lambda: request(recorder, "business", "POST", host, port, "/api/tavily/search", payload, headers),
     )
 
@@ -269,11 +273,14 @@ def main() -> None:
         for _ in range(20)
     ]
     threads += [
-        threading.Thread(
-            target=business_lane,
-            args=(stop, recorder, args.host, args.port, access_token),
-            daemon=True,
-        ),
+        *[
+            threading.Thread(
+                target=business_lane,
+                args=(stop, recorder, args.host, args.port, access_token),
+                daemon=True,
+            )
+            for _ in range(BUSINESS_CLIENTS)
+        ],
         threading.Thread(target=interrupted_ha_export, args=(stop, recorder, args.host, args.port), daemon=True),
         threading.Thread(target=trigger_ha_gc, args=(stop, recorder, args.host, args.port), daemon=True),
     ]

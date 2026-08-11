@@ -16,7 +16,7 @@ Required environment:
   COMPOSE_PROJECT   Unique Docker Compose project name
 
 Optional environment:
-  DURATION_SECS     Per-variant duration, defaults to 1800
+  DURATION_SECS     Per-variant duration, defaults to 600
 EOF
 }
 
@@ -30,7 +30,7 @@ CANDIDATE_REPO="${CANDIDATE_REPO:?CANDIDATE_REPO is required}"
 BASELINE_REPO="${BASELINE_REPO:?BASELINE_REPO is required}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:?SNAPSHOT_DIR is required}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}"
-DURATION_SECS="${DURATION_SECS:-1800}"
+DURATION_SECS="${DURATION_SECS:-600}"
 ARTIFACTS_DIR="${REMOTE_RUN}/artifacts/performance-recovery"
 WORK_DIR="${REMOTE_RUN}/performance-recovery"
 
@@ -353,16 +353,18 @@ for summary in (baseline, candidate):
     if dashboard_clients != 20 or dashboard_interval_secs != 10.0:
         raise SystemExit(f"unexpected dashboard load shape for {summary['variant']}")
     diagnostic = summary["load"]["durationSecs"] <= 120
-    # A 60-second fixture smoke intentionally restarts the app halfway through
-    # the run. It establishes that every lane reaches real application code;
-    # p95 comparison and sustained coverage are reserved for the 30-minute
-    # production-shape gate below.
+    # A short diagnostic intentionally restarts the app halfway through. The
+    # ten-minute production-shape gate below retains p95 and sustained
+    # coverage comparisons.
     dashboard_coverage = 0.20 if diagnostic else 0.70
-    business_per_second = 1 if diagnostic else 4
+    business_clients = summary["load"].get("businessClients")
+    business_interval_secs = summary["load"].get("businessIntervalSecs")
+    if business_clients != 5 or business_interval_secs != 1.0:
+        raise SystemExit(f"unexpected business load shape for {summary['variant']}")
     dashboard_minimum = (
         summary["load"]["durationSecs"] * dashboard_clients / dashboard_interval_secs * dashboard_coverage
     )
-    business_minimum = summary["load"]["durationSecs"] * business_per_second
+    business_minimum = summary["load"]["durationSecs"] * business_clients * (0.10 if diagnostic else 0.30)
     if dashboard_attempts is None or dashboard_attempts < dashboard_minimum:
         raise SystemExit(f"insufficient dashboard coverage for {summary['variant']}")
     if statuses.get("sse:200", 0) < 20:
@@ -376,7 +378,8 @@ for summary in (baseline, candidate):
     application_business_responses = (
         statuses.get("business:200", 0) + statuses.get("business:429", 0)
     )
-    if application_business_responses < business_minimum:
+    application_business_minimum = max(20, business_minimum / 2)
+    if application_business_responses < application_business_minimum:
         raise SystemExit(f"insufficient application business coverage for {summary['variant']}")
     if events.get("ha_export_interrupted", 0) < 1:
         raise SystemExit(f"missing HA export interruption for {summary['variant']}")

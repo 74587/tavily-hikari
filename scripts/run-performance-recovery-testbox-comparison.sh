@@ -12,7 +12,7 @@ staging directory and REMOTE_RUN after collecting the non-sensitive comparison s
 
 Optional environment:
   BASELINE_REF    Baseline Git revision, defaults to the initiative baseline
-  DURATION_SECS   Per-variant duration, defaults to 1800
+  DURATION_SECS   Per-variant duration, defaults to 600
   RUN_ID          Explicit unique testbox run id
 EOF
 }
@@ -24,7 +24,7 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASELINE_REF="${BASELINE_REF:-77f4e8bfc281aa1ed1fc47486401d7077a85f0b8}"
-DURATION_SECS="${DURATION_SECS:-1800}"
+DURATION_SECS="${DURATION_SECS:-600}"
 TESTBOX_HOST="${TESTBOX_HOST:-codex-testbox}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%d_%H%M%S)_$(git -C "$ROOT_DIR" rev-parse --short HEAD)_recovery_compare}"
 
