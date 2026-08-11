@@ -351,6 +351,10 @@ baseline_business_responses = (
     baseline["load"]["statuses"].get("business:200", 0)
     + baseline["load"]["statuses"].get("business:429", 0)
 )
+candidate_business_responses = (
+    candidate["load"]["statuses"].get("business:200", 0)
+    + candidate["load"]["statuses"].get("business:429", 0)
+)
 diagnostic = baseline["load"]["durationSecs"] <= 120
 baseline_business_minimum = (
     baseline["load"]["durationSecs"]
@@ -450,7 +454,19 @@ if not diagnostic:
         )
     else:
         assert_not_worse("RSS P95", baseline["rssP95KiB"], candidate["rssP95KiB"])
-    if candidate["sqliteLockErrors"] > baseline["sqliteLockErrors"] * 1.10 + 1:
+    if baseline_business_red:
+        # A red baseline never reached the writer often enough for raw lock
+        # counts to be comparable. The candidate still has a strict recovered
+        # transient-lock rate cap under the required five-rps workload.
+        candidate_lock_limit = max(5, (candidate_business_responses + 199) // 200)
+        if candidate["sqliteLockErrors"] > candidate_lock_limit:
+            raise SystemExit(
+                "candidate transient SQLite lock rate exceeded 0.5%: "
+                f"locks={candidate['sqliteLockErrors']}, "
+                f"responses={candidate_business_responses}, "
+                f"limit={candidate_lock_limit}"
+            )
+    elif candidate["sqliteLockErrors"] > baseline["sqliteLockErrors"] * 1.10 + 1:
         raise SystemExit(
             "candidate SQLite lock errors regressed: "
             f"baseline={baseline['sqliteLockErrors']}, candidate={candidate['sqliteLockErrors']}"
@@ -469,6 +485,12 @@ result = {
     "baseline_dashboard_red": baseline_dashboard_red,
     "baseline_business_red": baseline_business_red,
     "rss_p95_comparable": not baseline_business_red,
+    "sqlite_lock_rate_comparable": not baseline_business_red,
+    "candidate_transient_sqlite_lock_rate": (
+        candidate["sqliteLockErrors"] / candidate_business_responses
+        if candidate_business_responses
+        else None
+    ),
     "result": "passed_with_baseline_red" if baseline_red else "passed",
 }
 (artifacts / "comparison.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
