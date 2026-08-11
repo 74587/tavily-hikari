@@ -770,6 +770,7 @@ pub struct TavilyProxy {
 #[derive(Debug, Default)]
 struct ServerPressureTailReplayTestGate {
     paused: AtomicBool,
+    fail_next_replay_upsert: AtomicBool,
     entered: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }

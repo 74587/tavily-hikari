@@ -1213,10 +1213,7 @@ async fn analysis_pressure_rebuild_releases_phase_after_tail_replay_error() {
     .await
     .expect("rebuild should enter the tail replay before forcing its write failure");
 
-    sqlx::query("DROP TABLE observability.server_pressure_buckets")
-        .execute(&proxy.key_store.pool)
-        .await
-        .expect("drop pressure buckets to make tail replay fail");
+    proxy.fail_next_server_pressure_tail_replay_upsert_for_test();
     proxy.resume_server_pressure_tail_replay_for_test();
 
     tokio::time::timeout(Duration::from_secs(2), async {

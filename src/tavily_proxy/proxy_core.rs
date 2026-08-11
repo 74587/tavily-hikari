@@ -1073,6 +1073,13 @@ impl TavilyProxy {
     }
 
     #[cfg(test)]
+    pub(crate) fn fail_next_server_pressure_tail_replay_upsert_for_test(&self) {
+        self.server_pressure_tail_replay_test_gate
+            .fail_next_replay_upsert
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
     async fn pause_server_pressure_tail_replay_for_test_if_requested(&self) {
         if !self
             .server_pressure_tail_replay_test_gate
@@ -1208,14 +1215,30 @@ impl TavilyProxy {
                                     .await;
                                 return;
                             }
-                            if let Err(err) = proxy
-                                .key_store
-                                .upsert_server_pressure_event(
-                                    event.created_at,
-                                    &event.result_status,
-                                )
-                                .await
+                            #[cfg(test)]
+                            let replay_result = if proxy
+                                .server_pressure_tail_replay_test_gate
+                                .fail_next_replay_upsert
+                                .swap(false, Ordering::SeqCst)
                             {
+                                Err(ProxyError::Other(
+                                    "forced server pressure tail replay failure".to_string(),
+                                ))
+                            } else {
+                                proxy
+                                    .key_store
+                                    .upsert_server_pressure_event(
+                                        event.created_at,
+                                        &event.result_status,
+                                    )
+                                    .await
+                            };
+                            #[cfg(not(test))]
+                            let replay_result = proxy
+                                .key_store
+                                .upsert_server_pressure_event(event.created_at, &event.result_status)
+                                .await;
+                            if let Err(err) = replay_result {
                                 proxy
                                     .stop_server_pressure_rebuild_generation(
                                         generation,
