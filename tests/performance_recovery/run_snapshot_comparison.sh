@@ -346,6 +346,25 @@ def assert_not_worse(metric, base, cand):
 
 baseline_dashboard_successes = baseline["load"]["statuses"].get("dashboard:200", 0)
 baseline_dashboard_clients = baseline["load"].get("dashboardClients", 0)
+baseline_business_attempts = baseline["load"].get("businessAttempts", 0)
+baseline_business_responses = (
+    baseline["load"]["statuses"].get("business:200", 0)
+    + baseline["load"]["statuses"].get("business:429", 0)
+)
+diagnostic = baseline["load"]["durationSecs"] <= 120
+baseline_business_minimum = (
+    baseline["load"]["durationSecs"]
+    * baseline["load"].get("businessClients", 0)
+    * (0.10 if diagnostic else 0.30)
+)
+baseline_application_business_minimum = max(20, baseline_business_minimum / 2)
+baseline_dashboard_red = (
+    not diagnostic and baseline_dashboard_successes < baseline_dashboard_clients
+)
+baseline_business_red = not diagnostic and (
+    baseline_business_attempts < baseline_business_minimum
+    or baseline_business_responses < baseline_application_business_minimum
+)
 
 for summary in (baseline, candidate):
     statuses = summary["load"]["statuses"]
@@ -385,7 +404,12 @@ for summary in (baseline, candidate):
     if statuses.get("sse:200", 0) < 20:
         raise SystemExit(f"insufficient SSE coverage for {summary['variant']}")
     business_attempts = summary["load"].get("businessAttempts", 0)
-    if business_attempts < business_minimum:
+    required_business_attempts = (
+        business_minimum
+        if summary["variant"] == "candidate" or not baseline_business_red
+        else 1
+    )
+    if business_attempts < required_business_attempts:
         raise SystemExit(f"insufficient business coverage for {summary['variant']}")
     # 429 is an application response, not a transport failure. Count it as
     # reached application code while keeping HTTP 5xx and connection errors
@@ -394,22 +418,38 @@ for summary in (baseline, candidate):
         statuses.get("business:200", 0) + statuses.get("business:429", 0)
     )
     application_business_minimum = max(20, business_minimum / 2)
-    if application_business_responses < application_business_minimum:
+    required_application_business_responses = (
+        max(application_business_minimum, baseline_business_responses)
+        if summary["variant"] == "candidate"
+        else (application_business_minimum if not baseline_business_red else 1)
+    )
+    if application_business_responses < required_application_business_responses:
         raise SystemExit(f"insufficient application business coverage for {summary['variant']}")
     if events.get("ha_export_interrupted", 0) < 1:
         raise SystemExit(f"missing HA export interruption for {summary['variant']}")
 
-diagnostic = baseline["load"]["durationSecs"] <= 120
-baseline_red = not diagnostic and baseline_dashboard_successes < baseline_dashboard_clients
+baseline_red = baseline_dashboard_red or baseline_business_red
 if baseline_red:
+    reasons = []
+    if baseline_dashboard_red:
+        reasons.append("dashboard")
+    if baseline_business_red:
+        reasons.append("business")
     print(
-        "baseline is already below full dashboard coverage; "
-        f"candidate must retain at least {baseline_dashboard_successes} successful samples",
+        "baseline is already below required production-shaped coverage for "
+        f"{','.join(reasons)}; candidate retains its absolute coverage gates",
         file=sys.stderr,
     )
 if not diagnostic:
     assert_not_worse("dashboard p95", p95(baseline), p95(candidate))
-    assert_not_worse("RSS P95", baseline["rssP95KiB"], candidate["rssP95KiB"])
+    if baseline_business_red:
+        print(
+            "RSS P95 comparison is non-comparable because the baseline did not "
+            "process the required business workload; retaining both raw values",
+            file=sys.stderr,
+        )
+    else:
+        assert_not_worse("RSS P95", baseline["rssP95KiB"], candidate["rssP95KiB"])
     if candidate["sqliteLockErrors"] > baseline["sqliteLockErrors"] * 1.10 + 1:
         raise SystemExit(
             "candidate SQLite lock errors regressed: "
@@ -426,7 +466,9 @@ if candidate["nestedTransactionErrors"]:
 result = {
     "baseline": baseline,
     "candidate": candidate,
-    "baseline_dashboard_red": baseline_red,
+    "baseline_dashboard_red": baseline_dashboard_red,
+    "baseline_business_red": baseline_business_red,
+    "rss_p95_comparable": not baseline_business_red,
     "result": "passed_with_baseline_red" if baseline_red else "passed",
 }
 (artifacts / "comparison.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

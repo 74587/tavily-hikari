@@ -1,5 +1,141 @@
 use super::upstream_reconciliation::{local_ts, reconciliation_test_db_path};
 use super::*;
+use axum::{Json, Router, routing::get};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
+use tokio::net::TcpListener;
+
+#[tokio::test]
+async fn reconciliation_research_sweep_does_not_hold_an_empty_main_run() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-research-budget"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    settings.upstream_precise_reconciliation_enabled = false;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("save reconciliation settings");
+    let key_id = proxy
+        .add_or_undelete_key("tvly-reconciliation-research-budget")
+        .await
+        .expect("create reconciliation key");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject, period_start, period_end,
+            request_count, first_used_at, last_used_at, updated_at, settlement_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("research-budget-token")
+    .bind(&key_id)
+    .bind("2026-07-15/R1")
+    .bind("project-research-budget")
+    .bind("token:research-budget-token")
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .bind("shadow")
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert research usage");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_research (
+            request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+        "#,
+    )
+    .bind("research-budget-slow")
+    .bind("research-budget-token")
+    .bind(&key_id)
+    .bind("2026-07-15/R1")
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert pending research");
+    sqlx::query(
+        r#"
+        UPDATE upstream_reconciliation_work
+        SET completed_generation = work_generation
+        WHERE token_id = 'research-budget-token' AND period_code = '2026-07-15/R1'
+        "#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("complete main work before research-only run");
+
+    let research_started = Arc::new(AtomicBool::new(false));
+    let research_started_for_route = Arc::clone(&research_started);
+    let app = Router::new().route(
+        "/research/research-budget-slow",
+        get(move || {
+            let research_started = Arc::clone(&research_started_for_route);
+            async move {
+                research_started.store(true, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Json(serde_json::json!({ "status": "completed" }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind research upstream");
+    let addr = listener
+        .local_addr()
+        .expect("read research upstream address");
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .expect("serve research upstream");
+    });
+
+    let started_at = std::time::Instant::now();
+    let settled = proxy
+        .run_upstream_reconciliation_once(&format!("http://{addr}"))
+        .await
+        .expect("run reconciliation with research-only work");
+    assert_eq!(settled, 0);
+    assert!(research_started.load(Ordering::SeqCst));
+    assert!(
+        started_at.elapsed() < Duration::from_secs(5),
+        "a slow research probe must not consume the 20-second main settlement budget"
+    );
+    let (_, attempted, _, _, _, budget_exhausted) = proxy
+        .key_store
+        .upstream_reconciliation_last_run_stats()
+        .await
+        .expect("read reconciliation observation");
+    assert_eq!(attempted, 0);
+    assert!(
+        !budget_exhausted,
+        "research's independent budget must not report primary local pressure"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
 
 #[tokio::test]
 async fn reconciliation_projection_preserves_global_min_across_backfill_pages() {

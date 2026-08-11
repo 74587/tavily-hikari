@@ -533,7 +533,7 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
         .route(
             "/research/research-runtime-marker",
             get(|| async {
-                tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 Json(serde_json::json!({ "status": "completed" }))
             }),
         );

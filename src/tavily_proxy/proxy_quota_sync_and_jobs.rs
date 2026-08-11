@@ -142,6 +142,10 @@ impl TavilyProxy {
     const RECONCILIATION_POST_PROCESS_HEADROOM_SECS: u64 = 2;
     const RECONCILIATION_RETRY_BOOKKEEPING_HEADROOM_SECS: u64 = 2;
     const RECONCILIATION_OUTER_TIMEOUT_MARGIN_SECS: u64 = 1;
+    // Research records are observability follow-up, not settlement work. Keep
+    // them bounded even when the main durable projection is empty so a slow
+    // remote terminal probe cannot occupy the maintenance worker's full run.
+    const RECONCILIATION_RESEARCH_SWEEP_BUDGET_SECS: u64 = 2;
     const RESEARCH_SWEEP_LIMIT: usize = 20;
     const RESEARCH_SWEEP_PER_KEY_LIMIT: usize = 4;
 
@@ -1701,12 +1705,16 @@ impl TavilyProxy {
             research_skipped_cooldown_count,
             research_budget_exhausted,
         ) = if result.is_ok() {
+            let research_deadline = remote_request_deadline.min(
+                std::time::Instant::now()
+                    + std::time::Duration::from_secs(Self::RECONCILIATION_RESEARCH_SWEEP_BUDGET_SECS),
+            );
             match self
                 .run_research_terminal_sweep(
                     usage_base,
                     &started_at,
                     research_start_budget_secs,
-                    remote_request_deadline,
+                    research_deadline,
                     claimed_job,
                 )
                 .await
@@ -1756,8 +1764,9 @@ impl TavilyProxy {
             }) => {
                 // The cap stops partial settlement, but it is not a time or local
                 // preparation budget exhaustion in the persisted observation.
+                // The research sweep has its own small post-settlement budget;
+                // exhausting it must not pretend that primary work was starved.
                 budget_exhausted &= !remote_attempt_limit_reached;
-                budget_exhausted |= research_budget_exhausted;
                 tracing::debug!(
                     component = "reconciliation",
                     event = "run_completed",
@@ -1781,6 +1790,7 @@ impl TavilyProxy {
                     research_pending_count,
                     research_retry_count,
                     research_skipped_cooldown_count,
+                    research_budget_exhausted,
                     budget_exhausted,
                 );
                 let (
