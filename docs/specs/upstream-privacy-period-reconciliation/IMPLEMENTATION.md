@@ -70,7 +70,7 @@
 
 ## Current performance contract
 
-- Main settlement now hydrates the bounded candidate page and all referenced key/cooldown state before starting the first `/usage` request; the research terminal sweep runs only after main settlement and uses the remaining 20-second job budget.
+- Main settlement now hydrates the bounded candidate page and all referenced key/cooldown state before starting the first `/usage` request; the research terminal sweep runs only after main settlement and may use at most two seconds of the remaining job time. Its timeout is not primary budget exhaustion.
 - Local budget exhaustion is persisted separately from the upstream-429 backoff. Only observed upstream 429 attempts advance the 2/5/10/30-minute global state; local pressure uses a short independent delay and never fabricates a remote rate-limit signal.
 - Remote request start, observation, settlement finalization, and research bookkeeping use nested
   deadlines with reserved post-processing headroom. The four local-pressure meta keys are included

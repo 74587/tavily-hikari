@@ -2,7 +2,11 @@
 
 ## Current scheduling contract
 
-Candidate windows are maintained in an indexed durable work projection. The engine hydrates a bounded page, starts primary settlement before research polling, permits at most two serial remote attempts per run, and leaves research to remaining budget. Local-pressure backoff (`30/60/120/300s`) is separate from upstream-429 backoff (`2/5/10/30m`); non-429 failures do not reset the remote circuit.
+Candidate windows are maintained in an indexed durable work projection. The engine hydrates a bounded page,
+starts primary settlement before research polling, permits at most two serial remote attempts per run, and gives
+research at most two seconds of the remaining time. Research exhaustion is diagnostic follow-up, not primary
+local pressure. Local-pressure backoff (`30/60/120/300s`) is separate from upstream-429 backoff
+(`2/5/10/30m`); non-429 failures do not reset the remote circuit.
 
 Terminal completion is typed. `settled` and a verified `no_adjustment` both finish only the current
 usage generation; transport failure, semantic failure, upstream `429`, and local pressure preserve
