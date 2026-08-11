@@ -610,6 +610,10 @@ impl TavilyProxy {
             server_pressure_rebuild_generation: Arc::new(AtomicU64::new(0)),
             server_pressure_rebuild_transition_gate: Arc::new(RwLock::new(())),
             server_pressure_rebuild_buffered_events: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            server_pressure_tail_replay_test_gate: Arc::new(
+                ServerPressureTailReplayTestGate::default(),
+            ),
             health_readiness_grace_until: backend_time
                 .deadline_after(options.health_readiness_grace_period),
             backend_time,
@@ -1045,6 +1049,51 @@ impl TavilyProxy {
         self.server_pressure_buckets_rebuild_is_active(generation)
     }
 
+    #[cfg(test)]
+    pub(crate) fn pause_server_pressure_tail_replay_for_test(&self) {
+        self.server_pressure_tail_replay_test_gate
+            .paused
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_server_pressure_tail_replay_for_test(&self) {
+        self.server_pressure_tail_replay_test_gate
+            .entered
+            .notified()
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_server_pressure_tail_replay_for_test(&self) {
+        self.server_pressure_tail_replay_test_gate
+            .paused
+            .store(false, Ordering::SeqCst);
+        self.server_pressure_tail_replay_test_gate.resume.notify_one();
+    }
+
+    #[cfg(test)]
+    async fn pause_server_pressure_tail_replay_for_test_if_requested(&self) {
+        if !self
+            .server_pressure_tail_replay_test_gate
+            .paused
+            .load(Ordering::SeqCst)
+        {
+            return;
+        }
+        self.server_pressure_tail_replay_test_gate.entered.notify_one();
+        while self
+            .server_pressure_tail_replay_test_gate
+            .paused
+            .load(Ordering::SeqCst)
+        {
+            self.server_pressure_tail_replay_test_gate
+                .resume
+                .notified()
+                .await;
+        }
+    }
+
     pub fn reset_post_ready_serving_tasks_for_writable_tenure(&self) {
         self.post_ready_serving_tasks_started
             .store(false, Ordering::SeqCst);
@@ -1141,6 +1190,10 @@ impl TavilyProxy {
                         else {
                             return;
                         };
+                        #[cfg(test)]
+                        proxy
+                            .pause_server_pressure_tail_replay_for_test_if_requested()
+                            .await;
                         for (replay_index, event) in buffered_events.iter().enumerate() {
                             if event.request_log_id.is_some_and(|request_log_id| {
                                 request_log_id <= upper_bound_request_log_id
@@ -1164,7 +1217,8 @@ impl TavilyProxy {
                                 .await
                             {
                                 proxy
-                                    .requeue_server_pressure_buffered_events(
+                                    .stop_server_pressure_rebuild_generation(
+                                        generation,
                                         buffered_events[replay_index..].to_vec(),
                                     )
                                     .await;

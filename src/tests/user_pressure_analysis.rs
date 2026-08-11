@@ -1139,19 +1139,14 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
             )
             .await;
     }
+    proxy.pause_server_pressure_tail_replay_for_test();
     assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !proxy.server_pressure_rebuild_is_active_for_test() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        proxy.wait_for_server_pressure_tail_replay_for_test(),
+    )
     .await
-    .expect("rebuild should become active before the live producer starts");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(
-        proxy.server_pressure_rebuild_is_active_for_test(),
-        "the initial tail should keep the rebuild active while live events arrive"
-    );
+    .expect("rebuild should enter the tail replay before the live producer starts");
     let producer = {
         let proxy = proxy.clone();
         tokio::spawn(async move {
@@ -1165,6 +1160,7 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
         })
     };
     producer.await.expect("tail producer joins");
+    proxy.resume_server_pressure_tail_replay_for_test();
     tokio::time::timeout(Duration::from_secs(10), async {
         while proxy.server_pressure_rebuild_is_active_for_test() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1185,6 +1181,56 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
     .expect("read rebuilt pressure totals");
     assert_eq!(success_count, 250);
     assert_eq!(failure_count, 100);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn analysis_pressure_rebuild_releases_phase_after_tail_replay_error() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_475_000);
+    let db_path = temp_db_path("analysis-pressure-tail-replay-error");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let now = manual_clock.now_ts();
+
+    proxy
+        .inject_server_pressure_buffered_event_for_test(Some(9_999), now - 30, OUTCOME_ERROR)
+        .await;
+    proxy.pause_server_pressure_tail_replay_for_test();
+    assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        proxy.wait_for_server_pressure_tail_replay_for_test(),
+    )
+    .await
+    .expect("rebuild should enter the tail replay before forcing its write failure");
+
+    sqlx::query("DROP TABLE observability.server_pressure_buckets")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("drop pressure buckets to make tail replay fail");
+    proxy.resume_server_pressure_tail_replay_for_test();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while proxy.server_pressure_rebuild_is_active_for_test() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("tail replay write error should release the rebuild phase");
+    assert!(
+        proxy.spawn_server_pressure_buckets_rebuild_once(),
+        "a failed tail replay must leave the next rebuild schedulable"
+    );
+    proxy.cancel_server_pressure_buckets_rebuild().await;
 
     let _ = std::fs::remove_file(db_path);
 }

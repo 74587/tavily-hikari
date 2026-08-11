@@ -760,8 +760,18 @@ pub struct TavilyProxy {
     server_pressure_rebuild_generation: Arc<AtomicU64>,
     server_pressure_rebuild_transition_gate: Arc<RwLock<()>>,
     server_pressure_rebuild_buffered_events: Arc<Mutex<Vec<ServerPressureBufferedEvent>>>,
+    #[cfg(test)]
+    server_pressure_tail_replay_test_gate: Arc<ServerPressureTailReplayTestGate>,
     health_readiness_grace_until: tokio::time::Instant,
     pub(crate) backend_time: BackendTime,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct ServerPressureTailReplayTestGate {
+    paused: AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
