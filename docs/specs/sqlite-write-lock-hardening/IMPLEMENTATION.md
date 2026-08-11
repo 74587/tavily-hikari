@@ -323,7 +323,9 @@
 - Server-pressure startup rehydration now computes the 48-hour and 8-day source aggregates before
   acquiring `BEGIN IMMEDIATE`; the write transaction contains only bucket replacement. A
   deterministic concurrency test pauses at that boundary and proves a foreground writer can still
-  complete within 250ms.
+  complete within 250ms. The live-tail buffer uses the same gate for pre-snapshot direct writes,
+  repeated replay drains, failure requeue, and the final inactive transition so no event can land
+  between the last drain and completion.
 - Added request-log GC coverage for old-row deletion, recent-row preservation, partial catch-up,
   catalog rollup cleanup, and transient SQLite write-lock retry.
 - Added explicit sidecar-migration coverage for:

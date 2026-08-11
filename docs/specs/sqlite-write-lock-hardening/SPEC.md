@@ -99,7 +99,9 @@ source when a usable persisted runtime already exists.
 - The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write
   transaction. It may acquire SQLite's writer only for the final small bucket replacement; the
   upper-bound request-log id and buffered live-event replay preserve the handoff across those two
-  phases.
+  phases. Entering and leaving rebuild mode must share the event-buffer gate with incremental
+  writers, and completion must drain until the buffer is empty before atomically returning events to
+  direct persistence.
 - Non-core startup repairs must stay partitioned by contract. `user_business_calls_1h` history
   backfill is an owner-facing readiness view and must be cheaply rehydrated before serving starts
   reporting ready, while one-time request-log effect-bucket repair remains a startup maintenance

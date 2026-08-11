@@ -325,6 +325,11 @@ month-tail public metrics scan.
   the projection through read connections, then acquire the writer only for the bounded replacement
   and replay buffered tail events. Otherwise one observability rebuild can stall billing, job claims,
   and unrelated backfills for the full scan duration.
+- The read/write split creates two event-boundary races unless one gate owns the transition. A direct
+  incremental write that observed inactive must finish before the rebuild captures its upper bound;
+  at completion, drain and replay in a loop and set inactive only while holding the same buffer gate
+  after observing it empty. A single drain followed by a separate flag update can strand the final
+  live event indefinitely.
 - For `billing_ledger` startup truth repair specifically, persist a high-watermark marker and let
   the readiness path prove “no gap / no drift” before invoking a whole-ledger reconcile. The first
   upgraded boot may still need one repair, but steady-state restarts should only pay the precheck.

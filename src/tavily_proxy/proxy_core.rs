@@ -901,10 +901,16 @@ impl TavilyProxy {
             });
             return Ok(());
         }
-        drop(buffered);
-        self.key_store
+        // Keep the gate until the direct write finishes. A rebuild that turns
+        // active concurrently must cross the same gate before capturing its
+        // source upper bound, so this event is either in that source snapshot
+        // or in the rebuild's buffered tail.
+        let result = self
+            .key_store
             .upsert_server_pressure_event(created_at, result_status)
-            .await
+            .await;
+        drop(buffered);
+        result
     }
 
     async fn requeue_server_pressure_buffered_events(
@@ -924,6 +930,50 @@ impl TavilyProxy {
         buffered.extend(events);
     }
 
+    async fn stop_server_pressure_rebuild_generation(
+        &self,
+        generation: u64,
+        mut requeue: Vec<ServerPressureBufferedEvent>,
+    ) {
+        let mut buffered = self.server_pressure_rebuild_buffered_events.lock().await;
+        let current_generation = self
+            .server_pressure_rebuild_generation
+            .load(Ordering::SeqCst);
+        for event in &mut requeue {
+            event.generation = current_generation;
+        }
+        buffered.extend(requeue);
+        if current_generation == generation {
+            self.server_pressure_rebuild_started
+                .store(false, Ordering::SeqCst);
+        }
+    }
+
+    async fn take_server_pressure_replay_batch(
+        &self,
+        generation: u64,
+    ) -> Option<Vec<ServerPressureBufferedEvent>> {
+        let mut buffered = self.server_pressure_rebuild_buffered_events.lock().await;
+        if !self.server_pressure_buckets_rebuild_is_active(generation) {
+            return None;
+        }
+        let drained = std::mem::take(&mut *buffered);
+        let (matching, retained): (Vec<_>, Vec<_>) = drained
+            .into_iter()
+            .partition(|event| event.generation <= generation);
+        *buffered = retained;
+        if matching.is_empty() {
+            // This transition shares the event gate with recorders. Events
+            // arriving after it observe inactive and write directly; events
+            // arriving before it are returned in a replay batch.
+            self.server_pressure_rebuild_started
+                .store(false, Ordering::SeqCst);
+            None
+        } else {
+            Some(matching)
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn inject_server_pressure_buffered_event_for_test(
         &self,
@@ -941,6 +991,14 @@ impl TavilyProxy {
             created_at,
             result_status: result_status.to_string(),
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_pressure_rebuild_is_active_for_test(&self) -> bool {
+        let generation = self
+            .server_pressure_rebuild_generation
+            .load(Ordering::SeqCst);
+        self.server_pressure_buckets_rebuild_is_active(generation)
     }
 
     pub fn reset_post_ready_serving_tasks_for_writable_tenure(&self) {
@@ -1005,6 +1063,16 @@ impl TavilyProxy {
                     attempt = attempt + 1,
                     "rebuilding server pressure buckets after listener readiness"
                 );
+                // Fence direct events that observed the previous inactive
+                // generation. They hold this gate through their incremental
+                // write, so the source upper bound below cannot pass them.
+                {
+                    let _event_gate =
+                        proxy.server_pressure_rebuild_buffered_events.lock().await;
+                    if !proxy.server_pressure_buckets_rebuild_is_active(generation) {
+                        return;
+                    }
+                }
                 match proxy
                     .key_store
                     .rebuild_server_pressure_buckets_with_cancel(|| {
@@ -1015,77 +1083,55 @@ impl TavilyProxy {
                     Ok(crate::store::ServerPressureBucketsRebuildOutcome::Completed {
                         upper_bound_request_log_id,
                     }) => {
-                        let buffered_events = {
-                            let mut buffered =
-                                proxy.server_pressure_rebuild_buffered_events.lock().await;
-                            let drained = std::mem::take(&mut *buffered);
-                            let (matching, retained): (Vec<_>, Vec<_>) = drained
-                                .into_iter()
-                                .partition(|event| event.generation <= generation);
-                            *buffered = retained;
-                            matching
-                        };
-                        let mut replay_index = 0usize;
-                        while replay_index < buffered_events.len() {
-                            let event = &buffered_events[replay_index];
-                            if event
-                                .request_log_id
-                                .is_some_and(|request_log_id| {
-                                    request_log_id <= upper_bound_request_log_id
-                                })
-                            {
-                                replay_index += 1;
-                                continue;
-                            }
-                            if !proxy.server_pressure_buckets_rebuild_is_active(generation) {
-                                proxy
-                                    .requeue_server_pressure_buffered_events(
-                                        buffered_events[replay_index..].to_vec(),
-                                    )
-                                    .await;
-                                return;
-                            }
-                            if let Err(err) = proxy
-                                .key_store
-                                .upsert_server_pressure_event(
-                                    event.created_at,
-                                    &event.result_status,
-                                )
+                        loop {
+                            let Some(buffered_events) = proxy
+                                .take_server_pressure_replay_batch(generation)
                                 .await
-                            {
-                                proxy
-                                    .requeue_server_pressure_buffered_events(
-                                        buffered_events[replay_index..].to_vec(),
+                            else {
+                                break;
+                            };
+                            let mut replay_index = 0usize;
+                            while replay_index < buffered_events.len() {
+                                let event = &buffered_events[replay_index];
+                                if event.request_log_id.is_some_and(|request_log_id| {
+                                    request_log_id <= upper_bound_request_log_id
+                                }) {
+                                    replay_index += 1;
+                                    continue;
+                                }
+                                if !proxy.server_pressure_buckets_rebuild_is_active(generation) {
+                                    proxy
+                                        .requeue_server_pressure_buffered_events(
+                                            buffered_events[replay_index..].to_vec(),
+                                        )
+                                        .await;
+                                    return;
+                                }
+                                if let Err(err) = proxy
+                                    .key_store
+                                    .upsert_server_pressure_event(
+                                        event.created_at,
+                                        &event.result_status,
                                     )
-                                    .await;
-                                if proxy
-                                    .server_pressure_rebuild_generation
-                                    .load(Ordering::SeqCst)
-                                    == generation
+                                    .await
                                 {
                                     proxy
-                                        .server_pressure_rebuild_started
-                                        .store(false, Ordering::SeqCst);
+                                        .stop_server_pressure_rebuild_generation(
+                                            generation,
+                                            buffered_events[replay_index..].to_vec(),
+                                        )
+                                        .await;
+                                    tracing::warn!(
+                                        component = "analysis_pressure",
+                                        event = "server_pressure_buckets_rebuild_failed",
+                                        attempt = attempt + 1,
+                                        err = %err,
+                                        "server pressure buckets rebuild failed while replaying live buffered events"
+                                    );
+                                    return;
                                 }
-                                tracing::warn!(
-                                    component = "analysis_pressure",
-                                    event = "server_pressure_buckets_rebuild_failed",
-                                    attempt = attempt + 1,
-                                    err = %err,
-                                    "server pressure buckets rebuild failed while replaying live buffered events"
-                                );
-                                return;
+                                replay_index += 1;
                             }
-                            replay_index += 1;
-                        }
-                        if proxy
-                            .server_pressure_rebuild_generation
-                            .load(Ordering::SeqCst)
-                            == generation
-                        {
-                            proxy
-                                .server_pressure_rebuild_started
-                                .store(false, Ordering::SeqCst);
                         }
                         proxy.invalidate_analysis_pressure_cache().await;
                         tracing::info!(
@@ -1125,15 +1171,9 @@ impl TavilyProxy {
                         proxy.backend_time.sleep(retry_delay).await;
                     }
                     Err(err) => {
-                        if proxy
-                            .server_pressure_rebuild_generation
-                            .load(Ordering::SeqCst)
-                            == generation
-                        {
-                            proxy
-                                .server_pressure_rebuild_started
-                                .store(false, Ordering::SeqCst);
-                        }
+                        proxy
+                            .stop_server_pressure_rebuild_generation(generation, Vec::new())
+                            .await;
                         tracing::warn!(
                             component = "analysis_pressure",
                             event = "server_pressure_buckets_rebuild_failed",

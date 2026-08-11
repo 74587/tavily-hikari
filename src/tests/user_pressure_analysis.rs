@@ -1112,6 +1112,69 @@ async fn analysis_pressure_cancel_requeues_buffered_events_for_next_generation()
 }
 
 #[tokio::test]
+async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_470_000);
+    let db_path = temp_db_path("analysis-pressure-live-tail-drain");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let now = manual_clock.now_ts();
+
+    assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
+    for index in 0..250_i64 {
+        proxy
+            .inject_server_pressure_buffered_event_for_test(
+                Some(10_000 + index),
+                now - 30,
+                OUTCOME_SUCCESS,
+            )
+            .await;
+    }
+    let producer = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move {
+            for index in 0..100_i64 {
+                proxy
+                    .record_server_pressure_event(Some(20_000 + index), now - 30, OUTCOME_ERROR)
+                    .await
+                    .expect("record event while replay drains");
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    producer.await.expect("tail producer joins");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while proxy.server_pressure_rebuild_is_active_for_test() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pressure rebuild drains its live tail");
+
+    let (success_count, failure_count): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
+        FROM observability.server_pressure_buckets
+        WHERE bucket_kind = 'five_minute'
+        "#,
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read rebuilt pressure totals");
+    assert_eq!(success_count, 250);
+    assert_eq!(failure_count, 100);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn analysis_pressure_snapshot_warms_up_24h_rolling_window_edges() {
     let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_500_000);
     let db_path = temp_db_path("analysis-pressure-snapshot-warmup");
