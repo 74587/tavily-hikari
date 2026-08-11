@@ -320,6 +320,10 @@
   is waiting on `/usage`.
 - Added local contention coverage for forward-proxy startup subscription refresh and runtime
   snapshot persistence.
+- Server-pressure startup rehydration now computes the 48-hour and 8-day source aggregates before
+  acquiring `BEGIN IMMEDIATE`; the write transaction contains only bucket replacement. A
+  deterministic concurrency test pauses at that boundary and proves a foreground writer can still
+  complete within 250ms.
 - Added request-log GC coverage for old-row deletion, recent-row preservation, partial catch-up,
   catalog rollup cleanup, and transient SQLite write-lock retry.
 - Added explicit sidecar-migration coverage for:

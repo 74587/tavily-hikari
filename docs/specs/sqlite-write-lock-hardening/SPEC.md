@@ -96,6 +96,10 @@ source when a usable persisted runtime already exists.
   first healthy image status. Once the process is already serving business traffic, it may run once
   as a best-effort background rebuild whose failure is isolated to logs/observability and does not
   turn serving `/health` red.
+- The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write
+  transaction. It may acquire SQLite's writer only for the final small bucket replacement; the
+  upper-bound request-log id and buffered live-event replay preserve the handoff across those two
+  phases.
 - Non-core startup repairs must stay partitioned by contract. `user_business_calls_1h` history
   backfill is an owner-facing readiness view and must be cheaply rehydrated before serving starts
   reporting ready, while one-time request-log effect-bucket repair remains a startup maintenance

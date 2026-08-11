@@ -1,5 +1,7 @@
 use super::*;
 use axum::http::{Method, StatusCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_pressure_attempt(
@@ -688,6 +690,78 @@ async fn analysis_pressure_background_rebuild_retries_after_transient_failure() 
     assert_eq!(current_point.pressure, 1);
     assert_eq!(current_point.success_count, 1);
     assert_eq!(current_point.failure_count, 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analysis_pressure_rebuild_does_not_hold_writer_during_source_aggregation() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_390_000);
+    let db_path = temp_db_path("analysis-pressure-read-before-write");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let now = manual_clock.now_ts();
+    sqlx::query(
+        r#"
+        INSERT INTO observability.request_logs (
+            method, path, status_code, tavily_status_code, result_status,
+            request_kind_key, request_kind_label, counts_business_quota,
+            request_user_id, upstream_operation, created_at
+        ) VALUES ('POST', '/api/tavily/search', 200, 200, 'success',
+                  'api:search', 'API | search', 1, 'pressure-reader', 'search', ?)
+        "#,
+    )
+    .bind(now - 120)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed pressure request log");
+
+    let aggregation_reached = Arc::new(Barrier::new(2));
+    let release_aggregation = Arc::new(Barrier::new(2));
+    let checkpoints = Arc::new(AtomicUsize::new(0));
+    let rebuild_store = proxy.key_store.clone();
+    let rebuild_reached = aggregation_reached.clone();
+    let rebuild_release = release_aggregation.clone();
+    let rebuild_checkpoints = checkpoints.clone();
+    let rebuild = tokio::spawn(async move {
+        rebuild_store
+            .rebuild_server_pressure_buckets_with_cancel(|| {
+                if rebuild_checkpoints.fetch_add(1, Ordering::SeqCst) == 1 {
+                    rebuild_reached.wait();
+                    rebuild_release.wait();
+                }
+                true
+            })
+            .await
+    });
+    tokio::task::spawn_blocking(move || aggregation_reached.wait())
+        .await
+        .expect("observe completed source aggregation");
+
+    let foreground_write = tokio::time::timeout(
+        Duration::from_millis(250),
+        sqlx::query("UPDATE meta SET value = value WHERE key = 'schema_version'")
+            .execute(&proxy.key_store.pool),
+    )
+    .await;
+    tokio::task::spawn_blocking(move || release_aggregation.wait())
+        .await
+        .expect("release pressure rebuild");
+    foreground_write
+        .expect("source aggregation must not block a foreground writer")
+        .expect("foreground writer succeeds during source aggregation");
+    rebuild
+        .await
+        .expect("pressure rebuild task joins")
+        .expect("pressure rebuild succeeds");
 
     let _ = std::fs::remove_file(db_path);
 }

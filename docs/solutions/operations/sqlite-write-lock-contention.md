@@ -320,6 +320,11 @@ month-tail public metrics scan.
 - Keep startup backfills cheap and no-op aware. Large production SQLite files make repeated per-user
   repair loops expensive even when every row is already correct; use an indexed precheck in the
   readiness path and move periodic refresh work to a background scheduler.
+- A background rebuild is not low priority merely because it starts after readiness. Never acquire
+  `BEGIN IMMEDIATE` before a long analytical aggregation: capture an immutable upper bound, compute
+  the projection through read connections, then acquire the writer only for the bounded replacement
+  and replay buffered tail events. Otherwise one observability rebuild can stall billing, job claims,
+  and unrelated backfills for the full scan duration.
 - For `billing_ledger` startup truth repair specifically, persist a high-watermark marker and let
   the readiness path prove “no gap / no drift” before invoking a whole-ledger reconcile. The first
   upgraded boot may still need one repair, but steady-state restarts should only pay the precheck.
