@@ -15,6 +15,8 @@ pub(crate) const RECONCILIATION_OUTCOME_UPSTREAM_429: &str = "upstream_429";
 pub(crate) const RECONCILIATION_OUTCOME_TRANSPORT_FAILURE: &str = "transport_failure";
 pub(crate) const RECONCILIATION_OUTCOME_SEMANTIC_FAILURE: &str = "semantic_failure";
 pub(crate) const RECONCILIATION_OUTCOME_LOCAL_PRESSURE: &str = "local_pressure";
+pub(crate) const META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1: &str =
+    "upstream_reconciliation_work_projection_complete_v1";
 const RECONCILIATION_RECENT_LANE_BUDGET: i64 = 12;
 const RECONCILIATION_BACKLOG_LANE_BUDGET: i64 = 8;
 const RECONCILIATION_QUEUE_ESTIMATE_LIMIT: i64 = 64;
@@ -474,7 +476,6 @@ impl KeyStore {
     pub(crate) async fn upstream_reconciliation_continuation_at(
         &self,
     ) -> Result<Option<i64>, ProxyError> {
-        const CURSOR_KEY: &str = "upstream_reconciliation_work_cursor_v1";
         let now = self.backend_time.now_ts();
         let work_at: Option<i64> = sqlx::query_scalar(
             r#"
@@ -513,17 +514,18 @@ impl KeyStore {
         .bind(now)
         .fetch_one(&self.pool)
         .await?;
-        // The durable work projection is intentionally paged. Its source cursor is itself work:
-        // once a fully-settled page drains, the representative job must advance the next page
-        // instead of treating an empty projected table as a terminal reconciliation state.
-        let projection_cursor = self.get_meta_i64(CURSOR_KEY).await?.unwrap_or(0);
-        let projection_pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM upstream_reconciliation_usage WHERE rowid > ? LIMIT 1)",
-        )
-        .bind(projection_cursor)
-        .fetch_one(&self.pool)
-        .await?;
-        let projection_at = projection_pending.then_some(now);
+        // A one-time versioned lifecycle flag keeps historical source projection off the hot
+        // continuation read path. New usage is maintained by triggers and therefore never
+        // reopens a completed period merely because the legacy cursor is absent.
+        let projection_pending = self
+            .get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
+            .await?
+            .unwrap_or(0)
+            == 0;
+        // Historical projection is local maintenance, not a main-settlement retry. Keep the
+        // representative delayed while no durable candidate exists so a disabled or not-yet
+        // ready reconciliation configuration cannot spin an immediate worker loop.
+        let projection_at = projection_pending.then_some(now.saturating_add(30));
         let Some(pending_at) = (match (work_at, research_at, projection_at) {
             (Some(work_at), Some(research_at), Some(projection_at)) => {
                 Some(work_at.min(research_at).min(projection_at))
@@ -1318,8 +1320,21 @@ impl KeyStore {
             .collect()
     }
 
-    async fn advance_upstream_reconciliation_work_projection(&self) -> Result<(), ProxyError> {
+    /// Advance the legacy usage-to-work bootstrap independently from candidate
+    /// selection. The live usage triggers maintain new work synchronously, so
+    /// this bounded slice is only for historical rows that predate them.
+    pub(crate) async fn advance_upstream_reconciliation_work_projection(
+        &self,
+    ) -> Result<(), ProxyError> {
         const CURSOR_KEY: &str = "upstream_reconciliation_work_cursor_v1";
+        if self
+            .get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
+            .await?
+            .unwrap_or(0)
+            != 0
+        {
+            return Ok(());
+        }
         let cursor = self.get_meta_i64(CURSOR_KEY).await?.unwrap_or(0);
         let next_cursor: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(rowid) FROM (SELECT rowid FROM upstream_reconciliation_usage WHERE rowid > ? ORDER BY rowid LIMIT 500)",
@@ -1328,6 +1343,11 @@ impl KeyStore {
         .fetch_one(&self.pool)
         .await?;
         let Some(next_cursor) = next_cursor else {
+            self.set_meta_i64(
+                META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1,
+                1,
+            )
+            .await?;
             return Ok(());
         };
         sqlx::query(
@@ -1472,7 +1492,6 @@ impl KeyStore {
         &self,
         limit: i64,
     ) -> Result<UpstreamReconciliationCandidateBatch, ProxyError> {
-        self.advance_upstream_reconciliation_work_projection().await?;
         let now = self.backend_time.now_ts();
         let total_limit = limit.max(1);
         let day_window = server_local_day_window_utc(self.backend_time.now_utc().with_timezone(&Local));

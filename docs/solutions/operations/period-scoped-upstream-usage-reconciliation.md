@@ -10,6 +10,12 @@ their own durable retry state. This prevents a valid zero-delta observation from
 minute-by-minute reconciliation job and prevents a non-429 result from falsely clearing a remote
 rate-limit circuit.
 
+Historical usage needs a separate lifecycle from live settlement. Mark an empty new database as
+projection-complete during its versioned migration. For an upgraded database with historical rows,
+advance at most one bounded page only after the durable candidate page is empty, then persist a
+delayed representative for the next page. Do not make candidate selection aggregate raw usage or
+treat an unread legacy cursor as proof that a trigger-maintained, terminal work item must run again.
+
 When the upstream only exposes cumulative usage counters, a proxy cannot do exact per-request
 billing by reading upstream state inline. Tavily Hikari solves this by splitting local billing
 into two phases: optimistic request-time charging, then one idempotent settlement per complete

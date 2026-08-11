@@ -40,6 +40,18 @@ TESTBOX_OUTPUT="$TMP_DIR/testbox-comparison.log"
 REMOTE_RUN=""
 COMPOSE_PROJECT=""
 completed=false
+collect_sanitized_summaries() {
+  local destination="$TMP_DIR/result"
+  mkdir -p "$destination"
+  for variant in baseline candidate; do
+    local remote_summary="$REMOTE_RUN/artifacts/performance-recovery/$variant/summary.json"
+    if ssh -o BatchMode=yes "$TESTBOX_HOST" "test -f '$remote_summary'"; then
+      rsync -az "$TESTBOX_HOST:$remote_summary" "$destination/$variant-summary.json"
+      printf '%s summary:\n' "$variant"
+      cat "$destination/$variant-summary.json"
+    fi
+  done
+}
 cleanup() {
   rm -rf "$TMP_DIR"
   if [[ "$completed" != true && -n "$REMOTE_RUN" ]]; then
@@ -88,6 +100,8 @@ bash '$REMOTE_RUN/repo/tests/performance_recovery/run_snapshot_comparison.sh'
   :
 else
   testbox_status=$?
+  echo "Collecting sanitized partial summaries from the failed comparison..." >&2
+  collect_sanitized_summaries >&2 || true
   tail -120 "$TESTBOX_OUTPUT" >&2 || true
   exit "$testbox_status"
 fi

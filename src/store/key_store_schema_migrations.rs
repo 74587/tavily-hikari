@@ -18,6 +18,11 @@ const RECONCILIATION_TERMINAL_SAME_SECOND_NAME: &str =
     "reconciliation-terminal-usage-refresh-v2";
 const RECONCILIATION_TERMINAL_SAME_SECOND_CHECKSUM: &str =
     "sha256:83c35ed6d15067fc5c4e830eaf3b520c";
+const RECONCILIATION_PROJECTION_LIFECYCLE_VERSION: i64 = 7;
+const RECONCILIATION_PROJECTION_LIFECYCLE_NAME: &str =
+    "reconciliation-projection-lifecycle-v1";
+const RECONCILIATION_PROJECTION_LIFECYCLE_CHECKSUM: &str =
+    "sha256:75705f2a93c4a8d6526f13b708490ec1";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -644,6 +649,11 @@ impl KeyStore {
                 RECONCILIATION_TERMINAL_SAME_SECOND_NAME,
                 RECONCILIATION_TERMINAL_SAME_SECOND_CHECKSUM,
             ),
+            (
+                RECONCILIATION_PROJECTION_LIFECYCLE_VERSION,
+                RECONCILIATION_PROJECTION_LIFECYCLE_NAME,
+                RECONCILIATION_PROJECTION_LIFECYCLE_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -1029,6 +1039,31 @@ impl KeyStore {
         .await
     }
 
+    async fn apply_reconciliation_projection_lifecycle_migration(
+        &self,
+    ) -> Result<(), ProxyError> {
+        // This is an O(1) startup classification. Existing usage is projected in bounded
+        // post-start slices; an empty new database needs no historical projection at all.
+        let has_usage: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM upstream_reconciliation_usage LIMIT 1)",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
+        .bind(if has_usage { "0" } else { "1" })
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            RECONCILIATION_PROJECTION_LIFECYCLE_VERSION,
+            RECONCILIATION_PROJECTION_LIFECYCLE_NAME,
+            RECONCILIATION_PROJECTION_LIFECYCLE_CHECKSUM,
+        )
+        .await
+    }
+
     pub(crate) async fn prepare_versioned_schema(&self) -> Result<bool, ProxyError> {
         let started = std::time::Instant::now();
         let existing_database = self.schema_object_exists("main", "meta").await?;
@@ -1109,6 +1144,13 @@ impl KeyStore {
             self.apply_reconciliation_terminal_same_second_migration()
                 .await?;
         }
+        if !self
+            .schema_migration_applied(RECONCILIATION_PROJECTION_LIFECYCLE_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_projection_lifecycle_migration()
+                .await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1135,6 +1177,8 @@ impl KeyStore {
         self.apply_reconciliation_outcome_migration().await?;
         self.apply_reconciliation_terminal_refresh_migration().await?;
         self.apply_reconciliation_terminal_same_second_migration()
+            .await?;
+        self.apply_reconciliation_projection_lifecycle_migration()
             .await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;

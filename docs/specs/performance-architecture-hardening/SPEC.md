@@ -61,11 +61,11 @@
 - 相同 wire payload 的 UPDATE 不产生 HA outbox 事件；有效变化恰好产生一条兼容事件。
 - reconciliation 使用持久 work projection、公平 cursor 和原子 runtime state，并区分本地压力、429、
   transport、semantic failure 与 budget exhaustion。
-- Usage source cursor itself remains durable unfinished projection work. Draining a fully settled
-  projection page must enqueue the next source page until the cursor reaches the source tail; a
-  pre-trigger usage update after a terminal settlement must likewise reopen that usage generation.
-  Because persisted timestamps are second-resolution, an equal usage/settlement timestamp is
-  conservatively reopened too: a duplicate observation is acceptable, but a lost settlement is not.
+- Historical usage projection has a versioned lifecycle independent of candidate selection. A
+  pending upgrade projects one bounded page only after durable candidates drain, while new usage
+  is maintained by triggers. A completed lifecycle must not requeue a completed no-adjustment
+  work generation; pre-trigger usage updates still reopen their generation, and equal
+  usage/settlement timestamps remain conservatively reopenable because they have second precision.
 - 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通

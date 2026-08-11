@@ -28,7 +28,17 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+    let projection_complete: i64 = sqlx::query_scalar(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'upstream_reconciliation_work_projection_complete_v1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read empty-database projection lifecycle");
+    assert_eq!(
+        projection_complete, 1,
+        "a new empty database must not schedule historical reconciliation projection"
+    );
     sqlx::query("UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 2")
         .execute(&pool)
         .await
@@ -475,7 +485,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

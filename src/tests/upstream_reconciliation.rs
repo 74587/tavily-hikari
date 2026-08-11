@@ -42,6 +42,14 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
         .execute(&proxy.key_store.pool)
         .await
         .expect("disable live projection for backfill fixture");
+    proxy
+        .key_store
+        .set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1,
+            0,
+        )
+        .await
+        .expect("mark existing usage projection pending");
     sqlx::query(
         r#"WITH RECURSIVE rows(n) AS (
              VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 501
@@ -82,14 +90,24 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
         "the unfinished source projection check must seek by rowid, not scan usage"
     );
 
+    assert!(
+        proxy
+            .key_store
+            .next_upstream_reconciliation_candidates(1)
+            .await
+            .expect("select candidates without advancing legacy projection")
+            .candidates
+            .is_empty(),
+        "candidate selection must not write or scan the legacy projection before main settlement"
+    );
     proxy
         .key_store
-        .next_upstream_reconciliation_candidates(1)
+        .advance_upstream_reconciliation_work_projection()
         .await
         .expect("advance first projection page");
     proxy
         .key_store
-        .next_upstream_reconciliation_candidates(1)
+        .advance_upstream_reconciliation_work_projection()
         .await
         .expect("advance second projection page");
     let projected: (String, String, String) = sqlx::query_as(
@@ -129,6 +147,14 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
         .execute(&proxy.key_store.pool)
         .await
         .expect("disable live projection for backfill fixture");
+    proxy
+        .key_store
+        .set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1,
+            0,
+        )
+        .await
+        .expect("mark existing usage projection pending");
     sqlx::query(
         r#"WITH RECURSIVE rows(n) AS (
              VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 501
@@ -154,7 +180,7 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
 
     proxy
         .key_store
-        .next_upstream_reconciliation_candidates(20)
+        .advance_upstream_reconciliation_work_projection()
         .await
         .expect("project first page");
     sqlx::query("UPDATE upstream_reconciliation_work SET completed_generation = work_generation")
@@ -168,7 +194,7 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
             .upstream_reconciliation_continuation_at()
             .await
             .expect("continue incomplete source projection"),
-        Some(now),
+        Some(now + 30),
         "the source cursor must remain durable work after its current projected page drains"
     );
     proxy
@@ -181,13 +207,18 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("read next-page representative");
-    assert_eq!(continuation, (1, now));
+    assert_eq!(continuation, (1, now + 30));
 
+    proxy
+        .key_store
+        .advance_upstream_reconciliation_work_projection()
+        .await
+        .expect("project second page");
     let next_page = proxy
         .key_store
         .next_upstream_reconciliation_candidates(1)
         .await
-        .expect("project second page");
+        .expect("select second projected page");
     assert_eq!(next_page.candidates.len(), 1);
     assert_eq!(next_page.candidates[0].token_id, "projection-page-501");
 
@@ -847,6 +878,15 @@ async fn reconciliation_no_adjustment_completes_only_the_current_usage_generatio
             .await
             .expect("read continuation after completion"),
         None
+    );
+    assert_eq!(
+        proxy
+            .key_store
+            .get_meta_i64("upstream_reconciliation_work_cursor_v1")
+            .await
+            .expect("read legacy projection cursor after settlement"),
+        None,
+        "a projected candidate must be settled without running the legacy source projection"
     );
     let queued_continuations: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' AND status = 'queued'",

@@ -1135,6 +1135,34 @@ impl TavilyProxy {
         }
         preparation_budget_exhausted |=
             std::time::Instant::now() >= preparation_deadline;
+        if candidate_batch.candidates.is_empty() && !preparation_budget_exhausted {
+            // The projection is a compatibility bootstrap for usage written
+            // before the durable work triggers existed. It must never sit in
+            // front of already-projectable work: otherwise its aggregate write
+            // can consume the entire main-settlement preparation budget. A
+            // projected page is settled by the next representative run so this
+            // run remains a bounded local maintenance slice.
+            let bootstrap_budget = preparation_deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(Duration::from_millis(250));
+            if bootstrap_budget.is_zero() {
+                preparation_budget_exhausted = true;
+            } else {
+                match tokio::time::timeout(
+                    bootstrap_budget,
+                    self.key_store.advance_upstream_reconciliation_work_projection(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) if crate::store::is_transient_sqlite_write_error(&err) => {
+                        preparation_budget_exhausted = true;
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_) => preparation_budget_exhausted = true,
+                }
+            }
+        }
         let candidate_hydration_deadline = preparation_deadline;
         let recent_candidate_count = candidate_batch.recent_candidate_count;
         let backlog_candidate_count = candidate_batch.backlog_candidate_count;

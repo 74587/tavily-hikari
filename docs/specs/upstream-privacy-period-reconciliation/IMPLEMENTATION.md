@@ -34,7 +34,9 @@
 - 本地压力连续三轮触发 `30/60/120/300` 秒退避；真实 upstream 429 独立触发
   `2/5/10/30` 分钟退避并尊重更晚的 `Retry-After`。transport、semantic failure 与本地预算耗尽
   不会清空已有 429 状态。
-- `upstream_reconciliation_work` 由 usage 写入增量维护，并用持久 cursor 分页吸收升级前历史行；候选查询不再每轮聚合原始 usage 全表。每轮最多发起两次串行远端请求。
+- `upstream_reconciliation_work` 由 usage 写入增量维护。升级前历史行使用 versioned lifecycle
+  在无 durable candidate 时以最多 250ms 的单页维护吸收，并以 30 秒 representative 续跑；候选查询
+  不再每轮聚合原始 usage 全表。每轮最多发起两次串行远端请求。
 - `ReconciliationEngine` uses typed terminal outcomes. A successful upstream observation that
   requires no signed adjustment completes only the matching usage generation as `no_adjustment`;
   later usage creates fresh work instead of recreating a minute-by-minute no-op run. The status
