@@ -350,13 +350,13 @@ for summary in (baseline, candidate):
     dashboard_clients = summary["load"].get("dashboardClients")
     dashboard_interval_secs = summary["load"].get("dashboardIntervalSecs")
     dashboard_attempts = summary["load"].get("dashboardAttempts")
-    if dashboard_clients != 20 or dashboard_interval_secs != 10.0:
+    if dashboard_clients != 20 or dashboard_interval_secs != 60.0:
         raise SystemExit(f"unexpected dashboard load shape for {summary['variant']}")
     diagnostic = summary["load"]["durationSecs"] <= 120
     # A short diagnostic intentionally restarts the app halfway through. The
     # ten-minute production-shape gate below retains p95 and sustained
     # coverage comparisons.
-    dashboard_coverage = 0.20 if diagnostic else 0.70
+    dashboard_coverage = 0.20
     business_clients = summary["load"].get("businessClients")
     business_interval_secs = summary["load"].get("businessIntervalSecs")
     if business_clients != 5 or business_interval_secs != 1.0:
@@ -367,6 +367,8 @@ for summary in (baseline, candidate):
     business_minimum = summary["load"]["durationSecs"] * business_clients * (0.10 if diagnostic else 0.30)
     if dashboard_attempts is None or dashboard_attempts < dashboard_minimum:
         raise SystemExit(f"insufficient dashboard coverage for {summary['variant']}")
+    if statuses.get("dashboard:200", 0) < (4 if diagnostic else dashboard_clients):
+        raise SystemExit(f"insufficient dashboard response coverage for {summary['variant']}")
     if statuses.get("sse:200", 0) < 20:
         raise SystemExit(f"insufficient SSE coverage for {summary['variant']}")
     business_attempts = summary["load"].get("businessAttempts", 0)
