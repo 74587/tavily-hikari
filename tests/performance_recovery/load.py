@@ -157,8 +157,18 @@ def periodic(
     next_run = time.monotonic()
     while not stop.is_set():
         action()
-        next_run += interval_secs
+        next_run = next_periodic_deadline(next_run, interval_secs, time.monotonic())
         stop.wait(max(0.0, next_run - time.monotonic()))
+
+
+def next_periodic_deadline(
+    previous_deadline: float,
+    interval_secs: float,
+    now: float,
+) -> float:
+    """Advance a lane without replaying intervals missed by a slow request."""
+    scheduled = previous_deadline + interval_secs
+    return scheduled if scheduled > now else now + interval_secs
 
 
 def dashboard_lane(
