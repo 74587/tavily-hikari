@@ -395,6 +395,16 @@ async fn startup_resume_schedules_pending_research_with_default_poll_time() {
     )
     .await
     .expect("create first proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
     sqlx::query(
         r#"
         INSERT INTO upstream_reconciliation_research (

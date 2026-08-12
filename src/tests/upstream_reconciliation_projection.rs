@@ -152,6 +152,16 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
     )
     .await
     .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
     sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
         .execute(&proxy.key_store.pool)
         .await
@@ -257,6 +267,16 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
     )
     .await
     .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
     sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
         .execute(&proxy.key_store.pool)
         .await

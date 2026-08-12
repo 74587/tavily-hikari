@@ -551,10 +551,25 @@ impl KeyStore {
         Ok(Some(pending_at.max(global_until).max(local_until).max(now)))
     }
 
+    /// Returns a runnable representative wake. Durable reconciliation state remains intact while
+    /// the shadow gate is disabled, but must not wake a worker that can only short-circuit.
+    pub(crate) async fn upstream_reconciliation_representative_available_at(
+        &self,
+    ) -> Result<Option<i64>, ProxyError> {
+        let settings = self.get_system_settings().await?;
+        if !upstream_reconciliation_shadow_ready(&settings) {
+            return Ok(None);
+        }
+        self.upstream_reconciliation_continuation_at().await
+    }
+
     pub(crate) async fn ensure_upstream_reconciliation_representative_job(
         &self,
     ) -> Result<(), ProxyError> {
-        let Some(available_at) = self.upstream_reconciliation_continuation_at().await? else {
+        let Some(available_at) = self
+            .upstream_reconciliation_representative_available_at()
+            .await?
+        else {
             return Ok(());
         };
         self.scheduled_job_enqueue_at(

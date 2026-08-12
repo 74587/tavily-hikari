@@ -2683,6 +2683,14 @@ impl TavilyProxy {
         self.key_store.upstream_reconciliation_continuation_at().await
     }
 
+    pub async fn upstream_reconciliation_representative_available_at(
+        &self,
+    ) -> Result<Option<i64>, ProxyError> {
+        self.key_store
+            .upstream_reconciliation_representative_available_at()
+            .await
+    }
+
     pub async fn ensure_upstream_reconciliation_representative_job(
         &self,
     ) -> Result<(), ProxyError> {

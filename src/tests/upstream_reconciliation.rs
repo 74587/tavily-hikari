@@ -914,6 +914,16 @@ async fn reconciliation_startup_resume_keeps_one_pending_representative_job() {
     )
     .await
     .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
     let token = proxy
         .create_access_token(Some("reconciliation-startup-resume"))
         .await
@@ -976,6 +986,16 @@ async fn reconciliation_rejects_reclaimed_scheduled_job_claim() {
     )
     .await
     .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
     let token = proxy
         .create_access_token(Some("reconciliation-stale-claim"))
         .await

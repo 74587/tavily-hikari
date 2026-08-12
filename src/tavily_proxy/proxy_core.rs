@@ -1457,6 +1457,17 @@ impl TavilyProxy {
         settings: &SystemSettings,
     ) -> Result<SystemSettings, ProxyError> {
         let updated = self.key_store.set_system_settings(settings).await?;
+        if let Err(err) = self
+            .key_store
+            .ensure_upstream_reconciliation_representative_job()
+            .await
+        {
+            tracing::debug!(
+                component = "reconciliation",
+                event = "settings_resume_enqueue_failed",
+                err = %err,
+            );
+        }
         self.token_request_limit
             .set_request_limit(updated.request_rate_limit);
         Ok(updated)

@@ -126,7 +126,7 @@ async fn put_system_settings(
         ));
     }
 
-    state
+    let updated = state
         .proxy
         .set_system_settings(&tavily_hikari::SystemSettings {
             request_rate_limit: payload
@@ -182,7 +182,6 @@ async fn put_system_settings(
                 .unwrap_or(current_settings.request_log_retention),
         })
         .await
-        .map(Json)
         .map_err(|err| {
             eprintln!("update system settings error: {err}");
             let message = err.to_string();
@@ -208,7 +207,9 @@ async fn put_system_settings(
             } else {
                 (StatusCode::INTERNAL_SERVER_ERROR, message)
             }
-        })
+        })?;
+    maintenance_worker_wake_for_state(state.as_ref()).notify_one();
+    Ok(Json(updated))
 }
 
 async fn get_upstream_privacy_status(

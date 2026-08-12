@@ -59,6 +59,16 @@ async fn reconciliation_continuation_waits_for_pending_research_poll() {
     )
     .await
     .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
     let key_id = proxy
         .add_or_undelete_key("tvly-reconciliation-research-continuation")
         .await
@@ -134,6 +144,98 @@ async fn reconciliation_continuation_waits_for_pending_research_poll() {
     .await
     .expect("read delayed representative");
     assert_eq!(scheduled, (1, now + 120));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_disabled_gate_preserves_work_without_representative_churn() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-disabled-gate"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_research (
+            request_id, token_id, key_id, period_code, created_at, terminal_at, next_poll_at, updated_at
+        ) VALUES ('disabled-gate-research', 'disabled-gate-token', 'disabled-gate-key',
+                  '2026-07-15/S1', ?, NULL, ?, ?)
+        "#,
+    )
+    .bind(now - 60)
+    .bind(now)
+    .bind(now - 60)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert due research");
+    proxy
+        .key_store
+        .set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1,
+            0,
+        )
+        .await
+        .expect("mark durable projection pending");
+
+    assert_eq!(
+        proxy
+            .key_store
+            .upstream_reconciliation_continuation_at()
+            .await
+            .expect("read raw durable continuation"),
+        Some(now),
+        "due research remains visible for diagnostics while disabled"
+    );
+    assert_eq!(
+        proxy
+            .upstream_reconciliation_representative_available_at()
+            .await
+            .expect("read runnable continuation while disabled"),
+        None,
+        "a disabled gate must not requeue a no-op worker"
+    );
+    proxy
+        .ensure_upstream_reconciliation_representative_job()
+        .await
+        .expect("suppress disabled representative");
+    let disabled_jobs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' AND status IN ('queued', 'running')",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("count disabled representatives");
+    assert_eq!(disabled_jobs, 0);
+
+    let mut settings = proxy
+        .get_system_settings()
+        .await
+        .expect("load disabled settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable reconciliation shadow gate");
+    let enabled_job: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(available_at) FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' AND status = 'queued'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read resumed representative");
+    assert_eq!(enabled_job, (1, now));
 
     let _ = std::fs::remove_file(db_path);
 }
