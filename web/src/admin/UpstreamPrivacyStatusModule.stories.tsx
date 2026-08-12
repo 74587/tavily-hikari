@@ -323,6 +323,21 @@ function renderWithStatus(status: UpstreamPrivacyStatus | null, overrides?: Part
   )
 }
 
+function renderEvidenceSurface(child: JSX.Element): JSX.Element {
+  return (
+    <div
+      data-testid="upstream-privacy-evidence-surface"
+      style={{
+        background: '#453754',
+        boxSizing: 'border-box',
+        padding: 48,
+      }}
+    >
+      <div style={{ background: '#ffffff', boxSizing: 'border-box', padding: 24 }}>{child}</div>
+    </div>
+  )
+}
+
 function InteractionCanvas(args: StoryArgs): JSX.Element {
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(args.autoRefreshEnabled)
 
@@ -367,6 +382,10 @@ export const LocalBackoff: Story = {
   args: {
     status: localBackoffStatus,
   },
+}
+
+export const EvidenceLocalBackoff: Story = {
+  render: () => renderEvidenceSurface(renderWithStatus(localBackoffStatus)),
 }
 
 export const UpstreamBackoff: Story = {
@@ -432,6 +451,11 @@ export const Mobile393x852: Story = {
   parameters: {
     ...mobileViewport,
   },
+}
+
+export const EvidenceLocalBackoffMobile393x852: Story = {
+  parameters: mobileViewport,
+  render: EvidenceLocalBackoff.render,
 }
 
 export const Gallery: Story = {

@@ -153,6 +153,21 @@ function renderStateGallery(): JSX.Element {
   )
 }
 
+function renderEvidenceSurface(child: JSX.Element): JSX.Element {
+  return (
+    <div
+      data-testid="ha-node-detail-evidence-surface"
+      style={{
+        background: '#453754',
+        boxSizing: 'border-box',
+        padding: 48,
+      }}
+    >
+      <div style={{ background: '#ffffff', boxSizing: 'border-box', padding: 24 }}>{child}</div>
+    </div>
+  )
+}
+
 export const Default: Story = {}
 
 export const Eligible: Story = {
@@ -165,6 +180,17 @@ export const Draining: Story = {
 
 export const Deferred: Story = {
   args: { detail: gcStateMatrix[2].detail },
+}
+
+export const EvidenceDeferred: Story = {
+  render: () => renderEvidenceSurface(
+    <HaNodeDetailPanel
+      detail={gcStateMatrix[2].detail}
+      strings={translations.zh.admin.systemSettings.ha}
+      language="zh"
+      onBack={() => undefined}
+    />,
+  ),
 }
 
 export const Recovering: Story = {
@@ -216,6 +242,11 @@ export const Mobile393x852: Story = {
       },
     },
   },
+}
+
+export const EvidenceDeferredMobile393x852: Story = {
+  parameters: mobileViewport,
+  render: EvidenceDeferred.render,
 }
 
 export const MobileStateGallery: Story = {
