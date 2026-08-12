@@ -158,7 +158,7 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
 }
 
 #[tokio::test]
-async fn ha_gc_writer_lock_uses_bounded_continuation_persistence_retry() {
+async fn ha_gc_writer_lock_defers_continuation_to_stale_reaper() {
     let db_path = temp_db_path("ha-gc-writer-lock-continuation-retry");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
@@ -202,44 +202,82 @@ async fn ha_gc_writer_lock_uses_bounded_continuation_persistence_retry() {
         api_key_ip_geo_origin: "https://api.country.is".to_string(),
         dashboard_overview_cache: new_dashboard_overview_cache(),
     });
-    let run = tokio::spawn(run_ha_outbox_gc_claimed_job(
-        state.clone(),
-        ClaimedScheduledJob {
-            job_id: initial_claim.id,
-            claim_generation: initial_claim.claim_generation,
-            _job_execution_gate: None,
-        },
-    ));
-    // Hold the writer beyond the old 3.1-second retry budget. The continuation
-    // must still hand off shortly after release instead of waiting for stale
-    // reaping at 120 seconds.
-    tokio::time::sleep(Duration::from_millis(3_600)).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            run_ha_outbox_gc_claimed_job(
+                state.clone(),
+                ClaimedScheduledJob {
+                    job_id: initial_claim.id,
+                    claim_generation: initial_claim.claim_generation,
+                    _job_execution_gate: None,
+                },
+            )
+        )
+        .await
+        .expect("GC worker must yield when continuation persistence is busy")
+    );
+    let running_claim: (String, i64) = sqlx::query_as(
+        "SELECT status, claim_generation FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(initial_claim.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read unresolved HA GC claim");
+    assert_eq!(running_claim, ("running".to_string(), initial_claim.claim_generation));
+
     sqlx::query("ROLLBACK")
         .execute(&mut lock_conn)
         .await
         .expect("release SQLite writer lock");
     lock_conn.close().await.expect("close writer lock holder");
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), run)
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM scheduled_jobs WHERE id = ?")
+            .bind(initial_claim.id)
+            .fetch_one(&pool)
             .await
-            .expect("GC worker returns promptly")
-            .expect("GC worker task completes")
+            .expect("continuation persistence must not retry in the background"),
+        "running"
     );
 
-    let mut queued = false;
-    for _ in 0..20 {
-        queued = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE job_type = 'ha_outbox_gc' AND status = 'queued')",
-        )
-        .fetch_one(&pool)
+    let recovery_now = Utc::now().timestamp();
+    sqlx::query("UPDATE scheduled_jobs SET started_at = ? WHERE id = ?")
+        .bind(recovery_now - 120)
+        .bind(initial_claim.id)
+        .execute(&pool)
         .await
-        .expect("read deferred HA GC job state");
-        if queued {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(queued, "writer lock release must recover the continuation promptly");
+        .expect("age unresolved HA GC claim for stale reaper");
+    assert_eq!(
+        state
+            .proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover stale HA GC claim"),
+        1,
+        "the stale reaper is the sole recovery path after persistence conflict"
+    );
+    assert_eq!(
+        state
+            .proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("a recovered HA GC claim cannot be recovered twice"),
+        0
+    );
+    let recovered: (String, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT status, claim_generation, available_at, message FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(initial_claim.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read stale-reaper continuation");
+    assert_eq!(recovered.0, "queued");
+    assert_eq!(recovered.1, initial_claim.claim_generation + 1);
+    assert!(
+        (recovery_now + 30..=recovery_now + 31).contains(&recovered.2),
+        "stale recovery must preserve the 30-second continuation delay"
+    );
+    assert_eq!(recovered.3.as_deref(), Some("deferred=stale_recovery"));
 
     drop(state);
     pool.close().await;

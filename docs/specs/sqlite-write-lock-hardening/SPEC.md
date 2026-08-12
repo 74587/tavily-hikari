@@ -269,9 +269,9 @@ source when a usable persisted runtime already exists.
   earliest eligible channel and must not turn one channel's delay into a global freeze.
 - An expired scheduled-job claim returns an internal stale-claim result. It cannot finish, enqueue a
   continuation, or mutate a newer claim with the same job id. HA continuation persistence is part of
-  the finish transaction; a transient conflict uses a fixed, bounded same-generation persistence
-  retry before the stale reaper becomes the final recovery path. It must never create an unbounded
-  background retry loop.
+  the finish transaction; a transient conflict may use a fixed, bounded same-generation retry, or
+  leave the running claim for stale reaper recovery. It must never create an unbounded background
+  retry loop.
 - Reconciliation candidate selection is bounded by indexed pages before hydration. Three consecutive
   rounds with eligible candidates but no remote attempt and exhausted local budget enter a persisted
   short local backoff with one delayed representative job. Only actual upstream 429 attempts enter
