@@ -985,10 +985,32 @@ async fn online_ha_gc_does_not_fast_loop_while_only_legacy_scanning_remains() {
     assert_eq!(billing.channels[0].channel, HaSyncChannel::Billing);
     let runtime = proxy.gc_ha_outbox_online().await.expect("runtime GC");
     assert_eq!(runtime.channels[0].channel, HaSyncChannel::Runtime);
+    let global_wake_delay = runtime
+        .continuation_delay_secs
+        .expect("legacy scanning must keep a deferred global wake");
+    assert!(
+        (HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS - 1
+            ..=HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS)
+            .contains(&global_wake_delay),
+        "the global wake reports remaining whole seconds after the earlier control slice"
+    );
+    let (last_attempt_at, next_retry_at, continuation_delay_secs): (i64, i64, Option<i64>) =
+        sqlx::query_as(
+            "SELECT last_attempt_at, next_retry_at, last_continuation_delay_secs \
+             FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read the deferred legacy channel state");
     assert_eq!(
-        runtime.continuation_delay_secs,
+        continuation_delay_secs,
         Some(HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS),
-        "once the other channels are clear, the legacy cursor keeps its own five-minute defer"
+        "the legacy channel must persist its own five-minute defer"
+    );
+    assert_eq!(
+        next_retry_at.saturating_sub(last_attempt_at),
+        HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS,
+        "the persisted defer must prevent a fast continuation loop"
     );
 
     pool.close().await;
