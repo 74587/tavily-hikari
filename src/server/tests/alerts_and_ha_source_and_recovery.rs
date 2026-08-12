@@ -158,13 +158,37 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
 }
 
 #[tokio::test]
-async fn ha_gc_writer_lock_defers_continuation_to_stale_reaper() {
+async fn ha_gc_productive_continuation_lock_defers_to_stale_reaper() {
     let db_path = temp_db_path("ha-gc-writer-lock-continuation-retry");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("create proxy");
     let pool = connect_sqlite_test_pool(&db_str).await;
+    let expired_created_at = Utc::now().timestamp() - 15 * 24 * 60 * 60;
+    for index in 0..1_250 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("locked-continuation-{index}"))
+        .bind(expired_created_at)
+        .execute(&pool)
+        .await
+        .expect("seed expired HA GC debt");
+    }
+    let report = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("run a productive GC slice before continuation handoff");
+    assert_eq!(report.deleted_rows, 1_000);
+    let continuation_delay_secs = report
+        .continuation_delay_secs
+        .expect("the productive GC slice must require a continuation");
+    assert!(report.has_more);
     let initial = proxy
         .scheduled_job_enqueue("ha_outbox_gc", "test", None, 1)
         .await
@@ -205,13 +229,12 @@ async fn ha_gc_writer_lock_defers_continuation_to_stale_reaper() {
     assert!(
         tokio::time::timeout(
             Duration::from_millis(500),
-            run_ha_outbox_gc_claimed_job(
-                state.clone(),
-                ClaimedScheduledJob {
-                    job_id: initial_claim.id,
-                    claim_generation: initial_claim.claim_generation,
-                    _job_execution_gate: None,
-                },
+            finish_ha_gc_with_continuation(
+                &state,
+                initial_claim.id,
+                initial_claim.claim_generation,
+                "controller_wake_delay_secs=1 productive_slice".to_string(),
+                continuation_delay_secs,
             )
         )
         .await
@@ -225,6 +248,14 @@ async fn ha_gc_writer_lock_defers_continuation_to_stale_reaper() {
     .await
     .expect("read unresolved HA GC claim");
     assert_eq!(running_claim, ("running".to_string(), initial_claim.claim_generation));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM ha_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("read remaining HA GC debt"),
+        250,
+        "the productive slice must leave a continuation-worthy tail"
+    );
 
     sqlx::query("ROLLBACK")
         .execute(&mut lock_conn)

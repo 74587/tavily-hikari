@@ -356,10 +356,9 @@ source when a usable persisted runtime already exists.
 - Online HA outbox GC must use a non-blocking maintenance write lease and a one-second slice
   budget. If the lease or SQLite writer is busy, it must finish the current scheduled row and
   persist a bounded continuation handoff instead of waiting through the scheduler's long retry
-  window. A transient handoff conflict keeps only the matching representative claim in a
-  capped-cadence same-generation recovery loop until it persists or becomes stale; it must not
-  leave the global representative `running` until the 120-second stale threshold after the writer
-  has already released.
+  window. A transient handoff conflict keeps only the matching representative claim for a fixed,
+  bounded same-generation retry when available, or for claim-fenced stale-reaper recovery; it must
+  never create an unbounded background retry loop.
   Productive retention slices whose slowest active database micro-batch stays within `50ms` must persist a
   five-second continuation and adapt their per-channel batch size within `25..250`; an over-budget
   slice halves its next batch before retrying. Legacy-resource cursor verification is not retention

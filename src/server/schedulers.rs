@@ -1250,7 +1250,7 @@ async fn finish_ha_gc_with_continuation(
                     event = "deferred_job_finish_failed",
                     job_id,
                     err = %finish_err,
-                    "HA outbox GC deferred job remains eligible for the outer continuation retry"
+                    "HA outbox GC deferred job remains running for stale-reaper recovery"
                 );
             }
             return false;
