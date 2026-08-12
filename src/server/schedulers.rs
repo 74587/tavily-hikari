@@ -2721,11 +2721,7 @@ async fn run_manual_claimed_job(
             };
             match run_result {
                 Ok(Ok(settled)) => {
-                    match state
-                        .proxy
-                        .upstream_reconciliation_representative_available_at()
-                        .await
-                    {
+                    match state.proxy.upstream_reconciliation_representative_available_at().await {
                         Ok(Some(available_at)) => state
                             .proxy
                             .scheduled_job_finish_and_enqueue_auto_at(
