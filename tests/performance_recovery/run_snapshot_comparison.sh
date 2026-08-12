@@ -466,11 +466,19 @@ if not diagnostic:
                 f"responses={candidate_business_responses}, "
                 f"limit={candidate_lock_limit}"
             )
-    elif candidate["sqliteLockErrors"] > baseline["sqliteLockErrors"] * 1.10 + 1:
-        raise SystemExit(
-            "candidate SQLite lock errors regressed: "
-            f"baseline={baseline['sqliteLockErrors']}, candidate={candidate['sqliteLockErrors']}"
-        )
+    else:
+        # The candidate can serve substantially more application requests than
+        # the baseline. Compare contention per reached request rather than raw
+        # lock-event totals so throughput improvements do not read as a lock
+        # regression. The baseline response floor above guarantees a non-zero
+        # denominator in this branch.
+        baseline_lock_rate = baseline["sqliteLockErrors"] / baseline_business_responses
+        candidate_lock_rate = candidate["sqliteLockErrors"] / candidate_business_responses
+        if candidate_lock_rate > baseline_lock_rate * 1.10:
+            raise SystemExit(
+                "candidate SQLite lock rate regressed: "
+                f"baseline={baseline_lock_rate:.6f}, candidate={candidate_lock_rate:.6f}"
+            )
 if candidate["http5xx"] > baseline["http5xx"]:
     raise SystemExit(
         "candidate introduced HTTP 5xx: "
@@ -486,6 +494,11 @@ result = {
     "baseline_business_red": baseline_business_red,
     "rss_p95_comparable": not baseline_business_red,
     "sqlite_lock_rate_comparable": not baseline_business_red,
+    "baseline_transient_sqlite_lock_rate": (
+        baseline["sqliteLockErrors"] / baseline_business_responses
+        if baseline_business_responses
+        else None
+    ),
     "candidate_transient_sqlite_lock_rate": (
         candidate["sqliteLockErrors"] / candidate_business_responses
         if candidate_business_responses
