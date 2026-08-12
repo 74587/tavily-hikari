@@ -23,6 +23,9 @@ const RECONCILIATION_PROJECTION_LIFECYCLE_NAME: &str =
     "reconciliation-projection-lifecycle-v1";
 const RECONCILIATION_PROJECTION_LIFECYCLE_CHECKSUM: &str =
     "sha256:75705f2a93c4a8d6526f13b708490ec1";
+const HA_GC_LEGACY_CURSOR_VERSION: i64 = 8;
+const HA_GC_LEGACY_CURSOR_NAME: &str = "ha-gc-per-channel-legacy-cursor-v1";
+const HA_GC_LEGACY_CURSOR_CHECKSUM: &str = "sha256:ac41cf12d5e848f3a1b9d276e0f4598c";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -654,6 +657,11 @@ impl KeyStore {
                 RECONCILIATION_PROJECTION_LIFECYCLE_NAME,
                 RECONCILIATION_PROJECTION_LIFECYCLE_CHECKSUM,
             ),
+            (
+                HA_GC_LEGACY_CURSOR_VERSION,
+                HA_GC_LEGACY_CURSOR_NAME,
+                HA_GC_LEGACY_CURSOR_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -689,6 +697,17 @@ impl KeyStore {
         {
             return Err(ProxyError::Other(
                 "schema migration object validation failed at version 2".to_string(),
+            ));
+        }
+        if self
+            .schema_migration_applied(HA_GC_LEGACY_CURSOR_VERSION)
+            .await?
+            && !self
+                .table_column_exists("ha_outbox_gc_channel_state", "legacy_cursor_seq")
+                .await?
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 8".to_string(),
             ));
         }
         if self
@@ -797,6 +816,39 @@ impl KeyStore {
         }
         self.record_schema_migration(GC_WORK_VERSION, GC_WORK_NAME, GC_WORK_CHECKSUM)
             .await
+    }
+
+    async fn apply_ha_gc_legacy_cursor_migration(&self) -> Result<(), ProxyError> {
+        if !self
+            .table_column_exists("ha_outbox_gc_channel_state", "legacy_cursor_seq")
+            .await?
+        {
+            sqlx::query(
+                "ALTER TABLE ha_outbox_gc_channel_state ADD COLUMN legacy_cursor_seq INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE ha_outbox_gc_channel_state
+               SET legacy_cursor_seq = CASE channel
+                   WHEN 'control' THEN (SELECT last_legacy_control_seq FROM ha_outbox_gc_state WHERE id = 'local')
+                   WHEN 'billing' THEN (SELECT last_legacy_billing_seq FROM ha_outbox_gc_state WHERE id = 'local')
+                   WHEN 'runtime' THEN (SELECT last_legacy_runtime_seq FROM ha_outbox_gc_state WHERE id = 'local')
+                   ELSE legacy_cursor_seq
+               END
+             WHERE legacy_cursor_seq = 0
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            HA_GC_LEGACY_CURSOR_VERSION,
+            HA_GC_LEGACY_CURSOR_NAME,
+            HA_GC_LEGACY_CURSOR_CHECKSUM,
+        )
+        .await
     }
 
     async fn apply_reconciliation_work_migration(&self) -> Result<(), ProxyError> {
@@ -1151,6 +1203,12 @@ impl KeyStore {
             self.apply_reconciliation_projection_lifecycle_migration()
                 .await?;
         }
+        if !self
+            .schema_migration_applied(HA_GC_LEGACY_CURSOR_VERSION)
+            .await?
+        {
+            self.apply_ha_gc_legacy_cursor_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1180,6 +1238,7 @@ impl KeyStore {
             .await?;
         self.apply_reconciliation_projection_lifecycle_migration()
             .await?;
+        self.apply_ha_gc_legacy_cursor_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1187,7 +1246,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 6_i64,
+            migration_count = 8_i64,
         );
         Ok(())
     }

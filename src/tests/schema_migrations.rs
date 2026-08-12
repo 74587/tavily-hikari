@@ -28,7 +28,7 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     let projection_complete: i64 = sqlx::query_scalar(
         "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'upstream_reconciliation_work_projection_complete_v1'",
     )
@@ -54,6 +54,69 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
     .expect_err("checksum drift must reject startup");
     assert!(error.to_string().contains("checksum mismatch"));
 
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn warm_schema_migration_adds_the_per_channel_legacy_cursor() {
+    let db_path = temp_db_path("schema-migration-ha-gc-legacy-cursor");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-ha-gc-legacy-cursor".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET last_legacy_control_seq = 101, \
+         last_legacy_billing_seq = 202, last_legacy_runtime_seq = 303 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed pre-v8 shared cursor state");
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 8")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate an existing database before v8");
+    sqlx::query("ALTER TABLE ha_outbox_gc_channel_state DROP COLUMN legacy_cursor_seq")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate the pre-v8 channel state");
+
+    assert!(
+        !proxy
+            .key_store
+            .prepare_versioned_schema()
+            .await
+            .expect("warm migration must converge an existing database"),
+        "an existing database must not request full bootstrap"
+    );
+    let cursors: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT channel, legacy_cursor_seq FROM ha_outbox_gc_channel_state ORDER BY channel",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read migrated per-channel cursors");
+    assert_eq!(
+        cursors,
+        vec![
+            ("billing".to_string(), 202),
+            ("control".to_string(), 101),
+            ("runtime".to_string(), 303),
+        ]
+    );
+    let v8_recorded: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 8)")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read v8 migration ledger record");
+    assert_eq!(v8_recorded, 1);
+
+    drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -485,7 +548,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
