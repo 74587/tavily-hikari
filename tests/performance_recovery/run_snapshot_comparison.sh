@@ -33,6 +33,9 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:?COMPOSE_PROJECT is required}"
 DURATION_SECS="${DURATION_SECS:-600}"
 ARTIFACTS_DIR="${REMOTE_RUN}/artifacts/performance-recovery"
 WORK_DIR="${REMOTE_RUN}/performance-recovery"
+# Testbox retries must not ask Docker Hub to resolve a mutable tag. This digest
+# is the exact Rust 1.91 Bookworm image used by the checked-in test Dockerfile.
+TESTBOX_RUST_BASE_IMAGE="rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33"
 
 manifest_get() {
   local key="$1"
@@ -156,9 +159,16 @@ write_compose() {
   local repo="$1"
   local data_dir="$2"
   local artifact_dir="$3"
+  local dockerfile="$repo/tests/ha/Dockerfile.performance-recovery.app"
   local runner_uid runner_gid
   runner_uid="$(id -u)"
   runner_gid="$(id -g)"
+  sed "s|^FROM rust:1.91-bookworm AS builder$|FROM $TESTBOX_RUST_BASE_IMAGE AS builder|" \
+    "$repo/tests/ha/Dockerfile.app" > "$dockerfile"
+  grep -qx "FROM $TESTBOX_RUST_BASE_IMAGE AS builder" "$dockerfile" || {
+    echo "unexpected testbox app Dockerfile base image" >&2
+    exit 2
+  }
   cat > "$WORK_DIR/compose.yml" <<EOF
 services:
   upstream:
@@ -172,7 +182,7 @@ services:
   app:
     build:
       context: $repo
-      dockerfile: tests/ha/Dockerfile.app
+      dockerfile: tests/ha/Dockerfile.performance-recovery.app
     environment:
       TAVILY_API_KEYS: tvly-load-key
       TAVILY_UPSTREAM: http://upstream:9001
