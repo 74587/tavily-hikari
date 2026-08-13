@@ -1672,7 +1672,7 @@ impl KeyStore {
         &self,
         record: &AccountEntitlementRecord,
     ) -> Result<AccountEntitlementRecord, ProxyError> {
-        let created_id = sqlx::query_scalar::<_, i64>(
+        let insert = sqlx::query(
             r#"
             INSERT INTO account_entitlements (
                 user_id, scope_kind, month_start, business_calls_1h_delta,
@@ -1681,7 +1681,6 @@ impl KeyStore {
                 actor_display_name, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
             "#,
         )
         .bind(&record.user_id)
@@ -1697,11 +1696,10 @@ impl KeyStore {
         .bind(&record.actor_user_id)
         .bind(&record.actor_display_name)
         .bind(record.created_at)
-        .fetch_one(&self.pool)
+        .execute(&self.pool)
         .await?;
         let mut created = record.clone();
-        created.id = created_id;
-        self.invalidate_account_quota_resolution(&record.user_id).await;
+        created.id = insert.last_insert_rowid();
         if record.scope_kind == ACCOUNT_ENTITLEMENT_SCOPE_MONTH && record.month_start > 0 {
             let current_month_start = start_of_local_month_utc_ts(self.backend_time.local_now());
             if record.month_start <= current_month_start {

@@ -765,6 +765,7 @@ use super::upstream_support_and_manual_jobs::*;
                 .expect("settle associated key binding");
         }
 
+        let direct_proxy = proxy.clone();
         let addr = spawn_admin_users_server(proxy, true).await;
         let client = Client::new();
 
@@ -1398,6 +1399,17 @@ use super::upstream_support_and_manual_jobs::*;
                 .get("frontendNote")
                 .and_then(|value| value.as_str()),
             Some("base quota ledger correction")
+        );
+
+        let direct_quota = direct_proxy
+            .get_admin_user_quota_details(&alice.user_id)
+            .await
+            .expect("direct quota details after base entitlement")
+            .expect("admin quota details exist");
+        assert_eq!(
+            direct_quota.base.business_calls_1h_limit,
+            target_base_hourly,
+            "direct quota resolution must observe the committed entitlement"
         );
 
         let detail_after_resp = client
