@@ -119,7 +119,14 @@
 ## Current diagnostics contract
 
 - Online HA GC emits a channel-scoped aggregate INFO at most once per 60 seconds; slow slices and writer conflicts bypass that window. The aggregate reports deletion progress and age, while sequence span remains explicitly an estimate.
+- The GC aggregate and administrator channel view now expose controller-owned `next_wake`,
+  eligibility, batch size, ingress delta, net-row estimate, deletion rate, last progress and defer
+  reason. Normal slices and duplicate continuation attempts remain DEBUG; only state transitions,
+  SLO breach/recovery, busy defers and real errors are elevated.
 - Reconciliation local-budget pressure is stored and logged independently from upstream 429 backoff, preventing a local query-budget exhaustion from generating a remote-rate-limit alert.
+- Reconciliation aggregates include main-settlement and research timing plus typed outcome counts,
+  including `no_adjustment`. The status view keeps unknown coverage nullable instead of publishing a
+  zero queue or zero adjustment count before its first durable observation.
 - Main settlement now precedes Research, and remote observations plus bookkeeping share bounded
   nested deadlines with reserved finalization headroom. HA metadata carries local pressure across
   takeover without increasing normal log volume.

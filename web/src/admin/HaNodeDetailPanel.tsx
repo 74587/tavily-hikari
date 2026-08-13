@@ -42,6 +42,11 @@ function numberFormat(value: number, language: 'en' | 'zh'): string {
   return new Intl.NumberFormat(localeFor(language), { maximumFractionDigits: 1 }).format(value)
 }
 
+function formatSignedNumber(value: number | null | undefined, language: 'en' | 'zh'): string {
+  if (value == null) return '—'
+  return `${value > 0 ? '+' : ''}${numberFormat(value, language)}`
+}
+
 function channelLabel(channel: string, language: 'en' | 'zh'): string {
   if (language === 'zh') {
     return channel === 'control' ? 'Control' : channel === 'billing' ? 'Billing' : 'Runtime'
@@ -57,16 +62,41 @@ function channelStateLabel(state: string, language: 'en' | 'zh'): string {
     expired_backlog: ['存在过期积压', 'Expired backlog'],
     unavailable: ['源端不可用', 'Source unavailable'],
     source: ['源端', 'Source'],
+    unknown: ['未知', 'Unknown'],
   }
-  return labels[state]?.[language === 'zh' ? 0 : 1] ?? state
+  const normalizedState = state.trim() || 'unknown'
+  return labels[normalizedState]?.[language === 'zh' ? 0 : 1] ?? normalizedState
 }
 
-function gcStateLabel(state: string, language: 'en' | 'zh'): string {
+function gcStateLabel(state: string | null | undefined, language: 'en' | 'zh'): string {
   const labels: Record<string, [string, string]> = {
-    idle: ['空闲', 'Idle'], draining: ['清理中', 'Draining'], deferred: ['已让步', 'Deferred'],
-    stalled: ['停滞', 'Stalled'], unknown: ['未知', 'Unknown'],
+    eligible: ['可执行', 'Eligible'],
+    idle: ['空闲', 'Idle'],
+    draining: ['清理中', 'Draining'],
+    deferred: ['已让步', 'Deferred'],
+    recovering: ['恢复中', 'Recovering'],
+    stalled: ['停滞', 'Stalled'],
+    stale: ['已过期', 'Stale'],
+    unknown: ['未知', 'Unknown'],
   }
-  return labels[state]?.[language === 'zh' ? 0 : 1] ?? state
+  const normalizedState = state?.trim() || 'unknown'
+  return labels[normalizedState]?.[language === 'zh' ? 0 : 1] ?? normalizedState
+}
+
+function gcStateTone(state: string | null | undefined): StatusTone {
+  switch (state ?? 'unknown') {
+    case 'eligible':
+    case 'idle':
+      return 'success'
+    case 'draining':
+    case 'deferred':
+    case 'recovering':
+      return 'warning'
+    case 'stalled':
+      return 'error'
+    default:
+      return 'neutral'
+  }
 }
 
 function gcSloLabel(state: string, language: 'en' | 'zh'): string {
@@ -282,9 +312,14 @@ export default function HaNodeDetailPanel({
                 <div key={health.channel} className="ha-channel-health-row">
                   <div className="ha-channel-health-heading">
                     <strong>{channelLabel(health.channel, language)}</strong>
-                    <StatusBadge tone={health.cursorState === 'healthy' ? 'success' : 'warning'}>
-                      {channelStateLabel(health.cursorState, language)}
-                    </StatusBadge>
+                    <div className="ha-channel-health-badges">
+                      <StatusBadge tone={health.cursorState === 'healthy' ? 'success' : 'warning'}>
+                        {channelStateLabel(health.cursorState, language)}
+                      </StatusBadge>
+                      <StatusBadge tone={gcStateTone(health.gcState)}>
+                        {gcStateLabel(health.gcState, language)}
+                      </StatusBadge>
+                    </div>
                   </div>
                   <dl>
                     <div><dt>{language === 'zh' ? 'ACK 序号' : 'ACK'}</dt><dd>{health.ackedSeq ?? '—'}</dd></div>
@@ -294,11 +329,13 @@ export default function HaNodeDetailPanel({
                     <div><dt>{language === 'zh' ? '过期积压' : 'Expired backlog'}</dt><dd>{health.expiredBacklog ? (language === 'zh' ? '是' : 'Yes') : (language === 'zh' ? '否' : 'No')}</dd></div>
                     <div><dt>{language === 'zh' ? 'GC 状态' : 'GC state'}</dt><dd>{gcStateLabel(health.gcState, language)}</dd></div>
                     <div><dt>{language === 'zh' ? '最老事件' : 'Oldest event'}</dt><dd>{formatLag(health.oldestAgeSecs, language)}</dd></div>
-                    <div><dt>{language === 'zh' ? '批量' : 'Batch'}</dt><dd>{health.batchSize}</dd></div>
+                    <div><dt>{language === 'zh' ? '批量' : 'Batch'}</dt><dd>{health.batchSize ?? '—'}</dd></div>
                     <div><dt>{language === 'zh' ? '最近进展' : 'Last progress'}</dt><dd>{formatTimestamp(health.lastProgressAt, language)}</dd></div>
                     <div><dt>{language === 'zh' ? '让步原因' : 'Defer reason'}</dt><dd>{health.lastDeferReason ?? '—'}</dd></div>
                     <div><dt>{language === 'zh' ? '下次重试' : 'Next retry'}</dt><dd>{formatTimestamp(health.nextRetryAt, language)}</dd></div>
                     <div><dt>{language === 'zh' ? '债务模式' : 'Debt mode'}</dt><dd>{health.gcDebtMode || '—'}</dd></div>
+                    <div><dt>{language === 'zh' ? '入流增量' : 'Ingress delta'}</dt><dd>{formatSignedNumber(health.lastIngressSeqDelta, language)}</dd></div>
+                    <div><dt>{language === 'zh' ? '净回收' : 'Net recovery'}</dt><dd>{formatSignedNumber(health.lastNetRowsDeltaEstimate == null ? null : -health.lastNetRowsDeltaEstimate, language)}</dd></div>
                     <div><dt>{language === 'zh' ? '删除速率' : 'Delete rate'}</dt><dd>{numberFormat(health.gcDeletedRowsPerMinute, language)} / min</dd></div>
                     <div><dt>{language === 'zh' ? '前台 RPS' : 'Foreground RPS'}</dt><dd>{numberFormat(health.gcForegroundRps, language)}</dd></div>
                     <div><dt>{language === 'zh' ? 'GC SLO' : 'GC SLO'}</dt><dd>{gcSloLabel(health.gcSloState, language)}</dd></div>

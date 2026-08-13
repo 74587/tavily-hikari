@@ -2,19 +2,319 @@ use super::core_support_and_parsing::*;
 use super::upstream_support_and_manual_jobs::*;
 use super::*;
 
-#[test]
-fn ha_gc_keeps_legacy_scan_yield_under_foreground_load() {
+#[tokio::test]
+async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
+    let db_path = temp_db_path("ha-gc-worker-fair-wake");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("create proxy");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let now = Utc::now().timestamp();
+    let mut tx = pool.begin().await.expect("begin outbox seed transaction");
+    for index in 0..250 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("legacy-scan-{index}"))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .expect("seed retained control event");
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO ha_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'scheduled_jobs', 'legacy-after-page', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .expect("seed deferred legacy control event");
+    sqlx::query(
+        r#"
+        INSERT INTO ha_billing_outbox
+            (kind, resource, resource_id, op, payload_json, created_at, checksum)
+        VALUES ('state', 'billing_ledger', 'billing-ready', 'upsert', '{}', ?, NULL)
+        "#,
+    )
+    .bind(now - 15 * 24 * 60 * 60)
+    .execute(&mut *tx)
+    .await
+    .expect("seed eligible billing event");
+    tx.commit().await.expect("commit outbox seed transaction");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET next_channel = 'control', pending_channel_mask = 7 WHERE id = 'local'",
+    )
+    .execute(&pool)
+    .await
+    .expect("select control first");
+
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        admin_passkey: AdminPasskeyOptions::disabled(),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+        dev_open_admin: false,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+        dashboard_overview_cache: new_dashboard_overview_cache(),
+    });
+
+    let initial = state
+        .proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "test", None, 1)
+        .await
+        .expect("enqueue control worker job");
+    let initial_claim = state
+        .proxy
+        .scheduled_job_mark_running(initial.job_id)
+        .await
+        .expect("claim control worker job")
+        .expect("initial job is due");
+    assert!(
+        run_ha_outbox_gc_claimed_job(
+            state.clone(),
+            ClaimedScheduledJob {
+                job_id: initial_claim.id,
+                claim_generation: initial_claim.claim_generation,
+                _job_execution_gate: None,
+            },
+        )
+        .await
+    );
+
+    let continuation: (i64, i64, i64) = sqlx::query_as(
+        "SELECT id, queued_at, available_at FROM scheduled_jobs WHERE job_type = 'ha_outbox_gc' AND status = 'queued'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read controller continuation");
     assert_eq!(
-        ha_gc_continuation_delay_secs(
-            Some(HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS),
-            HA_OUTBOX_GC_LOW_PRESSURE_RPS + 1,
-        ),
-        HA_OUTBOX_GC_LEGACY_SCAN_CONTINUATION_DELAY_SECS,
+        continuation.2.saturating_sub(continuation.1),
+        1,
+        "the scheduler must persist the controller's one-second fair wake, not the control channel's 300-second legacy defer"
+    );
+    let (control_delay, control_cursor): (i64, i64) = sqlx::query_as(
+        "SELECT next_retry_at - last_attempt_at, legacy_cursor_seq FROM ha_outbox_gc_channel_state WHERE channel = 'control'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read durable control defer");
+    assert_eq!(control_delay, 300);
+    assert_eq!(control_cursor, 250);
+
+    // Contract split: the library's manual-clock regression proves the
+    // controller calculates this one-second fair wake. This binary test proves
+    // the scheduler persists that exact typed wake and the next real worker
+    // advances billing when the durable job becomes due.
+    sqlx::query("UPDATE scheduled_jobs SET available_at = ? WHERE id = ?")
+        .bind(Utc::now().timestamp())
+        .bind(continuation.0)
+        .execute(&pool)
+        .await
+        .expect("advance continuation to its fair wake");
+    let billing_claim = state
+        .proxy
+        .scheduled_job_mark_running(continuation.0)
+        .await
+        .expect("claim billing worker job")
+        .expect("fair continuation is due");
+    assert!(
+        run_ha_outbox_gc_claimed_job(
+            state.clone(),
+            ClaimedScheduledJob {
+                job_id: billing_claim.id,
+                claim_generation: billing_claim.claim_generation,
+                _job_execution_gate: None,
+            },
+        )
+        .await
+    );
+    let billing_remaining: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM ha_billing_outbox WHERE resource_id = 'billing-ready' LIMIT 1)",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read billing progress");
+    assert!(!billing_remaining, "billing must advance on the fair wake");
+
+    drop(state);
+    pool.close().await;
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn ha_gc_productive_continuation_lock_defers_to_stale_reaper() {
+    let db_path = temp_db_path("ha-gc-writer-lock-continuation-retry");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("create proxy");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let expired_created_at = Utc::now().timestamp() - 15 * 24 * 60 * 60;
+    for index in 0..1_250 {
+        sqlx::query(
+            r#"
+            INSERT INTO ha_outbox
+                (kind, resource, resource_id, op, payload_json, created_at, checksum)
+            VALUES ('state', 'users', ?, 'upsert', '{}', ?, NULL)
+            "#,
+        )
+        .bind(format!("locked-continuation-{index}"))
+        .bind(expired_created_at)
+        .execute(&pool)
+        .await
+        .expect("seed expired HA GC debt");
+    }
+    let report = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("run a productive GC slice before continuation handoff");
+    assert_eq!(report.deleted_rows, 1_000);
+    let continuation_delay_secs = report
+        .continuation_delay_secs
+        .expect("the productive GC slice must require a continuation");
+    assert!(report.has_more);
+    let initial = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "test", None, 1)
+        .await
+        .expect("enqueue HA GC job");
+    let initial_claim = proxy
+        .scheduled_job_mark_running(initial.job_id)
+        .await
+        .expect("claim HA GC job")
+        .expect("HA GC job is due");
+    let lock_options = SqliteConnectOptions::new()
+        .filename(&db_str)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_millis(0));
+    let mut lock_conn = sqlx::SqliteConnection::connect_with(&lock_options)
+        .await
+        .expect("connect writer lock holder");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut lock_conn)
+        .await
+        .expect("hold SQLite writer lock");
+
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        admin_passkey: AdminPasskeyOptions::disabled(),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+        dev_open_admin: false,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+        dashboard_overview_cache: new_dashboard_overview_cache(),
+    });
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            finish_ha_gc_with_continuation(
+                &state,
+                initial_claim.id,
+                initial_claim.claim_generation,
+                "controller_wake_delay_secs=1 productive_slice".to_string(),
+                continuation_delay_secs,
+            )
+        )
+        .await
+        .expect("GC worker must yield when continuation persistence is busy")
+    );
+    let running_claim: (String, i64) = sqlx::query_as(
+        "SELECT status, claim_generation FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(initial_claim.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read unresolved HA GC claim");
+    assert_eq!(running_claim, ("running".to_string(), initial_claim.claim_generation));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM ha_outbox")
+            .fetch_one(&pool)
+            .await
+            .expect("read remaining HA GC debt"),
+        250,
+        "the productive slice must leave a continuation-worthy tail"
+    );
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut lock_conn)
+        .await
+        .expect("release SQLite writer lock");
+    lock_conn.close().await.expect("close writer lock holder");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM scheduled_jobs WHERE id = ?")
+            .bind(initial_claim.id)
+            .fetch_one(&pool)
+            .await
+            .expect("continuation persistence must not retry in the background"),
+        "running"
+    );
+
+    let recovery_now = Utc::now().timestamp();
+    sqlx::query("UPDATE scheduled_jobs SET started_at = ? WHERE id = ?")
+        .bind(recovery_now - 120)
+        .bind(initial_claim.id)
+        .execute(&pool)
+        .await
+        .expect("age unresolved HA GC claim for stale reaper");
+    assert_eq!(
+        state
+            .proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover stale HA GC claim"),
+        1,
+        "the stale reaper is the sole recovery path after persistence conflict"
     );
     assert_eq!(
-        ha_gc_continuation_delay_secs(Some(1), HA_OUTBOX_GC_LOW_PRESSURE_RPS + 1),
-        HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
+        state
+            .proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("a recovered HA GC claim cannot be recovered twice"),
+        0
     );
+    let recovered: (String, i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT status, claim_generation, available_at, message FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(initial_claim.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read stale-reaper continuation");
+    assert_eq!(recovered.0, "queued");
+    assert_eq!(recovered.1, initial_claim.claim_generation + 1);
+    assert!(
+        (recovery_now + 30..=recovery_now + 31).contains(&recovered.2),
+        "stale recovery must preserve the 30-second continuation delay"
+    );
+    assert_eq!(recovered.3.as_deref(), Some("deferred=stale_recovery"));
+
+    drop(state);
+    pool.close().await;
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
 }
 
 #[tokio::test]
@@ -104,6 +404,7 @@ async fn ha_channel_outbox_stats_reports_indexed_span_age_and_ack_lag() {
     assert_eq!(health.cursor_state, "catching_up");
     assert_eq!(health.retention_secs, 72 * 60 * 60);
     assert!(!health.expired_backlog);
+    assert_eq!(health.gc_state, "unknown");
 
     sqlx::query("DELETE FROM ha_outbox WHERE seq = 2")
         .execute(&pool)
@@ -569,9 +870,14 @@ async fn compute_signatures_tracks_recent_alert_summary_changes() {
         .bind(&token.id)
         .bind(now)
         .execute(&pool)
-        .await
-        .expect("insert recent alert auth token log");
+    .await
+    .expect("insert recent alert auth token log");
 
+    expire_dashboard_overview_freshness_probe(&state).await;
+    let _ = compute_signatures(&state)
+        .await
+        .expect("serve last-good signatures while alerts refresh");
+    let _ = wait_for_dashboard_overview_refresh(&state).await;
     let (after_sig, _) = compute_signatures(&state)
         .await
         .expect("compute signatures after alerts");

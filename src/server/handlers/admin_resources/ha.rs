@@ -275,8 +275,8 @@ fn peer_view_from_status(
             .peer_nodes
             .iter()
             .find(|node| node.node_id == status.node_id)
-            .map(|node| node.channel_health.clone())
-            .unwrap_or_default(),
+            .map(|node| channel_health_or_unknown(node.channel_health.clone()))
+            .unwrap_or_else(tavily_hikari::unknown_ha_channel_health),
     }
 }
 
@@ -299,7 +299,7 @@ fn peer_view_from_error(
         stale: true,
         role_hint: config.role_hint,
         planned_cutover_eligible: false,
-        channel_health: Vec::new(),
+        channel_health: channel_health_or_unknown(Vec::new()),
     }
 }
 
@@ -371,6 +371,25 @@ async fn build_internal_ha_status(state: &Arc<AppState>) -> tavily_hikari::HaSta
     status
 }
 
+fn normalize_gc_state(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "unknown".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn channel_health_or_unknown(
+    channel_health: Vec<tavily_hikari::HaChannelHealthView>,
+) -> Vec<tavily_hikari::HaChannelHealthView> {
+    if channel_health.is_empty() {
+        tavily_hikari::unknown_ha_channel_health()
+    } else {
+        channel_health
+    }
+}
+
 async fn attach_internal_source_channel_health(
     state: &Arc<AppState>,
     status: &mut tavily_hikari::HaStatusView,
@@ -408,7 +427,10 @@ async fn attach_internal_source_channel_health(
                 | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
             },
             expired_backlog: peer_health.as_ref().is_some_and(|health| health.expired_backlog),
-            gc_state: peer_health.as_ref().map(|health| health.gc_state.clone()).unwrap_or_else(|| "unknown".to_string()),
+            gc_state: peer_health
+                .as_ref()
+                .map(|health| normalize_gc_state(&health.gc_state))
+                .unwrap_or_else(|| "unknown".to_string()),
             oldest_age_secs: peer_health.as_ref().and_then(|health| health.oldest_age_secs),
             last_progress_at: peer_health.as_ref().and_then(|health| health.last_progress_at),
             last_defer_reason: peer_health.as_ref().and_then(|health| health.last_defer_reason.clone()),
@@ -416,6 +438,8 @@ async fn attach_internal_source_channel_health(
             batch_size: peer_health.as_ref().map(|health| health.batch_size).unwrap_or(250),
             gc_debt_mode: peer_health.as_ref().map(|health| health.gc_debt_mode.clone()).unwrap_or_else(|| "unknown".to_string()),
             gc_observed_at: peer_health.as_ref().and_then(|health| health.gc_observed_at),
+            last_ingress_seq_delta: peer_health.as_ref().and_then(|health| health.last_ingress_seq_delta),
+            last_net_rows_delta_estimate: peer_health.as_ref().and_then(|health| health.last_net_rows_delta_estimate),
             gc_deleted_rows_per_minute: peer_health.as_ref().map(|health| health.gc_deleted_rows_per_minute).unwrap_or(0.0),
             gc_recovery_deadline_at: peer_health.as_ref().and_then(|health| health.gc_recovery_deadline_at),
             gc_slo_state: peer_health.as_ref().map(|health| health.gc_slo_state.clone()).unwrap_or_else(|| "unknown".to_string()),
@@ -513,6 +537,8 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                     batch_size: 250,
                     gc_debt_mode: "unknown".to_string(),
                     gc_observed_at: None,
+                    last_ingress_seq_delta: None,
+                    last_net_rows_delta_estimate: None,
                     gc_deleted_rows_per_minute: 0.0,
                     gc_recovery_deadline_at: None,
                     gc_slo_state: "unknown".to_string(),
@@ -531,6 +557,9 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                 let source_unavailable = source_health
                     .as_ref()
                     .is_some_and(|health| health.cursor_state == "unavailable");
+                let source_unknown = source_health
+                    .as_ref()
+                    .is_some_and(|health| health.cursor_state == "unknown");
                 let watermark_name = if state.ha.dual_active_enabled() {
                     format!("peer_{}_{}_applied_seq", peer.node_id, channel.as_str())
                 } else {
@@ -571,7 +600,10 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                         "unavailable"
                     } else if source_expired_backlog {
                         "expired_backlog"
-                    } else if source_health.is_none() || source_high_watermark.is_none() {
+                    } else if source_unknown
+                        || source_health.is_none()
+                        || source_high_watermark.is_none()
+                    {
                         // Older peers can answer successfully without the optional channel
                         // telemetry. Keep the probe result neutral during rolling upgrades.
                         "unknown"
@@ -589,7 +621,10 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                         | tavily_hikari::HaSyncChannel::Runtime => 14 * 24 * 60 * 60,
                     },
                     expired_backlog: source_expired_backlog,
-                    gc_state: source_health.as_ref().map(|health| health.gc_state.clone()).unwrap_or_else(|| "unknown".to_string()),
+                    gc_state: source_health
+                        .as_ref()
+                        .map(|health| normalize_gc_state(&health.gc_state))
+                        .unwrap_or_else(|| "unknown".to_string()),
                     oldest_age_secs: source_health.as_ref().and_then(|health| health.oldest_age_secs),
                     last_progress_at: source_health.as_ref().and_then(|health| health.last_progress_at),
                     last_defer_reason: source_health.as_ref().and_then(|health| health.last_defer_reason.clone()),
@@ -597,6 +632,8 @@ async fn refresh_admin_ha_status_live(state: &Arc<AppState>) -> tavily_hikari::H
                     batch_size: source_health.as_ref().map(|health| health.batch_size).unwrap_or(250),
                     gc_debt_mode: source_health.as_ref().map(|health| health.gc_debt_mode.clone()).unwrap_or_else(|| "unknown".to_string()),
                     gc_observed_at: source_health.as_ref().and_then(|health| health.gc_observed_at),
+                    last_ingress_seq_delta: source_health.as_ref().and_then(|health| health.last_ingress_seq_delta),
+                    last_net_rows_delta_estimate: source_health.as_ref().and_then(|health| health.last_net_rows_delta_estimate),
                     gc_deleted_rows_per_minute: source_health.as_ref().map(|health| health.gc_deleted_rows_per_minute).unwrap_or(0.0),
                     gc_recovery_deadline_at: source_health.as_ref().and_then(|health| health.gc_recovery_deadline_at),
                     gc_slo_state: source_health.as_ref().map(|health| health.gc_slo_state.clone()).unwrap_or_else(|| "unknown".to_string()),
@@ -2325,4 +2362,18 @@ async fn post_admin_ha_planned_cutover(
         status: "success".to_string(),
         detail: None,
     }))
+}
+
+#[cfg(test)]
+mod channel_health_tests {
+    use super::*;
+
+    #[test]
+    fn absent_peer_channel_health_is_explicitly_unknown() {
+        let health = channel_health_or_unknown(Vec::new());
+
+        assert_eq!(health.len(), 3);
+        assert!(health.iter().all(|value| value.cursor_state == "unknown"));
+        assert!(health.iter().all(|value| value.gc_state == "unknown"));
+    }
 }

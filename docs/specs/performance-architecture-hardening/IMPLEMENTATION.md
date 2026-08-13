@@ -4,18 +4,18 @@
 
 ## Current Status
 
-- Implementation: 当前主干上的增量收敛
+- Implementation: 当前集成候选上的增量收敛
 - Lifecycle: active
-- Delivery topology: single fast-track change
-- Integration branch: `th/fix-performance-runtime-self-healing`
+- Delivery topology: initiative aggregate
+- Integration branch: `prd/performance-debt-recovery`
 
 ## Coverage / rollout summary
 
 本轮已落地的边界包括：
 
 1. `HaPeerObservationStore` 的后台探测与管理员缓存读路径
-2. per-channel HA GC eligibility、claim generation 与最早唤醒
-3. reconciliation durable work projection、两秒主结算预算与 typed outcome
+2. `HaGcController` 的 per-channel HA GC eligibility、claim generation、最早唤醒与公平轮转
+3. `ReconciliationEngine` durable work projection、两秒主结算预算与 typed terminal outcome
 4. versioned additive schema migration ledger
 
 ## Remaining Gaps
@@ -23,7 +23,20 @@
 - `SqliteRuntime` 的首个 containment slice 已进入交付：取消安全 read/immediate guard、读路径禁止
   request-stats flush、事务源码门禁与低频 workload 归因。
 - DashboardReadModel、AlertProjection、完整 MaintenanceRuntime 与 HA writable-tenure 生命周期仍是后续架构工作，未在本变更中伪装为已完成。
-- testbox 生产形状对比、全量质量门禁和 PR review 是交付前硬门禁。
+- 101 双库只读快照上的 baseline/candidate production-shape 对比、全量质量门禁和 aggregate PR review
+  是交付前硬门禁。
+
+## Durable recovery convergence
+
+- `HaGcController` 以 `ha_outbox_gc_channel_state` 作为 control、billing、runtime 的唯一可运行时间、
+  claim generation、batch、legacy cursor、进展与 defer 真相。scheduler 仅消费 controller 给出的最早
+  wake；一个 channel 的 slow、busy 或 legacy defer 不会再把其他 eligible channel 推迟到同一全局延迟。
+- 在线 GC 始终只持有一个 writer slice：每片一个 channel、`25..250` 自适应 batch、单 SQL `50ms` 目标和
+  一秒上限。低压连续五分钟后采用一秒 continuation；正常进展保持五秒，前台压力、busy 或慢 SQL 只让
+  受影响 channel 退让 30 秒。
+- `ReconciliationEngine` 将 work 完成归类为 `settled`、`no_adjustment`、`upstream_429`、
+  `transport_failure`、`semantic_failure` 或 `local_pressure`。`no_adjustment` 是当前 usage generation 的
+  terminal result，只有新 usage 才重新投影 work；本地压力、429 与其他失败状态彼此独立持久化。
 
 ## Related Changes
 

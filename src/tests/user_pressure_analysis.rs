@@ -1,5 +1,7 @@
 use super::*;
 use axum::http::{Method, StatusCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_pressure_attempt(
@@ -692,6 +694,78 @@ async fn analysis_pressure_background_rebuild_retries_after_transient_failure() 
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn analysis_pressure_rebuild_does_not_hold_writer_during_source_aggregation() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_390_000);
+    let db_path = temp_db_path("analysis-pressure-read-before-write");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let now = manual_clock.now_ts();
+    sqlx::query(
+        r#"
+        INSERT INTO observability.request_logs (
+            method, path, status_code, tavily_status_code, result_status,
+            request_kind_key, request_kind_label, counts_business_quota,
+            request_user_id, upstream_operation, created_at
+        ) VALUES ('POST', '/api/tavily/search', 200, 200, 'success',
+                  'api:search', 'API | search', 1, 'pressure-reader', 'search', ?)
+        "#,
+    )
+    .bind(now - 120)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed pressure request log");
+
+    let aggregation_reached = Arc::new(Barrier::new(2));
+    let release_aggregation = Arc::new(Barrier::new(2));
+    let checkpoints = Arc::new(AtomicUsize::new(0));
+    let rebuild_store = proxy.key_store.clone();
+    let rebuild_reached = aggregation_reached.clone();
+    let rebuild_release = release_aggregation.clone();
+    let rebuild_checkpoints = checkpoints.clone();
+    let rebuild = tokio::spawn(async move {
+        rebuild_store
+            .rebuild_server_pressure_buckets_with_cancel(|| {
+                if rebuild_checkpoints.fetch_add(1, Ordering::SeqCst) == 1 {
+                    rebuild_reached.wait();
+                    rebuild_release.wait();
+                }
+                true
+            })
+            .await
+    });
+    tokio::task::spawn_blocking(move || aggregation_reached.wait())
+        .await
+        .expect("observe completed source aggregation");
+
+    let foreground_write = tokio::time::timeout(
+        Duration::from_millis(250),
+        sqlx::query("UPDATE meta SET value = value WHERE key = 'schema_version'")
+            .execute(&proxy.key_store.pool),
+    )
+    .await;
+    tokio::task::spawn_blocking(move || release_aggregation.wait())
+        .await
+        .expect("release pressure rebuild");
+    foreground_write
+        .expect("source aggregation must not block a foreground writer")
+        .expect("foreground writer succeeds during source aggregation");
+    rebuild
+        .await
+        .expect("pressure rebuild task joins")
+        .expect("pressure rebuild succeeds");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 #[tokio::test]
 async fn analysis_pressure_background_rebuild_cancels_and_can_be_rescheduled() {
     let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_400_000);
@@ -1033,6 +1107,127 @@ async fn analysis_pressure_cancel_requeues_buffered_events_for_next_generation()
     assert_eq!(current_point.pressure, 2);
     assert_eq!(current_point.success_count, 1);
     assert_eq!(current_point.failure_count, 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_470_000);
+    let db_path = temp_db_path("analysis-pressure-live-tail-drain");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let now = manual_clock.now_ts();
+
+    // Seed the first replay batch before the background task can drain it.
+    // The concurrent producer below then exercises the live handoff rather
+    // than relying on an unlocked test-only append racing the task itself.
+    for index in 0..250_i64 {
+        proxy
+            .inject_server_pressure_buffered_event_for_test(
+                Some(10_000 + index),
+                now - 30,
+                OUTCOME_SUCCESS,
+            )
+            .await;
+    }
+    proxy.pause_server_pressure_tail_replay_for_test();
+    assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        proxy.wait_for_server_pressure_tail_replay_for_test(),
+    )
+    .await
+    .expect("rebuild should enter the tail replay before the live producer starts");
+    let producer = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move {
+            for index in 0..100_i64 {
+                proxy
+                    .record_server_pressure_event(Some(20_000 + index), now - 30, OUTCOME_ERROR)
+                    .await
+                    .expect("record event while replay drains");
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    producer.await.expect("tail producer joins");
+    proxy.resume_server_pressure_tail_replay_for_test();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while proxy.server_pressure_rebuild_is_active_for_test() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pressure rebuild drains its live tail");
+
+    let (success_count, failure_count): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
+        FROM observability.server_pressure_buckets
+        WHERE bucket_kind = 'five_minute'
+        "#,
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read rebuilt pressure totals");
+    assert_eq!(success_count, 250);
+    assert_eq!(failure_count, 100);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn analysis_pressure_rebuild_releases_phase_after_tail_replay_error() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_475_000);
+    let db_path = temp_db_path("analysis-pressure-tail-replay-error");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let now = manual_clock.now_ts();
+
+    proxy
+        .inject_server_pressure_buffered_event_for_test(Some(9_999), now - 30, OUTCOME_ERROR)
+        .await;
+    proxy.pause_server_pressure_tail_replay_for_test();
+    assert!(proxy.spawn_server_pressure_buckets_rebuild_once());
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        proxy.wait_for_server_pressure_tail_replay_for_test(),
+    )
+    .await
+    .expect("rebuild should enter the tail replay before forcing its write failure");
+
+    proxy.fail_next_server_pressure_tail_replay_upsert_for_test();
+    proxy.resume_server_pressure_tail_replay_for_test();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while proxy.server_pressure_rebuild_is_active_for_test() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("tail replay write error should release the rebuild phase");
+    assert!(
+        proxy.spawn_server_pressure_buckets_rebuild_once(),
+        "a failed tail replay must leave the next rebuild schedulable"
+    );
+    proxy.cancel_server_pressure_buckets_rebuild().await;
 
     let _ = std::fs::remove_file(db_path);
 }

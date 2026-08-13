@@ -3,6 +3,15 @@ use super::core_support_and_parsing::*;
 use super::linuxdo_oauth_and_admin_keys::*;
 use super::upstream_support_and_manual_jobs::*;
 
+async fn load_dashboard_overview_after_background_refresh(
+    state: &Arc<AppState>,
+) -> Arc<DashboardOverviewSnapshot> {
+    let _last_good = load_dashboard_overview_snapshot(state)
+        .await
+        .expect("warm overview snapshot");
+    wait_for_dashboard_overview_refresh(state).await
+}
+
 #[tokio::test]
 async fn compute_signatures_reuses_dashboard_boundary_contract() {
     let db_path = temp_db_path("summary-signatures-dashboard-boundaries");
@@ -108,19 +117,22 @@ async fn dashboard_overview_snapshot_caches_rebuilt_freshness_after_emitted_snap
         .debug_enqueue_dashboard_credit_rollups(created_at, 7)
         .await;
 
-    let (probe_sig, _) = compute_signatures(&state)
+    let probe_freshness = compute_dashboard_overview_freshness(&state)
         .await
-        .expect("compute signatures after pending rollup");
-    let probe_sig = probe_sig.expect("summary signature after pending rollup");
+        .expect("compute expected freshness after pending rollup");
     assert_ne!(
-        probe_sig.freshness.pending_dashboard_rollup_signature,
+        probe_freshness.pending_dashboard_rollup_signature,
         initial.freshness.pending_dashboard_rollup_signature,
         "cheap freshness should notice pending rollup work before the shared snapshot is rebuilt",
     );
 
-    let (_event, emitted_sig) = build_snapshot_event(&state)
+    let (_stale_event, _) = build_snapshot_event(&state)
         .await
         .expect("snapshot event after pending rollup");
+    let _refreshed = load_dashboard_overview_after_background_refresh(&state).await;
+    let (_event, emitted_sig) = build_snapshot_event(&state)
+        .await
+        .expect("snapshot event after background refresh");
 
     let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
     let cache = cache_handle.lock().await;
@@ -340,9 +352,7 @@ async fn dashboard_overview_snapshot_keeps_one_stale_boundary_when_background_fl
     );
 
     reset_dashboard_overview_build_count(&state).await;
-    let refreshed = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("refreshed overview snapshot");
+    let refreshed = load_dashboard_overview_after_background_refresh(&state).await;
     let refreshed_hourly_primary_success = refreshed
         .payload
         .hourly_request_window
@@ -412,6 +422,82 @@ async fn dashboard_overview_snapshot_is_reused_within_the_same_freshness_wave() 
         first.freshness,
         "SSE should remember the emitted snapshot freshness instead of the pre-rebuild probe state",
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn dashboard_overview_snapshot_serves_last_good_while_refresh_is_running() {
+    let db_path = temp_db_path("dashboard-overview-last-good-refresh");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-dashboard-overview-last-good-refresh".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        admin_passkey: AdminPasskeyOptions::disabled(),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+        dev_open_admin: false,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+        dashboard_overview_cache: new_dashboard_overview_cache(),
+    });
+
+    let initial = load_dashboard_overview_snapshot(&state)
+        .await
+        .expect("initial overview snapshot");
+    reset_dashboard_overview_build_count(&state).await;
+    let pause = state
+        .proxy
+        .install_dashboard_overview_read_pause_for_test()
+        .await;
+    state
+        .proxy
+        .debug_enqueue_dashboard_credit_rollups(Utc::now().timestamp(), 1)
+        .await;
+    expire_dashboard_overview_freshness_probe(&state).await;
+
+    let served = tokio::time::timeout(
+        Duration::from_millis(250),
+        load_dashboard_overview_snapshot(&state),
+    )
+    .await
+    .expect("warm overview must not wait for a refresh")
+    .expect("last-good overview snapshot");
+    assert!(
+        Arc::ptr_eq(&served, &initial),
+        "warm refresh should serve the existing immutable snapshot",
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), pause.wait_until_arrived())
+        .await
+        .expect("background overview refresh reached the controlled pause");
+    expire_dashboard_overview_freshness_probe(&state).await;
+    let signature_reads = (0..20).map(|_| compute_signatures(&state));
+    let signatures = tokio::time::timeout(
+        Duration::from_millis(250),
+        futures_util::future::join_all(signature_reads),
+    )
+    .await
+    .expect("SSE signature reads must not wait for or duplicate the active refresh");
+    assert!(signatures.iter().all(Result::is_ok));
+    assert_eq!(
+        dashboard_overview_freshness_probe_count(&state).await,
+        1,
+        "subscriber count must not multiply the singleflight freshness probe",
+    );
+    pause.release();
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -563,19 +649,22 @@ async fn dashboard_snapshot_event_uses_rebuilt_freshness_after_pending_rollups()
         .debug_enqueue_dashboard_credit_rollups(created_at, 7)
         .await;
 
-    let (probe_sig, _) = compute_signatures(&state)
+    let probe_freshness = compute_dashboard_overview_freshness(&state)
         .await
-        .expect("compute signatures after pending rollup");
-    let probe_sig = probe_sig.expect("summary signature after pending rollup");
+        .expect("compute expected freshness after pending rollup");
     assert_ne!(
-        probe_sig.freshness.pending_dashboard_rollup_signature,
+        probe_freshness.pending_dashboard_rollup_signature,
         initial.freshness.pending_dashboard_rollup_signature,
         "cheap freshness should notice pending rollup work before the shared snapshot is rebuilt",
     );
 
-    let (_event, emitted_sig) = build_snapshot_event(&state)
+    let (_stale_event, _) = build_snapshot_event(&state)
         .await
         .expect("snapshot event after pending rollup");
+    let _refreshed = load_dashboard_overview_after_background_refresh(&state).await;
+    let (_event, emitted_sig) = build_snapshot_event(&state)
+        .await
+        .expect("snapshot event after background refresh");
 
     assert!(
         dashboard_overview_build_count(&state).await >= 1,
@@ -583,7 +672,7 @@ async fn dashboard_snapshot_event_uses_rebuilt_freshness_after_pending_rollups()
     );
     assert_eq!(
         emitted_sig.freshness.pending_dashboard_rollup_signature,
-        probe_sig.freshness.pending_dashboard_rollup_signature,
+        probe_freshness.pending_dashboard_rollup_signature,
         "a Dashboard rebuild must preserve pending freshness instead of flushing from the read path",
     );
 
@@ -644,9 +733,14 @@ async fn dashboard_snapshot_event_emits_latest_log_cursor_from_rebuilt_snapshot(
     .expect("insert new visible request log")
     .last_insert_rowid();
 
-    let (_event, emitted_sig) = build_snapshot_event(&state)
+    expire_dashboard_overview_freshness_probe(&state).await;
+    let (_stale_event, _) = build_snapshot_event(&state)
         .await
         .expect("snapshot event after new log");
+    let _refreshed = wait_for_dashboard_overview_refresh(&state).await;
+    let (_event, emitted_sig) = build_snapshot_event(&state)
+        .await
+        .expect("snapshot event after request-log refresh");
 
     assert_eq!(
         emitted_sig.freshness.latest_request_log_id,
@@ -841,9 +935,7 @@ async fn dashboard_overview_freshness_notices_same_second_rollup_updates() {
     .expect("upsert initial rollup row");
 
     expire_dashboard_overview_freshness_probe(&state).await;
-    let after_insert = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("overview snapshot after insert");
+    let after_insert = load_dashboard_overview_after_background_refresh(&state).await;
     assert_ne!(
         after_insert.freshness.dashboard_rollup_signature,
         initial.freshness.dashboard_rollup_signature,
@@ -873,9 +965,7 @@ async fn dashboard_overview_freshness_notices_same_second_rollup_updates() {
     .expect("update same bucket within same second");
 
     expire_dashboard_overview_freshness_probe(&state).await;
-    let after_update = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("overview snapshot after update");
+    let after_update = load_dashboard_overview_after_background_refresh(&state).await;
     assert_ne!(
         after_update.freshness.dashboard_rollup_signature,
         after_insert.freshness.dashboard_rollup_signature,
@@ -942,9 +1032,7 @@ async fn dashboard_overview_freshness_tracks_time_driven_stale_key_transitions()
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     reset_dashboard_overview_build_count(&state).await;
-    let second = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("second overview snapshot");
+    let second = load_dashboard_overview_after_background_refresh(&state).await;
     assert_eq!(
         second.payload.summary_windows.today.quota_charge.stale_key_count,
         1,
@@ -1043,9 +1131,7 @@ async fn dashboard_overview_snapshot_rebuilds_when_displayed_log_signature_chang
         "second insert should get a higher id while remaining older by created_at",
     );
 
-    let second = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("second overview snapshot");
+    let second = load_dashboard_overview_after_background_refresh(&state).await;
 
     assert!(
         dashboard_overview_build_count(&state).await >= 1,
@@ -1147,9 +1233,7 @@ async fn dashboard_overview_snapshot_rebuilds_when_trend_only_log_window_changes
     .expect("insert trend-only request log")
     .last_insert_rowid();
 
-    let second = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("second overview snapshot");
+    let second = load_dashboard_overview_after_background_refresh(&state).await;
 
     assert!(
         dashboard_overview_build_count(&state).await >= 1,
@@ -1233,9 +1317,7 @@ async fn dashboard_overview_snapshot_does_not_reuse_recent_cache_after_freshness
     .await
     .expect("update quota totals");
 
-    let refreshed = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("refreshed overview snapshot");
+    let refreshed = load_dashboard_overview_after_background_refresh(&state).await;
 
     assert_eq!(
         refreshed.payload.site_status.remaining_quota,
@@ -1321,9 +1403,7 @@ async fn dashboard_overview_snapshot_rebuilds_when_previous_month_lifecycle_chan
     .await
     .expect("insert previous month quarantine");
 
-    let second = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("second overview snapshot");
+    let second = load_dashboard_overview_after_background_refresh(&state).await;
 
     assert!(
         dashboard_overview_build_count(&state).await >= 1,
@@ -1416,9 +1496,7 @@ async fn dashboard_overview_snapshot_rebuilds_when_month_quota_samples_backfill(
     .await
     .expect("insert month quota sample backfill");
 
-    let second = load_dashboard_overview_snapshot(&state)
-        .await
-        .expect("second overview snapshot");
+    let second = load_dashboard_overview_after_background_refresh(&state).await;
 
     assert!(
         dashboard_overview_build_count(&state).await >= 1,

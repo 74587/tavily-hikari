@@ -2,7 +2,7 @@
 
 ## Current Coverage
 
-- Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance.
+- Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance. Additive HA GC migrations include the per-channel legacy cursor and seed it from the former shared cursor before recording the migration, so an upgraded database preserves completed legacy-scan progress.
 - Reconciliation circuit fields are committed through one cancellation-safe immediate transaction. HA GC channel completion checks its persisted claim generation before clearing the claim.
 
 - Added a runtime logging contract for the online service surface based on `tracing` +
@@ -320,6 +320,12 @@
   is waiting on `/usage`.
 - Added local contention coverage for forward-proxy startup subscription refresh and runtime
   snapshot persistence.
+- Server-pressure startup rehydration now computes the 48-hour and 8-day source aggregates before
+  acquiring `BEGIN IMMEDIATE`; the write transaction contains only bucket replacement. A
+  deterministic concurrency test pauses at that boundary and proves a foreground writer can still
+  complete within 250ms. A read/write transition gate fences pre-snapshot direct writes; after the
+  replacement, the tail buffer is detached and the rebuild atomically returns new events to direct
+  persistence before replaying the finite tail in yielding batches.
 - Added request-log GC coverage for old-row deletion, recent-row preservation, partial catch-up,
   catalog rollup cleanup, and transient SQLite write-lock retry.
 - Added explicit sidecar-migration coverage for:
@@ -508,6 +514,10 @@
   activity in a lock-free one-second meter, and never waits for the HTTP maintenance read gate.
   Retention work is one-channel round-robin with adaptive `25..250` batches, a one-second slice, and
   one-second recovery continuations only after the persisted low-pressure window is satisfied.
+- The durable per-channel state is controller-owned: it records eligibility, claim generation,
+  batch adaptation, legacy cursor, progress and defer state together. Controller completion chooses
+  the earliest eligible wake, so a five-minute legacy scan or a 30-second busy defer cannot freeze
+  the other two channels.
 - `scheduled_jobs.claim_generation` fences stale finish/error/continuation writes. HA continuation
   enqueue is atomic with finish; failed persistence is left for stale reaper recovery instead of an
   unbounded retry task.
@@ -535,6 +545,9 @@
   candidate key/cooldown hydration. Local budget pressure is persisted separately from remote 429
   pressure, while HA GC normal progress is emitted through the existing per-channel 60-second
   sampling window.
+- Reconciliation terminal completion is typed. `no_adjustment` completes the exact usage generation
+  after a valid zero-delta observation, while transport, semantic, local-pressure and upstream-429
+  outcomes retain independent retry state instead of being collapsed into a generic retry.
 - The final reconciliation path separates request-start, remote-observation, settlement-finalization,
   and durable-postprocessing deadlines. Research bookkeeping writes are individually bounded, and
   local pressure metadata is included in the HA meta baseline so takeover preserves its backoff state.

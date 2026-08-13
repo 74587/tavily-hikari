@@ -61,6 +61,8 @@ struct DashboardOverviewCacheState {
     notify: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     build_count: usize,
+    #[cfg(test)]
+    freshness_probe_count: usize,
 }
 
 impl Default for DashboardOverviewCacheState {
@@ -74,6 +76,8 @@ impl Default for DashboardOverviewCacheState {
             notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             build_count: 0,
+            #[cfg(test)]
+            freshness_probe_count: 0,
         }
     }
 }
@@ -89,14 +93,28 @@ const FOREGROUND_ACTIVITY_BUCKET_MS: u64 = 100;
 
 struct ForegroundActivityMeter {
     buckets: [AtomicU64; FOREGROUND_ACTIVITY_BUCKETS],
+    dashboard_sse_subscribers: AtomicU64,
     started_slot: u64,
     last_high_pressure_slot: AtomicU64,
+}
+
+pub(crate) struct DashboardSseSubscription<'a> {
+    meter: &'a ForegroundActivityMeter,
+}
+
+impl Drop for DashboardSseSubscription<'_> {
+    fn drop(&mut self) {
+        self.meter
+            .dashboard_sse_subscribers
+            .fetch_sub(1, AtomicOrdering::AcqRel);
+    }
 }
 
 impl ForegroundActivityMeter {
     fn new() -> Self {
         Self {
             buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            dashboard_sse_subscribers: AtomicU64::new(0),
             started_slot: foreground_activity_slot(),
             last_high_pressure_slot: AtomicU64::new(0),
         }
@@ -126,7 +144,8 @@ impl ForegroundActivityMeter {
     }
 
     fn rps_at(&self, current_slot: u64) -> i64 {
-        self.buckets
+        let arrivals = self
+            .buckets
             .iter()
             .filter_map(|bucket| {
                 let value = bucket.load(AtomicOrdering::Acquire);
@@ -135,7 +154,19 @@ impl ForegroundActivityMeter {
                     .then_some(value & Self::COUNT_MASK)
             })
             .sum::<u64>()
+            .min(i64::MAX as u64);
+        arrivals
+            .saturating_add(self.dashboard_sse_subscribers.load(AtomicOrdering::Acquire))
             .min(i64::MAX as u64) as i64
+    }
+
+    fn subscribe_dashboard_sse_at(&self, slot: u64) -> DashboardSseSubscription<'_> {
+        self.dashboard_sse_subscribers
+            .fetch_add(1, AtomicOrdering::AcqRel);
+        if self.rps_at(slot) > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
+            self.last_high_pressure_slot.fetch_max(slot, AtomicOrdering::AcqRel);
+        }
+        DashboardSseSubscription { meter: self }
     }
 
     fn low_pressure_since_floor_at(&self, current_slot: u64) -> i64 {
@@ -177,6 +208,11 @@ pub(crate) fn foreground_activity_rps() -> i64 {
 pub(crate) fn foreground_activity_low_pressure_since_floor() -> i64 {
     let current_slot = foreground_activity_slot();
     foreground_activity_meter().low_pressure_since_floor_at(current_slot)
+}
+
+pub(crate) fn subscribe_dashboard_sse() -> DashboardSseSubscription<'static> {
+    let slot = foreground_activity_slot();
+    foreground_activity_meter().subscribe_dashboard_sse_at(slot)
 }
 static DB_JOB_EXECUTION_GATES: OnceLock<std::sync::Mutex<HashMap<usize, std::sync::Weak<Mutex<()>>>>> =
     OnceLock::new();
@@ -345,6 +381,21 @@ mod db_maintenance_gate_tests {
 
         assert_eq!(meter.last_high_pressure_slot.load(AtomicOrdering::Acquire), slot);
         assert_eq!(meter.low_pressure_since_floor_at(slot + 1), (slot / 10) as i64);
+    }
+
+    #[test]
+    fn dashboard_sse_subscribers_hold_gc_out_of_low_pressure_recovery() {
+        let meter = ForegroundActivityMeter::new();
+        let slot = meter.started_slot.saturating_add(1);
+        let subscriptions = (0..=tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS)
+            .map(|_| meter.subscribe_dashboard_sse_at(slot))
+            .collect::<Vec<_>>();
+
+        assert!(meter.rps_at(slot) > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS);
+        assert_eq!(meter.last_high_pressure_slot.load(AtomicOrdering::Acquire), slot);
+
+        drop(subscriptions);
+        assert_eq!(meter.rps_at(slot), 0);
     }
 }
 

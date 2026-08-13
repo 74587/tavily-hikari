@@ -34,7 +34,13 @@
 - 本地压力连续三轮触发 `30/60/120/300` 秒退避；真实 upstream 429 独立触发
   `2/5/10/30` 分钟退避并尊重更晚的 `Retry-After`。transport、semantic failure 与本地预算耗尽
   不会清空已有 429 状态。
-- `upstream_reconciliation_work` 由 usage 写入增量维护，并用持久 cursor 分页吸收升级前历史行；候选查询不再每轮聚合原始 usage 全表。每轮最多发起两次串行远端请求。
+- `upstream_reconciliation_work` 由 usage 写入增量维护。升级前历史行使用 versioned lifecycle
+  在无 durable candidate 时以最多 250ms 的单页维护吸收，并以 30 秒 representative 续跑；候选查询
+  不再每轮聚合原始 usage 全表。每轮最多发起两次串行远端请求。
+- `ReconciliationEngine` uses typed terminal outcomes. A successful upstream observation that
+  requires no signed adjustment completes only the matching usage generation as `no_adjustment`;
+  later usage creates fresh work instead of recreating a minute-by-minute no-op run. The status
+  projection exposes outcome counts and separates main-settlement and research timing.
 
 ## Remaining Gaps
 
@@ -64,8 +70,11 @@
 
 ## Current performance contract
 
-- Main settlement now hydrates the bounded candidate page and all referenced key/cooldown state before starting the first `/usage` request; the research terminal sweep runs only after main settlement and uses the remaining 20-second job budget.
+- Main settlement now hydrates the bounded candidate page and all referenced key/cooldown state before starting the first `/usage` request; the research terminal sweep runs only after main settlement and may use at most two seconds of the remaining job time. Its timeout is not primary budget exhaustion.
 - Local budget exhaustion is persisted separately from the upstream-429 backoff. Only observed upstream 429 attempts advance the 2/5/10/30-minute global state; local pressure uses a short independent delay and never fabricates a remote rate-limit signal.
 - Remote request start, observation, settlement finalization, and research bookkeeping use nested
   deadlines with reserved post-processing headroom. The four local-pressure meta keys are included
   in HA incremental and baseline replication so failover retains the same recovery state.
+- Transport and semantic failures preserve an active upstream-429 circuit. A real remote attempt
+  clears local-pressure state; only `settled` or `no_adjustment` recovery clears the upstream
+  circuit. This prevents unrelated local outcomes from restarting the remote-rate-limit loop.

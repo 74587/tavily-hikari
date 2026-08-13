@@ -925,6 +925,7 @@ async fn reset_dashboard_overview_build_count(state: &Arc<AppState>) {
     let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
     let mut cache = cache_handle.lock().await;
     cache.build_count = 0;
+    cache.freshness_probe_count = 0;
     cache.last_freshness_probe_at = None;
 }
 
@@ -936,6 +937,13 @@ async fn dashboard_overview_build_count(state: &Arc<AppState>) -> usize {
 }
 
 #[cfg(test)]
+async fn dashboard_overview_freshness_probe_count(state: &Arc<AppState>) -> usize {
+    let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+    let cache = cache_handle.lock().await;
+    cache.freshness_probe_count
+}
+
+#[cfg(test)]
 async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
     let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
     let mut cache = cache_handle.lock().await;
@@ -944,6 +952,30 @@ async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
             .checked_sub(DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL)
             .expect("dashboard refresh interval fits in the monotonic clock"),
     );
+}
+
+#[cfg(test)]
+async fn wait_for_dashboard_overview_refresh(
+    state: &Arc<AppState>,
+) -> Arc<DashboardOverviewSnapshot> {
+    let waiter = {
+        let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+        let cache = cache_handle.lock().await;
+        cache.loading.then(|| cache.notify.clone().notified_owned())
+    };
+    if let Some(waiter) = waiter {
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("dashboard background refresh should finish");
+    }
+    let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+    let cache = cache_handle.lock().await;
+    cache
+        .cached
+        .as_ref()
+        .expect("refreshed dashboard snapshot")
+        .snapshot
+        .clone()
 }
 
 #[derive(Debug, Serialize)]
@@ -1049,6 +1081,7 @@ async fn sse_dashboard(
     let state = state.clone();
 
     let stream = stream! {
+        let _dashboard_sse_subscription = subscribe_dashboard_sse();
         let mut last_sig: Option<SummarySig> = None;
         let mut last_log_id: Option<i64> = None;
         let mut last_snapshot_at: Option<tokio::time::Instant> = None;
@@ -1580,6 +1613,12 @@ fn dashboard_local_midnight_utc_ts(
 async fn compute_dashboard_overview_freshness(
     state: &Arc<AppState>,
 ) -> Result<DashboardOverviewFreshness, ProxyError> {
+    #[cfg(test)]
+    {
+        let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+        let mut cache = cache_handle.lock().await;
+        cache.freshness_probe_count = cache.freshness_probe_count.saturating_add(1);
+    }
     let summary = state.proxy.summary_without_flush().await?;
     let now_local = state.proxy.backend_time().local_now();
     let now_utc = now_local.with_timezone(&Utc);
@@ -1711,10 +1750,9 @@ async fn compute_dashboard_overview_freshness(
 async fn load_dashboard_overview_snapshot(
     state: &Arc<AppState>,
 ) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
-    let perf = tavily_hikari::RuntimePerfScope::start();
     loop {
         let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
-        let waiter = {
+        let action = {
             let mut cache = cache_handle.lock().await;
             if cache.loading {
                 let stale = cache
@@ -1730,66 +1768,134 @@ async fn load_dashboard_overview_snapshot(
                     cache.loading = false;
                     cache.loading_started_at = None;
                     cache.notify.notify_waiters();
-                    None
-                } else {
-                    Some(cache.notify.clone().notified_owned())
                 }
-            } else {
-                None
             }
-        };
-
-        if let Some(waiter) = waiter {
-            tavily_hikari::emit_sampled_perf_log(
-                tavily_hikari::DbLogStatus::Info,
-                "admin_read",
-                "dashboard_overview_phase",
-                Duration::ZERO,
-                tavily_hikari::PerfLogScope {
-                    route: Some("/api/dashboard/overview"),
-                    scope: Some("dashboard"),
-                    phase: Some("cache_wait"),
-                    degraded: Some("shared_snapshot"),
-                    ..Default::default()
-                },
-            );
-            waiter.await;
-            continue;
-        }
-
-        {
-            let cache = cache_handle.lock().await;
             if let (Some(cached), Some(last_probe)) =
                 (cache.cached.as_ref(), cache.last_freshness_probe_at)
                 && last_probe.elapsed() < DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
             {
-                return Ok(cached.snapshot.clone());
+                DashboardOverviewLoadAction::Return(cached.snapshot.clone())
+            } else if cache.loading {
+                if let Some(cached) = cache.cached.as_ref() {
+                    DashboardOverviewLoadAction::Return(cached.snapshot.clone())
+                } else {
+                    DashboardOverviewLoadAction::Wait(cache.notify.clone().notified_owned())
+                }
+            } else {
+                cache.loading = true;
+                cache.loading_generation = cache.loading_generation.wrapping_add(1);
+                cache.loading_started_at = Some(tokio::time::Instant::now());
+                DashboardOverviewLoadAction::Refresh {
+                    generation: cache.loading_generation,
+                    last_good: cache.cached.as_ref().map(|cached| cached.snapshot.clone()),
+                }
+            }
+        };
+
+        match action {
+            DashboardOverviewLoadAction::Return(snapshot) => return Ok(snapshot),
+            DashboardOverviewLoadAction::Wait(waiter) => {
+                tavily_hikari::emit_sampled_perf_log(
+                    tavily_hikari::DbLogStatus::Info,
+                    "admin_read",
+                    "dashboard_overview_phase",
+                    Duration::ZERO,
+                    tavily_hikari::PerfLogScope {
+                        route: Some("/api/dashboard/overview"),
+                        scope: Some("dashboard"),
+                        phase: Some("cache_wait"),
+                        degraded: Some("cold_start"),
+                        ..Default::default()
+                    },
+                );
+                waiter.await;
+            }
+            DashboardOverviewLoadAction::Refresh {
+                generation,
+                last_good,
+            } => {
+                if let Some(last_good) = last_good {
+                    let refresh_state = state.clone();
+                    tokio::spawn(async move {
+                        let _ = refresh_dashboard_overview_snapshot(
+                            &refresh_state,
+                            cache_handle,
+                            generation,
+                        )
+                        .await;
+                    });
+                    return Ok(last_good);
+                } else {
+                    return refresh_dashboard_overview_snapshot(
+                        state,
+                        cache_handle,
+                        generation,
+                    )
+                    .await;
+                }
             }
         }
+    }
+}
 
-        let freshness_started = Instant::now();
-        let freshness = compute_dashboard_overview_freshness(state).await?;
-        tavily_hikari::emit_sampled_perf_log(
-            tavily_hikari::DbLogStatus::Info,
-            "admin_read",
-            "dashboard_overview_phase",
-            freshness_started.elapsed(),
-            tavily_hikari::PerfLogScope {
-                route: Some("/api/dashboard/overview"),
-                scope: Some("dashboard"),
-                phase: Some("freshness_probe"),
-                degraded: Some("cheap_token"),
-                ..Default::default()
-            },
-        );
+enum DashboardOverviewLoadAction {
+    Return(Arc<DashboardOverviewSnapshot>),
+    Wait(tokio::sync::futures::OwnedNotified),
+    Refresh {
+        generation: u64,
+        last_good: Option<Arc<DashboardOverviewSnapshot>>,
+    },
+}
 
-        let mut load_generation = None;
-        let waiter = {
+async fn refresh_dashboard_overview_snapshot(
+    state: &Arc<AppState>,
+    cache_handle: Arc<Mutex<DashboardOverviewCacheState>>,
+    load_generation: u64,
+) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
+    let perf = tavily_hikari::RuntimePerfScope::start();
+    let mut load_guard = DashboardOverviewLoadGuard::new(cache_handle.clone(), load_generation);
+    let freshness_started = Instant::now();
+    let freshness = match compute_dashboard_overview_freshness(state).await {
+        Ok(freshness) => freshness,
+        Err(error) => {
             let mut cache = cache_handle.lock().await;
+            let last_good = cache.cached.as_ref().map(|cached| cached.snapshot.clone());
+            if cache.loading_generation == load_generation {
+                cache.loading = false;
+                cache.loading_started_at = None;
+                cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
+                cache.notify.notify_waiters();
+            }
+            load_guard.disarm();
+            return last_good.ok_or(error);
+        }
+    };
+    tavily_hikari::emit_sampled_perf_log(
+        tavily_hikari::DbLogStatus::Info,
+        "admin_read",
+        "dashboard_overview_phase",
+        freshness_started.elapsed(),
+        tavily_hikari::PerfLogScope {
+            route: Some("/api/dashboard/overview"),
+            scope: Some("dashboard"),
+            phase: Some("freshness_probe"),
+            degraded: Some("cheap_token"),
+            ..Default::default()
+        },
+    );
+
+    {
+        let mut cache = cache_handle.lock().await;
+        if cache.loading_generation == load_generation {
             cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
             if let Some(cached) = cache.cached.as_ref()
                 && cached.freshness.as_ref() == &freshness
             {
+                let snapshot = cached.snapshot.clone();
+                cache.loading = false;
+                cache.loading_started_at = None;
+                cache.notify.notify_waiters();
+                load_guard.disarm();
                 tavily_hikari::emit_low_memory_protection_decision(
                     "admin_read",
                     tavily_hikari::PerfLogScope {
@@ -1813,108 +1919,79 @@ async fn load_dashboard_overview_snapshot(
                         ..Default::default()
                     },
                 );
-                return Ok(cached.snapshot.clone());
+                return Ok(snapshot);
             }
-            if cache.loading {
-                let stale = cache
-                    .loading_started_at
-                    .is_some_and(|started_at| started_at.elapsed() >= DASHBOARD_OVERVIEW_LOADING_STALE_AFTER);
-                if stale {
-                    tracing::warn!(
-                        component = "admin_read",
-                        event = "dashboard_overview_loading_stale",
-                        stale_after_ms = DASHBOARD_OVERVIEW_LOADING_STALE_AFTER.as_millis() as u64,
-                        "dashboard overview shared snapshot loader was stale after freshness probe; taking over rebuild"
-                    );
-                    cache.loading = true;
-                    cache.loading_generation = cache.loading_generation.wrapping_add(1);
-                    cache.loading_started_at = Some(tokio::time::Instant::now());
-                    load_generation = Some(cache.loading_generation);
-                    None
-                } else {
-                    Some(cache.notify.clone().notified_owned())
-                }
-            } else {
-                cache.loading = true;
-                cache.loading_generation = cache.loading_generation.wrapping_add(1);
-                cache.loading_started_at = Some(tokio::time::Instant::now());
-                load_generation = Some(cache.loading_generation);
-                None
-            }
-        };
-
-        if let Some(waiter) = waiter {
-            waiter.await;
-            continue;
         }
+    }
 
-        let load_generation = load_generation.expect("dashboard overview loader generation should be assigned");
-        let payload_started = Instant::now();
-        let mut load_guard = DashboardOverviewLoadGuard::new(cache_handle.clone(), load_generation);
-        let result = build_dashboard_overview_payload(state).await.map(Arc::new);
-        tavily_hikari::emit_sampled_perf_log(
-            tavily_hikari::DbLogStatus::Info,
+    let payload_started = Instant::now();
+    let result = build_dashboard_overview_payload(state).await.map(Arc::new);
+    tavily_hikari::emit_sampled_perf_log(
+        tavily_hikari::DbLogStatus::Info,
+        "admin_read",
+        "dashboard_overview_phase",
+        payload_started.elapsed(),
+        tavily_hikari::PerfLogScope {
+            route: Some("/api/dashboard/overview"),
+            scope: Some("dashboard"),
+            phase: Some("overview_payload_build"),
+            degraded: Some("rebuilt"),
+            ..Default::default()
+        },
+    );
+    let mut cache = cache_handle.lock().await;
+    if cache.loading_generation != load_generation {
+        tracing::warn!(
+            component = "admin_read",
+            event = "dashboard_overview_loader_superseded",
+            loader_generation = load_generation,
+            current_generation = cache.loading_generation,
+            "dashboard overview loader finished after a newer loader took ownership"
+        );
+        load_guard.disarm();
+        return cache
+            .cached
+            .as_ref()
+            .map(|cached| Ok(cached.snapshot.clone()))
+            .unwrap_or(result);
+    }
+
+    cache.loading = false;
+    cache.loading_started_at = None;
+    if let Ok(snapshot) = result.as_ref() {
+        cache.cached = Some(CachedDashboardOverviewSnapshot {
+            snapshot: snapshot.clone(),
+            freshness: snapshot.freshness.clone(),
+        });
+        tavily_hikari::emit_low_memory_protection_decision(
             "admin_read",
-            "dashboard_overview_phase",
-            payload_started.elapsed(),
             tavily_hikari::PerfLogScope {
-                route: Some("/api/dashboard/overview"),
+                route: Some("dashboard_shared_snapshot"),
                 scope: Some("dashboard"),
-                phase: Some("overview_payload_build"),
+                phase: Some("cache_serve"),
+                row_count: Some(snapshot.payload.recent_logs.len()),
                 degraded: Some("rebuilt"),
                 ..Default::default()
             },
         );
-        let mut cache = cache_handle.lock().await;
-        if cache.loading_generation != load_generation {
-            tracing::warn!(
-                component = "admin_read",
-                event = "dashboard_overview_loader_superseded",
-                loader_generation = load_generation,
-                current_generation = cache.loading_generation,
-                "dashboard overview loader finished after a newer loader took ownership"
-            );
-            load_guard.disarm();
-            return result;
-        }
-
-        cache.loading = false;
-        cache.loading_started_at = None;
-        if let Ok(snapshot) = result.as_ref() {
-            cache.cached = Some(CachedDashboardOverviewSnapshot {
-                snapshot: snapshot.clone(),
-                freshness: snapshot.freshness.clone(),
-            });
-            tavily_hikari::emit_low_memory_protection_decision(
-                "admin_read",
-                tavily_hikari::PerfLogScope {
-                    route: Some("dashboard_shared_snapshot"),
-                    scope: Some("dashboard"),
-                    phase: Some("cache_serve"),
-                    row_count: Some(snapshot.payload.recent_logs.len()),
-                    degraded: Some("rebuilt"),
-                    ..Default::default()
-                },
-            );
-            tavily_hikari::emit_sampled_perf_log(
-                tavily_hikari::DbLogStatus::Info,
-                "admin_read",
-                "dashboard_snapshot_rebuilt",
-                Duration::from_millis(perf.elapsed_ms()),
-                tavily_hikari::PerfLogScope {
-                    route: Some("dashboard_shared_snapshot"),
-                    scope: Some("dashboard"),
-                    phase: Some("cache_serve"),
-                    row_count: Some(snapshot.payload.recent_logs.len()),
-                    degraded: Some("rebuilt"),
-                    ..Default::default()
-                },
-            );
-        }
-        cache.notify.notify_waiters();
-        load_guard.disarm();
-        return result;
+        tavily_hikari::emit_sampled_perf_log(
+            tavily_hikari::DbLogStatus::Info,
+            "admin_read",
+            "dashboard_snapshot_rebuilt",
+            Duration::from_millis(perf.elapsed_ms()),
+            tavily_hikari::PerfLogScope {
+                route: Some("dashboard_shared_snapshot"),
+                scope: Some("dashboard"),
+                phase: Some("cache_serve"),
+                row_count: Some(snapshot.payload.recent_logs.len()),
+                degraded: Some("rebuilt"),
+                ..Default::default()
+            },
+        );
     }
+    cache.notify.notify_waiters();
+    load_guard.disarm();
+    result
 }
 
 async fn build_snapshot_frame(state: &Arc<AppState>) -> Option<(Bytes, SummarySig)> {
@@ -1963,34 +2040,10 @@ async fn build_snapshot_event(state: &Arc<AppState>) -> Option<(Event, SummarySi
 async fn compute_signatures(
     state: &Arc<AppState>,
 ) -> Result<(Option<SummarySig>, Option<i64>), ()> {
-    let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
-    {
-        let cache = cache_handle.lock().await;
-        if let (Some(cached), Some(last_probe)) =
-            (cache.cached.as_ref(), cache.last_freshness_probe_at)
-            && last_probe.elapsed() < DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
-        {
-            let freshness = cached.freshness.clone();
-            let latest_id = freshness.latest_request_log_id;
-            return Ok((Some(SummarySig { freshness }), latest_id));
-        }
-    }
-    let freshness = compute_dashboard_overview_freshness(state).await.map_err(|_| ())?;
+    let snapshot = load_dashboard_overview_snapshot(state).await.map_err(|_| ())?;
+    let freshness = snapshot.freshness.clone();
     let latest_id = freshness.latest_request_log_id;
-    {
-        let mut cache = cache_handle.lock().await;
-        let unchanged = cache
-            .cached
-            .as_ref()
-            .is_some_and(|cached| cached.freshness.as_ref() == &freshness);
-        cache.last_freshness_probe_at = unchanged.then(tokio::time::Instant::now);
-    }
-    Ok((
-        Some(SummarySig {
-            freshness: Arc::new(freshness),
-        }),
-        latest_id,
-    ))
+    Ok((Some(SummarySig { freshness }), latest_id))
 }
 
 // ---- Jobs listing ----

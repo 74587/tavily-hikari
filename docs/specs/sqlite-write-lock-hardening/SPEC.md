@@ -96,6 +96,13 @@ source when a usable persisted runtime already exists.
   first healthy image status. Once the process is already serving business traffic, it may run once
   as a best-effort background rebuild whose failure is isolated to logs/observability and does not
   turn serving `/health` red.
+- The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write
+  transaction. It may acquire SQLite's writer only for the final small bucket replacement; the
+  upper-bound request-log id and buffered live-event replay preserve the handoff across those two
+  phases. Entering rebuild mode must use a shared/exclusive transition gate with incremental
+  writers so direct writes that began earlier finish before the source fence. Completion must take
+  one buffer snapshot and atomically return new events to direct persistence before replaying that
+  finite tail in yielding batches.
 - Non-core startup repairs must stay partitioned by contract. `user_business_calls_1h` history
   backfill is an owner-facing readiness view and must be cheaply rehydrated before serving starts
   reporting ready, while one-time request-log effect-bucket repair remains a startup maintenance
@@ -253,16 +260,18 @@ source when a usable persisted runtime already exists.
   claim after 60 seconds. Recovery increments the generation and applies the existing 30-second
   delay, making repeated reaper passes idempotent.
 
-- Online HA cleanup enters recovery mode only after a persisted 30-minute window at or below `5`
+- Online HA cleanup enters recovery mode only after a persisted five-minute window at or below `5`
   foreground requests per second. Recovery uses a one-second continuation while the current slice
   remains within its one-second wall-clock and 50ms active-SQL targets; foreground pressure, busy
-  writers, or slow work returns to a 30-second continuation. Every slice processes one channel and
-  persists the round-robin cursor, oldest deletable age, deletion rate, debt mode, recovery deadline,
-  and SLO state.
+  writers, or slow work returns the affected channel to a 30-second continuation. Every slice
+  processes one channel and persists the round-robin cursor, channel eligibility, oldest deletable
+  age, deletion rate, debt mode, recovery deadline, and SLO state. The scheduler wakes at the
+  earliest eligible channel and must not turn one channel's delay into a global freeze.
 - An expired scheduled-job claim returns an internal stale-claim result. It cannot finish, enqueue a
   continuation, or mutate a newer claim with the same job id. HA continuation persistence is part of
-  the finish transaction; the stale reaper is the only recovery path when that transaction cannot
-  commit.
+  the finish transaction; a transient conflict may use a fixed, bounded same-generation retry, or
+  leave the running claim for stale reaper recovery. It must never create an unbounded background
+  retry loop.
 - Reconciliation candidate selection is bounded by indexed pages before hydration. Three consecutive
   rounds with eligible candidates but no remote attempt and exhausted local budget enter a persisted
   short local backoff with one delayed representative job. Only actual upstream 429 attempts enter
@@ -270,6 +279,9 @@ source when a usable persisted runtime already exists.
 - Reconciliation's main settlement pass owns the first remote-attempt budget. Research terminal
   polling is permitted only after the main pass (or when no eligible main candidate exists), and
   all remote requests plus their durable bookkeeping are bounded by the same per-run deadline.
+- A completed upstream observation with zero signed delta is a `no_adjustment` terminal outcome for
+  the matching usage generation. It must not recreate the representative job until a later usage
+  write projects new work.
 - Settlement finalization has a reserved tail budget for the fresh billing read, adjustment writes,
   and pressure-state markers; an observation that completes before that tail is not discarded merely
   because no new remote request may start.
@@ -343,7 +355,10 @@ source when a usable persisted runtime already exists.
   candidate page reports one retention context with cache hits for subsequent candidates.
 - Online HA outbox GC must use a non-blocking maintenance write lease and a one-second slice
   budget. If the lease or SQLite writer is busy, it must finish the current scheduled row and
-  persist a 30-second continuation instead of waiting through the scheduler's long retry window.
+  persist a bounded continuation handoff instead of waiting through the scheduler's long retry
+  window. A transient handoff conflict keeps only the matching representative claim for a fixed,
+  bounded same-generation retry when available, or for claim-fenced stale-reaper recovery; it must
+  never create an unbounded background retry loop.
   Productive retention slices whose slowest active database micro-batch stays within `50ms` must persist a
   five-second continuation and adapt their per-channel batch size within `25..250`; an over-budget
   slice halves its next batch before retrying. Legacy-resource cursor verification is not retention

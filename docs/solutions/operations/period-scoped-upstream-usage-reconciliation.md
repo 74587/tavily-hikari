@@ -2,7 +2,23 @@
 
 ## Current scheduling contract
 
-Candidate windows are maintained in an indexed durable work projection. The engine hydrates a bounded page, starts primary settlement before research polling, permits at most two serial remote attempts per run, and leaves research to remaining budget. Local-pressure backoff (`30/60/120/300s`) is separate from upstream-429 backoff (`2/5/10/30m`); non-429 failures do not reset the remote circuit.
+Candidate windows are maintained in an indexed durable work projection. The engine hydrates a bounded page,
+starts primary settlement before research polling, permits at most two serial remote attempts per run, and gives
+research at most two seconds of the remaining time. Research exhaustion is diagnostic follow-up, not primary
+local pressure. Local-pressure backoff (`30/60/120/300s`) is separate from upstream-429 backoff
+(`2/5/10/30m`); non-429 failures do not reset the remote circuit.
+
+Terminal completion is typed. `settled` and a verified `no_adjustment` both finish only the current
+usage generation; transport failure, semantic failure, upstream `429`, and local pressure preserve
+their own durable retry state. This prevents a valid zero-delta observation from becoming a new
+minute-by-minute reconciliation job and prevents a non-429 result from falsely clearing a remote
+rate-limit circuit.
+
+Historical usage needs a separate lifecycle from live settlement. Mark an empty new database as
+projection-complete during its versioned migration. For an upgraded database with historical rows,
+advance at most one bounded page only after the durable candidate page is empty, then persist a
+delayed representative for the next page. Do not make candidate selection aggregate raw usage or
+treat an unread legacy cursor as proof that a trigger-maintained, terminal work item must run again.
 
 When the upstream only exposes cumulative usage counters, a proxy cannot do exact per-request
 billing by reading upstream state inline. Tavily Hikari solves this by splitting local billing

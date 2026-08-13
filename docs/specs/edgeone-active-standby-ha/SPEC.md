@@ -139,8 +139,10 @@ control, billing, and runtime. It also exposes `gcDebtMode`, `gcObservedAt`,
 
 Online GC persists per-channel attempt and progress state. Normal slices are DEBUG-level events;
 stalled, deferred, SLO-breached, and recovered states are logged only on persisted state
-transitions. A failed continuation
-write does not start an unbounded retry task: the stale-job reaper owns eventual recovery.
+transitions. A transient continuation-write failure keeps the one representative claim in a
+same-generation, capped-cadence recovery loop until persistence succeeds or stale recovery fences
+the claim. It never fans out retry tasks; the stale-job reaper remains the independent final
+recovery path.
 
 Online retention debt is self-healing through a persisted per-channel controller. It keeps one
 channel per slice, starts at an adaptive `25..250` batch size, and measures each active database
@@ -166,10 +168,13 @@ Sampled HA export and sync diagnostics use `outbox_sequence_span_estimate` plus
 `outbox_high_watermark`, never an exact `outbox_row_count`. The span is an upper bound when
 sequence holes exist and must not be presented as inventory.
 
-When the foreground request meter stays at or below `5` requests per second for 30 minutes, the
+When the foreground request meter stays at or below `5` requests per second for five minutes, the
 admin detail marks the channel as recovering and shows the recovery deadline and observed deletion
-rate. A request burst, SQLite busy result, or slow micro-batch changes the debt mode to deferred and
-the next retry to 30 seconds; no channel may be hidden by a clean-state exact count.
+rate. Recovery can continue its next fair slice after one second; normal productive work continues
+after five seconds. A request burst, SQLite busy result, or slow micro-batch changes the affected
+channel debt mode to deferred and its next retry to 30 seconds. Foreground work observed between
+batches prevents a new GC SQL batch from starting; no channel may be hidden by a clean-state exact
+count.
 
 - 用户控制台在 failover、provisional、recovery、同步滞后时显示降级警告。
 - 管理员控制台的完整 HA 服务节点管理面板只出现在系统设置的高可用二级界面，包含节点清单、角色、源站、健康状态、同步水位、promote/finalize 操作和 EdgeOne 当前源站摘要。

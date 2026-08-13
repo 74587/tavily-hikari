@@ -10,7 +10,7 @@ use sqlx::Row;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{
     OnceLock,
-    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering},
 };
 
 #[derive(Clone, Debug)]
@@ -756,11 +756,23 @@ pub struct TavilyProxy {
     post_ready_serving_tasks_started: Arc<AtomicBool>,
     post_ready_serving_tasks_suppressed_logged: Arc<AtomicBool>,
     user_business_calls_backfill_started: Arc<AtomicBool>,
-    server_pressure_rebuild_started: Arc<AtomicBool>,
+    server_pressure_rebuild_phase: Arc<AtomicU8>,
     server_pressure_rebuild_generation: Arc<AtomicU64>,
+    server_pressure_rebuild_transition_gate: Arc<RwLock<()>>,
     server_pressure_rebuild_buffered_events: Arc<Mutex<Vec<ServerPressureBufferedEvent>>>,
+    #[cfg(test)]
+    server_pressure_tail_replay_test_gate: Arc<ServerPressureTailReplayTestGate>,
     health_readiness_grace_until: tokio::time::Instant,
     pub(crate) backend_time: BackendTime,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct ServerPressureTailReplayTestGate {
+    paused: AtomicBool,
+    fail_next_replay_upsert: AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

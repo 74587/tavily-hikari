@@ -136,6 +136,32 @@ fn perf_logs_are_info_level_and_include_memory_budget_fields() {
 }
 
 #[test]
+fn shadow_adjustment_logs_are_debug_only() {
+    let info_output = capture_tracing_output(EnvFilter::new("info"), || {
+        KeyStore::emit_shadow_adjustment_written_log(
+            42,
+            "settlement-test",
+            "2026-08",
+            12,
+            false,
+        );
+    });
+    assert!(info_output.trim().is_empty());
+
+    let debug_output = capture_tracing_output(EnvFilter::new("debug"), || {
+        KeyStore::emit_shadow_adjustment_written_log(
+            42,
+            "settlement-test",
+            "2026-08",
+            12,
+            false,
+        );
+    });
+    assert!(debug_output.contains("\"level\":\"DEBUG\""));
+    assert!(debug_output.contains("\"event\":\"shadow_adjustment_written\""));
+}
+
+#[test]
 fn low_memory_protection_duplicate_logs_are_sampled() {
     let output = capture_tracing_output(EnvFilter::new("info"), || {
         emit_low_memory_protection_decision(

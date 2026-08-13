@@ -21,6 +21,16 @@ related_specs:
 
 - Maintenance and reconciliation state transitions use one bounded immediate transaction; related circuit fields are updated atomically rather than as independent meta writes.
 - Online HA GC claims one eligible channel at a time. A deferred channel's `next_retry_at` cannot become a global scheduler delay for other channels.
+- Treat `ha_outbox_gc_channel_state` as the scheduling truth, not a diagnostic mirror. The
+  controller must atomically fence a channel claim, persist that channel's defer and compute the
+  earliest eligible wake across all channels; a scheduler must never infer controller state from a
+  log message or a single representative job's delay.
+- If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
+  same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
+  gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
+- If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
+  same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
+  gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
 - Startup schema work is ledgered in `schema_migrations`; a warm process verifies the critical layout and skips already-applied DDL.
 - Administrator peer status reads an observation cache. A normal GET never waits for the five-second peer network probe.
 - A transport or semantic reconciliation failure does not clear an existing upstream-429 circuit. Only a real settlement or a real remote attempt follows the recovery contract.
@@ -310,6 +320,17 @@ month-tail public metrics scan.
 - Keep startup backfills cheap and no-op aware. Large production SQLite files make repeated per-user
   repair loops expensive even when every row is already correct; use an indexed precheck in the
   readiness path and move periodic refresh work to a background scheduler.
+- A background rebuild is not low priority merely because it starts after readiness. Never acquire
+  `BEGIN IMMEDIATE` before a long analytical aggregation: capture an immutable upper bound, compute
+  the projection through read connections, then acquire the writer only for the bounded replacement
+  and replay buffered tail events. Otherwise one observability rebuild can stall billing, job claims,
+  and unrelated backfills for the full scan duration.
+- The read/write split creates two event-boundary races unless a transition gate owns the handoff. A
+  direct incremental write that observed inactive must finish before the rebuild captures its upper
+  bound; after bucket replacement, detach the buffered tail and switch to replaying mode while
+  holding the buffer gate, then replay that finite snapshot in yielding batches. New events return
+  directly to persistence, so sustained ingress cannot grow the tail indefinitely or permit an
+  overlapping rebuild.
 - For `billing_ledger` startup truth repair specifically, persist a high-watermark marker and let
   the readiness path prove “no gap / no drift” before invoking a whole-ledger reconcile. The first
   upgraded boot may still need one repair, but steady-state restarts should only pay the precheck.
@@ -353,9 +374,9 @@ month-tail public metrics scan.
 - A durable scheduler claim needs a generation as well as a status. Increment it on claim and stale
   recovery, then require `(id, generation, running)` for finish and continuation writes; this closes
   the ABA window where a timed-out future completes a newly reclaimed job.
-- Continuation persistence must have one owner. A short atomic attempt plus a periodic stale reaper
-  is bounded and observable; spawning an unbounded retry task per failed continuation amplifies
-  writer contention.
+- Continuation persistence must have one owner. Keep only the current generation's representative
+  retrying at a capped cadence until it persists or stale recovery fences it; retry fan-out per
+  failure amplifies writer contention, while a fixed timeout recreates a post-lock recovery gap.
 
 - Do not enable full SQL debug logging in production by default. Slow-statement logging is enough
   for this contention class and avoids dumping every statement or bind-heavy traffic path.

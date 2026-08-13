@@ -1450,6 +1450,8 @@ const META_KEY_UPSTREAM_RECONCILIATION_LAST_ATTEMPTED_V1: &str =
     "upstream_reconciliation_last_attempted_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_LAST_SETTLED_V1: &str =
     "upstream_reconciliation_last_settled_v1";
+const META_KEY_UPSTREAM_RECONCILIATION_LAST_NO_ADJUSTMENT_V1: &str =
+    "upstream_reconciliation_last_no_adjustment_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_LAST_429_V1: &str = "upstream_reconciliation_last_429_v1";
 const META_KEY_UPSTREAM_RECONCILIATION_LAST_BUDGET_EXHAUSTED_V1: &str =
     "upstream_reconciliation_last_budget_exhausted_v1";

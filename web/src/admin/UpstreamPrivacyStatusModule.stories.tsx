@@ -8,6 +8,9 @@ import { translations } from '../i18n'
 
 type StoryArgs = ComponentProps<typeof UpstreamPrivacyStatusModule>
 
+const desktopViewport = { viewport: { defaultViewport: '1440-device-desktop' } } as const
+const mobileViewport = { viewport: { defaultViewport: '0393-admin-mobile' } } as const
+
 const congestedBoundUsers = Array.from({ length: 14 }, (_, index) => ({
   keyIdHint: `key-${String(index + 1).padStart(2, '0')}`,
   count: Math.max(1, 28 - index * 2),
@@ -49,6 +52,7 @@ const pendingStatus: UpstreamPrivacyStatus = {
   lastReconciliationEnqueueErrorAt: 1_783_957_900,
   lastResearchSweepAt: 1_783_958_320,
   lastResearchTerminalAt: 1_783_958_300,
+  reconciliationLastNoAdjustment: 0,
   reconciliationPressureStreak: 0,
   reconciliationBackoffLevel: 0,
   reconciliationBackoffUntil: null,
@@ -221,12 +225,57 @@ const compareStatus: UpstreamPrivacyStatus = {
   ],
 }
 
+const localBackoffStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationBackoffLevel: 0,
+  reconciliationBackoffUntil: null,
+  reconciliationLocalBackoff: {
+    pressureStreak: 3,
+    level: 1,
+    availableAt: 1_783_959_120,
+    lastRecoveredAt: null,
+  },
+}
+
+const upstreamBackoffStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationPressureStreak: 3,
+  reconciliationBackoffLevel: 1,
+  reconciliationBackoffUntil: 1_783_959_120,
+  reconciliationLocalBackoff: {
+    pressureStreak: 0,
+    level: 0,
+    availableAt: null,
+    lastRecoveredAt: null,
+  },
+}
+
+const budgetExhaustedStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationLastDurationMs: 20_000,
+  reconciliationLastAttempted: 20,
+  reconciliationLastSettled: 0,
+  reconciliationLastNoAdjustment: 0,
+  reconciliationLastUpstream429: 16,
+  reconciliationLastBudgetExhausted: true,
+}
+
+const noAdjustmentStatus: UpstreamPrivacyStatus = {
+  ...activeStatus,
+  reconciliationLastAttempted: 6,
+  reconciliationLastSettled: 6,
+  reconciliationLastNoAdjustment: 6,
+  reconciliationLastUpstream429: 0,
+  reconciliationLastBudgetExhausted: false,
+}
+
 const meta = {
   title: 'Admin/Modules/SystemStatusModule',
   component: UpstreamPrivacyStatusModule,
   tags: ['autodocs'],
   parameters: {
     layout: 'padded',
+    ...desktopViewport,
     docs: {
       description: {
         component:
@@ -274,6 +323,21 @@ function renderWithStatus(status: UpstreamPrivacyStatus | null, overrides?: Part
   )
 }
 
+function renderEvidenceSurface(child: JSX.Element): JSX.Element {
+  return (
+    <div
+      data-testid="upstream-privacy-evidence-surface"
+      style={{
+        background: '#453754',
+        boxSizing: 'border-box',
+        padding: 48,
+      }}
+    >
+      <div style={{ background: '#ffffff', boxSizing: 'border-box', padding: 24 }}>{child}</div>
+    </div>
+  )
+}
+
 function InteractionCanvas(args: StoryArgs): JSX.Element {
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(args.autoRefreshEnabled)
 
@@ -300,6 +364,8 @@ export const Active: Story = {
   },
 }
 
+export const Healthy: Story = Active
+
 export const CompareOnly: Story = {
   args: {
     status: compareStatus,
@@ -312,22 +378,23 @@ export const Degraded: Story = {
   },
 }
 
-export const GlobalBackoff: Story = {
+export const LocalBackoff: Story = {
   args: {
-    status: {
-      ...compareStatus,
-      reconciliationPressureStreak: 3,
-      reconciliationBackoffLevel: 1,
-      reconciliationBackoffUntil: 1_783_959_120,
-      reconciliationLocalBackoff: {
-        pressureStreak: 3,
-        level: 1,
-        availableAt: 1_783_959_120,
-        lastRecoveredAt: null,
-      },
-    },
+    status: localBackoffStatus,
   },
 }
+
+export const EvidenceLocalBackoff: Story = {
+  render: () => renderEvidenceSurface(renderWithStatus(localBackoffStatus)),
+}
+
+export const UpstreamBackoff: Story = {
+  args: {
+    status: upstreamBackoffStatus,
+  },
+}
+
+export const GlobalBackoff: Story = UpstreamBackoff
 
 export const UnknownObservation: Story = {
   args: {
@@ -353,14 +420,13 @@ export const UnknownObservation: Story = {
 
 export const BudgetExhausted: Story = {
   args: {
-    status: {
-      ...compareStatus,
-      reconciliationLastDurationMs: 20_000,
-      reconciliationLastAttempted: 20,
-      reconciliationLastSettled: 0,
-      reconciliationLastUpstream429: 16,
-      reconciliationLastBudgetExhausted: true,
-    },
+    status: budgetExhaustedStatus,
+  },
+}
+
+export const NoAdjustment: Story = {
+  args: {
+    status: noAdjustmentStatus,
   },
 }
 
@@ -381,16 +447,26 @@ export const LoadingState: Story = {
   }),
 }
 
-export const Mobile: Story = {
+export const Mobile393x852: Story = {
   parameters: {
-    viewport: { defaultViewport: '0390-device-iphone-14' },
+    ...mobileViewport,
   },
+}
+
+export const EvidenceLocalBackoffMobile393x852: Story = {
+  parameters: mobileViewport,
+  render: EvidenceLocalBackoff.render,
 }
 
 export const Gallery: Story = {
   render: () => (
     <div style={{ display: 'grid', gap: 24 }}>
       {[
+        { title: 'Healthy', status: activeStatus },
+        { title: 'Local backoff', status: localBackoffStatus },
+        { title: 'Upstream backoff', status: upstreamBackoffStatus },
+        { title: 'Budget exhausted', status: budgetExhaustedStatus },
+        { title: 'No adjustment', status: noAdjustmentStatus },
         { title: 'Pending', status: pendingStatus },
         { title: 'Blocked by sessions', status: compareBlockedStatus },
         { title: 'Compare', status: compareStatus },
@@ -416,6 +492,13 @@ export const Gallery: Story = {
     </div>
   ),
 }
+
+export const MobileStateGallery: Story = {
+  parameters: mobileViewport,
+  render: Gallery.render,
+}
+
+export const Mobile: Story = Mobile393x852
 
 export const InteractionContract: Story = {
   render: (args) => <InteractionCanvas {...args} />,

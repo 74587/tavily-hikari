@@ -541,7 +541,7 @@ pub struct HaChannelHealthView {
     pub cursor_state: String,
     pub retention_secs: i64,
     pub expired_backlog: bool,
-    #[serde(default)]
+    #[serde(default = "default_gc_state")]
     pub gc_state: String,
     #[serde(default)]
     pub oldest_age_secs: Option<i64>,
@@ -558,6 +558,10 @@ pub struct HaChannelHealthView {
     #[serde(default)]
     pub gc_observed_at: Option<i64>,
     #[serde(default)]
+    pub last_ingress_seq_delta: Option<i64>,
+    #[serde(default)]
+    pub last_net_rows_delta_estimate: Option<i64>,
+    #[serde(default)]
     pub gc_deleted_rows_per_minute: f64,
     #[serde(default)]
     pub gc_recovery_deadline_at: Option<i64>,
@@ -565,6 +569,10 @@ pub struct HaChannelHealthView {
     pub gc_slo_state: String,
     #[serde(default)]
     pub gc_foreground_rps: i64,
+}
+
+fn default_gc_state() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -711,6 +719,10 @@ pub struct HaRuntime {
     peer_observations: Arc<HaPeerObservationStore>,
 }
 
+pub fn unknown_ha_channel_health() -> Vec<HaChannelHealthView> {
+    HaRuntime::unknown_peer_channel_health()
+}
+
 impl HaRuntime {
     fn unknown_peer_channel_health() -> Vec<HaChannelHealthView> {
         [
@@ -738,6 +750,8 @@ impl HaRuntime {
             batch_size: 250,
             gc_debt_mode: "unknown".to_string(),
             gc_observed_at: None,
+            last_ingress_seq_delta: None,
+            last_net_rows_delta_estimate: None,
             gc_deleted_rows_per_minute: 0.0,
             gc_recovery_deadline_at: None,
             gc_slo_state: "unknown".to_string(),
@@ -2008,6 +2022,23 @@ impl HaConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_channel_health_defaults_missing_gc_state_to_unknown() {
+        let value = serde_json::json!({
+            "channel": "control",
+            "ackedSeq": null,
+            "highWatermark": 0,
+            "ackLag": null,
+            "cursorState": "unknown",
+            "retentionSecs": 0,
+            "expiredBacklog": false,
+        });
+
+        let health: HaChannelHealthView =
+            serde_json::from_value(value).expect("decode legacy channel health");
+        assert_eq!(health.gc_state, "unknown");
+    }
 
     #[tokio::test]
     async fn single_mode_starts_full_master() {

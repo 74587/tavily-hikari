@@ -64,9 +64,14 @@
 - `429` 只对 `period_reconciliation` scope 中的对应 Key 建立持久化冷却，使用 `Retry-After` 或 `5/10/20/30` 分钟退避；不得批量把同 Key 的其他窗口写为 rate-limited，也不得影响正常 API/MCP 流量。
 - 候选观测必须使用有界索引页：`queueEstimate` 可为空且最多统计 64 个候选，`hasEligible` 与最老候选年龄必须单独表达，首次观测前 coverage 为 `unknown`，不得以零伪装未观测状态。历史 degraded 状态必须由独立的索引化 `EXISTS` 探测保留，不能用当天计数替代。
 - 连续三轮存在候选、未产生远端尝试且本地预算耗尽时，持久化独立的本地短退避；它不得增加 upstream 429 全局退避。只有真实远端 429 才按 `2/5/10/30` 分钟升级，并以更晚的 `Retry-After` 为准；退避期间只保留一个 delayed representative job，真实远端尝试或成功结算后立即复位。
-- 主结算候选页、key/cooldown hydrate 与 reservation 的本地准备预算最多 2 秒，主结算优先启动；terminal-research sweep 仅在主结算之后使用同一轮剩余预算，单轮总预算保持 20 秒。
+- 主结算候选页、key/cooldown hydrate 与 reservation 的本地准备预算最多 2 秒，主结算优先启动；terminal-research sweep 仅在主结算之后使用同一轮剩余预算，且最多占用 2 秒。Research 超时不代表主结算本地预算耗尽，单轮总预算保持 20 秒。
 - 远端请求启动、观察结果、结算写入和 Research 状态落盘均受同一轮截止时间约束；最后的持久化收尾预算不得被新一轮远端请求抢占。
 - 本地预算耗尽只推进独立 local backoff，不增加 upstream 429 压力；local backoff 的持久化元数据随 HA meta 增量和 baseline 同步，接管后继续执行原退避而不是立即重试。
+- Historical usage projection has a versioned durable lifecycle. An upgraded database with legacy
+  usage advances one bounded page only when no durable candidate is ready, and its representative
+  waits 30 seconds before the next page. Candidate selection never aggregates raw usage. New usage
+  is maintained by write triggers, and a usage update after terminal settlement reopens that
+  generation without reviving a completed no-adjustment period through the legacy cursor.
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）

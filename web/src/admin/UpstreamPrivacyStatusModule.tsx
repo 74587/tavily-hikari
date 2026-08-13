@@ -41,6 +41,41 @@ function phaseTone(phase: UpstreamPrivacyStatus['phase']): 'neutral' | 'info' | 
   }
 }
 
+type ReconciliationRunState =
+  | 'healthy'
+  | 'local_backoff'
+  | 'upstream_backoff'
+  | 'budget_exhausted'
+  | 'no_adjustment'
+
+function reconciliationRunState(status: UpstreamPrivacyStatus): ReconciliationRunState {
+  if (status.reconciliationLastBudgetExhausted) return 'budget_exhausted'
+  if (
+    status.reconciliationLocalBackoff.level > 0
+    && status.reconciliationLocalBackoff.availableAt != null
+  ) {
+    return 'local_backoff'
+  }
+  if (status.reconciliationBackoffUntil != null) return 'upstream_backoff'
+
+  const noAdjustment = status.reconciliationLastNoAdjustment ?? 0
+  if (noAdjustment > 0 && noAdjustment === (status.reconciliationLastSettled ?? 0)) {
+    return 'no_adjustment'
+  }
+  return 'healthy'
+}
+
+function reconciliationRunStateLabel(state: ReconciliationRunState, language: Language): string {
+  const labels: Record<ReconciliationRunState, [string, string]> = {
+    healthy: ['健康', 'Healthy'],
+    local_backoff: ['本地退避', 'Local backoff'],
+    upstream_backoff: ['上游退避', 'Upstream backoff'],
+    budget_exhausted: ['预算耗尽', 'Budget exhausted'],
+    no_adjustment: ['无需调整', 'No adjustment'],
+  }
+  return labels[state][language === 'zh' ? 0 : 1]
+}
+
 function formatOptionalValue(value: string | null | undefined, emptyLabel: string): string {
   return value && value.length > 0 ? value : emptyLabel
 }
@@ -176,6 +211,7 @@ export default function UpstreamPrivacyStatusModule({
   const sessionBindingCardLabel =
     language === 'zh' ? '活跃 upstream_mcp session' : 'Active upstream_mcp sessions'
   const sessionBindingSummaryLabel = sessionBindingCardLabel
+  const latestReconciliationState = status ? reconciliationRunState(status) : 'healthy'
 
   const phaseLabel = status
     ? ({
@@ -234,9 +270,32 @@ export default function UpstreamPrivacyStatusModule({
 
     if (status.reconciliationBackoffUntil != null) {
       issues.push({
-        key: 'globalReconciliationBackoff',
-        title: language === 'zh' ? '对账全局退避' : 'Global reconciliation backoff',
+        key: 'upstreamReconciliationBackoff',
+        title: language === 'zh' ? '对账上游退避' : 'Upstream reconciliation backoff',
         detail: `${language === 'zh' ? '级别' : 'Level'} ${status.reconciliationBackoffLevel ?? 0} · ${formatOptionalTimestamp(status.reconciliationBackoffUntil, timestampFormatter, '-')}`,
+        tone: 'warning',
+      })
+    }
+
+    if (
+      status.reconciliationLocalBackoff.level > 0
+      && status.reconciliationLocalBackoff.availableAt != null
+    ) {
+      issues.push({
+        key: 'localReconciliationBackoff',
+        title: language === 'zh' ? '对账本地退避' : 'Local reconciliation backoff',
+        detail: `${language === 'zh' ? '级别' : 'Level'} ${status.reconciliationLocalBackoff.level} · ${formatOptionalTimestamp(status.reconciliationLocalBackoff.availableAt, timestampFormatter, '-')}`,
+        tone: 'warning',
+      })
+    }
+
+    if (status.reconciliationLastBudgetExhausted) {
+      issues.push({
+        key: 'reconciliationBudgetExhausted',
+        title: language === 'zh' ? '对账预算已耗尽' : 'Reconciliation budget exhausted',
+        detail: status.reconciliationLastDurationMs == null
+          ? '-'
+          : `${numberFormatter.format(status.reconciliationLastDurationMs)} ms`,
         tone: 'warning',
       })
     }
@@ -251,7 +310,7 @@ export default function UpstreamPrivacyStatusModule({
     }
 
     return issues
-  }, [language, numberFormatter, status, strings])
+  }, [language, numberFormatter, status, strings, timestampFormatter])
 
   const summarySignals = useMemo(
     () =>
@@ -300,6 +359,7 @@ export default function UpstreamPrivacyStatusModule({
   const diagnosticsLabels = language === 'zh'
       ? {
         lastRun: '最近对账运行',
+        lastOutcome: '最近对账结果',
         lastShadowAdjustment: '最近 shadow 调整',
         lastEnqueueError: '最近入队失败',
         lastResearchSweep: '最近 Research 轮询',
@@ -330,6 +390,7 @@ export default function UpstreamPrivacyStatusModule({
       }
     : {
         lastRun: 'Last reconciliation run',
+        lastOutcome: 'Last reconciliation outcome',
         lastShadowAdjustment: 'Last shadow adjustment',
         lastEnqueueError: 'Last enqueue error',
         lastResearchSweep: 'Last Research sweep',
@@ -517,12 +578,16 @@ export default function UpstreamPrivacyStatusModule({
                   value={formatOptionalTimestamp(status.lastReconciliationRunAt, timestampFormatter, strings.statusMissing)}
                 />
                 <PrivacyStat
+                  label={diagnosticsLabels.lastOutcome}
+                  value={reconciliationRunStateLabel(latestReconciliationState, language)}
+                />
+                <PrivacyStat
                   label={language === 'zh' ? '最近轮耗时' : 'Last run duration'}
                   value={status.reconciliationLastDurationMs == null ? strings.statusMissing : `${numberFormatter.format(status.reconciliationLastDurationMs)} ms`}
                 />
                 <PrivacyStat
-                  label={language === 'zh' ? '尝试 / 结算 / 429' : 'Attempted / settled / 429'}
-                  value={`${numberFormatter.format(status.reconciliationLastAttempted ?? 0)} / ${numberFormatter.format(status.reconciliationLastSettled ?? 0)} / ${numberFormatter.format(status.reconciliationLastUpstream429 ?? 0)}`}
+                  label={language === 'zh' ? '尝试 / 完成 / 无调整 / 429' : 'Attempted / completed / no adjustment / 429'}
+                  value={`${numberFormatter.format(status.reconciliationLastAttempted ?? 0)} / ${numberFormatter.format(status.reconciliationLastSettled ?? 0)} / ${numberFormatter.format(status.reconciliationLastNoAdjustment ?? 0)} / ${numberFormatter.format(status.reconciliationLastUpstream429 ?? 0)}`}
                 />
                 <PrivacyStat
                   label={language === 'zh' ? '预算状态' : 'Budget status'}

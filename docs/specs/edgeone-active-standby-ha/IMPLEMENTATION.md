@@ -4,6 +4,14 @@
 
 - Ordinary administrator HA status reads `HaPeerObservationStore`; the background owner probes every 30 seconds with a five-second timeout, retains last-good observations, and marks them stale after 90 seconds without success. Dangerous control-plane operations continue to probe live.
 - Online outbox GC persists independent control, billing, and runtime eligibility plus claim generation. Round-robin selection skips deferred channels, and the scheduler uses the earliest typed continuation instead of parsing GC log text.
+- `HaGcController` now makes the per-channel durable row the single source of scheduling truth. A
+  five-minute legacy scan, slow SQL, or SQLite-busy defer remains attached to that channel while the
+  next eligible channel receives the next fair writer slice. Completion is fenced by the channel
+  claim generation and records the next wake atomically.
+- During five minutes of foreground traffic at or below `5 rps`, controller recovery uses one
+  channel-scoped slice per second until debt clears. Ordinary draining remains on a five-second
+  cadence; foreground pressure, a busy writer, or a batch over the 50ms target moves only that
+  channel to the 30-second defer path.
 
 - Added `src/ha.rs` with HA mode, role state machine, runtime status view, and Tencent TC3-signed EdgeOne client calls.
 - Added HA startup role detection from EdgeOne current origin.
@@ -274,6 +282,10 @@
 ## Current diagnostics contract
 
 - The scheduler emits one sampled `ha_outbox_gc` aggregate INFO per channel per 60-second window. Slow slices and SQLite conflicts bypass the normal window so they remain immediately visible without restoring per-slice WARN noise.
+- The administrator channel health projection carries controller-owned eligibility, next wake,
+  claim-fenced progress, ingress and net-row estimates, deletion rate, batch size, and defer reason.
+  Empty, unavailable, and legacy peer values render as explicit unknown coverage rather than a
+  fabricated healthy zero.
 - Sampled HA export/sync logs publish indexed `outbox_sequence_span_estimate` and high watermark
   instead of an exact outbox row count. Sequence holes make the span an estimate, not inventory.
 - Reconciliation local-pressure metadata is part of the replicated HA meta set. The final deadline

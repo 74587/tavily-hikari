@@ -144,19 +144,14 @@ impl KeyStore {
             VALUES (?, ?, ?, ?, ?, ?)
         "#;
 
-        let mut conn = begin_immediate_sqlite_connection_with_retry(
-            &self.pool,
-            &self.backend_time,
-            "rebuild_server_pressure_buckets",
-            Duration::from_secs(5),
-        )
-        .await?;
-        let result = async {
-            if !should_continue() {
-                return Ok(ServerPressureBucketsRebuildOutcome::Cancelled);
-            }
+        if !should_continue() {
+            return Ok(ServerPressureBucketsRebuildOutcome::Cancelled);
+        }
 
-            let five_minute_rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        // Source aggregation can scan a production-sized observability history.
+        // Keep it outside the immediate transaction so startup rehydration never
+        // owns SQLite's single writer while it performs analytical reads.
+        let five_minute_rows = sqlx::query_as::<_, (i64, i64, i64)>(
                 r#"
                 SELECT
                     (created_at / ?) * ? AS bucket_start,
@@ -182,9 +177,9 @@ impl KeyStore {
             .bind(five_minute_since)
             .bind(OUTCOME_QUOTA_EXHAUSTED)
             .bind(upper_bound_request_log_id)
-            .fetch_all(&mut *conn)
+            .fetch_all(&self.pool)
             .await?;
-            let hour_rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        let hour_rows = sqlx::query_as::<_, (i64, i64, i64)>(
                 r#"
                 SELECT
                     CAST(
@@ -214,13 +209,21 @@ impl KeyStore {
             .bind(hour_since)
             .bind(OUTCOME_QUOTA_EXHAUSTED)
             .bind(upper_bound_request_log_id)
-            .fetch_all(&mut *conn)
+            .fetch_all(&self.pool)
             .await?;
 
-            if !should_continue() {
-                return Ok(ServerPressureBucketsRebuildOutcome::Cancelled);
-            }
+        if !should_continue() {
+            return Ok(ServerPressureBucketsRebuildOutcome::Cancelled);
+        }
 
+        let mut conn = begin_immediate_sqlite_connection_with_retry(
+            &self.pool,
+            &self.backend_time,
+            "rebuild_server_pressure_buckets",
+            Duration::from_secs(5),
+        )
+        .await?;
+        let result = async {
             sqlx::query("DELETE FROM observability.server_pressure_buckets")
                 .execute(&mut *conn)
                 .await?;

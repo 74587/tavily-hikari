@@ -101,6 +101,8 @@ pub struct UpstreamPrivacyStatus {
     pub reconciliation_last_duration_ms: Option<i64>,
     pub reconciliation_last_attempted: i64,
     pub reconciliation_last_settled: i64,
+    #[serde(default)]
+    pub reconciliation_last_no_adjustment: i64,
     pub reconciliation_last_upstream_429: i64,
     pub reconciliation_last_budget_exhausted: bool,
     pub reconciliation_observation: ReconciliationObservation,

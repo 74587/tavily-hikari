@@ -20,6 +20,7 @@ Environment variables:
   SOURCE_BACKUP_SLEEP_SECS    Defaults to 0.005
   SOURCE_BACKUP_PROGRESS_SECS Defaults to 15
   SOURCE_BACKUP_TIMEOUT_SECS  Defaults to 600 per database
+  SOURCE_COMPRESSION_THREADS  Defaults to 1; low-priority zstd worker count on 101
   SOURCE_DB_DIR               Fallback host path, defaults to /var/lib/docker/volumes/ai-tavily-hikari-data/_data
   SOURCE_CORE_DB_NAME         Defaults to tavily_proxy.db
   SOURCE_OBSERVABILITY_DB_NAME Defaults to tavily_proxy-observability.db
@@ -31,6 +32,9 @@ Outputs:
   Prints the remote run directory and writes manifests under:
     <remote-run>/live-db/manifest.env
     <remote-run>/live-db/sha256sums.txt
+
+The testbox keeps only compressed immutable snapshots. Each test variant expands one private,
+writable database set and verifies its raw SHA-256 and SQLite integrity before use.
 EOF
 }
 
@@ -50,6 +54,7 @@ SOURCE_BACKUP_PAGES="${SOURCE_BACKUP_PAGES:--1}"
 SOURCE_BACKUP_SLEEP_SECS="${SOURCE_BACKUP_SLEEP_SECS:-0.005}"
 SOURCE_BACKUP_PROGRESS_SECS="${SOURCE_BACKUP_PROGRESS_SECS:-15}"
 SOURCE_BACKUP_TIMEOUT_SECS="${SOURCE_BACKUP_TIMEOUT_SECS:-600}"
+SOURCE_COMPRESSION_THREADS="${SOURCE_COMPRESSION_THREADS:-1}"
 SOURCE_DB_DIR="${SOURCE_DB_DIR:-/var/lib/docker/volumes/ai-tavily-hikari-data/_data}"
 SOURCE_CORE_DB_NAME="${SOURCE_CORE_DB_NAME:-tavily_proxy.db}"
 SOURCE_OBSERVABILITY_DB_NAME="${SOURCE_OBSERVABILITY_DB_NAME:-tavily_proxy-observability.db}"
@@ -94,6 +99,8 @@ SOURCE_CORE_LIVE="$SOURCE_DB_DIR/$SOURCE_CORE_DB_NAME"
 SOURCE_SIDECAR_LIVE="$SOURCE_DB_DIR/$SOURCE_OBSERVABILITY_DB_NAME"
 SOURCE_CORE_SNAPSHOT="$SOURCE_TMP_DIR/$SOURCE_CORE_DB_NAME"
 SOURCE_SIDECAR_SNAPSHOT="$SOURCE_TMP_DIR/$SOURCE_OBSERVABILITY_DB_NAME"
+SOURCE_CORE_COMPRESSED_SNAPSHOT="${SOURCE_CORE_SNAPSHOT}.zst"
+SOURCE_SIDECAR_COMPRESSED_SNAPSHOT="${SOURCE_SIDECAR_SNAPSHOT}.zst"
 
 case "$SOURCE_TMP_DIR" in
   /home/ivan/srv/media/shared_data/*)
@@ -113,6 +120,10 @@ for snapshot_name in "$SOURCE_CORE_DB_NAME" "$SOURCE_OBSERVABILITY_DB_NAME"; do
     exit 2
   fi
 done
+[[ "$SOURCE_COMPRESSION_THREADS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "SOURCE_COMPRESSION_THREADS must be a positive integer" >&2
+  exit 2
+}
 
 source_tmp_owned=false
 ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" \
@@ -126,7 +137,7 @@ cleanup_failed_run() {
   fi
   if [[ "$source_tmp_owned" == "true" ]]; then
     ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" \
-      "rm -f '$SOURCE_CORE_SNAPSHOT' '$SOURCE_SIDECAR_SNAPSHOT'; rmdir '$SOURCE_TMP_DIR' 2>/dev/null || true" \
+      "rm -f '$SOURCE_CORE_SNAPSHOT' '$SOURCE_SIDECAR_SNAPSHOT' '$SOURCE_CORE_COMPRESSED_SNAPSHOT' '$SOURCE_SIDECAR_COMPRESSED_SNAPSHOT'; rmdir '$SOURCE_TMP_DIR' 2>/dev/null || true" \
       >/dev/null 2>&1 || true
   fi
   if [[ "$remote_run_owned" == "true" ]]; then
@@ -137,7 +148,10 @@ trap cleanup_failed_run EXIT
 
 manifest_get() {
   local key="$1"
-  printf '%s\n' "$SOURCE_MANIFEST" | awk -F= -v target="$key" '$1 == target { sub($1"=",""); print; exit }'
+  # Avoid a producer/consumer pipeline here: awk intentionally stops after
+  # the first match, which can otherwise make printf fail with SIGPIPE under
+  # pipefail when the captured manifest grows.
+  awk -F= -v target="$key" '$1 == target { sub($1"=",""); print; exit }' <<<"$SOURCE_MANIFEST"
 }
 
 printf 'Preparing isolated codex-testbox run dir: %s\n' "$REMOTE_RUN"
@@ -183,6 +197,7 @@ SOURCE_MANIFEST="$(ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "bash -s" -- \
   "$SOURCE_BACKUP_SLEEP_SECS" \
   "$SOURCE_BACKUP_PROGRESS_SECS" \
   "$SOURCE_BACKUP_TIMEOUT_SECS" \
+  "$SOURCE_COMPRESSION_THREADS" \
   "$SOURCE_CORE_LIVE" \
   "$SOURCE_SIDECAR_LIVE" \
   "$SOURCE_CORE_SNAPSHOT" \
@@ -198,10 +213,13 @@ backup_pages="$5"
 backup_sleep_secs="$6"
 backup_progress_secs="$7"
 backup_timeout_secs="$8"
-core_live="$9"
-sidecar_live="${10}"
-core_snapshot="${11}"
-sidecar_snapshot="${12}"
+compression_threads="$9"
+core_live="${10}"
+sidecar_live="${11}"
+core_snapshot="${12}"
+sidecar_snapshot="${13}"
+core_compressed_snapshot="${core_snapshot}.zst"
+sidecar_compressed_snapshot="${sidecar_snapshot}.zst"
 
 mkdir -p "$tmp_dir"
 chmod 700 "$tmp_dir"
@@ -230,14 +248,16 @@ if [[ "$snapshot_source_kind" == "host-path" ]]; then
   sidecar_live_bytes="$(stat -c %s "$effective_sidecar_live")"
 fi
 
-required_tmp_bytes="$((core_live_bytes + core_live_wal_bytes + sidecar_live_bytes + 1073741824))"
+# The source staging area holds the raw SQLite backups plus their compressed transport
+# representation. Reserve for the incompressible worst case before starting any backup.
+required_tmp_bytes="$(((core_live_bytes + core_live_wal_bytes + sidecar_live_bytes) * 2 + 1073741824))"
 
 if (( available_tmp_bytes < required_tmp_bytes )); then
   echo "insufficient temporary free space for snapshot: available=${available_tmp_bytes} required=${required_tmp_bytes}" >&2
   exit 2
 fi
 
-rm -f "$core_snapshot" "$sidecar_snapshot"
+rm -f "$core_snapshot" "$sidecar_snapshot" "$core_compressed_snapshot" "$sidecar_compressed_snapshot"
 
 if [[ "$snapshot_source_kind" == "container-helper-python-backup" ]]; then
   snapshot_uid="$(id -u)"
@@ -362,6 +382,18 @@ if [[ "$sidecar_integrity" != "ok" ]]; then
   exit 8
 fi
 
+# Compression runs on the source only after the read-only SQLite backups are complete. Keep it
+# intentionally low impact: one low-priority worker avoids competing with the running service.
+nice -n 19 ionice -c3 zstd -q -T"$compression_threads" -1 --force "$core_snapshot" -o "$core_compressed_snapshot"
+nice -n 19 ionice -c3 zstd -q -T"$compression_threads" -1 --force "$sidecar_snapshot" -o "$sidecar_compressed_snapshot"
+chmod 600 "$core_compressed_snapshot" "$sidecar_compressed_snapshot"
+core_compressed_bytes="$(stat -c %s "$core_compressed_snapshot")"
+sidecar_compressed_bytes="$(stat -c %s "$sidecar_compressed_snapshot")"
+if (( core_compressed_bytes <= 0 || sidecar_compressed_bytes <= 0 )); then
+  echo "compressed snapshot is empty" >&2
+  exit 9
+fi
+
 printf 'source_tmp_dir=%s\n' "$tmp_dir"
 printf 'snapshot_source_kind=%s\n' "$snapshot_source_kind"
 printf 'helper_image=%s\n' "$helper_image"
@@ -380,6 +412,12 @@ printf 'core_snapshot_page_count=%s\n' "$core_snapshot_page_count"
 printf 'sidecar_snapshot_page_count=%s\n' "$sidecar_snapshot_page_count"
 printf 'core_snapshot_sha256=%s\n' "$(sha256sum "$core_snapshot" | awk '{print $1}')"
 printf 'sidecar_snapshot_sha256=%s\n' "$(sha256sum "$sidecar_snapshot" | awk '{print $1}')"
+printf 'core_compressed_snapshot_path=%s\n' "$core_compressed_snapshot"
+printf 'sidecar_compressed_snapshot_path=%s\n' "$sidecar_compressed_snapshot"
+printf 'core_compressed_snapshot_bytes=%s\n' "$core_compressed_bytes"
+printf 'sidecar_compressed_snapshot_bytes=%s\n' "$sidecar_compressed_bytes"
+printf 'core_compressed_snapshot_sha256=%s\n' "$(sha256sum "$core_compressed_snapshot" | awk '{print $1}')"
+printf 'sidecar_compressed_snapshot_sha256=%s\n' "$(sha256sum "$sidecar_compressed_snapshot" | awk '{print $1}')"
 printf 'core_snapshot_integrity=%s\n' "$core_integrity"
 printf 'sidecar_snapshot_integrity=%s\n' "$sidecar_integrity"
 EOS
@@ -399,23 +437,36 @@ CORE_SNAPSHOT_PATH_REMOTE="$(manifest_get core_snapshot_path)"
 SIDECAR_SNAPSHOT_PATH_REMOTE="$(manifest_get sidecar_snapshot_path)"
 CORE_SNAPSHOT_BYTES="$(manifest_get core_snapshot_bytes)"
 SIDECAR_SNAPSHOT_BYTES="$(manifest_get sidecar_snapshot_bytes)"
+CORE_SNAPSHOT_PAGE_COUNT="$(manifest_get core_snapshot_page_count)"
+SIDECAR_SNAPSHOT_PAGE_COUNT="$(manifest_get sidecar_snapshot_page_count)"
 CORE_SNAPSHOT_SHA256="$(manifest_get core_snapshot_sha256)"
 SIDECAR_SNAPSHOT_SHA256="$(manifest_get sidecar_snapshot_sha256)"
 CORE_SNAPSHOT_INTEGRITY="$(manifest_get core_snapshot_integrity)"
 SIDECAR_SNAPSHOT_INTEGRITY="$(manifest_get sidecar_snapshot_integrity)"
+CORE_COMPRESSED_SNAPSHOT_PATH_REMOTE="$(manifest_get core_compressed_snapshot_path)"
+SIDECAR_COMPRESSED_SNAPSHOT_PATH_REMOTE="$(manifest_get sidecar_compressed_snapshot_path)"
+CORE_COMPRESSED_SNAPSHOT_BYTES="$(manifest_get core_compressed_snapshot_bytes)"
+SIDECAR_COMPRESSED_SNAPSHOT_BYTES="$(manifest_get sidecar_compressed_snapshot_bytes)"
+CORE_COMPRESSED_SNAPSHOT_SHA256="$(manifest_get core_compressed_snapshot_sha256)"
+SIDECAR_COMPRESSED_SNAPSHOT_SHA256="$(manifest_get sidecar_compressed_snapshot_sha256)"
 
 REMOTE_AVAILABLE_BYTES="$(ssh -o BatchMode=yes "$TESTBOX_HOST" "df -B1 --output=avail '$REMOTE_DB_DIR' | tail -n1 | tr -d ' '")"
-REMOTE_REQUIRED_BYTES="$((CORE_SNAPSHOT_BYTES + SIDECAR_SNAPSHOT_BYTES + 1073741824))"
+# The testbox retains compressed immutable inputs and expands exactly one writable variant at a
+# time. The 10GiB margin covers the application build/image, WAL growth, artifacts, and ordinary
+# filesystem metadata without touching unrelated host images or caches.
+REMOTE_REQUIRED_BYTES="$((CORE_COMPRESSED_SNAPSHOT_BYTES + SIDECAR_COMPRESSED_SNAPSHOT_BYTES + CORE_SNAPSHOT_BYTES + SIDECAR_SNAPSHOT_BYTES + 10 * 1073741824))"
 if (( REMOTE_AVAILABLE_BYTES < REMOTE_REQUIRED_BYTES )); then
   echo "insufficient testbox free space: available=${REMOTE_AVAILABLE_BYTES} required=${REMOTE_REQUIRED_BYTES}" >&2
   exit 2
 fi
 
-printf 'Streaming full snapshot set to codex-testbox ...\n'
-ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$CORE_SNAPSHOT_PATH_REMOTE'" \
-  | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$SOURCE_CORE_DB_NAME'; chmod 600 '$REMOTE_DB_DIR/$SOURCE_CORE_DB_NAME'"
-ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$SIDECAR_SNAPSHOT_PATH_REMOTE'" \
-  | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$SOURCE_OBSERVABILITY_DB_NAME'; chmod 600 '$REMOTE_DB_DIR/$SOURCE_OBSERVABILITY_DB_NAME'"
+CORE_COMPRESSED_NAME="${SOURCE_CORE_DB_NAME}.zst"
+SIDECAR_COMPRESSED_NAME="${SOURCE_OBSERVABILITY_DB_NAME}.zst"
+printf 'Streaming compressed snapshot set to codex-testbox ...\n'
+ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$CORE_COMPRESSED_SNAPSHOT_PATH_REMOTE'" \
+  | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$CORE_COMPRESSED_NAME'; chmod 600 '$REMOTE_DB_DIR/$CORE_COMPRESSED_NAME'"
+ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" "cat '$SIDECAR_COMPRESSED_SNAPSHOT_PATH_REMOTE'" \
+  | ssh -o BatchMode=yes "$TESTBOX_HOST" "umask 077; cat > '$REMOTE_DB_DIR/$SIDECAR_COMPRESSED_NAME'; chmod 600 '$REMOTE_DB_DIR/$SIDECAR_COMPRESSED_NAME'"
 
 # shellcheck disable=SC2087 # Manifest values are expanded by this local script.
 ssh -o BatchMode=yes "$TESTBOX_HOST" "cat > '$REMOTE_DB_DIR/manifest.env'" <<EOF
@@ -430,6 +481,7 @@ source_backup_pages=$SOURCE_BACKUP_PAGES
 source_backup_sleep_secs=$SOURCE_BACKUP_SLEEP_SECS
 source_backup_progress_secs=$SOURCE_BACKUP_PROGRESS_SECS
 source_backup_timeout_secs=$SOURCE_BACKUP_TIMEOUT_SECS
+source_compression_threads=$SOURCE_COMPRESSION_THREADS
 source_db_dir=$SOURCE_DB_DIR
 snapshot_source_kind=$SNAPSHOT_SOURCE_KIND
 helper_image=$HELPER_IMAGE_REMOTE
@@ -444,8 +496,16 @@ available_tmp_bytes=$AVAILABLE_TMP_BYTES
 required_tmp_bytes=$REQUIRED_TMP_BYTES
 core_snapshot_bytes=$CORE_SNAPSHOT_BYTES
 sidecar_snapshot_bytes=$SIDECAR_SNAPSHOT_BYTES
+core_snapshot_page_count=$CORE_SNAPSHOT_PAGE_COUNT
+sidecar_snapshot_page_count=$SIDECAR_SNAPSHOT_PAGE_COUNT
 core_snapshot_sha256=$CORE_SNAPSHOT_SHA256
 sidecar_snapshot_sha256=$SIDECAR_SNAPSHOT_SHA256
+core_compressed_snapshot_name=$CORE_COMPRESSED_NAME
+sidecar_compressed_snapshot_name=$SIDECAR_COMPRESSED_NAME
+core_compressed_snapshot_bytes=$CORE_COMPRESSED_SNAPSHOT_BYTES
+sidecar_compressed_snapshot_bytes=$SIDECAR_COMPRESSED_SNAPSHOT_BYTES
+core_compressed_snapshot_sha256=$CORE_COMPRESSED_SNAPSHOT_SHA256
+sidecar_compressed_snapshot_sha256=$SIDECAR_COMPRESSED_SNAPSHOT_SHA256
 core_snapshot_integrity=$CORE_SNAPSHOT_INTEGRITY
 sidecar_snapshot_integrity=$SIDECAR_SNAPSHOT_INTEGRITY
 remote_run=$REMOTE_RUN
@@ -455,20 +515,20 @@ EOF
 
 # shellcheck disable=SC2087 # Checksums are expanded by this local script.
 ssh -o BatchMode=yes "$TESTBOX_HOST" "cat > '$REMOTE_DB_DIR/sha256sums.txt'" <<EOF
-$CORE_SNAPSHOT_SHA256  $SOURCE_CORE_DB_NAME
-$SIDECAR_SNAPSHOT_SHA256  $SOURCE_OBSERVABILITY_DB_NAME
+$CORE_COMPRESSED_SNAPSHOT_SHA256  $CORE_COMPRESSED_NAME
+$SIDECAR_COMPRESSED_SNAPSHOT_SHA256  $SIDECAR_COMPRESSED_NAME
 EOF
 
-printf 'Verifying uploaded files on codex-testbox ...\n'
+printf 'Verifying uploaded compressed files on codex-testbox ...\n'
 ssh -o BatchMode=yes "$TESTBOX_HOST" "cd '$REMOTE_DB_DIR' \
   && sha256sum -c sha256sums.txt \
-  && test \"\$(sqlite3 '$SOURCE_CORE_DB_NAME' 'PRAGMA integrity_check;')\" = ok \
-  && test \"\$(sqlite3 '$SOURCE_OBSERVABILITY_DB_NAME' 'PRAGMA integrity_check;')\" = ok"
+  && test \"\$(zstd -q -d -c '$CORE_COMPRESSED_NAME' | sha256sum | awk '{print \$1}')\" = '$CORE_SNAPSHOT_SHA256' \
+  && test \"\$(zstd -q -d -c '$SIDECAR_COMPRESSED_NAME' | sha256sum | awk '{print \$1}')\" = '$SIDECAR_SNAPSHOT_SHA256'"
 
 if [[ "$KEEP_SOURCE_SNAPSHOTS" != "true" && "$KEEP_SOURCE_SNAPSHOTS" != "1" ]]; then
   printf 'Cleaning temporary backups on %s ...\n' "$SOURCE_SSH_TARGET"
   ssh -o BatchMode=yes "$SOURCE_SSH_TARGET" \
-    "rm -f '$CORE_SNAPSHOT_PATH_REMOTE' '$SIDECAR_SNAPSHOT_PATH_REMOTE' && rmdir '$SOURCE_TMP_DIR_REMOTE' && test ! -e '$SOURCE_TMP_DIR_REMOTE'"
+    "rm -f '$CORE_SNAPSHOT_PATH_REMOTE' '$SIDECAR_SNAPSHOT_PATH_REMOTE' '$CORE_COMPRESSED_SNAPSHOT_PATH_REMOTE' '$SIDECAR_COMPRESSED_SNAPSHOT_PATH_REMOTE' && rmdir '$SOURCE_TMP_DIR_REMOTE' && test ! -e '$SOURCE_TMP_DIR_REMOTE'"
   source_tmp_owned=false
 fi
 

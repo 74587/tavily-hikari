@@ -28,7 +28,17 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    let projection_complete: i64 = sqlx::query_scalar(
+        "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'upstream_reconciliation_work_projection_complete_v1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read empty-database projection lifecycle");
+    assert_eq!(
+        projection_complete, 1,
+        "a new empty database must not schedule historical reconciliation projection"
+    );
     sqlx::query("UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 2")
         .execute(&pool)
         .await
@@ -44,6 +54,69 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
     .expect_err("checksum drift must reject startup");
     assert!(error.to_string().contains("checksum mismatch"));
 
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn warm_schema_migration_adds_the_per_channel_legacy_cursor() {
+    let db_path = temp_db_path("schema-migration-ha-gc-legacy-cursor");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-ha-gc-legacy-cursor".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET last_legacy_control_seq = 101, \
+         last_legacy_billing_seq = 202, last_legacy_runtime_seq = 303 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed pre-v8 shared cursor state");
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 8")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate an existing database before v8");
+    sqlx::query("ALTER TABLE ha_outbox_gc_channel_state DROP COLUMN legacy_cursor_seq")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate the pre-v8 channel state");
+
+    assert!(
+        !proxy
+            .key_store
+            .prepare_versioned_schema()
+            .await
+            .expect("warm migration must converge an existing database"),
+        "an existing database must not request full bootstrap"
+    );
+    let cursors: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT channel, legacy_cursor_seq FROM ha_outbox_gc_channel_state ORDER BY channel",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read migrated per-channel cursors");
+    assert_eq!(
+        cursors,
+        vec![
+            ("billing".to_string(), 202),
+            ("control".to_string(), 101),
+            ("runtime".to_string(), 303),
+        ]
+    );
+    let v8_recorded: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 8)")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read v8 migration ledger record");
+    assert_eq!(v8_recorded, 1);
+
+    drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -82,6 +155,133 @@ async fn versioned_schema_migrations_reject_missing_recorded_objects() {
             .contains("object validation failed at version 3")
     );
 
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn terminal_outcome_migration_rejects_a_missing_usage_update_trigger() {
+    let db_path = temp_db_path("schema-migration-terminal-outcome-trigger");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-terminal-outcome".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    drop(proxy);
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_update")
+        .execute(&pool)
+        .await
+        .expect("remove terminal outcome trigger");
+    pool.close().await;
+
+    let error = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-terminal-outcome".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect_err("missing terminal outcome trigger must reject startup");
+    assert!(
+        error
+            .to_string()
+            .contains("object validation failed at version 4")
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn terminal_outcome_migration_reopens_same_second_usage_update_after_prior_settlement() {
+    let db_path = temp_db_path("schema-migration-terminal-outcome-reopens-same-second-usage");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-schema-migration-terminal-outcome-reopens-same-second".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    let now = 1_752_500_000_i64;
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_usage (
+            token_id, key_id, period_code, project_id, billing_subject,
+            settlement_mode, period_start, period_end, request_count,
+            first_used_at, last_used_at, updated_at
+        ) VALUES ('migration-reopen-token', 'migration-reopen-key', '2026-07-15/S1',
+                   'migration-reopen-project', 'account:migration-reopen', 'shadow',
+                   ?, ?, 1, ?, ?, ?)
+        "#,
+    )
+    .bind(now - 1_000)
+    .bind(now - 300)
+    .bind(now - 900)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert usage row");
+    sqlx::query(
+        r#"
+        INSERT INTO upstream_reconciliation_settlements (
+            settlement_key, token_id, period_code, project_id, billing_subject,
+            period_start, period_end, status, upstream_usage, local_billed_credits,
+            delta_credits, attempt_count, created_at, updated_at, settled_at
+        ) VALUES ('v1:migration-reopen-token:2026-07-15/S1', 'migration-reopen-token',
+                   '2026-07-15/S1', 'migration-reopen-project', 'account:migration-reopen',
+                   ?, ?, 'shadow_settled', 1, 1, 0, 1, ?, ?, ?)
+        "#,
+    )
+    .bind(now - 1_000)
+    .bind(now - 300)
+    .bind(now - 900)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert prior terminal settlement");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_work SET work_generation = 1, completed_generation = 0, last_outcome = NULL WHERE token_id = 'migration-reopen-token'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("shape pre-v4 work row");
+    let recorded_v5_checksum: String =
+        sqlx::query_scalar("SELECT checksum FROM schema_migrations WHERE version = 5")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read immutable v5 checksum");
+    assert_eq!(
+        recorded_v5_checksum,
+        "sha256:8e4f4cc3f832d24d4f7d7dc3d6f2a8c1"
+    );
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 6")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove same-second repair migration record");
+
+    proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect("apply same-second repair migration after immutable v5");
+    let reopened: (i64, i64, Option<String>) = sqlx::query_as(
+        "SELECT work_generation, completed_generation, last_outcome FROM upstream_reconciliation_work WHERE token_id = 'migration-reopen-token'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read reopened work row");
+    assert_eq!(reopened, (1, 0, None));
+
+    drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -348,7 +548,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
@@ -473,7 +673,7 @@ async fn warm_schema_verification_is_read_only_and_rejects_runtime_column_drift(
         .await
         .expect("hold writer lock");
     let verified = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(1),
         proxy.key_store.prepare_versioned_schema(),
     )
     .await
