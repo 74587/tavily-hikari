@@ -152,7 +152,10 @@ impl SqliteOperation {
         // make one bounded attempt on its nominal wake instead of extending a
         // prior writer conflict into a multi-second metrics backlog. Other
         // bulk work keeps the full contention cooldown.
-        matches!(self, Self::RequestStatsFlush)
+        matches!(
+            self,
+            Self::RequestStatsFlush | Self::ReconciliationProjection
+        )
     }
 }
 
@@ -504,7 +507,7 @@ impl SqliteRuntime {
             Some(SqliteAdmissionDeferReason::ForegroundPressure)
         } else if self.recent_contention_active() && !operation.probes_recent_contention() {
             Some(SqliteAdmissionDeferReason::RecentContention)
-        } else if !self.has_foreground_pool_capacity() {
+        } else if !self.has_foreground_pool_capacity_for(operation) {
             Some(SqliteAdmissionDeferReason::PoolPressure)
         } else if self.inner.maintenance_bulk.available_permits() == 0 {
             Some(SqliteAdmissionDeferReason::BulkBusy)
@@ -541,6 +544,26 @@ impl SqliteRuntime {
         idle >= MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS
             || idle.saturating_add(unopened)
                 >= MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS.saturating_add(1)
+    }
+
+    fn has_foreground_pool_capacity_for(&self, operation: SqliteOperation) -> bool {
+        if operation != SqliteOperation::ReconciliationProjection {
+            return self.has_foreground_pool_capacity();
+        }
+
+        // Projection is a short, resumable recovery slice. Let it probe a
+        // lazy pool when one foreground slot remains available and another
+        // connection can still be opened. Any queued acquirer keeps strict
+        // foreground precedence.
+        if self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0 {
+            return false;
+        }
+        let idle = self.inner.pool.num_idle().min(u32::MAX as usize) as u32;
+        let unopened = self
+            .inner
+            .maximum_connections
+            .saturating_sub(self.inner.pool.size());
+        idle.saturating_add(unopened) >= 2
     }
 
     fn recent_contention_active(&self) -> bool {
@@ -1947,6 +1970,59 @@ mod tests {
                 .expect("second foreground connection");
 
         drop((second_foreground, first_foreground, bulk));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_projection_can_probe_a_partially_open_idle_pool() {
+        let runtime = SqliteRuntime::with_max_connections(
+            SqlitePoolOptions::new()
+                .min_connections(1)
+                .max_connections(3)
+                .connect_with(
+                    SqliteConnectOptions::from_str("sqlite::memory:")
+                        .expect("SQLite options")
+                        .create_if_missing(true),
+                )
+                .await
+                .expect("lazy three connection pool"),
+            3,
+        );
+        let foreground = runtime.inner.pool.acquire().await.expect("foreground");
+        let second = runtime.inner.pool.acquire().await.expect("grow pool");
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime.inner.pool.num_idle() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("returned connection becomes idle");
+        assert_eq!(runtime.inner.pool.size(), 2);
+        assert_eq!(runtime.inner.pool.num_idle(), 1);
+
+        assert_eq!(
+            runtime
+                .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+                .expect_err("ordinary bulk work still reserves two foreground slots"),
+            SqliteAdmissionDeferReason::PoolPressure
+        );
+        runtime.mark_recent_contention_for_test();
+        let projection = runtime
+            .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
+            .expect("a bounded projection slice may probe the remaining lazy capacity");
+        let projection_tx = runtime
+            .begin_immediate(SqliteOperation::ReconciliationProjection)
+            .await
+            .expect("bounded projection transaction");
+        let second_foreground =
+            tokio::time::timeout(Duration::from_millis(250), runtime.inner.pool.acquire())
+                .await
+                .expect("foreground can open the final reserved connection")
+                .expect("foreground connection");
+
+        drop(second_foreground);
+        projection_tx.rollback().await.expect("rollback projection");
+        drop((projection, foreground));
     }
 
     #[tokio::test]
