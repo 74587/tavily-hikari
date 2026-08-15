@@ -1130,10 +1130,27 @@ impl TavilyProxy {
                             && scanned_rows > 0
                             && std::time::Instant::now() < preparation_deadline
                         {
-                            candidate_batch = self
-                                .key_store
-                                .next_upstream_reconciliation_candidates(20)
-                                .await?;
+                            let remaining = preparation_deadline
+                                .saturating_duration_since(std::time::Instant::now());
+                            candidate_batch = match tokio::time::timeout(
+                                remaining,
+                                self.key_store.next_upstream_reconciliation_candidates(20),
+                            )
+                            .await
+                            {
+                                Ok(Ok(batch)) => batch,
+                                Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                                    return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                                        reason: "local_pressure",
+                                    });
+                                }
+                                Ok(Err(err)) => return Err(err),
+                                Err(_) => {
+                                    return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                                        reason: "local_pressure",
+                                    });
+                                }
+                            };
                         }
                     }
                     Ok(ReconciliationProjectionSliceOutcome::Deferred { .. }) => {

@@ -28,7 +28,7 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     let projection_state: (i64, i64, i64) = sqlx::query_as(
         "SELECT batch_size, scanned_rows, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
     )
