@@ -18,6 +18,7 @@ const MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS: u32 = 2;
 const MAINTENANCE_BULK_HEAP_TRIM_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const FOREGROUND_ACTIVITY_BUCKETS: usize = 10;
 const FOREGROUND_ACTIVITY_BUCKET_MS: u64 = 100;
+const TRANSACTION_HOLD_BUCKET_UPPER_MS: [u64; 6] = [10, 25, 50, 100, 250, 251];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SqliteAdmissionDeferReason {
@@ -171,6 +172,7 @@ struct OperationWindow {
     pool_wait_ms: u64,
     begin_wait_ms: u64,
     hold_ms: u64,
+    hold_histogram: [u64; TRANSACTION_HOLD_BUCKET_UPPER_MS.len()],
     rows_affected: u64,
     deferred_by_reason: BTreeMap<SqliteAdmissionDeferReason, u64>,
 }
@@ -884,6 +886,15 @@ impl SqliteRuntime {
             .begin_wait_ms
             .saturating_add(begin_wait.as_millis() as u64);
         metrics.hold_ms = metrics.hold_ms.saturating_add(hold.as_millis() as u64);
+        if deferred.is_none() && !error {
+            let hold_ms = hold.as_millis().min(u64::MAX as u128) as u64;
+            let hold_bucket = TRANSACTION_HOLD_BUCKET_UPPER_MS
+                .iter()
+                .position(|upper| hold_ms <= *upper)
+                .unwrap_or(TRANSACTION_HOLD_BUCKET_UPPER_MS.len() - 1);
+            metrics.hold_histogram[hold_bucket] =
+                metrics.hold_histogram[hold_bucket].saturating_add(1);
+        }
         metrics.rows_affected = metrics.rows_affected.saturating_add(rows_affected);
         let idle_connections = self.inner.pool.num_idle().min(u32::MAX as usize) as u32;
         let in_use_connections = self.inner.pool.size().saturating_sub(idle_connections);
@@ -1478,7 +1489,7 @@ fn format_operation_window(operations: &BTreeMap<SqliteOperation, OperationWindo
                 .collect::<Vec<_>>()
                 .join("|");
             format!(
-                "{}/{}:calls={},deferred={},defer_reasons={},errors={},retries={},discarded={},pool_wait_ms={},begin_wait_ms={},hold_ms={},rows={}",
+                "{}/{}:calls={},deferred={},defer_reasons={},errors={},retries={},discarded={},pool_wait_ms={},begin_wait_ms={},hold_ms={},hold_p95_ms={},rows={}",
                 operation.workload_class(),
                 operation.as_str(),
                 metrics.calls,
@@ -1490,11 +1501,28 @@ fn format_operation_window(operations: &BTreeMap<SqliteOperation, OperationWindo
                 metrics.pool_wait_ms,
                 metrics.begin_wait_ms,
                 metrics.hold_ms,
+                transaction_hold_p95_ms(&metrics.hold_histogram),
                 metrics.rows_affected,
             )
         })
         .collect::<Vec<_>>()
         .join(";")
+}
+
+fn transaction_hold_p95_ms(histogram: &[u64; TRANSACTION_HOLD_BUCKET_UPPER_MS.len()]) -> u64 {
+    let samples = histogram.iter().sum::<u64>();
+    if samples == 0 {
+        return 0;
+    }
+    let target = samples.saturating_mul(95).saturating_add(99) / 100;
+    let mut cumulative = 0_u64;
+    for (index, count) in histogram.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative >= target {
+            return TRANSACTION_HOLD_BUCKET_UPPER_MS[index];
+        }
+    }
+    TRANSACTION_HOLD_BUCKET_UPPER_MS[TRANSACTION_HOLD_BUCKET_UPPER_MS.len() - 1]
 }
 
 fn read_process_write_bytes() -> Option<u64> {
@@ -1603,6 +1631,16 @@ mod tests {
         assert_eq!(metrics.pool_wait_ms, 5);
         assert_eq!(metrics.begin_wait_ms, 6);
         assert_eq!(metrics.hold_ms, 7);
+        assert_eq!(transaction_hold_p95_ms(&metrics.hold_histogram), 10);
+    }
+
+    #[test]
+    fn transaction_hold_histogram_reports_the_fixed_p95_bucket() {
+        let mut histogram = [0; TRANSACTION_HOLD_BUCKET_UPPER_MS.len()];
+        histogram[0] = 94;
+        histogram[3] = 5;
+        histogram[5] = 1;
+        assert_eq!(transaction_hold_p95_ms(&histogram), 100);
     }
 
     #[test]

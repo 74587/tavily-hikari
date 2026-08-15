@@ -21,6 +21,10 @@
 
 - Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance. Additive HA GC migrations include the per-channel legacy cursor and seed it from the former shared cursor before recording the migration, so an upgraded database preserves completed legacy-scan progress.
 - Reconciliation circuit fields are committed through one cancellation-safe immediate transaction. HA GC channel completion checks its persisted claim generation before clearing the claim.
+- Reconciliation historical projection no longer scans and aggregates 500 source rows while holding
+  `BEGIN IMMEDIATE`. A `25..100` row stable-keyset read is aggregated in memory, followed by one short
+  claim-fenced merge/cursor-CAS transaction. Handled stale claims explicitly roll back; runtime budgets
+  are checked between phases rather than cancelling an open transaction.
 
 - Added a runtime logging contract for the online service surface based on `tracing` +
   `tracing-subscriber`. Runtime logging now defaults to JSON lines on stderr, exposes a documented

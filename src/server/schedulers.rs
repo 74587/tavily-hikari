@@ -2610,35 +2610,20 @@ async fn run_manual_claimed_job(
                 )
                 .await;
             }
-            let selected_run = {
-                let run = tokio::time::timeout(
-                    Duration::from_secs(20),
-                    state.proxy.run_upstream_reconciliation_once_claimed_outcome(
-                        &state.usage_base,
-                        job_id,
-                        claim_generation,
-                    ),
-                );
-                tokio::pin!(run);
-                tokio::select! {
-                    foreground_rps = wait_for_foreground_maintenance_pressure(&state.proxy) => Err(foreground_rps),
-                    result = &mut run => Ok(result),
-                }
-            };
-            let run_result = match selected_run {
-                Ok(result) => result,
-                Err(foreground_rps) => {
-                    return defer_reconciliation_for_foreground(
-                        &state,
-                        job_id,
-                        claim_generation,
-                        foreground_rps,
-                    )
-                    .await;
-                }
-            };
+            let run_result = state
+                .proxy
+                .run_upstream_reconciliation_once_claimed_outcome(
+                    &state.usage_base,
+                    job_id,
+                    claim_generation,
+                )
+                .await;
             match run_result {
-                Ok(Ok(ClaimedReconciliationRunOutcome::Completed { settled })) => {
+                Ok(ClaimedReconciliationRunOutcome::Completed {
+                    settled,
+                    no_adjustment,
+                    observed,
+                }) => {
                     match state.proxy.upstream_reconciliation_representative_available_at().await {
                         Ok(Some(available_at)) => state
                             .proxy
@@ -2648,16 +2633,25 @@ async fn run_manual_claimed_job(
                                 "upstream_reconciliation",
                                 None,
                                 1,
-                                Some(&format!("settled={settled} continuation_at={available_at}")),
+                                Some(&format!(
+                                    "settled={settled} no_adjustment={no_adjustment} observed={observed} continuation_at={available_at}"
+                                )),
                                 available_at,
                             )
                             .await
                             .is_ok(),
-                        Ok(None) => finish(state, "success", format!("settled={settled}")).await,
+                        Ok(None) => finish(
+                            state,
+                            "success",
+                            format!(
+                                "settled={settled} no_adjustment={no_adjustment} observed={observed}"
+                            ),
+                        )
+                        .await,
                         Err(err) => finish(state, "error", err.to_string()).await,
                     }
                 }
-                Ok(Ok(ClaimedReconciliationRunOutcome::Deferred { reason })) => {
+                Ok(ClaimedReconciliationRunOutcome::Deferred { reason }) => {
                     defer_reconciliation_for_sqlite_admission(
                         &state,
                         job_id,
@@ -2666,40 +2660,8 @@ async fn run_manual_claimed_job(
                     )
                     .await
                 }
-                Ok(Err(err)) => finish(state, "error", err.to_string()).await,
-                Err(_) => {
-                    tracing::debug!(
-                        component = "reconciliation",
-                        event = "run_budget_exhausted",
-                        budget_ms = 20_000_u64,
-                        "upstream reconciliation stopped at its total runtime budget"
-                    );
-                    if let Err(err) = state
-                        .proxy
-                        .record_upstream_reconciliation_budget_exhausted(20_000)
-                        .await
-                    {
-                        tracing::warn!(
-                            component = "reconciliation",
-                            event = "run_budget_stats_persist_failed",
-                            err = %err,
-                        );
-                    }
-                    let available_at = state.proxy.backend_time().now_ts().saturating_add(300);
-                    state
-                        .proxy
-                        .scheduled_job_finish_and_enqueue_auto_at(
-                            job_id,
-                            claim_generation,
-                            "upstream_reconciliation",
-                            None,
-                            1,
-                            Some("settled=unknown budget_exhausted=true"),
-                            available_at,
-                        )
-                        .await
-                        .is_ok()
-                }
+                Ok(ClaimedReconciliationRunOutcome::StaleClaim) => false,
+                Err(err) => finish(state, "error", err.to_string()).await,
             }
         }
         "auth_token_logs_gc" => {
@@ -2760,16 +2722,6 @@ async fn run_manual_claimed_job(
             run_db_compaction_claimed_job(state, job_id, claim_generation).await
         }
         _ => finish(state, "error", format!("unsupported manual job type: {job_type}")).await,
-    }
-}
-
-async fn wait_for_foreground_maintenance_pressure(proxy: &TavilyProxy) -> i64 {
-    loop {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let foreground_rps = proxy.foreground_activity_rps();
-        if foreground_rps > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
-            return foreground_rps;
-        }
     }
 }
 

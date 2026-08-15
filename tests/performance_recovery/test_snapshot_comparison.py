@@ -63,6 +63,11 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('"database table is locked"', COMPARISON)
         self.assertIn('"database schema is locked"', COMPARISON)
         self.assertIn('"database is busy"', COMPARISON)
+        self.assertIn('"terminalDelta": reconciliation_after["terminal"]', COMPARISON)
+        self.assertIn('"reconciliationProjectionDiscarded"', COMPARISON)
+        self.assertIn('candidate reconciliation produced no terminal outcome', COMPARISON)
+        self.assertIn('projection transaction p95 is not proven below 100ms', COMPARISON)
+        self.assertIn('candidate billing truth differs', COMPARISON)
 
 
 if __name__ == "__main__":

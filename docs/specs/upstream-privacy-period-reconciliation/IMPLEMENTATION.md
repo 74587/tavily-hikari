@@ -34,13 +34,15 @@
 - 本地压力连续三轮触发 `30/60/120/300` 秒退避；真实 upstream 429 独立触发
   `2/5/10/30` 分钟退避并尊重更晚的 `Retry-After`。transport、semantic failure 与本地预算耗尽
   不会清空已有 429 状态。
-- `upstream_reconciliation_work` 由 usage 写入增量维护。升级前历史行使用 versioned lifecycle
-  在无 durable candidate 时以最多 250ms 的单页维护吸收，并以 30 秒 representative 续跑；候选查询
-  不再每轮聚合原始 usage 全表。每轮最多发起两次串行远端请求。
+- `upstream_reconciliation_work` 由 usage 写入增量维护。升级前历史行由
+  `ReconciliationProjectionController` 使用稳定复合 keyset 和 `25..100` 行自适应微片吸收：读扫描
+  在事务外完成，work merge、claim fence、cursor CAS 和进度在同一短事务提交。低压续跑最快一秒，
+  busy、慢片或前台压力只产生持久化 typed defer；候选查询不再每轮聚合原始 usage 全表。
 - `ReconciliationEngine` uses typed terminal outcomes. A successful upstream observation that
   requires no signed adjustment completes only the matching usage generation as `no_adjustment`;
-  later usage creates fresh work instead of recreating a minute-by-minute no-op run. The status
-  projection exposes outcome counts and separates main-settlement and research timing.
+  compare-mode non-zero deltas complete as `observed` without writing billing truth, while active
+  non-zero deltas alone complete as `settled`. Transport, semantic, upstream-429, and local-pressure
+  retry state remain independent. The status projection exposes phase timing and outcome counts.
 
 ## Remaining Gaps
 

@@ -321,6 +321,7 @@
         "tests::schema_migrations::",
         "tests::upstream_reconciliation::",
         "tests::upstream_reconciliation_continuation::",
+        "tests::upstream_reconciliation_engine::",
         "tests::upstream_reconciliation_fencing::",
         "tests::upstream_reconciliation_projection::",
         "tavily_proxy::reconciliation_engine_tests::",

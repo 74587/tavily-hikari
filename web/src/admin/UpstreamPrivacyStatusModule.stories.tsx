@@ -225,6 +225,30 @@ const compareStatus: UpstreamPrivacyStatus = {
   ],
 }
 
+const runObservationBase: NonNullable<UpstreamPrivacyStatus['reconciliationRunObservation']> = {
+  mode: 'compare',
+  projectionState: 'complete',
+  projectionScannedRows: 12_450,
+  projectionBatchSize: 75,
+  projectionTransactionP95Ms: 47,
+  cursorAdvanced: false,
+  hydrateMs: 91,
+  firstRemoteMs: 418,
+  remoteMs: 622,
+  finalizationMs: 44,
+  researchMs: 0,
+  settled: 0,
+  noAdjustment: 0,
+  observed: 0,
+  upstream429: 0,
+  transportFailure: 0,
+  semanticFailure: 0,
+  localPressure: 0,
+  continuationReason: null,
+  nextRetryAt: null,
+  observedAt: 1_783_959_000,
+}
+
 const localBackoffStatus: UpstreamPrivacyStatus = {
   ...compareStatus,
   reconciliationBackoffLevel: 0,
@@ -234,6 +258,13 @@ const localBackoffStatus: UpstreamPrivacyStatus = {
     level: 1,
     availableAt: 1_783_959_120,
     lastRecoveredAt: null,
+  },
+  reconciliationRunObservation: {
+    ...runObservationBase,
+    projectionState: 'deferred',
+    localPressure: 1,
+    continuationReason: 'local_pressure',
+    nextRetryAt: 1_783_959_120,
   },
 }
 
@@ -247,6 +278,32 @@ const upstreamBackoffStatus: UpstreamPrivacyStatus = {
     level: 0,
     availableAt: null,
     lastRecoveredAt: null,
+  },
+  reconciliationRunObservation: {
+    ...runObservationBase,
+    upstream429: 1,
+    continuationReason: 'upstream_429',
+    nextRetryAt: 1_783_959_120,
+  },
+}
+
+const transportFailureStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationRunObservation: {
+    ...runObservationBase,
+    transportFailure: 1,
+    continuationReason: 'transport_failure',
+    nextRetryAt: 1_783_959_030,
+  },
+}
+
+const semanticFailureStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationRunObservation: {
+    ...runObservationBase,
+    semanticFailure: 1,
+    continuationReason: 'semantic_failure',
+    nextRetryAt: 1_783_959_300,
   },
 }
 
@@ -267,6 +324,33 @@ const noAdjustmentStatus: UpstreamPrivacyStatus = {
   reconciliationLastNoAdjustment: 6,
   reconciliationLastUpstream429: 0,
   reconciliationLastBudgetExhausted: false,
+}
+
+const projectingStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationRunObservation: {
+    ...runObservationBase,
+    projectionState: 'projecting',
+    cursorAdvanced: true,
+    firstRemoteMs: null,
+    remoteMs: 0,
+    continuationReason: 'projection_progress',
+    nextRetryAt: 1_783_959_005,
+  },
+}
+
+const observedStatus: UpstreamPrivacyStatus = {
+  ...compareStatus,
+  reconciliationRunObservation: {
+    ...projectingStatus.reconciliationRunObservation!,
+    projectionState: 'complete',
+    firstRemoteMs: 418,
+    remoteMs: 622,
+    finalizationMs: 44,
+    observed: 1,
+    continuationReason: 'observed',
+    nextRetryAt: null,
+  },
 }
 
 const meta = {
@@ -430,6 +514,32 @@ export const NoAdjustment: Story = {
   },
 }
 
+export const Projecting: Story = {
+  args: { status: projectingStatus },
+}
+
+export const Observed: Story = {
+  args: { status: observedStatus },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('结算 / 无调整 / 仅观测')).toBeInTheDocument()
+    await expect(canvas.getByText('阶段耗时（准备 / 首次远端 / 远端）')).toBeInTheDocument()
+    await expect(canvas.getByText('0 / 0 / 1')).toBeInTheDocument()
+  },
+}
+
+export const TransportFailure: Story = {
+  args: { status: transportFailureStatus },
+}
+
+export const SemanticFailure: Story = {
+  args: { status: semanticFailureStatus },
+}
+
+export const Recovered: Story = {
+  args: { status: observedStatus },
+}
+
 export const EmptyState: Story = {
   render: () => renderWithStatus(null),
 }
@@ -467,6 +577,11 @@ export const Gallery: Story = {
         { title: 'Upstream backoff', status: upstreamBackoffStatus },
         { title: 'Budget exhausted', status: budgetExhaustedStatus },
         { title: 'No adjustment', status: noAdjustmentStatus },
+        { title: 'Projecting', status: projectingStatus },
+        { title: 'Observed', status: observedStatus },
+        { title: 'Transport failure', status: transportFailureStatus },
+        { title: 'Semantic failure', status: semanticFailureStatus },
+        { title: 'Recovered', status: observedStatus },
         { title: 'Pending', status: pendingStatus },
         { title: 'Blocked by sessions', status: compareBlockedStatus },
         { title: 'Compare', status: compareStatus },

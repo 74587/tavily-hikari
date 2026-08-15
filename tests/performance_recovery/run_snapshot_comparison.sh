@@ -196,6 +196,26 @@ capture_ha_gc_state() {
   " > "$target_path"
 }
 
+capture_reconciliation_state() {
+  local database_path="$1"
+  local target_path="$2"
+  local projection_p95=0
+  if [[ "$(sqlite3 "$database_path" "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upstream_reconciliation_projection_state');")" == "1" ]]; then
+    projection_p95="$(sqlite3 "$database_path" "SELECT COALESCE(transaction_p95_ms, 0) FROM upstream_reconciliation_projection_state WHERE id = 'local';")"
+  fi
+  sqlite3 -tabs "$database_path" "
+    SELECT
+      COALESCE(SUM(completed_generation >= work_generation), 0),
+      COALESCE(SUM(last_outcome = 'settled'), 0),
+      COALESCE(SUM(last_outcome = 'no_adjustment'), 0),
+      COALESCE(SUM(last_outcome = 'observed'), 0),
+      $projection_p95,
+      COALESCE((SELECT COUNT(*) FROM billing_reconciliation_adjustments), 0),
+      COALESCE((SELECT SUM(delta_credits) FROM billing_reconciliation_adjustments), 0)
+    FROM upstream_reconciliation_work;
+  " > "$target_path"
+}
+
 trap 'cleanup_compose; cleanup_app_image' EXIT
 mkdir -p "$ARTIFACTS_DIR" "$WORK_DIR"
 
@@ -328,6 +348,7 @@ run_variant() {
   compose up -d app upstream
   wait_for_dashboard_readiness "$artifact_dir"
   capture_ha_gc_state "$variant_dir/tavily_proxy.db" "$artifact_dir/ha_gc_before.tsv"
+  capture_reconciliation_state "$variant_dir/tavily_proxy.db" "$artifact_dir/reconciliation_before.tsv"
   sample_memory "$artifact_dir/memory_samples.txt" &
   rss_pid=$!
   (
@@ -349,6 +370,7 @@ run_variant() {
   kill "$rss_pid" 2>/dev/null || true
   wait "$rss_pid" 2>/dev/null || true
   capture_ha_gc_state "$variant_dir/tavily_proxy.db" "$artifact_dir/ha_gc_after.tsv"
+  capture_reconciliation_state "$variant_dir/tavily_proxy.db" "$artifact_dir/reconciliation_after.tsv"
   compose logs --no-color > "$artifact_dir/compose.log" 2>&1 || true
   python3 - "$name" "$artifact_dir" <<'PY'
 import json
@@ -373,6 +395,17 @@ def read_ha_gc_state(path):
 
 ha_gc_before = read_ha_gc_state(artifact_dir / "ha_gc_before.tsv")
 ha_gc_after = read_ha_gc_state(artifact_dir / "ha_gc_after.tsv")
+
+def read_reconciliation_state(path):
+    values = [int(value) for value in path.read_text().strip().split("\t")]
+    keys = (
+        "terminal", "settled", "noAdjustment", "observed",
+        "projectionTransactionP95Ms", "billingAdjustmentCount", "billingAdjustmentSum",
+    )
+    return dict(zip(keys, values, strict=True))
+
+reconciliation_before = read_reconciliation_state(artifact_dir / "reconciliation_before.tsv")
+reconciliation_after = read_reconciliation_state(artifact_dir / "reconciliation_after.tsv")
 samples = []
 for line in (artifact_dir / "memory_samples.txt").read_text().splitlines():
     sample = {}
@@ -454,6 +487,11 @@ summary = {
     "sqliteTypedLockDeferrals": sqlite_typed_lock_deferrals,
     "sqliteFinalLockErrors": sqlite_final_lock_errors,
     "nestedTransactionErrors": logs.count("cannot start a transaction within a transaction"),
+    "reconciliationProjectionDiscarded": sum(
+        structured_field(line, "event", "sqlite_transaction_connection_discarded")
+        and structured_field(line, "operation", "reconciliation_projection")
+        for line in logs.splitlines()
+    ),
     "foregroundHttp5xx": lane_5xx("business"),
     "dashboardHttp5xx": lane_5xx("dashboard"),
     "maintenanceHttp5xx": lane_5xx("ha_gc_trigger"),
@@ -464,6 +502,11 @@ summary = {
             channel: ha_gc_after[channel]["totalDeletedRows"] - values["totalDeletedRows"]
             for channel, values in ha_gc_before.items()
         },
+    },
+    "reconciliation": {
+        "before": reconciliation_before,
+        "after": reconciliation_after,
+        "terminalDelta": reconciliation_after["terminal"] - reconciliation_before["terminal"],
     },
 }
 (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -675,6 +718,23 @@ if candidate["foregroundHttp5xx"]:
     )
 if candidate["nestedTransactionErrors"]:
     raise SystemExit("candidate emitted a nested transaction error")
+if candidate["reconciliationProjectionDiscarded"]:
+    raise SystemExit("candidate discarded a reconciliation projection transaction connection")
+if candidate["reconciliation"]["terminalDelta"] <= 0:
+    raise SystemExit("candidate reconciliation produced no terminal outcome")
+projection_p95 = candidate["reconciliation"]["after"]["projectionTransactionP95Ms"]
+if projection_p95 <= 0 or projection_p95 >= 100:
+    raise SystemExit(
+        f"candidate reconciliation projection transaction p95 is not proven below 100ms: {projection_p95}"
+    )
+for billing_field in ("billingAdjustmentCount", "billingAdjustmentSum"):
+    baseline_value = baseline["reconciliation"]["after"][billing_field]
+    candidate_value = candidate["reconciliation"]["after"][billing_field]
+    if candidate_value != baseline_value:
+        raise SystemExit(
+            f"candidate billing truth differs for {billing_field}: "
+            f"baseline={baseline_value}, candidate={candidate_value}"
+        )
 
 result = {
     "baseline": baseline,

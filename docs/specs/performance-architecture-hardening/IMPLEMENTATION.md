@@ -28,6 +28,9 @@
 - HA GC, request-stats persistence, pressure rebuild, reconciliation projection, and Dashboard
   integrity use that admission boundary. Scheduler claim/finish/continuation remain short control
   transactions, so bulk backpressure cannot consume their control path or create an unbounded retry.
+- Historical reconciliation projection is owned by a dedicated controller. Stable keyset reads happen
+  outside the writer, while a single claim-fenced transaction merges work and CAS-advances the cursor.
+  Cooperative 20-second boundaries never cancel an open projection or finalization transaction.
   A transient short-control completion leaves its generation-fenced row running for the periodic
   stale reaper; request-log GC persists its five-minute continuation in the same transaction as
   completion.

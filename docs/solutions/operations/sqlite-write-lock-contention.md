@@ -408,8 +408,12 @@ month-tail public metrics scan.
   guard module; migrations, offline CLIs, and tests need explicit allowlist entries rather than an
   informal convention.
 - Attribute pressure by stable operation/class windows, not raw SQL logs: aggregate pool wait, begin
-  wait, hold time, rows, errors, discarded connections, and process/cgroup write-byte deltas at low
+  wait, fixed-bucket hold-time p95, rows, errors, discarded connections, and process/cgroup write-byte deltas at low
   frequency. Sample `/proc` and cgroup I/O only when emitting the window or a real error.
+- For a historical projection, do not put source scan, aggregation, merge, and cursor movement in one
+  transaction guarded by an outer timeout. Read a stable keyset micro-page first, aggregate outside
+  SQLite's writer, then use one claim-fenced transaction for merge plus cursor CAS. A stale claim is
+  an explicit rollback; a busy writer is a typed defer; neither should appear as a discarded connection.
 - A durable scheduler claim needs a generation as well as a status. Increment it on claim and stale
   recovery, then require `(id, generation, running)` for finish and continuation writes; this closes
   the ABA window where a timed-out future completes a newly reclaimed job.
