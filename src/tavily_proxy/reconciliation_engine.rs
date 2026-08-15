@@ -34,12 +34,18 @@ impl ReconciliationEngine {
         job_id: i64,
         claim_generation: i64,
     ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
-        proxy
+        match proxy
             .run_upstream_reconciliation_once_inner(
                 usage_base,
                 Some((job_id, claim_generation)),
             )
             .await
+        {
+            Err(ProxyError::StaleClaim { .. }) => {
+                Ok(ClaimedReconciliationRunOutcome::StaleClaim)
+            }
+            result => result,
+        }
     }
 
     fn outcome(

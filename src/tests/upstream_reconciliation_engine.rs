@@ -322,3 +322,72 @@ async fn reconciliation_without_an_eligible_key_records_semantic_retry() {
     drop(proxy);
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn reconciliation_does_not_partially_fetch_a_candidate_over_remote_limit() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-multi-key"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable compare reconciliation");
+    for index in 0..3 {
+        let key_id = proxy
+            .add_or_undelete_key(&format!("tvly-reconciliation-multi-key-{index}"))
+            .await
+            .expect("create upstream key");
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_usage (
+                 token_id, key_id, period_code, project_id, billing_subject,
+                 period_start, period_end, request_count, first_used_at,
+                 last_used_at, updated_at, settlement_mode
+               ) VALUES ('multi-key-token', ?, '2026-07-15/S1', 'multi-key-project',
+                         'token:multi-key-token', ?, ?, 1, ?, ?, ?, 'shadow')"#,
+        )
+        .bind(key_id)
+        .bind(now - 4_000)
+        .bind(now - 900)
+        .bind(now - 1_000)
+        .bind(now - 900)
+        .bind(now - 900)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert multi-key usage");
+    }
+
+    proxy
+        .run_upstream_reconciliation_once("http://127.0.0.1:9")
+        .await
+        .expect("classify candidate before remote fetch");
+    let state: (String, i64, i64) = sqlx::query_as(
+        r#"SELECT last_outcome, semantic_failure_streak, completed_generation
+           FROM upstream_reconciliation_work
+           WHERE token_id = 'multi-key-token' AND period_code = '2026-07-15/S1'"#,
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read multi-key retry state");
+    assert_eq!(state.0, RECONCILIATION_OUTCOME_SEMANTIC_FAILURE);
+    assert_eq!(state.1, 1);
+    assert_eq!(state.2, 0, "partial fetch must not complete work");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}

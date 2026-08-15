@@ -1318,7 +1318,7 @@ async fn reconciliation_rejects_reclaimed_claim_after_remote_fetch() {
     let running_proxy = proxy.clone();
     let running = tokio::spawn(async move {
         running_proxy
-            .run_upstream_reconciliation_once_claimed(
+            .run_upstream_reconciliation_once_claimed_outcome(
                 &format!("http://{addr}"),
                 claimed.id,
                 claimed.claim_generation,
@@ -1338,13 +1338,13 @@ async fn reconciliation_rejects_reclaimed_claim_after_remote_fetch() {
     );
     release_fetch.notify_one();
 
-    assert_eq!(
+    assert!(matches!(
         running
             .await
             .expect("join stale claimed worker")
             .expect("stale claimed worker exits cleanly"),
-        0
-    );
+        ClaimedReconciliationRunOutcome::StaleClaim
+    ));
     assert_eq!(
         proxy
             .key_store
@@ -1506,7 +1506,11 @@ async fn reconciliation_request_cap_never_settles_partially_observed_candidate()
         .run_upstream_reconciliation_once(&format!("http://{addr}"))
         .await
         .expect("run capped reconciliation");
-    assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        0,
+        "a candidate that cannot fit the remote budget must not be partially fetched"
+    );
     assert_eq!(research_hits.load(Ordering::SeqCst), 1);
     assert_eq!(settled, 0);
     let settlement_count: i64 = sqlx::query_scalar(
@@ -1516,7 +1520,15 @@ async fn reconciliation_request_cap_never_settles_partially_observed_candidate()
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("read partial settlement count");
-    assert_eq!(settlement_count, 0);
+    assert_eq!(settlement_count, 1, "the candidate keeps a typed retry");
+    let retry_outcome: String = sqlx::query_scalar(
+        "SELECT last_outcome FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read capped candidate outcome");
+    assert_eq!(retry_outcome, RECONCILIATION_OUTCOME_SEMANTIC_FAILURE);
 
     let _ = std::fs::remove_file(db_path);
 }

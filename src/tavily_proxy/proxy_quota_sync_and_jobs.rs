@@ -1329,6 +1329,31 @@ impl TavilyProxy {
                         .await?;
                     continue;
                 }
+                let remaining_remote_attempts = ReconciliationEngine::MAX_REMOTE_ATTEMPTS
+                    .saturating_sub(remote_request_count) as usize;
+                if key_count > remaining_remote_attempts {
+                    if remote_request_count > 0 {
+                        remote_attempt_limit_reached = true;
+                        budget_exhausted = true;
+                        break 'candidates;
+                    }
+                    semantic_failure_windows += 1;
+                    other_retry_windows += 1;
+                    self.key_store
+                        .mark_reconciliation_retry(
+                            &candidate,
+                            "waiting",
+                            self.backend_time.now_ts(),
+                            Some("candidate exceeds remote request limit"),
+                            RECONCILIATION_OUTCOME_SEMANTIC_FAILURE,
+                            Some(ReconciliationWorkFence {
+                                work_generation,
+                                claimed_job,
+                            }),
+                        )
+                        .await?;
+                    continue;
+                }
                 for key_id in key_ids {
                     if remote_request_count >= ReconciliationEngine::MAX_REMOTE_ATTEMPTS {
                         remote_attempt_limit_reached = true;
