@@ -170,6 +170,78 @@ async fn reconciliation_projection_is_cancellation_safe() {
 }
 
 #[tokio::test]
+async fn reconciliation_projection_rolls_back_sql_errors_without_discarding_connection() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-projection-error"],
+        "http://127.0.0.1:9",
+        &db_string,
+    )
+    .await
+    .expect("create proxy");
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("disable live projection");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark projection incomplete");
+    sqlx::query(
+        r#"INSERT INTO upstream_reconciliation_usage (
+             token_id, key_id, period_code, project_id, billing_subject,
+             period_start, period_end, request_count, first_used_at,
+             last_used_at, updated_at, settlement_mode
+           ) VALUES ('error-token', 'error-key', '2026-07-15/S1', 'error-project',
+                     'token:error-token', 1, 2, 1, 1, 2, 2, 'shadow')"#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert pending projection source");
+    sqlx::query(
+        r#"CREATE TRIGGER fail_projection_work_insert
+           BEFORE INSERT ON upstream_reconciliation_work
+           BEGIN
+             SELECT RAISE(ABORT, 'injected projection write failure');
+           END"#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("inject projection write failure");
+
+    let err = proxy
+        .key_store
+        .advance_upstream_reconciliation_work_projection()
+        .await
+        .expect_err("projection write fails");
+    assert!(
+        err.to_string()
+            .contains("injected projection write failure")
+    );
+    assert_eq!(
+        proxy
+            .key_store
+            .sqlite_runtime
+            .discarded_connections_for_test(SqliteOperation::ReconciliationProjection),
+        0,
+        "ordinary SQL errors must rollback instead of discarding the connection"
+    );
+    let tx = proxy
+        .key_store
+        .sqlite_runtime
+        .begin_immediate(SqliteOperation::ReconciliationProjection)
+        .await
+        .expect("next transaction begins on the rolled-back connection");
+    tx.rollback().await.expect("rollback clean transaction");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn reconciliation_projection_rejects_stale_claim() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();

@@ -325,6 +325,18 @@ pub(crate) struct SqliteRuntime {
 }
 
 impl SqliteRuntime {
+    #[cfg(test)]
+    pub(crate) fn discarded_connections_for_test(&self, operation: SqliteOperation) -> u64 {
+        self.inner
+            .workload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .operations
+            .get(&operation)
+            .map(|metrics| metrics.discarded_connections)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn new(pool: SqlitePool) -> Self {
         Self::with_max_connections(pool, crate::SQLITE_POOL_MAX_CONNECTIONS_DEFAULT)
     }

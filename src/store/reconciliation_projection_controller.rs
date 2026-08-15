@@ -32,6 +32,13 @@ struct ReconciliationProjectionController<'a> {
     store: &'a KeyStore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconciliationProjectionWriteStatus {
+    Advanced,
+    StaleClaim,
+    CursorConflict,
+}
+
 impl<'a> ReconciliationProjectionController<'a> {
     fn new(store: &'a KeyStore) -> Self {
         Self { store }
@@ -103,44 +110,62 @@ impl<'a> ReconciliationProjectionController<'a> {
                 .sqlite_runtime
                 .begin_immediate(SqliteOperation::ReconciliationProjection)
                 .await?;
-            if !Self::claim_is_current(&mut tx, claimed_job).await? {
-                tx.rollback().await?;
-                return Ok(ReconciliationProjectionSliceOutcome::StaleClaim);
-            }
-            let updated = sqlx::query(
-                r#"UPDATE upstream_reconciliation_projection_state
-                   SET completed = 1, next_retry_at = 0, last_defer_reason = NULL,
-                       updated_at = ?
-                   WHERE id = 'local' AND cursor_token_id = ? AND cursor_key_id = ?
-                     AND cursor_period_code = ? AND completed = 0"#,
-            )
-            .bind(self.store.backend_time.now_ts())
-            .bind(&state.0)
-            .bind(&state.1)
-            .bind(&state.2)
-            .execute(&mut *tx)
-            .await?;
-            if updated.rows_affected() != 1 {
-                tx.rollback().await?;
-                return Ok(ReconciliationProjectionSliceOutcome::Deferred {
-                    reason: "cursor_conflict",
-                });
-            }
-            sqlx::query("INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-                .bind(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
+            let write_result = async {
+                if !Self::claim_is_current(&mut tx, claimed_job).await? {
+                    return Ok(ReconciliationProjectionWriteStatus::StaleClaim);
+                }
+                let updated = sqlx::query(
+                    r#"UPDATE upstream_reconciliation_projection_state
+                       SET completed = 1, next_retry_at = 0, last_defer_reason = NULL,
+                           updated_at = ?
+                       WHERE id = 'local' AND cursor_token_id = ? AND cursor_key_id = ?
+                         AND cursor_period_code = ? AND completed = 0"#,
+                )
+                .bind(self.store.backend_time.now_ts())
+                .bind(&state.0)
+                .bind(&state.1)
+                .bind(&state.2)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query(
-                "UPDATE upstream_reconciliation_run_observation SET projection_state = 'complete', cursor_advanced = 0, observed_at = ? WHERE id = 'local'",
-            )
-            .bind(self.store.backend_time.now_ts())
-            .execute(&mut *tx)
-            .await?;
-            tx.finish(Ok(())).await?;
-            return Ok(ReconciliationProjectionSliceOutcome::Advanced {
-                scanned_rows: 0,
-                completed: true,
-            });
+                if updated.rows_affected() != 1 {
+                    return Ok(ReconciliationProjectionWriteStatus::CursorConflict);
+                }
+                sqlx::query("INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                    .bind(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(
+                    "UPDATE upstream_reconciliation_run_observation SET projection_state = 'complete', cursor_advanced = 0, observed_at = ? WHERE id = 'local'",
+                )
+                .bind(self.store.backend_time.now_ts())
+                .execute(&mut *tx)
+                .await?;
+                Ok(ReconciliationProjectionWriteStatus::Advanced)
+            }
+            .await;
+            return match write_result {
+                Ok(ReconciliationProjectionWriteStatus::Advanced) => {
+                    tx.finish(Ok(())).await?;
+                    Ok(ReconciliationProjectionSliceOutcome::Advanced {
+                        scanned_rows: 0,
+                        completed: true,
+                    })
+                }
+                Ok(ReconciliationProjectionWriteStatus::StaleClaim) => {
+                    tx.rollback().await?;
+                    Ok(ReconciliationProjectionSliceOutcome::StaleClaim)
+                }
+                Ok(ReconciliationProjectionWriteStatus::CursorConflict) => {
+                    tx.rollback().await?;
+                    Ok(ReconciliationProjectionSliceOutcome::Deferred {
+                        reason: "cursor_conflict",
+                    })
+                }
+                Err(err) => {
+                    tx.finish(Err(err)).await?;
+                    unreachable!("finishing a failed projection transaction returns the error")
+                }
+            };
         };
 
         let mut aggregates = std::collections::BTreeMap::<
@@ -182,11 +207,11 @@ impl<'a> ReconciliationProjectionController<'a> {
             .begin_immediate(SqliteOperation::ReconciliationProjection)
             .await?;
         let write_started = std::time::Instant::now();
-        if !Self::claim_is_current(&mut tx, claimed_job).await? {
-            tx.rollback().await?;
-            return Ok(ReconciliationProjectionSliceOutcome::StaleClaim);
-        }
-        if !aggregates.is_empty() {
+        let write_result = async {
+            if !Self::claim_is_current(&mut tx, claimed_job).await? {
+                return Ok(ReconciliationProjectionWriteStatus::StaleClaim);
+            }
+            if !aggregates.is_empty() {
             let mut merge = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
                 r#"INSERT INTO upstream_reconciliation_work (
                      token_id, period_code, project_id, billing_subject, settlement_mode,
@@ -215,8 +240,8 @@ impl<'a> ReconciliationProjectionController<'a> {
                      scheduling_key_id = MIN(upstream_reconciliation_work.scheduling_key_id, excluded.scheduling_key_id),
                      updated_at = MAX(upstream_reconciliation_work.updated_at, excluded.updated_at)"#,
             );
-            merge.build().execute(&mut *tx).await?;
-        }
+                merge.build().execute(&mut *tx).await?;
+            }
         let write_ms = write_started.elapsed().as_millis() as i64;
         let mut hold_histogram = [state.6, state.7, state.8, state.9, state.10, state.11];
         let hold_bucket = RECONCILIATION_PROJECTION_HOLD_BUCKETS_MS
@@ -238,7 +263,7 @@ impl<'a> ReconciliationProjectionController<'a> {
         } else {
             5
         };
-        let updated = sqlx::query(
+            let updated = sqlx::query(
             r#"UPDATE upstream_reconciliation_projection_state
                SET cursor_token_id = ?, cursor_key_id = ?, cursor_period_code = ?,
                    batch_size = ?, fast_slice_streak = ?, scanned_rows = scanned_rows + ?,
@@ -272,25 +297,43 @@ impl<'a> ReconciliationProjectionController<'a> {
         .bind(&state.0)
         .bind(&state.1)
         .bind(&state.2)
-        .execute(&mut *tx)
-        .await?;
-        if updated.rows_affected() != 1 {
-            tx.rollback().await?;
-            return Ok(ReconciliationProjectionSliceOutcome::Deferred {
-                reason: "cursor_conflict",
-            });
-        }
-        sqlx::query(
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Ok(ReconciliationProjectionWriteStatus::CursorConflict);
+            }
+            sqlx::query(
             "UPDATE upstream_reconciliation_run_observation SET projection_state = 'projecting', cursor_advanced = 1, observed_at = ? WHERE id = 'local'",
         )
         .bind(self.store.backend_time.now_ts())
-        .execute(&mut *tx)
-        .await?;
-        tx.finish(Ok(())).await?;
-        Ok(ReconciliationProjectionSliceOutcome::Advanced {
-            scanned_rows: rows.len() as i64,
-            completed: false,
-        })
+            .execute(&mut *tx)
+            .await?;
+            Ok(ReconciliationProjectionWriteStatus::Advanced)
+        }
+        .await;
+        match write_result {
+            Ok(ReconciliationProjectionWriteStatus::Advanced) => {
+                tx.finish(Ok(())).await?;
+                Ok(ReconciliationProjectionSliceOutcome::Advanced {
+                    scanned_rows: rows.len() as i64,
+                    completed: false,
+                })
+            }
+            Ok(ReconciliationProjectionWriteStatus::StaleClaim) => {
+                tx.rollback().await?;
+                Ok(ReconciliationProjectionSliceOutcome::StaleClaim)
+            }
+            Ok(ReconciliationProjectionWriteStatus::CursorConflict) => {
+                tx.rollback().await?;
+                Ok(ReconciliationProjectionSliceOutcome::Deferred {
+                    reason: "cursor_conflict",
+                })
+            }
+            Err(err) => {
+                tx.finish(Err(err)).await?;
+                unreachable!("finishing a failed projection transaction returns the error")
+            }
+        }
     }
 
     async fn claim_is_current(
