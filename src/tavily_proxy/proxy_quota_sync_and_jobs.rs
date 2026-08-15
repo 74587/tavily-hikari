@@ -1072,21 +1072,14 @@ impl TavilyProxy {
             .saturating_sub(Self::RECONCILIATION_FINALIZATION_HEADROOM_SECS)
             .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS);
         let remote_request_start_budget_secs = research_start_budget_secs;
-        let empty_candidate_batch = || UpstreamReconciliationCandidateBatch {
-            candidates: Vec::new(),
-            work_generation_by_candidate: std::collections::HashMap::new(),
-            recent_lane_budget: 0,
-            backlog_lane_budget: 0,
-            recent_candidate_count: 0,
-            backlog_candidate_count: 0,
-        };
         let mut preparation_budget_exhausted = false;
         let candidate_remaining = preparation_deadline
             .saturating_duration_since(std::time::Instant::now());
         let mut candidate_batch;
         if candidate_remaining.is_zero() {
-            preparation_budget_exhausted = true;
-            candidate_batch = empty_candidate_batch();
+            return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                reason: "local_pressure",
+            });
         } else {
             candidate_batch = match tokio::time::timeout(
                 candidate_remaining,
@@ -1094,10 +1087,17 @@ impl TavilyProxy {
             )
             .await
             {
-                Ok(batch) => batch?,
+                Ok(Ok(batch)) => batch,
+                Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                    return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                        reason: "local_pressure",
+                    });
+                }
+                Ok(Err(err)) => return Err(err),
                 Err(_) => {
-                    preparation_budget_exhausted = true;
-                    empty_candidate_batch()
+                    return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                        reason: "local_pressure",
+                    });
                 }
             };
         }
@@ -1181,8 +1181,9 @@ impl TavilyProxy {
             let remaining = candidate_hydration_deadline
                 .saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                preparation_budget_exhausted = true;
-                std::collections::HashMap::new()
+                return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                    reason: "local_pressure",
+                });
             } else {
                 match tokio::time::timeout(
                     remaining,
@@ -1190,10 +1191,17 @@ impl TavilyProxy {
                 )
                 .await
                 {
-                    Ok(result) => result?,
+                    Ok(Ok(result)) => result,
+                    Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                        return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                            reason: "local_pressure",
+                        });
+                    }
+                    Ok(Err(err)) => return Err(err),
                     Err(_) => {
-                        preparation_budget_exhausted = true;
-                        std::collections::HashMap::new()
+                        return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                            reason: "local_pressure",
+                        });
                     }
                 }
             }
@@ -1208,8 +1216,9 @@ impl TavilyProxy {
             let remaining = candidate_hydration_deadline
                 .saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                preparation_budget_exhausted = true;
-                std::collections::HashMap::new()
+                return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                    reason: "local_pressure",
+                });
             } else {
                 match tokio::time::timeout(
                     remaining,
@@ -1221,10 +1230,17 @@ impl TavilyProxy {
                 )
                 .await
                 {
-                    Ok(result) => result?,
+                    Ok(Ok(result)) => result,
+                    Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                        return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                            reason: "local_pressure",
+                        });
+                    }
+                    Ok(Err(err)) => return Err(err),
                     Err(_) => {
-                        preparation_budget_exhausted = true;
-                        std::collections::HashMap::new()
+                        return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                            reason: "local_pressure",
+                        });
                     }
                 }
             }

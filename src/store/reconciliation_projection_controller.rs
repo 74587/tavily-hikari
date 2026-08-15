@@ -14,6 +14,7 @@ struct ReconciliationProjectionAggregate {
     period_end: i64,
     scheduling_key_id: String,
     updated_at: i64,
+    terminal_outcome: Option<String>,
 }
 
 type ReconciliationProjectionSourceRow = (
@@ -26,6 +27,8 @@ type ReconciliationProjectionSourceRow = (
     i64,
     i64,
     i64,
+    Option<String>,
+    Option<i64>,
 );
 
 struct ReconciliationProjectionController<'a> {
@@ -88,11 +91,14 @@ impl<'a> ReconciliationProjectionController<'a> {
             .clamp(RECONCILIATION_PROJECTION_MIN_BATCH, RECONCILIATION_PROJECTION_MAX_BATCH);
         let rows: Vec<ReconciliationProjectionSourceRow> =
             sqlx::query_as(
-                r#"SELECT token_id, key_id, period_code, project_id, billing_subject,
-                          settlement_mode, period_start, period_end, updated_at
-                   FROM upstream_reconciliation_usage
-                   WHERE (token_id, key_id, period_code) > (?, ?, ?)
-                   ORDER BY token_id, key_id, period_code
+                r#"SELECT u.token_id, u.key_id, u.period_code, u.project_id,
+                          u.billing_subject, u.settlement_mode, u.period_start,
+                          u.period_end, u.updated_at, s.status, s.delta_credits
+                   FROM upstream_reconciliation_usage u
+                   LEFT JOIN upstream_reconciliation_settlements s
+                     ON s.settlement_key = 'v1:' || u.token_id || ':' || u.period_code
+                   WHERE (u.token_id, u.key_id, u.period_code) > (?, ?, ?)
+                   ORDER BY u.token_id, u.key_id, u.period_code
                    LIMIT ?"#,
             )
             .bind(&state.0)
@@ -183,6 +189,10 @@ impl<'a> ReconciliationProjectionController<'a> {
                     period_end: row.7,
                     scheduling_key_id: row.1.clone(),
                     updated_at: row.8,
+                    terminal_outcome: projection_terminal_outcome(
+                        row.9.as_deref(),
+                        row.10,
+                    ),
                 });
             if row.3 < entry.project_id {
                 entry.project_id.clone_from(&row.3);
@@ -199,7 +209,19 @@ impl<'a> ReconciliationProjectionController<'a> {
                 entry.scheduling_key_id.clone_from(&row.1);
             }
             entry.updated_at = entry.updated_at.max(row.8);
+            if entry.terminal_outcome.is_none() {
+                entry.terminal_outcome = projection_terminal_outcome(row.9.as_deref(), row.10);
+            }
         }
+
+        let terminal_repairs = aggregates
+            .iter()
+            .filter_map(|((token_id, period_code), aggregate)| {
+                aggregate.terminal_outcome.as_ref().map(|outcome| {
+                    (token_id.clone(), period_code.clone(), outcome.clone())
+                })
+            })
+            .collect::<Vec<_>>();
 
         let mut tx = self
             .store
@@ -241,6 +263,27 @@ impl<'a> ReconciliationProjectionController<'a> {
                      updated_at = MAX(upstream_reconciliation_work.updated_at, excluded.updated_at)"#,
             );
                 merge.build().execute(&mut *tx).await?;
+            }
+            if !terminal_repairs.is_empty() {
+                let mut repair = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                    "WITH repaired(token_id, period_code, outcome) AS (",
+                );
+                repair.push_values(terminal_repairs, |mut values, (token_id, period_code, outcome)| {
+                    values.push_bind(token_id).push_bind(period_code).push_bind(outcome);
+                });
+                repair.push(
+                    r#") UPDATE upstream_reconciliation_work AS w
+                       SET last_outcome = (
+                           SELECT r.outcome FROM repaired r
+                           WHERE r.token_id = w.token_id AND r.period_code = w.period_code
+                       )
+                       WHERE completed_generation >= work_generation
+                         AND EXISTS (
+                           SELECT 1 FROM repaired r
+                           WHERE r.token_id = w.token_id AND r.period_code = w.period_code
+                         )"#,
+                );
+                repair.build().execute(&mut *tx).await?;
             }
         let write_ms = write_started.elapsed().as_millis() as i64;
         let mut hold_histogram = [state.6, state.7, state.8, state.9, state.10, state.11];
@@ -351,6 +394,20 @@ impl<'a> ReconciliationProjectionController<'a> {
         .fetch_one(&mut **tx)
         .await?
             != 0)
+    }
+}
+
+fn projection_terminal_outcome(status: Option<&str>, delta_credits: Option<i64>) -> Option<String> {
+    match status {
+        Some("shadow_settled" | "shadow_degraded") if delta_credits == Some(0) => {
+            Some("no_adjustment".to_string())
+        }
+        Some("shadow_settled" | "shadow_degraded") => Some("observed".to_string()),
+        Some("settled" | "degraded") if delta_credits == Some(0) => {
+            Some("no_adjustment".to_string())
+        }
+        Some("settled" | "degraded") => Some("settled".to_string()),
+        _ => None,
     }
 }
 

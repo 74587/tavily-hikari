@@ -2038,6 +2038,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciliation_projection_prewarm_does_not_block_foreground_capacity() {
+        let runtime = SqliteRuntime::with_max_connections(
+            SqlitePoolOptions::new()
+                .min_connections(1)
+                .max_connections(3)
+                .connect_with(
+                    SqliteConnectOptions::from_str("sqlite::memory:")
+                        .expect("SQLite options")
+                        .create_if_missing(true),
+                )
+                .await
+                .expect("lazy three connection pool"),
+            3,
+        );
+        let existing_foreground = runtime.inner.pool.acquire().await.expect("foreground");
+        let grow = runtime.inner.pool.acquire().await.expect("grow pool");
+        drop(grow);
+
+        let prewarm_runtime = runtime.clone();
+        let foreground_pool = runtime.inner.pool.clone();
+        let started = Instant::now();
+        let ((), foreground) = tokio::join!(
+            prewarm_runtime.prewarm_reconciliation_projection_capacity(),
+            async {
+                tokio::time::timeout(Duration::from_millis(250), foreground_pool.acquire())
+                    .await
+                    .expect("foreground wait remains bounded during prewarm")
+                    .expect("foreground connection")
+            }
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        drop((foreground, existing_foreground));
+    }
+
+    #[tokio::test]
     async fn sqlite_runtime_never_admits_bulk_from_a_single_connection_pool() {
         let runtime = single_connection_runtime().await;
         assert_eq!(

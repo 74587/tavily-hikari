@@ -29,7 +29,11 @@ const HA_GC_LEGACY_CURSOR_CHECKSUM: &str = "sha256:ac41cf12d5e848f3a1b9d276e0f45
 const RECONCILIATION_ENGINE_STATE_VERSION: i64 = 9;
 const RECONCILIATION_ENGINE_STATE_NAME: &str = "reconciliation-engine-state-v1";
 const RECONCILIATION_ENGINE_STATE_CHECKSUM: &str =
-    "sha256:919f699f3058d4e5cbb31acf0abdc04d";
+    "sha256:614b3746410a20742499208d97764b88";
+const RECONCILIATION_OUTCOME_REPAIR_VERSION: i64 = 10;
+const RECONCILIATION_OUTCOME_REPAIR_NAME: &str = "reconciliation-shadow-outcome-repair-v1";
+const RECONCILIATION_OUTCOME_REPAIR_CHECKSUM: &str =
+    "sha256:0c3d8491c7064ba6a47fce9bb28c6220";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -671,6 +675,11 @@ impl KeyStore {
                 RECONCILIATION_ENGINE_STATE_NAME,
                 RECONCILIATION_ENGINE_STATE_CHECKSUM,
             ),
+            (
+                RECONCILIATION_OUTCOME_REPAIR_VERSION,
+                RECONCILIATION_OUTCOME_REPAIR_NAME,
+                RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -1004,35 +1013,31 @@ impl KeyStore {
             .execute(&self.pool)
             .await?;
         }
-        sqlx::query(
-            r#"UPDATE upstream_reconciliation_work
-               SET last_outcome = CASE
-                   WHEN EXISTS (
-                       SELECT 1 FROM upstream_reconciliation_settlements s
-                       WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
-                         AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
-                         AND s.delta_credits = 0
-                   ) THEN 'no_adjustment'
-                   WHEN EXISTS (
-                       SELECT 1 FROM upstream_reconciliation_settlements s
-                       WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
-                         AND s.status IN ('shadow_settled', 'shadow_degraded')
-                   ) THEN 'observed'
-                   ELSE 'settled'
-               END
-               WHERE completed_generation >= work_generation
-                 AND EXISTS (
-                     SELECT 1 FROM upstream_reconciliation_settlements s
-                     WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
-                       AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
-                 )"#,
-        )
-        .execute(&self.pool)
-        .await?;
         self.record_schema_migration(
             RECONCILIATION_ENGINE_STATE_VERSION,
             RECONCILIATION_ENGINE_STATE_NAME,
             RECONCILIATION_ENGINE_STATE_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_reconciliation_outcome_repair_migration(&self) -> Result<(), ProxyError> {
+        // Historical terminal outcomes are repaired by the existing bounded
+        // projection slices. Startup only resets the local derived cursor.
+        sqlx::query(
+            r#"UPDATE upstream_reconciliation_projection_state
+               SET cursor_token_id = '', cursor_key_id = '', cursor_period_code = '',
+                   completed = 0, next_retry_at = 0,
+                   last_defer_reason = 'outcome_repair_pending', updated_at = ?
+               WHERE id = 'local'"#,
+        )
+        .bind(self.backend_time.now_ts())
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            RECONCILIATION_OUTCOME_REPAIR_VERSION,
+            RECONCILIATION_OUTCOME_REPAIR_NAME,
+            RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
         )
         .await
     }
@@ -1401,6 +1406,12 @@ impl KeyStore {
         {
             self.apply_reconciliation_engine_state_migration().await?;
         }
+        if !self
+            .schema_migration_applied(RECONCILIATION_OUTCOME_REPAIR_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_outcome_repair_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1432,6 +1443,7 @@ impl KeyStore {
             .await?;
         self.apply_ha_gc_legacy_cursor_migration().await?;
         self.apply_reconciliation_engine_state_migration().await?;
+        self.apply_reconciliation_outcome_repair_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1439,7 +1451,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 9_i64,
+            migration_count = 10_i64,
         );
         Ok(())
     }

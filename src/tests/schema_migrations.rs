@@ -86,7 +86,7 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN transport_retry_at",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_failure_streak",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_retry_at",
-        "DELETE FROM schema_migrations WHERE version = 9",
+        "DELETE FROM schema_migrations WHERE version IN (9, 10)",
     ] {
         sqlx::query(statement)
             .execute(&proxy.key_store.pool)
@@ -159,6 +159,38 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
     .await
     .expect("read migrated stable projection cursor");
     assert_eq!(state, (String::new(), String::new(), String::new(), 0));
+    let recorded_v9_checksum: String =
+        sqlx::query_scalar("SELECT checksum FROM schema_migrations WHERE version = 9")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read the immutable v9 migration identity");
+    assert_eq!(
+        recorded_v9_checksum,
+        "sha256:614b3746410a20742499208d97764b88"
+    );
+    let startup_outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT last_outcome FROM upstream_reconciliation_work WHERE token_id LIKE 'migration-shadow-%' ORDER BY token_id",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("startup migration must not scan and repair historical work");
+    assert_eq!(startup_outcomes, vec!["settled", "settled"]);
+    for _ in 0..10 {
+        let slice = proxy
+            .key_store
+            .advance_upstream_reconciliation_work_projection()
+            .await
+            .expect("advance bounded outcome repair projection");
+        if matches!(
+            slice,
+            crate::store::ReconciliationProjectionSliceOutcome::Advanced {
+                completed: true,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
     let repaired_outcomes: Vec<(String, String)> = sqlx::query_as(
         "SELECT token_id, last_outcome FROM upstream_reconciliation_work WHERE token_id LIKE 'migration-shadow-%' ORDER BY token_id",
     )
