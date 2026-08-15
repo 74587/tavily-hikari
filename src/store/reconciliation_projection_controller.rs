@@ -266,23 +266,33 @@ impl<'a> ReconciliationProjectionController<'a> {
             }
             if !terminal_repairs.is_empty() {
                 let mut repair = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                    "WITH repaired(token_id, period_code, outcome) AS (",
+                    "UPDATE upstream_reconciliation_work SET last_outcome = CASE ",
                 );
-                repair.push_values(terminal_repairs, |mut values, (token_id, period_code, outcome)| {
-                    values.push_bind(token_id).push_bind(period_code).push_bind(outcome);
-                });
+                for (token_id, period_code, outcome) in &terminal_repairs {
+                    repair
+                        .push("WHEN token_id = ")
+                        .push_bind(token_id)
+                        .push(" AND period_code = ")
+                        .push_bind(period_code)
+                        .push(" THEN ")
+                        .push_bind(outcome)
+                        .push(" ");
+                }
                 repair.push(
-                    r#") UPDATE upstream_reconciliation_work AS w
-                       SET last_outcome = (
-                           SELECT r.outcome FROM repaired r
-                           WHERE r.token_id = w.token_id AND r.period_code = w.period_code
-                       )
-                       WHERE completed_generation >= work_generation
-                         AND EXISTS (
-                           SELECT 1 FROM repaired r
-                           WHERE r.token_id = w.token_id AND r.period_code = w.period_code
-                         )"#,
+                    "ELSE last_outcome END WHERE completed_generation >= work_generation AND (",
                 );
+                for (index, (token_id, period_code, _)) in terminal_repairs.iter().enumerate() {
+                    if index > 0 {
+                        repair.push(" OR ");
+                    }
+                    repair
+                        .push("(token_id = ")
+                        .push_bind(token_id)
+                        .push(" AND period_code = ")
+                        .push_bind(period_code)
+                        .push(")");
+                }
+                repair.push(")");
                 repair.build().execute(&mut *tx).await?;
             }
         let write_ms = write_started.elapsed().as_millis() as i64;

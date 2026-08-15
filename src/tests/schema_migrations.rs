@@ -210,6 +210,38 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
             ),
         ]
     );
+    let repair_plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        r#"EXPLAIN QUERY PLAN
+           UPDATE upstream_reconciliation_work
+              SET last_outcome = CASE
+                    WHEN token_id = ? AND period_code = ? THEN 'observed'
+                    ELSE last_outcome
+                  END
+            WHERE completed_generation >= work_generation
+              AND ((token_id = ? AND period_code = ?)
+                OR (token_id = ? AND period_code = ?))"#,
+    )
+    .bind("migration-shadow-nonzero")
+    .bind("2026-07-15/nonzero")
+    .bind("migration-shadow-nonzero")
+    .bind("2026-07-15/nonzero")
+    .bind("migration-shadow-zero")
+    .bind("2026-07-15/zero")
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("explain bounded terminal repair");
+    assert!(
+        repair_plan
+            .iter()
+            .all(|(_, _, _, detail)| !detail.contains("SCAN ")),
+        "terminal repair must not scan the work table: {repair_plan:?}"
+    );
+    assert!(
+        repair_plan
+            .iter()
+            .any(|(_, _, _, detail)| detail.contains("SEARCH ")),
+        "terminal repair must seek work by primary key: {repair_plan:?}"
+    );
     for statement in [
         "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_insert",
         "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_update",
