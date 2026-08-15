@@ -28,6 +28,9 @@
 - Graceful shutdown marks instance-owned maintenance-bulk admission closed and waits for its single
   active permit to return before process exit. This lets an in-flight projection micro-slice finish
   explicitly while preventing a replacement maintenance slice from starting during drain.
+- Claimed reconciliation projection transfers that permit into its short transaction task. Caller
+  cancellation drops only the join handle; the task retains admission through explicit commit or
+  rollback, so it cannot expose an unfinished transaction or overlap a replacement bulk slice.
 
 - Added a runtime logging contract for the online service surface based on `tracing` +
   `tracing-subscriber`. Runtime logging now defaults to JSON lines on stderr, exposes a documented

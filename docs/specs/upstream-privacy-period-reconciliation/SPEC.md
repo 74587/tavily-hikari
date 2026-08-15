@@ -81,6 +81,9 @@
 - Graceful process shutdown closes maintenance-bulk admission before exit and waits for the active
   micro-slice to reach its explicit commit or rollback boundary. A rolling restart therefore does
   not use physical-connection discard as the normal projection cancellation mechanism.
+- A claimed projection micro-slice owns its bulk permit in an independent task until the durable
+  boundary completes. Cancelling the scheduler caller cannot release admission early or abandon an
+  open projection transaction; claim and cursor fencing still reject obsolete work.
 - Every attempted work generation ends as exactly one typed result. `settled`, `no_adjustment`, and
   compare-mode `observed` are terminal. `upstream_429`, `transport_failure`, `semantic_failure`, and
   `local_pressure` are retryable and keep independent durable streaks and retry deadlines.

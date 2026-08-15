@@ -879,6 +879,32 @@ impl TavilyProxy {
         }
     }
 
+    pub(crate) async fn advance_claimed_reconciliation_projection_safe(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+        admission: SqliteMaintenanceAdmission,
+    ) -> Result<
+        (
+            ReconciliationProjectionSliceOutcome,
+            SqliteMaintenanceAdmission,
+        ),
+        ProxyError,
+    > {
+        let store = Arc::clone(&self.key_store);
+        tokio::spawn(async move {
+            let outcome = store
+                .advance_upstream_reconciliation_work_projection_claimed(
+                    job_id,
+                    claim_generation,
+                )
+                .await;
+            outcome.map(|outcome| (outcome, admission))
+        })
+        .await
+        .map_err(|err| ProxyError::Other(format!("reconciliation projection task failed: {err}")))?
+    }
+
     #[doc(hidden)]
     pub async fn run_upstream_reconciliation_once_claimed(
         &self,
@@ -926,7 +952,7 @@ impl TavilyProxy {
                 .await;
             local_admission_outcome = self.admit_upstream_reconciliation_projection();
         }
-        let local_admission = match local_admission_outcome {
+        let mut local_admission = match local_admission_outcome {
             SqliteAdmissionOutcome::Admitted(admission) => admission,
             SqliteAdmissionOutcome::Deferred { reason } => {
                 tracing::debug!(
@@ -1112,17 +1138,22 @@ impl TavilyProxy {
                 preparation_budget_exhausted = true;
             } else {
                 let projection = match claimed_job {
-                    Some((job_id, claim_generation)) => self
-                        .key_store
-                        .advance_upstream_reconciliation_work_projection_claimed(
-                            job_id,
-                            claim_generation,
-                        )
-                        .await,
-                    None => self
-                        .key_store
-                        .advance_upstream_reconciliation_work_projection()
-                        .await,
+                    Some((job_id, claim_generation)) => {
+                        let (outcome, admission) = self
+                            .advance_claimed_reconciliation_projection_safe(
+                                job_id,
+                                claim_generation,
+                                local_admission,
+                            )
+                            .await?;
+                        local_admission = admission;
+                        Ok(outcome)
+                    }
+                    None => {
+                        self.key_store
+                            .advance_upstream_reconciliation_work_projection()
+                            .await
+                    }
                 };
                 match projection {
                     Ok(ReconciliationProjectionSliceOutcome::Advanced { scanned_rows, .. }) => {

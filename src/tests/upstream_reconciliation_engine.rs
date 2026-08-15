@@ -222,6 +222,108 @@ async fn reconciliation_projection_is_cancellation_safe() {
 }
 
 #[tokio::test]
+async fn claimed_projection_keeps_its_admission_after_the_caller_is_cancelled() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let proxy = Arc::new(
+        TavilyProxy::with_endpoint(
+            vec!["tvly-reconciliation-projection-owner"],
+            "http://127.0.0.1:9",
+            &db_string,
+        )
+        .await
+        .expect("create proxy"),
+    );
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("disable live projection");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark projection incomplete");
+    sqlx::query(
+        r#"INSERT INTO upstream_reconciliation_usage (
+             token_id, key_id, period_code, project_id, billing_subject,
+             period_start, period_end, request_count, first_used_at,
+             last_used_at, updated_at, settlement_mode
+           ) VALUES ('owner-token', 'owner-key', '2026-07-15/S1', 'owner-project',
+                     'token:owner-token', 1, 2, 1, 1, 2, 2, 'shadow')"#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert pending projection source");
+    let queued = proxy
+        .scheduled_job_enqueue("upstream_reconciliation", "auto", None, 1)
+        .await
+        .expect("enqueue representative");
+    let claim = proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim representative")
+        .expect("representative becomes running");
+    let admission = match proxy.admit_upstream_reconciliation_projection() {
+        SqliteAdmissionOutcome::Admitted(admission) => admission,
+        SqliteAdmissionOutcome::Deferred { reason } => panic!("admission deferred: {reason}"),
+    };
+    let lock_pool = connect_sqlite_test_pool(&db_string).await;
+    let mut writer = lock_pool.acquire().await.expect("acquire writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold writer lock");
+
+    let cancelled_proxy = Arc::clone(&proxy);
+    let task = tokio::spawn(async move {
+        cancelled_proxy
+            .advance_claimed_reconciliation_projection_safe(
+                claim.id,
+                claim.claim_generation,
+                admission,
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    task.abort();
+    assert!(task.await.expect_err("caller is cancelled").is_cancelled());
+    sqlx::query("ROLLBACK")
+        .execute(&mut *writer)
+        .await
+        .expect("release writer lock");
+    drop(writer);
+    lock_pool.close().await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let scanned_rows: i64 = sqlx::query_scalar(
+                "SELECT scanned_rows FROM upstream_reconciliation_projection_state WHERE id = 'local'",
+            )
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read projection progress");
+            if scanned_rows > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached projection reaches its durable boundary");
+    assert_eq!(
+        proxy
+            .key_store
+            .sqlite_runtime
+            .discarded_connections_for_test(SqliteOperation::ReconciliationProjection),
+        0,
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn reconciliation_projection_rolls_back_sql_errors_without_discarding_connection() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
