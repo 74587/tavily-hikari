@@ -1016,11 +1016,7 @@ async fn reconciliation_rejects_usage_generation_changed_during_remote_fetch() {
         Some(now),
     );
 
-    // Admission keeps two SQLite slots available to foreground work. The
-    // unclaimed helper is intentionally allowed to yield while the first run
-    // drains its background persistence; the scheduler path preserves a
-    // durable continuation in that case. Retry only in this direct helper
-    // test, rather than weakening the foreground reservation contract.
+    // The direct helper retries admission while the scheduler persists a continuation.
     let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let settled = proxy
