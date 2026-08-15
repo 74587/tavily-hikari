@@ -150,8 +150,8 @@ impl SqliteOperation {
     fn probes_recent_contention(self) -> bool {
         // The coalescer can atomically restore an uncommitted batch. Let it
         // make one bounded attempt on its nominal wake instead of extending a
-        // prior writer conflict into a multi-second metrics backlog. Other
-        // bulk work keeps the full contention cooldown.
+        // prior writer conflict into a multi-second backlog. Projection uses
+        // the same bounded probe; other bulk work keeps the full cooldown.
         matches!(
             self,
             Self::RequestStatsFlush | Self::ReconciliationProjection
@@ -467,6 +467,35 @@ impl SqliteRuntime {
         }
     }
 
+    pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
+        if self.has_foreground_pool_capacity()
+            || self.inner.pool.size() >= self.inner.maximum_connections
+            || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
+        {
+            return;
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut held = Vec::new();
+        while self.inner.pool.size() < self.inner.maximum_connections {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, self.inner.pool.acquire()).await {
+                Ok(Ok(conn)) => held.push(conn),
+                _ => break,
+            }
+        }
+        drop(held);
+        while Instant::now() < deadline
+            && self.inner.pool.num_idle()
+                < MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS as usize
+        {
+            tokio::task::yield_now().await;
+        }
+    }
+
     pub(crate) fn maintenance_bulk_continue_reason(&self) -> Option<SqliteAdmissionDeferReason> {
         let foreground_rps = self.foreground_activity_rps();
         if foreground_rps > MAINTENANCE_BULK_MAX_FOREGROUND_RPS {
@@ -507,7 +536,7 @@ impl SqliteRuntime {
             Some(SqliteAdmissionDeferReason::ForegroundPressure)
         } else if self.recent_contention_active() && !operation.probes_recent_contention() {
             Some(SqliteAdmissionDeferReason::RecentContention)
-        } else if !self.has_foreground_pool_capacity_for(operation) {
+        } else if !self.has_foreground_pool_capacity() {
             Some(SqliteAdmissionDeferReason::PoolPressure)
         } else if self.inner.maintenance_bulk.available_permits() == 0 {
             Some(SqliteAdmissionDeferReason::BulkBusy)
@@ -544,26 +573,6 @@ impl SqliteRuntime {
         idle >= MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS
             || idle.saturating_add(unopened)
                 >= MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS.saturating_add(1)
-    }
-
-    fn has_foreground_pool_capacity_for(&self, operation: SqliteOperation) -> bool {
-        if operation != SqliteOperation::ReconciliationProjection {
-            return self.has_foreground_pool_capacity();
-        }
-
-        // Projection is a short, resumable recovery slice. Let it probe a
-        // lazy pool when one foreground slot remains available and another
-        // connection can still be opened. Any queued acquirer keeps strict
-        // foreground precedence.
-        if self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0 {
-            return false;
-        }
-        let idle = self.inner.pool.num_idle().min(u32::MAX as usize) as u32;
-        let unopened = self
-            .inner
-            .maximum_connections
-            .saturating_sub(self.inner.pool.size());
-        idle.saturating_add(unopened) >= 2
     }
 
     fn recent_contention_active(&self) -> bool {
@@ -2006,10 +2015,13 @@ mod tests {
                 .expect_err("ordinary bulk work still reserves two foreground slots"),
             SqliteAdmissionDeferReason::PoolPressure
         );
+        runtime.prewarm_reconciliation_projection_capacity().await;
+        assert_eq!(runtime.inner.pool.size(), 3);
+        assert_eq!(runtime.inner.pool.num_idle(), 2);
         runtime.mark_recent_contention_for_test();
         let projection = runtime
             .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
-            .expect("a bounded projection slice may probe the remaining lazy capacity");
+            .expect("a bounded projection slice may probe prewarmed capacity");
         let projection_tx = runtime
             .begin_immediate(SqliteOperation::ReconciliationProjection)
             .await

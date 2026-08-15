@@ -102,6 +102,12 @@ impl KeyStore {
             .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
     }
 
+    pub(crate) async fn prewarm_upstream_reconciliation_projection_capacity(&self) {
+        self.sqlite_runtime
+            .prewarm_reconciliation_projection_capacity()
+            .await;
+    }
+
     pub(crate) async fn upstream_reconciliation_run_admission_state(
         &self,
         claimed_job: Option<(i64, i64)>,

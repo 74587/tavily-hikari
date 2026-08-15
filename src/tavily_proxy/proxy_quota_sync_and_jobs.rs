@@ -915,7 +915,18 @@ impl TavilyProxy {
         claimed_job: Option<(i64, i64)>,
     ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
         let started_at = std::time::Instant::now();
-        let local_admission = match self.admit_upstream_reconciliation_projection() {
+        let mut local_admission_outcome = self.admit_upstream_reconciliation_projection();
+        if matches!(
+            local_admission_outcome,
+            SqliteAdmissionOutcome::Deferred {
+                reason: "pool_pressure"
+            }
+        ) {
+            self.prewarm_upstream_reconciliation_projection_capacity()
+                .await;
+            local_admission_outcome = self.admit_upstream_reconciliation_projection();
+        }
+        let local_admission = match local_admission_outcome {
             SqliteAdmissionOutcome::Admitted(admission) => admission,
             SqliteAdmissionOutcome::Deferred { reason } => {
                 tracing::debug!(
@@ -1126,13 +1137,19 @@ impl TavilyProxy {
                         }
                     }
                     Ok(ReconciliationProjectionSliceOutcome::Deferred { .. }) => {
-                        preparation_budget_exhausted = true;
+                        preparation_budget_exhausted |=
+                            ReconciliationEngine::projection_defer_exhausts_preparation(
+                                candidate_batch.candidates.len(),
+                            );
                     }
                     Ok(ReconciliationProjectionSliceOutcome::StaleClaim) => {
                         return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
                     }
                     Err(err) if crate::store::is_transient_sqlite_write_error(&err) => {
-                        preparation_budget_exhausted = true;
+                        preparation_budget_exhausted |=
+                            ReconciliationEngine::projection_defer_exhausts_preparation(
+                                candidate_batch.candidates.len(),
+                            );
                     }
                     Err(err) => return Err(err),
                 }

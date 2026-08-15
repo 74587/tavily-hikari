@@ -21,7 +21,7 @@ pub enum ClaimedReconciliationRunOutcome {
     StaleClaim,
 }
 
-struct ReconciliationEngine;
+pub(crate) struct ReconciliationEngine;
 
 impl ReconciliationEngine {
     const MAX_REMOTE_ATTEMPTS: i64 = 2;
@@ -78,6 +78,10 @@ impl ReconciliationEngine {
 
     fn is_transport_failure(err: &ProxyError) -> bool {
         matches!(err, ProxyError::Http(_) | ProxyError::Database(_))
+    }
+
+    pub(crate) fn projection_defer_exhausts_preparation(candidate_count: usize) -> bool {
+        candidate_count == 0
     }
 
     fn clears_local_pressure(outcome: ReconciliationOutcome) -> bool {

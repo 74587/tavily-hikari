@@ -29,7 +29,7 @@ const HA_GC_LEGACY_CURSOR_CHECKSUM: &str = "sha256:ac41cf12d5e848f3a1b9d276e0f45
 const RECONCILIATION_ENGINE_STATE_VERSION: i64 = 9;
 const RECONCILIATION_ENGINE_STATE_NAME: &str = "reconciliation-engine-state-v1";
 const RECONCILIATION_ENGINE_STATE_CHECKSUM: &str =
-    "sha256:614b3746410a20742499208d97764b88";
+    "sha256:919f699f3058d4e5cbb31acf0abdc04d";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -1004,6 +1004,31 @@ impl KeyStore {
             .execute(&self.pool)
             .await?;
         }
+        sqlx::query(
+            r#"UPDATE upstream_reconciliation_work
+               SET last_outcome = CASE
+                   WHEN EXISTS (
+                       SELECT 1 FROM upstream_reconciliation_settlements s
+                       WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                         AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
+                         AND s.delta_credits = 0
+                   ) THEN 'no_adjustment'
+                   WHEN EXISTS (
+                       SELECT 1 FROM upstream_reconciliation_settlements s
+                       WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                         AND s.status IN ('shadow_settled', 'shadow_degraded')
+                   ) THEN 'observed'
+                   ELSE 'settled'
+               END
+               WHERE completed_generation >= work_generation
+                 AND EXISTS (
+                     SELECT 1 FROM upstream_reconciliation_settlements s
+                     WHERE s.settlement_key = 'v1:' || upstream_reconciliation_work.token_id || ':' || upstream_reconciliation_work.period_code
+                       AND s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded')
+                 )"#,
+        )
+        .execute(&self.pool)
+        .await?;
         self.record_schema_migration(
             RECONCILIATION_ENGINE_STATE_VERSION,
             RECONCILIATION_ENGINE_STATE_NAME,

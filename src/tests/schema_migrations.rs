@@ -93,6 +93,48 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
             .await
             .unwrap_or_else(|err| panic!("apply legacy fixture statement {statement}: {err}"));
     }
+    for (suffix, delta_credits) in [("zero", 0_i64), ("nonzero", 3_i64)] {
+        let token_id = format!("migration-shadow-{suffix}");
+        let period_code = format!("2026-07-15/{suffix}");
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_usage (
+                 token_id, key_id, period_code, project_id, billing_subject,
+                 settlement_mode, period_start, period_end, request_count,
+                 first_used_at, last_used_at, updated_at
+               ) VALUES (?, 'migration-key', ?, 'migration-project', ?, 'shadow',
+                         1, 2, 1, 1, 2, 2)"#,
+        )
+        .bind(&token_id)
+        .bind(&period_code)
+        .bind(format!("token:{token_id}"))
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert historical shadow usage");
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_settlements (
+                 settlement_key, token_id, period_code, project_id, billing_subject,
+                 period_start, period_end, status, delta_credits, created_at,
+                 updated_at, settled_at
+               ) VALUES (?, ?, ?, 'migration-project', ?, 1, 2,
+                         'shadow_settled', ?, 2, 2, 2)"#,
+        )
+        .bind(format!("v1:{token_id}:{period_code}"))
+        .bind(&token_id)
+        .bind(&period_code)
+        .bind(format!("token:{token_id}"))
+        .bind(delta_credits)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert historical shadow settlement");
+        sqlx::query(
+            "UPDATE upstream_reconciliation_work SET completed_generation = work_generation, last_outcome = 'settled' WHERE token_id = ? AND period_code = ?",
+        )
+        .bind(&token_id)
+        .bind(&period_code)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("shape legacy terminal outcome");
+    }
     proxy
         .key_store
         .set_meta_i64(
@@ -117,6 +159,25 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
     .await
     .expect("read migrated stable projection cursor");
     assert_eq!(state, (String::new(), String::new(), String::new(), 0));
+    let repaired_outcomes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT token_id, last_outcome FROM upstream_reconciliation_work WHERE token_id LIKE 'migration-shadow-%' ORDER BY token_id",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read repaired shadow outcomes");
+    assert_eq!(
+        repaired_outcomes,
+        vec![
+            (
+                "migration-shadow-nonzero".to_string(),
+                "observed".to_string()
+            ),
+            (
+                "migration-shadow-zero".to_string(),
+                "no_adjustment".to_string()
+            ),
+        ]
+    );
     for statement in [
         "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_insert",
         "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_update",

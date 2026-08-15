@@ -1,6 +1,14 @@
 use super::upstream_reconciliation::{local_ts, reconciliation_test_db_path};
 use super::*;
 
+#[test]
+fn projection_defer_does_not_block_existing_main_candidates() {
+    assert!(!ReconciliationEngine::projection_defer_exhausts_preparation(20));
+    assert!(ReconciliationEngine::projection_defer_exhausts_preparation(
+        0
+    ));
+}
+
 #[tokio::test]
 async fn reconciliation_one_shot_waits_for_a_transient_bulk_admission() {
     let db_path = reconciliation_test_db_path();
