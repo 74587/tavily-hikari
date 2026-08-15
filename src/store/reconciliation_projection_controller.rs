@@ -186,13 +186,27 @@ impl<'a> ReconciliationProjectionController<'a> {
             tx.rollback().await?;
             return Ok(ReconciliationProjectionSliceOutcome::StaleClaim);
         }
-        for ((token_id, period_code), aggregate) in aggregates {
-            sqlx::query(
+        if !aggregates.is_empty() {
+            let mut merge = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
                 r#"INSERT INTO upstream_reconciliation_work (
                      token_id, period_code, project_id, billing_subject, settlement_mode,
                      period_start, period_end, scheduling_key_id, updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(token_id, period_code) DO UPDATE SET
+                   ) "#,
+            );
+            merge.push_values(aggregates, |mut values, ((token_id, period_code), aggregate)| {
+                values
+                    .push_bind(token_id)
+                    .push_bind(period_code)
+                    .push_bind(aggregate.project_id)
+                    .push_bind(aggregate.billing_subject)
+                    .push_bind(aggregate.settlement_mode)
+                    .push_bind(aggregate.period_start)
+                    .push_bind(aggregate.period_end)
+                    .push_bind(aggregate.scheduling_key_id)
+                    .push_bind(aggregate.updated_at);
+            });
+            merge.push(
+                r#" ON CONFLICT(token_id, period_code) DO UPDATE SET
                      project_id = MIN(upstream_reconciliation_work.project_id, excluded.project_id),
                      billing_subject = MIN(upstream_reconciliation_work.billing_subject, excluded.billing_subject),
                      settlement_mode = MIN(upstream_reconciliation_work.settlement_mode, excluded.settlement_mode),
@@ -200,18 +214,8 @@ impl<'a> ReconciliationProjectionController<'a> {
                      period_end = MAX(upstream_reconciliation_work.period_end, excluded.period_end),
                      scheduling_key_id = MIN(upstream_reconciliation_work.scheduling_key_id, excluded.scheduling_key_id),
                      updated_at = MAX(upstream_reconciliation_work.updated_at, excluded.updated_at)"#,
-            )
-            .bind(token_id)
-            .bind(period_code)
-            .bind(aggregate.project_id)
-            .bind(aggregate.billing_subject)
-            .bind(aggregate.settlement_mode)
-            .bind(aggregate.period_start)
-            .bind(aggregate.period_end)
-            .bind(aggregate.scheduling_key_id)
-            .bind(aggregate.updated_at)
-            .execute(&mut *tx)
-            .await?;
+            );
+            merge.build().execute(&mut *tx).await?;
         }
         let write_ms = write_started.elapsed().as_millis() as i64;
         let mut hold_histogram = [state.6, state.7, state.8, state.9, state.10, state.11];

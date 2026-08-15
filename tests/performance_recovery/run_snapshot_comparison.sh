@@ -645,11 +645,21 @@ for summary in (baseline, candidate):
         statuses.get("business:200", 0) + statuses.get("business:429", 0)
     )
     application_business_minimum = max(20, business_minimum / 2)
-    # Both variants perform a controlled restart halfway through the run. Keep
-    # the same bounded five-percent connection-race allowance as Dashboard
-    # coverage while the 5xx and latency gates below remain strict.
+    # Both variants perform a controlled restart halfway through the run and
+    # their open-loop clients can complete a different number of attempts.
+    # Compare application-response ratios instead of absolute response counts;
+    # the absolute workload, 5xx, lock, and latency gates below remain strict.
+    baseline_business_response_ratio = (
+        baseline_business_responses / baseline_business_attempts
+        if baseline_business_attempts
+        else 0.0
+    )
+    candidate_response_ratio_floor = max(0.0, baseline_business_response_ratio - 0.05)
     required_application_business_responses = (
-        max(application_business_minimum, (baseline_business_responses * 95 + 99) // 100)
+        max(
+            application_business_minimum,
+            int(business_attempts * candidate_response_ratio_floor),
+        )
         if summary["variant"] == "candidate"
         else (application_business_minimum if not baseline_business_red else 1)
     )
