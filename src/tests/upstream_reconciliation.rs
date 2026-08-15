@@ -1198,17 +1198,17 @@ async fn reconciliation_rejects_reclaimed_scheduled_job_claim() {
         1
     );
 
-    assert_eq!(
+    assert!(matches!(
         proxy
-            .run_upstream_reconciliation_once_claimed(
+            .run_upstream_reconciliation_once_claimed_outcome(
                 "http://127.0.0.1:9",
                 claimed.id,
                 claimed.claim_generation,
             )
             .await
             .expect("reject stale claimed worker"),
-        0
-    );
+        ClaimedReconciliationRunOutcome::StaleClaim
+    ));
     let work: (i64, i64) = sqlx::query_as(
         "SELECT work_generation, completed_generation FROM upstream_reconciliation_work WHERE token_id = ?",
     )
@@ -2768,6 +2768,12 @@ async fn daily_reconciliation_progress_includes_actual_mode_windows() {
             Some("degraded"),
         ),
         ("token-pending", "key-two", "account:user-pending", None),
+        (
+            "token-shadow",
+            "key-one",
+            "account:user-shadow",
+            Some("shadow_settled"),
+        ),
     ] {
         let period_code = format!("2026-07-15/{token_id}");
         sqlx::query(
@@ -2851,10 +2857,10 @@ async fn daily_reconciliation_progress_includes_actual_mode_windows() {
         .daily_reconciliation_progress()
         .await
         .expect("read daily reconciliation progress");
-    assert_eq!(progress.observed_accounts, 3);
+    assert_eq!(progress.observed_accounts, 4);
     assert_eq!(progress.accounts_with_settled_period, 1);
-    assert_eq!(progress.fully_terminal_accounts, 2);
-    assert_eq!(progress.observed_periods, 3);
+    assert_eq!(progress.fully_terminal_accounts, 3);
+    assert_eq!(progress.observed_periods, 4);
     assert_eq!(progress.settled_periods, 1);
     assert_eq!(progress.degraded_periods, 1);
     assert_eq!(progress.pending_periods, 1);

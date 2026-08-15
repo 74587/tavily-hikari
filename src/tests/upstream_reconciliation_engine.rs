@@ -216,3 +216,109 @@ async fn reconciliation_projection_rejects_stale_claim() {
     drop(proxy);
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn unclaimed_projection_preserves_typed_defer() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-projection-defer"],
+        "http://127.0.0.1:9",
+        &db_string,
+    )
+    .await
+    .expect("create proxy");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark projection incomplete");
+    let lock_pool = connect_sqlite_test_pool(&db_string).await;
+    let mut writer = lock_pool.acquire().await.expect("acquire writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *writer)
+        .await
+        .expect("hold writer lock");
+
+    assert!(matches!(
+        proxy
+            .key_store
+            .advance_upstream_reconciliation_work_projection()
+            .await
+            .expect("projection returns typed pressure"),
+        ReconciliationProjectionSliceOutcome::Deferred {
+            reason: "sqlite_pressure"
+        }
+    ));
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut *writer)
+        .await
+        .expect("release writer lock");
+    drop(writer);
+    lock_pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_without_an_eligible_key_records_semantic_retry() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-missing-key"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let mut settings = proxy.get_system_settings().await.expect("load settings");
+    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
+    settings.api_rebalance_enabled = true;
+    settings.api_rebalance_percent = 100;
+    settings.rebalance_mcp_enabled = true;
+    settings.rebalance_mcp_session_percent = 100;
+    proxy
+        .set_system_settings(&settings)
+        .await
+        .expect("enable compare reconciliation");
+    sqlx::query(
+        r#"INSERT INTO upstream_reconciliation_work (
+             token_id, period_code, project_id, billing_subject, settlement_mode,
+             period_start, period_end, scheduling_key_id, updated_at
+           ) VALUES ('missing-key-token', '2026-07-15/S1', 'missing-key-project',
+                     'token:missing-key-token', 'shadow', ?, ?, 'deleted-key', ?)"#,
+    )
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert work without an eligible key");
+
+    proxy
+        .run_upstream_reconciliation_once("http://127.0.0.1:9")
+        .await
+        .expect("run reconciliation without a key");
+    let retry: (String, i64, i64, i64) = sqlx::query_as(
+        r#"SELECT last_outcome, semantic_failure_streak, semantic_retry_at,
+                  completed_generation
+           FROM upstream_reconciliation_work
+           WHERE token_id = 'missing-key-token' AND period_code = '2026-07-15/S1'"#,
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read semantic retry state");
+    assert_eq!(retry.0, RECONCILIATION_OUTCOME_SEMANTIC_FAILURE);
+    assert_eq!(retry.1, 1);
+    assert_eq!(retry.2, now + 300);
+    assert_eq!(retry.3, 0, "retryable work must remain incomplete");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}

@@ -1113,11 +1113,7 @@ impl TavilyProxy {
                     None => self
                         .key_store
                         .advance_upstream_reconciliation_work_projection()
-                        .await
-                        .map(|_| ReconciliationProjectionSliceOutcome::Advanced {
-                            scanned_rows: 0,
-                            completed: false,
-                        }),
+                        .await,
                 };
                 match projection {
                     Ok(ReconciliationProjectionSliceOutcome::Advanced { scanned_rows, .. }) => {
@@ -1316,6 +1312,21 @@ impl TavilyProxy {
                 let key_count = key_ids.len();
                 let mut successful_key_count = 0_usize;
                 if key_count == 0 {
+                    semantic_failure_windows += 1;
+                    other_retry_windows += 1;
+                    self.key_store
+                        .mark_reconciliation_retry(
+                            &candidate,
+                            "waiting",
+                            self.backend_time.now_ts(),
+                            Some("no eligible upstream key"),
+                            RECONCILIATION_OUTCOME_SEMANTIC_FAILURE,
+                            Some(ReconciliationWorkFence {
+                                work_generation,
+                                claimed_job,
+                            }),
+                        )
+                        .await?;
                     continue;
                 }
                 for key_id in key_ids {
@@ -1665,11 +1676,7 @@ impl TavilyProxy {
                 job_id,
                 claim_generation,
             );
-            return Ok(ClaimedReconciliationRunOutcome::Completed {
-                settled: 0,
-                no_adjustment: 0,
-                observed: 0,
-            });
+            return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
         }
         let main_budget_exhausted = result
             .as_ref()

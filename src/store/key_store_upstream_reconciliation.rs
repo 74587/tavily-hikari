@@ -1459,11 +1459,10 @@ impl KeyStore {
     /// this bounded slice is only for historical rows that predate them.
     pub(crate) async fn advance_upstream_reconciliation_work_projection(
         &self,
-    ) -> Result<(), ProxyError> {
+    ) -> Result<ReconciliationProjectionSliceOutcome, ProxyError> {
         ReconciliationProjectionController::new(self)
             .advance_slice(None)
             .await
-            .map(|_| ())
     }
 
     pub(crate) async fn advance_upstream_reconciliation_work_projection_claimed(
@@ -2697,7 +2696,7 @@ impl KeyStore {
                         u.token_id,
                         u.period_code,
                         MIN(u.billing_subject) AS billing_subject,
-                        MAX(CASE WHEN s.status IN ('settled', 'shadow_settled') THEN 1 ELSE 0 END) AS settled,
+                        MAX(CASE WHEN s.status = 'settled' THEN 1 ELSE 0 END) AS settled,
                         MAX(CASE WHEN s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded') THEN 1 ELSE 0 END) AS terminal,
                         MAX(CASE WHEN s.status IN ('degraded', 'shadow_degraded') THEN 1 ELSE 0 END) AS degraded
                     FROM upstream_reconciliation_usage u
