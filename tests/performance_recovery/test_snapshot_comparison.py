@@ -70,6 +70,9 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('candidate reconciliation produced no terminal outcome', COMPARISON)
         self.assertIn('projection transaction p95 is not proven below 100ms', COMPARISON)
         self.assertIn('candidate billing truth differs', COMPARISON)
+        self.assertIn("prepare_reconciliation_fixture", COMPARISON)
+        self.assertIn("completed_generation < work_generation", COMPARISON)
+        self.assertIn("upstream_reconciliation_backoff_until_v1", COMPARISON)
 
 
 if __name__ == "__main__":

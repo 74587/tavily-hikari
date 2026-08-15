@@ -216,6 +216,32 @@ capture_reconciliation_state() {
   " > "$target_path"
 }
 
+prepare_reconciliation_fixture() {
+  local database_path="$1"
+  sqlite3 "$database_path" <<'SQL'
+UPDATE meta
+   SET value = '0'
+ WHERE key IN (
+   'upstream_reconciliation_pressure_streak_v1',
+   'upstream_reconciliation_backoff_level_v1',
+   'upstream_reconciliation_backoff_until_v1',
+   'upstream_reconciliation_local_pressure_streak_v1',
+   'upstream_reconciliation_local_backoff_level_v1',
+   'upstream_reconciliation_local_backoff_until_v1'
+ );
+UPDATE upstream_reconciliation_work
+   SET next_attempt_at = 0
+ WHERE completed_generation < work_generation;
+UPDATE upstream_reconciliation_settlements
+   SET next_attempt_at = 0
+ WHERE status IN ('pending', 'waiting', 'rate_limited');
+UPDATE scheduled_jobs
+   SET available_at = 0
+ WHERE job_type = 'upstream_reconciliation'
+   AND status = 'queued';
+SQL
+}
+
 trap 'cleanup_compose; cleanup_app_image' EXIT
 mkdir -p "$ARTIFACTS_DIR" "$WORK_DIR"
 
@@ -340,6 +366,11 @@ run_variant() {
   rm -rf -- "$artifact_dir"
   mkdir -p "$variant_dir" "$artifact_dir"
   expand_variant_data "$variant_dir"
+  # The production snapshot may be captured during a transient local/remote
+  # backoff. Reset only retry timing in the isolated copy so both variants
+  # exercise identical durable work; usage generations and billing truth stay
+  # untouched.
+  prepare_reconciliation_fixture "$variant_dir/tavily_proxy.db"
   write_compose "$repo" "$variant_dir" "$artifact_dir"
   # The testbox is deliberately isolated from production services. Reusing its
   # locked base-image cache keeps a transient registry failure out of the

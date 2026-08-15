@@ -1092,13 +1092,11 @@ impl TavilyProxy {
         }
         preparation_budget_exhausted |=
             std::time::Instant::now() >= preparation_deadline;
-        if candidate_batch.candidates.is_empty() && !preparation_budget_exhausted {
+        if !preparation_budget_exhausted {
             // The projection is a compatibility bootstrap for usage written
-            // before the durable work triggers existed. It must never sit in
-            // front of already-projectable work: otherwise its aggregate write
-            // can consume the entire main-settlement preparation budget. A
-            // projected page is settled by the next representative run so this
-            // run remains a bounded local maintenance slice.
+            // before the durable work triggers existed. Advance one bounded
+            // slice while this run still owns its preparation permit so an
+            // existing candidate backlog cannot starve historical projection.
             if preparation_deadline <= std::time::Instant::now() {
                 preparation_budget_exhausted = true;
             } else {
@@ -1117,7 +1115,8 @@ impl TavilyProxy {
                 };
                 match projection {
                     Ok(ReconciliationProjectionSliceOutcome::Advanced { scanned_rows, .. }) => {
-                        if scanned_rows > 0
+                        if candidate_batch.candidates.is_empty()
+                            && scanned_rows > 0
                             && std::time::Instant::now() < preparation_deadline
                         {
                             candidate_batch = self
@@ -1707,42 +1706,6 @@ impl TavilyProxy {
             .as_ref()
             .map(|value| value.budget_exhausted)
             .unwrap_or(true);
-        if result.is_ok() && std::time::Instant::now() < remote_request_deadline {
-            match self.admit_upstream_reconciliation_projection() {
-                SqliteAdmissionOutcome::Admitted(projection_admission) => {
-                    let projection = match claimed_job {
-                        Some((job_id, claim_generation)) => self
-                            .key_store
-                            .advance_upstream_reconciliation_work_projection_claimed(
-                                job_id,
-                                claim_generation,
-                            )
-                            .await,
-                        None => self
-                            .key_store
-                            .advance_upstream_reconciliation_work_projection()
-                            .await,
-                    };
-                    drop(projection_admission);
-                    match projection {
-                        Ok(ReconciliationProjectionSliceOutcome::Advanced { .. })
-                        | Ok(ReconciliationProjectionSliceOutcome::Deferred { .. }) => {}
-                        Ok(ReconciliationProjectionSliceOutcome::StaleClaim) => {
-                            return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
-                        }
-                        Err(err) if is_transient_sqlite_write_error(&err) => {}
-                        Err(err) => return Err(err),
-                    }
-                }
-                SqliteAdmissionOutcome::Deferred { reason } => {
-                    tracing::debug!(
-                        component = "reconciliation",
-                        event = "projection_deferred_after_main",
-                        defer_reason = reason,
-                    );
-                }
-            }
-        }
         let research_started_at = std::time::Instant::now();
         let (
             research_polled_count,
