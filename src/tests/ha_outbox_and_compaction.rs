@@ -67,44 +67,256 @@ fn online_ha_gc_slow_recovery_yields_before_the_one_second_fast_path() {
 }
 
 #[tokio::test]
-async fn ha_outbox_gc_watchdog_only_reports_persisted_channel_debt() {
-    let db_path = temp_db_path("ha-outbox-gc-watchdog-debt");
+async fn ha_outbox_gc_watchdog_rediscovers_dormant_channel_debt() {
+    let db_path = temp_db_path("ha-outbox-gc-watchdog-discovery");
     let db_str = db_path.to_string_lossy().to_string();
-    let proxy = TavilyProxy::with_endpoint(
-        vec!["tvly-ha-gc-watchdog-debt".to_string()],
+    let now = 1_700_060_000_i64;
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-ha-gc-watchdog-discovery".to_string()],
         DEFAULT_UPSTREAM,
         &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
     )
     .await
     .expect("proxy created");
     let pool = connect_sqlite_test_pool(&db_str).await;
 
-    assert!(
-        proxy
-            .ha_outbox_gc_watchdog_needed()
+    for expected_channel in [
+        HaSyncChannel::Control,
+        HaSyncChannel::Billing,
+        HaSyncChannel::Runtime,
+    ] {
+        let report = proxy
+            .gc_ha_outbox_online()
             .await
-            .expect("read initial GC debt state")
-    );
-    sqlx::query("UPDATE ha_outbox_gc_state SET pending_channel_mask = 0 WHERE id = 'local'")
-        .execute(&pool)
-        .await
-        .expect("clear GC debt state");
+            .expect("empty channel sweep");
+        assert_eq!(report.channels[0].channel, expected_channel);
+    }
+    let pending_channel_mask: i64 = sqlx::query_scalar(
+        "SELECT pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read completed empty sweep");
+    assert_eq!(pending_channel_mask, 0);
     assert!(
         !proxy
             .ha_outbox_gc_watchdog_needed()
             .await
-            .expect("read cleared GC debt state")
+            .expect("idle state remains quiet before the discovery cadence")
     );
-    sqlx::query("UPDATE ha_outbox_gc_state SET pending_channel_mask = 4 WHERE id = 'local'")
-        .execute(&pool)
-        .await
-        .expect("restore runtime GC debt state");
+    clock.advance_wall(Duration::from_secs(
+        (HA_OUTBOX_GC_IDLE_DISCOVERY_SECS - 1) as u64,
+    ));
     assert!(
-        proxy
+        !proxy
             .ha_outbox_gc_watchdog_needed()
             .await
-            .expect("read restored GC debt state")
+            .expect("idle discovery remains deferred before its cadence")
     );
+    clock.advance_wall(Duration::from_secs(1));
+    sqlx::query(
+        r#"INSERT INTO ha_billing_outbox
+           (kind, resource, resource_id, op, payload_json, created_at, checksum)
+           VALUES ('state', 'billing_ledger', 'dormant-billing-debt', 'upsert', '{}', ?, NULL)"#,
+    )
+    .bind(clock.now_ts() - 15 * SECS_PER_DAY)
+    .execute(&pool)
+    .await
+    .expect("seed billing debt after the completed sweep");
+    assert!(proxy.ha_outbox_gc_watchdog_needed().await.expect(
+        "state-only idle discovery must wake a controller that no longer has a pending mask",
+    ));
+    pool.close().await;
+
+    let control_probe = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("control rediscovery probe");
+    assert_eq!(control_probe.channels[0].channel, HaSyncChannel::Control);
+    let billing = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("billing rediscovery slice");
+    assert_eq!(billing.channels[0].channel, HaSyncChannel::Billing);
+    assert_eq!(billing.channels[0].deleted_rows, 1);
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_rearms_stale_billing_behind_runtime_debt() {
+    let db_path = temp_db_path("ha-outbox-gc-stale-billing-behind-runtime");
+    let db_str = db_path.to_string_lossy().to_string();
+    let now = 1_700_070_000_i64;
+    let (backend_time, _clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-ha-gc-stale-billing-behind-runtime".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let expired_at = now - 15 * SECS_PER_DAY;
+
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET next_channel = 'runtime', pending_channel_mask = 4 WHERE id = 'local'",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed runtime-only pending state");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_channel_state SET last_observed_at = ? WHERE channel = 'runtime'",
+    )
+    .bind(now)
+    .execute(&pool)
+    .await
+    .expect("mark runtime current");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_channel_state SET last_observed_at = ? WHERE channel = 'control'",
+    )
+    .bind(now)
+    .execute(&pool)
+    .await
+    .expect("keep the unrelated control channel out of this billing-specific probe");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_channel_state SET last_observed_at = ? WHERE channel = 'billing'",
+    )
+    .bind(now - HA_OUTBOX_GC_IDLE_DISCOVERY_SECS)
+    .execute(&pool)
+    .await
+    .expect("mark billing stale");
+
+    for sequence in 0..1_250_i64 {
+        sqlx::query(
+            r#"INSERT INTO ha_runtime_outbox
+               (kind, resource, resource_id, op, payload_json, created_at, checksum)
+               VALUES ('state', 'mcp_sessions', ?, 'upsert', '{}', ?, NULL)"#,
+        )
+        .bind(format!("runtime-debt-{sequence}"))
+        .bind(expired_at)
+        .execute(&pool)
+        .await
+        .expect("seed runtime debt");
+    }
+    sqlx::query(
+        r#"INSERT INTO ha_billing_outbox
+           (kind, resource, resource_id, op, payload_json, created_at, checksum)
+           VALUES ('state', 'billing_ledger', 'stale-billing-debt', 'upsert', '{}', ?, NULL)"#,
+    )
+    .bind(expired_at)
+    .execute(&pool)
+    .await
+    .expect("seed stale billing debt");
+
+    let runtime = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("runtime slice runs first");
+    assert_eq!(runtime.channels[0].channel, HaSyncChannel::Runtime);
+    assert!(
+        runtime.has_more,
+        "runtime retains debt after one online slice"
+    );
+
+    let billing = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("stale billing channel must be rearmed behind runtime debt");
+    assert_eq!(billing.channels[0].channel, HaSyncChannel::Billing);
+    assert_eq!(billing.channels[0].deleted_rows, 1);
+
+    pool.close().await;
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn online_ha_gc_probes_an_unknown_billing_channel_behind_runtime_debt() {
+    let db_path = temp_db_path("ha-outbox-gc-unknown-billing-behind-runtime");
+    let db_str = db_path.to_string_lossy().to_string();
+    let now = 1_700_075_000_i64;
+    let (backend_time, _clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-ha-gc-unknown-billing-behind-runtime".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("proxy created");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let expired_at = now - 15 * SECS_PER_DAY;
+
+    sqlx::query(
+        "UPDATE ha_outbox_gc_state SET next_channel = 'runtime', pending_channel_mask = 4 WHERE id = 'local'",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed runtime-only pending state");
+    sqlx::query(
+        "UPDATE ha_outbox_gc_channel_state SET last_observed_at = ? WHERE channel IN ('control', 'runtime')",
+    )
+    .bind(now)
+    .execute(&pool)
+    .await
+    .expect("mark control and runtime current");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT last_observed_at FROM ha_outbox_gc_channel_state WHERE channel = 'billing'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read intentionally unknown billing observation"),
+        None
+    );
+
+    for sequence in 0..1_250_i64 {
+        sqlx::query(
+            r#"INSERT INTO ha_runtime_outbox
+               (kind, resource, resource_id, op, payload_json, created_at, checksum)
+               VALUES ('state', 'mcp_sessions', ?, 'upsert', '{}', ?, NULL)"#,
+        )
+        .bind(format!("runtime-debt-{sequence}"))
+        .bind(expired_at)
+        .execute(&pool)
+        .await
+        .expect("seed runtime debt");
+    }
+    sqlx::query(
+        r#"INSERT INTO ha_billing_outbox
+           (kind, resource, resource_id, op, payload_json, created_at, checksum)
+           VALUES ('state', 'billing_ledger', 'unknown-billing-debt', 'upsert', '{}', ?, NULL)"#,
+    )
+    .bind(expired_at)
+    .execute(&pool)
+    .await
+    .expect("seed unknown billing debt");
+
+    let runtime = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("runtime slice runs first");
+    assert_eq!(runtime.channels[0].channel, HaSyncChannel::Runtime);
+    assert!(runtime.has_more);
+
+    let billing = proxy
+        .gc_ha_outbox_online()
+        .await
+        .expect("unknown billing channel must receive a bounded fairness probe");
+    assert_eq!(billing.channels[0].channel, HaSyncChannel::Billing);
+    assert_eq!(billing.channels[0].deleted_rows, 1);
 
     pool.close().await;
     drop(proxy);

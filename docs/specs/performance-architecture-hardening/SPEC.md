@@ -54,9 +54,31 @@
 - `SqliteRuntime` 唯一持有生产 pools、事务 guard、admission 和操作预算。迁移后的 HA read
   session、通用 audit snapshot 与 Dashboard integrity write 不得取得裸 pooled connection；取消或
   未完成 guard 必须丢弃物理连接。
+- `SqliteRuntime` 的 admission 属于单个 `KeyStore` 实例。`maintenance_control` 只可进行 claim、
+  finish、continuation 与 stale recovery 等短事务，连接和 SQLite writer 预算均不超过 `100ms`；
+  `maintenance_bulk` 必须在获取连接前检查至少两个实际 idle 或可立即分配的前台 pool slot、前台到达率不高于 `5 rps`、最近
+  五秒无 SQLite busy/pool timeout，并持有唯一 bulk permit。拒绝必须返回 typed deferred，不得先取得
+  pooled connection 或启动后台无限重试。
+- HTTP 发起的 manual scheduled-job enqueue 属于 `foreground_work`，其 pool acquisition 预算不超过
+  `250ms`，但不占用 bulk permit。若 `ha_outbox_gc` 在此预算内仍不能取得连接，端点返回 `503`，不伪造
+  `202`、sentinel job id 或 durable row；HA 的既有 watchdog 和 worker wake 继续恢复自动 recovery debt。
+  其他人工触发仍将实际 persistence failure 返回给调用方。
+- HA GC、request-log GC、request-stats flush、pressure rebuild、reconciliation projection 与 Dashboard
+  integrity 是 `maintenance_bulk`；GC 在每条 SQL 后重新检查 admission，压力只推迟当前 channel，不得
+  冻结其余 eligible channel。request-log GC 遇到未封存的本地日时只完成一次安全检查并以既有
+  five-minute continuation 让步，不得在同一 slice 重复扫描或删除派生 rollup。Dashboard 仅在有
+  last-good 时因 admission、busy 或 refresh 超时直接返回该快照；
+  request-stats background wake 每秒最多提交四个自适应 `25..250` logical-key transaction，并受同一
+  `50ms` 预算约束后原子回灌尾部；只有 shutdown drain 可以连续处理。冷启动只允许
+  一个 shared singleflight loader，server 在开始监听前可给同一 loader 一次一秒 head start；每个读取
+  请求最多等待一秒。超时只结束该读取请求，不得取消仍在运行的 loader，后续读取在其完成后复用同一快照。
 - 普通 Dashboard、summary、hourly window 与 rankings 读取只消费 durable request stats，不得触发
   flush 或获取写连接。pending/flushing 仅参与内部 freshness，不改变 HTTP shape。
 - `ha_outbox_gc_work` 按 control、billing、runtime 独立持久化 eligibility、claim 与 continuation。
+- `pending_channel_mask=0` 仅表示最近一轮 controller observation 没有剩余工作，不是永久库存断言。
+  scheduler 每五分钟以 `maintenance_control` 预算只读检查 channel state 的 observation age；到期时将已过期
+  observation 的 channel 加回 pending mask，再唤醒一个仍受 bulk admission 保护的 indexed channel slice。
+  watchdog 不得扫描 outbox 或计算精确库存。
 - HA GC 与 scheduled work 使用 typed outcome 在同一原子边界完成 claim 和 continuation。
 - 相同 wire payload 的 UPDATE 不产生 HA outbox 事件；有效变化恰好产生一条兼容事件。
 - reconciliation 使用持久 work projection、公平 cursor 和原子 runtime state，并区分本地压力、429、
@@ -161,6 +183,9 @@
   维持 5 rps（60% HTTP API、20% MCP、20% 管理员读取）及 20 个 SSE client。
 - 基准报告必须记录 commit SHA、构建 profile、CPU/内存环境、fixture seed、实际请求率、采样序列和
   p50/p95/max；不得把 cgroup file cache 计入进程组 RSS。
+- 10 分钟双库 snapshot 对比保留原始 Dashboard p95 和 RSS P95。Dashboard 比较使用 10ms 的绝对测量
+  下限，RSS 比较在相对 10% 外允许 40MiB 的 allocator/restart 噪声带；超过该带宽才判为候选回归。
+  这项短时 gate 不替代前述 30 分钟 release RSS P95 `<=256MiB` 基准。
 
 ## 验收清单（Acceptance checklist）
 

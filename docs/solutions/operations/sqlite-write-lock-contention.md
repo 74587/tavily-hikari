@@ -25,12 +25,12 @@ related_specs:
   controller must atomically fence a channel claim, persist that channel's defer and compute the
   earliest eligible wake across all channels; a scheduler must never infer controller state from a
   log message or a single representative job's delay.
-- If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
-  same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
-  gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
-- If a SQLite writer blocks the atomic HA job finish/continuation handoff, use a short fixed set of
-  same-generation retries after the worker returns. This closes the post-lock 120-second stale-job
-  gap without creating an unbounded retry loop; the stale reaper remains the last fallback.
+- A zero pending mask is a completed observation rather than a permanent empty-outbox assertion.
+  Use a low-frequency, bounded controller-state observation-age read to rearm a fresh indexed
+  channel probe; never turn the watchdog itself into an outbox scan or a special writer bypass.
+- If a SQLite writer blocks the atomic HA job finish/continuation handoff, do not spawn a background retry
+  loop. Keep the claim fenced and let the durable stale reaper recover it once after the threshold; this
+  avoids a hidden writer-pressure task while preserving the continuation.
 - Startup schema work is ledgered in `schema_migrations`; a warm process verifies the critical layout and skips already-applied DDL.
 - Administrator peer status reads an observation cache. A normal GET never waits for the five-second peer network probe.
 - A transport or semantic reconciliation failure does not clear an existing upstream-429 circuit. Only a real settlement or a real remote attempt follows the recovery contract.
@@ -88,6 +88,10 @@ month-tail public metrics scan.
   in fallback text mode the same fields remain grep-friendly.
 - Keep billing and MCP serialization fail-closed, but retry transient SQLite busy/locked writes
   inside the existing bounded lock wait or lease budget.
+- Treat online request-log retention as bulk work. Check admission before acquiring a connection;
+  if the earliest eligible local day is not sealed, retain raw rows and their derived rollups,
+  record one deferred outcome, and leave the durable five-minute continuation to retry later.
+  Repeating a blocked batch only amplifies the writer pressure that the guard is meant to contain.
 - Retry background job bookkeeping writes before surfacing scheduler errors.
 - Retry OAuth upsert/refresh wrapper calls so login/profile sync can survive short writer collisions.
 - Retry forward-proxy runtime snapshot persistence at the startup/maintenance boundary so a short
@@ -136,6 +140,26 @@ month-tail public metrics scan.
   priority/source, do that coalescing through a read-only fast path. Requiring `BEGIN IMMEDIATE`
   before checking the active row turns harmless duplicate manual triggers into transient HTTP 500s
   whenever a bounded GC slice is holding SQLite's writer slot.
+- Treat a failed foreground admission differently from a failed durable command. HA outbox GC is
+  self-scheduling recovery debt, but a manual endpoint must not report acceptance without a durable
+  representative: after its bounded `250ms` foreground pool budget expires, return `503`, log the
+  typed contention reason, and let the controller/watchdog re-establish automatic debt recovery.
+  Do not use a synthetic job id or apply this exception to manual operations whose request itself is
+  the only durable command.
+- Keep admission budgets separate from SQLite connection configuration. A short maintenance budget
+  is an operation deadline around pool acquisition and `BEGIN IMMEDIATE`, not a per-connection
+  `PRAGMA busy_timeout` rewrite. Rewriting that pragma turns ordinary transient bulk pressure into
+  new final lock errors for unrelated control work.
+- A deferred derived-write batch must atomically return its entire uncommitted logical delta to its
+  in-memory coalescer before releasing admission. Report this as a typed defer and retry on the
+  next admitted cadence; do not emit an exhaustion warning for every pressure cycle.
+- A request-stats coalescer may probe a released writer at its next nominal wake with one permit
+  and a short transaction budget. Its exact delta restore makes this safe; it does not relax the
+  contention cooldown for GC, rebuild, or reconciliation projection.
+- Do not let request-stats backlog size bypass that nominal wake. Under foreground load, one
+  admitted wake commits at most one minimum logical-key transaction, returns its tail atomically,
+  and waits for the next cadence. A shutdown drain may use its separate bounded deadline to finish
+  the remaining work without making the ordinary request path share a continuous writer lease.
 - Apply that same reuse rule explicitly to compare-only reconciliation scheduling. `upstream_reconciliation`
   should reuse an equivalent queued/running representative row before entering the write path, and
   it should emit stable `component=reconciliation event=enqueue_reused|enqueue_exhausted` logs plus
@@ -226,7 +250,9 @@ month-tail public metrics scan.
   Measure only cleanup batches for adaptive timing; post-slice state probes are diagnostics, not
   evidence that a write micro-batch exceeded budget. Keep an hourly baseline sweep for newly
   expired rows, and gate a low-frequency watchdog on durable pending-channel debt so it rediscovers
-  a lost continuation without creating clean-state jobs.
+  a lost continuation without creating clean-state jobs. Add stale observed and unobserved channels to the
+  current fair probe set so one busy or delayed channel cannot hide another channel's recovery debt; persist
+  a pending bit only after that probe confirms work, so empty discovery cannot create a fast wake loop.
 - Sequence high-watermark deltas are useful low-cost evidence of drainage versus ingress, but they
   are estimates, not exact row counts. If historical exact counts were not sampled, report the
   oldest retained age moving forward as proof of partial cleanup only; do not claim that total
@@ -279,6 +305,9 @@ month-tail public metrics scan.
   execution gate, and they should not pin the queue worker when the remaining DB phase can be
   resumed separately. At the same time, do not “solve” that by fan-out spawning every remote job:
   keep a bounded remote-I/O slot so the queue cannot turn a backlog into an upstream stampede.
+- Bound scheduler queue reads as maintenance control too. If a remote-heavy candidate page is blocked
+  by the remote slot, make one indexed local-only fallback selection before yielding so remote work
+  cannot create queue-head blocking for local HA recovery.
 - Keep `quota_sync` bounded. `/usage` fetches should have a hard timeout, the whole sync run should
   finish on a short wall-clock budget, and stale `quota_sync` / `quota_sync/hot` `running` rows
   should be abandoned during the next claim instead of waiting for a restart.
@@ -358,6 +387,16 @@ month-tail public metrics scan.
   one-second timestamp boundary. Prefer deterministic state shaping or a controlled time seam so the
   test still exercises the production retry logic without paying real-time cost.
 - Prefer bounded retries and narrower write windows before increasing SQLite pool size.
+- Treat the three-connection pool as a foreground reservation, not as spare writer capacity. Keep
+  two slots actually idle or immediately allocatable for request-path work; admit at most one bulk
+  maintenance operation per
+  `KeyStore` only after a pre-acquire check for pool capacity, low foreground arrival rate, and no
+  recent SQLite contention. A rejected bulk operation must persist its typed defer without first
+  entering the pool.
+- Short queue metadata transactions are control work, not bulk work: give them a fixed `100ms`
+  budget, bypass the bulk permit, and rely on their durable representative/stale-recovery contract
+  after a transient failure. Background retry loops merely transfer contention into an unbounded
+  task leak.
 
 ## Guardrails / Reuse Notes
 

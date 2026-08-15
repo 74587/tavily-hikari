@@ -10,6 +10,13 @@ enum ReconciliationOutcome {
     LocalPressure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum ClaimedReconciliationRunOutcome {
+    Completed { settled: i64 },
+    Deferred { reason: &'static str },
+}
+
 struct ReconciliationEngine;
 
 struct ReconciliationRunResult {
@@ -33,6 +40,11 @@ struct ReconciliationRunResult {
 
 impl ReconciliationEngine {
     const MAX_REMOTE_ATTEMPTS: i64 = 2;
+    // The scheduler consumes `Deferred` directly and persists a durable retry.
+    // This compatibility one-shot API has no representative job, so it may wait
+    // briefly for a transient local maintenance slice instead of reporting it as
+    // a successful zero-settlement run.
+    const ONE_SHOT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
     fn outcome(
         settled: i64,
@@ -984,8 +996,25 @@ impl TavilyProxy {
         &self,
         usage_base: &str,
     ) -> Result<i64, ProxyError> {
-        self.run_upstream_reconciliation_once_inner(usage_base, None)
-            .await
+        let deadline = std::time::Instant::now() + ReconciliationEngine::ONE_SHOT_ADMISSION_WAIT;
+        loop {
+            match self
+                .run_upstream_reconciliation_once_inner(usage_base, None)
+                .await?
+            {
+                ClaimedReconciliationRunOutcome::Completed { settled } => return Ok(settled),
+                ClaimedReconciliationRunOutcome::Deferred { reason } => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(ProxyError::Other(format!(
+                            "upstream reconciliation local preparation remained deferred for {}ms: {reason}",
+                            ReconciliationEngine::ONE_SHOT_ADMISSION_WAIT.as_millis(),
+                        )));
+                    }
+                    tokio::time::sleep(remaining.min(std::time::Duration::from_millis(25))).await;
+                }
+            }
+        }
     }
 
     #[doc(hidden)]
@@ -995,6 +1024,21 @@ impl TavilyProxy {
         job_id: i64,
         claim_generation: i64,
     ) -> Result<i64, ProxyError> {
+        self.run_upstream_reconciliation_once_claimed_outcome(usage_base, job_id, claim_generation)
+            .await
+            .map(|outcome| match outcome {
+                ClaimedReconciliationRunOutcome::Completed { settled } => settled,
+                ClaimedReconciliationRunOutcome::Deferred { .. } => 0,
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn run_upstream_reconciliation_once_claimed_outcome(
+        &self,
+        usage_base: &str,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
         self.run_upstream_reconciliation_once_inner(
             usage_base,
             Some((job_id, claim_generation)),
@@ -1006,27 +1050,43 @@ impl TavilyProxy {
         &self,
         usage_base: &str,
         claimed_job: Option<(i64, i64)>,
-    ) -> Result<i64, ProxyError> {
+    ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
         let started_at = std::time::Instant::now();
-        if let Some((job_id, claim_generation)) = claimed_job
-            && !self
-                .key_store
-                .scheduled_job_claim_is_current(job_id, claim_generation)
-                .await?
+        let local_admission = match self.admit_upstream_reconciliation_projection() {
+            SqliteAdmissionOutcome::Admitted(admission) => admission,
+            SqliteAdmissionOutcome::Deferred { reason } => {
+                tracing::debug!(
+                    component = "reconciliation",
+                    event = "local_preparation_deferred",
+                    defer_reason = reason,
+                    "reconciliation skipped local candidate preparation before SQLite connection acquisition"
+                );
+                return Ok(ClaimedReconciliationRunOutcome::Deferred { reason });
+            }
+        };
+        let run_admission_state = match self
+            .key_store
+            .upstream_reconciliation_run_admission_state(claimed_job)
+            .await
         {
+            Ok(state) => state,
+            Err(err) if is_transient_sqlite_write_error(&err) => {
+                return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                    reason: "pool_pressure",
+                });
+            }
+            Err(err) => return Err(err),
+        };
+        if claimed_job.is_some() && !run_admission_state.claim_current {
             tracing::debug!(
                 component = "reconciliation",
                 event = "stale_claim_rejected",
-                job_id,
-                claim_generation,
+                job_id = claimed_job.map(|(job_id, _)| job_id),
+                claim_generation = claimed_job.map(|(_, claim_generation)| claim_generation),
             );
-            return Ok(0);
+            return Ok(ClaimedReconciliationRunOutcome::Completed { settled: 0 });
         }
-        let settings = self.key_store.get_system_settings().await?;
-        let shadow_ready = settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
-            && settings.api_rebalance_enabled
-            && settings.rebalance_mcp_enabled;
-        if !shadow_ready {
+        if !run_admission_state.shadow_ready {
             tracing::debug!(
                 component = "reconciliation",
                 event = "run_started",
@@ -1045,13 +1105,11 @@ impl TavilyProxy {
                 candidate_count = 0_i64,
                 settled_count = 0_i64,
             );
-            return Ok(0);
+            return Ok(ClaimedReconciliationRunOutcome::Completed { settled: 0 });
         }
         let now = self.backend_time.now_ts();
-        let (_, global_backoff_level, global_backoff_until) = self
-            .key_store
-            .upstream_reconciliation_global_backoff_state()
-            .await?;
+        let global_backoff_level = run_admission_state.global_backoff_level;
+        let global_backoff_until = run_admission_state.global_backoff_until;
         if global_backoff_until > now {
             self.key_store
                 .mark_upstream_reconciliation_run_completed_at(now)
@@ -1063,12 +1121,10 @@ impl TavilyProxy {
                 backoff_level = global_backoff_level,
                 backoff_until = global_backoff_until,
             );
-            return Ok(0);
+            return Ok(ClaimedReconciliationRunOutcome::Completed { settled: 0 });
         }
-        let (_, local_backoff_level, local_backoff_until) = self
-            .key_store
-            .upstream_reconciliation_local_backoff_state()
-            .await?;
+        let local_backoff_level = run_admission_state.local_backoff_level;
+        let local_backoff_until = run_admission_state.local_backoff_until;
         if local_backoff_until > now {
             self.key_store
                 .mark_upstream_reconciliation_run_completed_at(now)
@@ -1080,7 +1136,7 @@ impl TavilyProxy {
                 backoff_level = local_backoff_level,
                 backoff_until = local_backoff_until,
             );
-            return Ok(0);
+            return Ok(ClaimedReconciliationRunOutcome::Completed { settled: 0 });
         }
         let preparation_deadline = started_at
             + std::time::Duration::from_secs(Self::RECONCILIATION_MAIN_PREP_BUDGET_SECS);
@@ -1250,6 +1306,10 @@ impl TavilyProxy {
             research_retry_count = 0_i64,
             research_skipped_cooldown_count = 0_i64,
         );
+        // Remote I/O and durable settlement must never retain the local bulk
+        // permit. The permit protects only candidate selection, hydration and
+        // the optional legacy projection above.
+        drop(local_admission);
         let result = async {
             let mut settled = 0_i64;
             let mut completed = 0_i64;
@@ -1691,7 +1751,7 @@ impl TavilyProxy {
                 job_id,
                 claim_generation,
             );
-            return Ok(0);
+            return Ok(ClaimedReconciliationRunOutcome::Completed { settled: 0 });
         }
         let main_budget_exhausted = result
             .as_ref()
@@ -1730,7 +1790,7 @@ impl TavilyProxy {
                         job_id,
                         claim_generation,
                     );
-                    return Ok(0);
+                    return Ok(ClaimedReconciliationRunOutcome::Completed { settled: 0 });
                 }
                 Err(err) => return Err(err),
             }
@@ -2033,7 +2093,7 @@ impl TavilyProxy {
                         previous_backoff_level,
                     );
                 }
-                Ok(settled)
+                Ok(ClaimedReconciliationRunOutcome::Completed { settled })
             }
             Err(err) => {
                 tracing::warn!(
@@ -2505,10 +2565,6 @@ impl TavilyProxy {
             .await
     }
 
-    pub async fn ensure_request_log_body_gc_cursor_index(&self) -> Result<(), ProxyError> {
-        self.key_store.ensure_request_log_body_gc_cursor_index().await
-    }
-
     pub async fn gc_mcp_sessions(&self) -> Result<i64, ProxyError> {
         let now = self.backend_time.now_ts();
         self.key_store
@@ -2610,6 +2666,18 @@ impl TavilyProxy {
             .await
     }
 
+    pub async fn scheduled_job_enqueue_foreground(
+        &self,
+        job_type: &str,
+        trigger_source: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        self.key_store
+            .scheduled_job_enqueue_foreground(job_type, trigger_source, key_id, attempt)
+            .await
+    }
+
     pub async fn scheduled_job_enqueue_at(
         &self,
         job_type: &str,
@@ -2638,6 +2706,32 @@ impl TavilyProxy {
             .scheduled_job_finish_and_enqueue_auto_at(
                 job_id,
                 claim_generation,
+                job_type,
+                key_id,
+                attempt,
+                message,
+                available_at,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scheduled_job_finish_and_enqueue_auto_at_with_status(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+        status: &str,
+        job_type: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        message: Option<&str>,
+        available_at: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        self.key_store
+            .scheduled_job_finish_and_enqueue_auto_at_with_status(
+                job_id,
+                claim_generation,
+                status,
                 job_type,
                 key_id,
                 attempt,
@@ -2713,6 +2807,15 @@ impl TavilyProxy {
         limit: usize,
     ) -> Result<Vec<QueuedScheduledJob>, ProxyError> {
         self.key_store.fetch_queued_scheduled_jobs(limit).await
+    }
+
+    pub async fn fetch_next_queued_scheduled_job_excluding_types(
+        &self,
+        excluded_job_types: &[&str],
+    ) -> Result<Option<QueuedScheduledJob>, ProxyError> {
+        self.key_store
+            .fetch_next_queued_scheduled_job_excluding_types(excluded_job_types)
+            .await
     }
 
     pub async fn next_queued_scheduled_job_available_at(&self) -> Result<Option<i64>, ProxyError> {

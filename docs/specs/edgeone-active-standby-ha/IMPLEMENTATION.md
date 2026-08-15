@@ -2,6 +2,11 @@
 
 ## Backend
 
+- Online HA GC is admitted as instance-local bulk work. It never takes a process-global
+  maintenance gate or a special writer connection; admission pressure and SQLite busy defer only
+  the selected channel for 30 seconds, while other eligible channels retain their independent
+  controller wake time.
+
 - Ordinary administrator HA status reads `HaPeerObservationStore`; the background owner probes every 30 seconds with a five-second timeout, retains last-good observations, and marks them stale after 90 seconds without success. Dangerous control-plane operations continue to probe live.
 - Online outbox GC persists independent control, billing, and runtime eligibility plus claim generation. Round-robin selection skips deferred channels, and the scheduler uses the earliest typed continuation instead of parsing GC log text.
 - `HaGcController` now makes the per-channel durable row the single source of scheduling truth. A
@@ -272,7 +277,9 @@
   SQLite micro-batch stays within a 50ms target. Slow work, busy writers, and lease deferrals retain the 30-second
   delay; a valid-only legacy cursor scan remains on a five-minute cadence so compatibility cleanup
   cannot create a permanent online write loop. The hourly baseline discovers newly expired rows;
-  the five-minute watchdog only resumes durable channel debt. Per-channel state records
+  the five-minute watchdog resumes pending debt and adds stale or unobserved channels to the current fair
+  probe set even when another channel remains active, without an outbox scan. Only a probe that confirms
+  remaining work persists a debt bit, so an empty unknown channel cannot create a fast wake loop. Per-channel state records
   high-watermark deltas, an ingress-minus-delete estimate, and cumulative deletions without a
   hot-path `COUNT(*)`.
 - The CI shard manifest assigns `online_ha_gc_*` watchdog-debt regression coverage to `lib-misc`.

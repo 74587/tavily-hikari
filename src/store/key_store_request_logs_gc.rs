@@ -11,6 +11,13 @@ struct RequestLogBodyGcCandidate {
     response_body: Option<Vec<u8>>,
 }
 
+struct RequestLogBodyGcCandidatePage {
+    candidates: Vec<RequestLogBodyGcCandidate>,
+    scanned: i64,
+    last_scanned: Option<(i64, i64)>,
+    has_more: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct RequestLogBodyGcBatch {
     cleaned: i64,
@@ -75,6 +82,19 @@ fn request_value_bucket_for_stored_request_log(
 }
 
 impl KeyStore {
+    pub(crate) fn try_admit_request_logs_gc(
+        &self,
+    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
+        self.sqlite_runtime
+            .try_admit_maintenance_bulk(SqliteOperation::RequestLogsGc)
+    }
+
+    pub(crate) fn request_logs_gc_continue_defer_reason(
+        &self,
+    ) -> Option<SqliteAdmissionDeferReason> {
+        self.sqlite_runtime.maintenance_bulk_continue_reason()
+    }
+
     pub(crate) async fn ensure_request_logs_gc_support_indexes(&self) -> Result<(), ProxyError> {
         for (table, sql) in [
             (
@@ -107,77 +127,41 @@ impl KeyStore {
         Ok(())
     }
 
-    pub(crate) async fn ensure_request_log_body_gc_cursor_index(&self) -> Result<(), ProxyError> {
-        if !self.table_exists("request_logs").await? {
-            return Ok(());
-        }
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS observability.idx_request_logs_body_gc_cursor
-            ON request_logs(created_at ASC, id ASC)
-            WHERE request_body IS NOT NULL OR response_body IS NOT NULL
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query("ANALYZE observability.idx_request_logs_body_gc_cursor")
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     async fn delete_old_request_logs_batch(
         &self,
         threshold: i64,
         batch_size: i64,
     ) -> Result<i64, ProxyError> {
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            let result = async {
-                let mut tx = self.pool.begin().await?;
-                sqlx::query("PRAGMA secure_delete = OFF")
-                    .execute(&mut *tx)
-                    .await?;
-                let result = sqlx::query(
-                    r#"
-                    DELETE FROM observability.request_logs
-                    WHERE id IN (
-                        SELECT id
-                        FROM observability.request_logs
-                        WHERE created_at < ?
-                        ORDER BY created_at ASC, id ASC
-                        LIMIT ?
-                    )
-                    "#,
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::RequestLogsGc)
+            .await?;
+        let result = async {
+            sqlx::query(
+                r#"
+                DELETE FROM observability.request_logs
+                WHERE id IN (
+                    SELECT id
+                    FROM observability.request_logs
+                    WHERE created_at < ?
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
                 )
-                .bind(threshold)
-                .bind(batch_size)
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-                Ok::<_, sqlx::Error>(result)
+                "#,
+            )
+            .bind(threshold)
+            .bind(batch_size)
+            .execute(&mut *tx)
+            .await
+        }
+        .await
+        .map_err(ProxyError::Database);
+        match result {
+            Ok(result) => {
+                tx.finish(Ok(())).await?;
+                Ok(result.rows_affected() as i64)
             }
-            .await;
-            match result {
-                Ok(result) => return Ok(result.rows_affected() as i64),
-                Err(err) => {
-                    let err = ProxyError::Database(err);
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "request logs gc batch delete",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
+            Err(err) => tx.finish(Err(err)).await.map(|_| unreachable!()),
         }
     }
 
@@ -239,14 +223,22 @@ impl KeyStore {
             let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
             let mut retry_attempt = 0usize;
             loop {
+                let mut conn = self
+                    .sqlite_runtime
+                    .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+                    .await?;
                 match sqlx::query(sql)
                     .bind(threshold)
                     .bind(batch_size)
-                    .execute(&self.pool)
+                    .execute(&mut *conn)
                     .await
                 {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        conn.close().await?;
+                        break;
+                    }
                     Err(err) => {
+                        drop(conn);
                         let err = ProxyError::Database(err);
                         if sleep_before_sqlite_transient_write_retry(
                             &self.backend_time,
@@ -280,6 +272,10 @@ impl KeyStore {
         let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
         let mut retry_attempt = 0usize;
         loop {
+            let mut conn = self
+                .sqlite_runtime
+                .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+                .await?;
             match sqlx::query(
                 r#"
                 DELETE FROM observability.request_log_catalog_rollups
@@ -294,11 +290,15 @@ impl KeyStore {
             )
             .bind(threshold)
             .bind(batch_size)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             {
-                Ok(result) => return Ok(result.rows_affected() as i64),
+                Ok(result) => {
+                    conn.close().await?;
+                    return Ok(result.rows_affected() as i64);
+                }
                 Err(err) => {
+                    drop(conn);
                     let err = ProxyError::Database(err);
                     if sleep_before_sqlite_transient_write_retry(
                         &self.backend_time,
@@ -319,25 +319,42 @@ impl KeyStore {
     }
 
     async fn has_old_request_log_rows(&self, threshold: i64) -> Result<bool, ProxyError> {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+            .await?;
         let exists = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM observability.request_logs WHERE created_at < ? LIMIT 1",
         )
         .bind(threshold)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
+        conn.close().await?;
         Ok(exists.is_some())
     }
 
     async fn has_old_request_log_rollup_rows(&self, threshold: i64) -> Result<bool, ProxyError> {
-        if !self.table_exists("request_log_catalog_rollups").await? {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+            .await?;
+        let rollup_table_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM observability.sqlite_master WHERE type = 'table' AND name = ?)",
+        )
+        .bind("request_log_catalog_rollups")
+        .fetch_one(&mut *conn)
+        .await?;
+        if rollup_table_exists == 0 {
+            conn.close().await?;
             return Ok(false);
         }
         let exists = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM observability.request_log_catalog_rollups WHERE bucket_start < ? LIMIT 1",
         )
         .bind(threshold)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
+        conn.close().await?;
         Ok(exists.is_some())
     }
 
@@ -360,18 +377,20 @@ impl KeyStore {
 
     async fn fetch_request_log_body_gc_candidates(
         &self,
-        batch_size: i64,
+        scan_limit: i64,
         after: Option<(i64, i64)>,
         row_retention_threshold: i64,
-    ) -> Result<Vec<RequestLogBodyGcCandidate>, ProxyError> {
-        let rows = if let Some((created_at, id)) = after {
-            sqlx::query(
+    ) -> Result<RequestLogBodyGcCandidatePage, ProxyError> {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+            .await?;
+        let scan_window: Vec<(i64, i64)> = if let Some((created_at, id)) = after {
+            sqlx::query_as(
                 r#"
-                SELECT id, created_at, request_user_id, result_status, request_kind_key,
-                       request_kind_label, request_kind_detail, path, request_body, response_body
-                FROM observability.request_logs
-                WHERE (request_body IS NOT NULL OR response_body IS NOT NULL)
-                  AND created_at >= ?
+                SELECT id, created_at
+                FROM observability.request_logs INDEXED BY idx_request_logs_time
+                WHERE created_at >= ?
                   AND (created_at > ? OR (created_at = ? AND id > ?))
                 ORDER BY created_at ASC, id ASC
                 LIMIT ?
@@ -381,30 +400,86 @@ impl KeyStore {
             .bind(created_at)
             .bind(created_at)
             .bind(id)
-            .bind(batch_size)
-            .fetch_all(&self.pool)
+            .bind(scan_limit)
+            .fetch_all(&mut *conn)
+            .await?
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT id, created_at
+                FROM observability.request_logs INDEXED BY idx_request_logs_time
+                WHERE created_at >= ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                "#,
+            )
+            .bind(row_retention_threshold)
+            .bind(scan_limit)
+            .fetch_all(&mut *conn)
+            .await?
+        };
+        let Some(&(last_id, last_created_at)) = scan_window.last() else {
+            conn.close().await?;
+            return Ok(RequestLogBodyGcCandidatePage {
+                candidates: Vec::new(),
+                scanned: 0,
+                last_scanned: None,
+                has_more: false,
+            });
+        };
+        let rows = if let Some((created_at, id)) = after {
+            sqlx::query(
+                r#"
+                SELECT id, created_at, request_user_id, result_status, request_kind_key,
+                       request_kind_label, request_kind_detail, path, request_body, response_body
+                FROM observability.request_logs INDEXED BY idx_request_logs_time
+                WHERE created_at >= ?
+                  AND (created_at > ? OR (created_at = ? AND id > ?))
+                  AND (created_at < ? OR (created_at = ? AND id <= ?))
+                  AND (request_body IS NOT NULL OR response_body IS NOT NULL)
+                ORDER BY created_at ASC, id ASC
+                "#,
+            )
+            .bind(row_retention_threshold)
+            .bind(created_at)
+            .bind(created_at)
+            .bind(id)
+            .bind(last_created_at)
+            .bind(last_created_at)
+            .bind(last_id)
+            .fetch_all(&mut *conn)
             .await?
         } else {
             sqlx::query(
                 r#"
                 SELECT id, created_at, request_user_id, result_status, request_kind_key,
                        request_kind_label, request_kind_detail, path, request_body, response_body
-                FROM observability.request_logs
-                WHERE (request_body IS NOT NULL OR response_body IS NOT NULL)
-                  AND created_at >= ?
+                FROM observability.request_logs INDEXED BY idx_request_logs_time
+                WHERE created_at >= ?
+                  AND (created_at < ? OR (created_at = ? AND id <= ?))
+                  AND (request_body IS NOT NULL OR response_body IS NOT NULL)
                 ORDER BY created_at ASC, id ASC
-                LIMIT ?
                 "#,
             )
             .bind(row_retention_threshold)
-            .bind(batch_size)
-            .fetch_all(&self.pool)
+            .bind(last_created_at)
+            .bind(last_created_at)
+            .bind(last_id)
+            .fetch_all(&mut *conn)
             .await?
         };
-        rows.into_iter()
+        conn.close().await?;
+        let candidates = rows
+            .into_iter()
             .map(Self::map_request_log_body_gc_candidate)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(ProxyError::from)
+            .map_err(ProxyError::from)?;
+        Ok(RequestLogBodyGcCandidatePage {
+            candidates,
+            scanned: scan_window.len() as i64,
+            last_scanned: Some((last_created_at, last_id)),
+            has_more: scan_window.len() as i64 >= scan_limit,
+        })
     }
 
     fn request_log_body_is_expired(
@@ -432,10 +507,18 @@ impl KeyStore {
     async fn get_request_log_body_gc_cursor(
         &self,
     ) -> Result<Option<RequestLogBodyGcCursor>, ProxyError> {
-        let Some(value) = self
-            .get_meta_string(META_KEY_REQUEST_LOG_BODY_GC_CURSOR_V1)
-            .await?
-        else {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+            .await?;
+        let value = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+        )
+        .bind(META_KEY_REQUEST_LOG_BODY_GC_CURSOR_V1)
+        .fetch_optional(&mut *conn)
+        .await?;
+        conn.close().await?;
+        let Some(value) = value else {
             return Ok(None);
         };
         let mut parts = value.split(':');
@@ -463,24 +546,37 @@ impl KeyStore {
         &self,
         cursor: Option<RequestLogBodyGcCursor>,
     ) -> Result<(), ProxyError> {
-        if let Some(cursor) = cursor {
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::RequestLogsGc)
+            .await?;
+        let result = if let Some(cursor) = cursor {
             let value = if let Some(restart_at) = cursor.restart_at {
                 format!("{}:{}:{}", cursor.created_at, cursor.id, restart_at)
             } else {
                 format!("{}:{}", cursor.created_at, cursor.id)
             };
-            self.set_meta_string(
-                META_KEY_REQUEST_LOG_BODY_GC_CURSOR_V1,
-                &value,
+            sqlx::query(
+                r#"
+                INSERT INTO meta (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                "#,
             )
-            .await?;
+            .bind(META_KEY_REQUEST_LOG_BODY_GC_CURSOR_V1)
+            .bind(value)
+            .execute(&mut *tx)
+            .await
         } else {
             sqlx::query("DELETE FROM meta WHERE key = ?")
                 .bind(META_KEY_REQUEST_LOG_BODY_GC_CURSOR_V1)
-                .execute(&self.pool)
-                .await?;
+                .execute(&mut *tx)
+                .await
+        };
+        match result {
+            Ok(_) => tx.finish(Ok(())).await,
+            Err(err) => tx.finish(Err(ProxyError::Database(err))).await,
         }
-        Ok(())
     }
 
     pub(crate) async fn clear_request_log_body_gc_cursor(&self) -> Result<(), ProxyError> {
@@ -519,18 +615,21 @@ impl KeyStore {
             && self.backend_time.instant_now() < deadline
         {
             let query_started = self.backend_time.instant_now();
-            let candidates = self
-                .fetch_request_log_body_gc_candidates(batch_size, after, row_retention_threshold)
+            let page = self
+                .fetch_request_log_body_gc_candidates(
+                    scan_limit.saturating_sub(scanned),
+                    after,
+                    row_retention_threshold,
+                )
                 .await?;
             diagnostics.body_candidate_query_elapsed_ms += query_started.elapsed().as_millis();
-            if candidates.is_empty() {
+            if page.scanned == 0 {
                 break;
             }
-            let fetched = candidates.len() as i64;
-            for candidate in candidates {
+            scanned += page.scanned;
+            diagnostics.scanned_body_candidates += page.scanned;
+            for candidate in page.candidates {
                 after = Some((candidate.created_at, candidate.id));
-                scanned += 1;
-                diagnostics.scanned_body_candidates += 1;
                 let request_body_slice = candidate.request_body.as_deref().unwrap_or(&[]);
                 let request_kind = canonicalize_request_log_request_kind(
                     &candidate.path,
@@ -579,7 +678,7 @@ impl KeyStore {
                             .map(|current| current.min(candidate_restart_at))
                             .unwrap_or(candidate_restart_at),
                     );
-                    if scanned >= scan_limit || self.backend_time.instant_now() >= deadline {
+                    if self.backend_time.instant_now() >= deadline {
                         has_more = true;
                         break 'scan;
                     }
@@ -602,7 +701,11 @@ impl KeyStore {
                 let mut retry_attempt = 0usize;
                 let write_started = self.backend_time.instant_now();
                 let result = loop {
-                    match sqlx::query(
+                    let mut conn = self
+                        .sqlite_runtime
+                        .acquire_operation_connection(SqliteOperation::RequestLogsGc)
+                        .await?;
+                    let result = sqlx::query(
                         r#"
                         UPDATE observability.request_logs
                         SET request_body = NULL,
@@ -635,11 +738,15 @@ impl KeyStore {
                     .bind(reason)
                     .bind(now)
                     .bind(candidate.id)
-                    .execute(&self.pool)
-                    .await
-                    {
-                        Ok(result) => break result,
+                    .execute(&mut *conn)
+                    .await;
+                    match result {
+                        Ok(result) => {
+                            conn.close().await?;
+                            break result;
+                        }
                         Err(err) => {
+                            drop(conn);
                             let err = ProxyError::Database(err);
                             if sleep_before_sqlite_transient_write_retry(
                                 &self.backend_time,
@@ -667,7 +774,10 @@ impl KeyStore {
                     break 'scan;
                 }
             }
-            if fetched < batch_size {
+            after = page.last_scanned;
+            if page.has_more {
+                has_more = true;
+            } else {
                 break;
             }
         }
@@ -727,10 +837,10 @@ impl KeyStore {
         let mut deleted_request_logs = 0_i64;
         let mut deleted_rollups = 0_i64;
         let mut body_batch_has_more = false;
+        let mut blocked_by_integrity = false;
         let mut batches = 0_i64;
         let mut retention_contexts = std::collections::HashMap::new();
         let mut body_gc_diagnostics = RequestLogBodyGcDiagnostics::default();
-
         while batches < max_batches && self.backend_time.instant_now() < deadline {
             let body_batch = self
                 .clear_request_log_body_batch(
@@ -751,23 +861,34 @@ impl KeyStore {
                 self.delete_old_request_logs_batch(raw_delete_cutoff, batch_size)
                     .await?
             } else {
-                tracing::warn!(
+                tracing::debug!(
                     component = "dashboard_rollup_integrity",
                     event = "request_logs_gc_blocked_unsealed_day",
                     threshold,
                     "request log deletion and reference unlinking delayed until its local-day recovery seal exists"
                 );
+                blocked_by_integrity = true;
                 0
             };
-            let rollup_deleted = self
-                .delete_old_request_log_rollups_batch(threshold, batch_size)
-                .await?;
+            let rollup_deleted = if blocked_by_integrity {
+                // Raw request rows and their derived rollups must advance as one
+                // retention unit. A missing day seal is not productive work, so
+                // do not turn one delayed continuation into five write batches.
+                0
+            } else {
+                self.delete_old_request_log_rollups_batch(threshold, batch_size)
+                    .await?
+            };
             body_batch_has_more = body_batch.has_more;
             cleaned_request_log_bodies += body_batch.cleaned;
             body_gc_diagnostics.merge(body_batch.diagnostics);
             deleted_request_logs += request_deleted;
             deleted_rollups += rollup_deleted;
             batches += 1;
+
+            if blocked_by_integrity {
+                break;
+            }
 
             if !body_batch.has_more
                 && body_batch.cleaned == 0
@@ -784,7 +905,8 @@ impl KeyStore {
             }
         }
 
-        let has_more = self.has_old_request_log_rows(threshold).await?
+        let has_more = blocked_by_integrity
+            || self.has_old_request_log_rows(threshold).await?
             || self.has_old_request_log_rollup_rows(threshold).await?
             || body_batch_has_more;
         self.invalidate_request_logs_catalog_cache().await;
@@ -809,6 +931,8 @@ impl KeyStore {
             body_write_elapsed_ms: body_gc_diagnostics.body_write_elapsed_ms,
             progress_status: if !has_more {
                 "completed"
+            } else if blocked_by_integrity {
+                "incomplete_blocked_integrity"
             } else if cleaned_request_log_bodies + deleted_request_logs + deleted_rollups > 0 {
                 "incomplete_progress"
             } else {

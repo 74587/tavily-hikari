@@ -4,6 +4,12 @@ pub(crate) enum RequestStatsReadFreshness {
     DurableFallback,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestStatsBackgroundFlushOutcome {
+    Flushed,
+    Deferred(SqliteAdmissionDeferReason),
+}
+
 #[derive(Debug)]
 struct DrainedRequestStatsFlushBatch {
     pending_dashboard_rollups: HashMap<(i64, i64), DashboardRequestRollupCounts>,
@@ -15,10 +21,199 @@ struct DrainedRequestStatsFlushBatch {
     drained_newest_pending_created_at: Option<i64>,
 }
 
+const REQUEST_STATS_FLUSH_MAX_LOGICAL_KEYS: usize = 250;
+const REQUEST_STATS_FLUSH_MIN_LOGICAL_KEYS: usize = 25;
+const REQUEST_STATS_FLUSH_SLOW_TRANSACTION: Duration = Duration::from_millis(50);
+const REQUEST_STATS_BACKGROUND_MAX_COMMITTED_CHUNKS: usize = 4;
+
+impl DrainedRequestStatsFlushBatch {
+    fn is_empty(&self) -> bool {
+        self.pending_dashboard_rollups.is_empty()
+            && self.pending_api_key_usage.is_empty()
+            && self.pending_auth_token_activity.is_empty()
+            && self.pending_account_request_rollups.is_empty()
+            && self.pending_request_log_catalog.is_empty()
+    }
+
+    fn take_chunk(&mut self, max_keys: usize) -> Self {
+        let mut remaining = max_keys;
+        let mut chunk = Self {
+            pending_dashboard_rollups: HashMap::new(),
+            pending_api_key_usage: HashMap::new(),
+            pending_auth_token_activity: HashMap::new(),
+            pending_account_request_rollups: HashMap::new(),
+            pending_request_log_catalog: HashMap::new(),
+            drained_oldest_pending_created_at: self.drained_oldest_pending_created_at,
+            drained_newest_pending_created_at: self.drained_newest_pending_created_at,
+        };
+        take_request_stats_chunk_entries(
+            &mut self.pending_dashboard_rollups,
+            &mut chunk.pending_dashboard_rollups,
+            &mut remaining,
+        );
+        take_request_stats_chunk_entries(
+            &mut self.pending_api_key_usage,
+            &mut chunk.pending_api_key_usage,
+            &mut remaining,
+        );
+        take_request_stats_chunk_entries(
+            &mut self.pending_auth_token_activity,
+            &mut chunk.pending_auth_token_activity,
+            &mut remaining,
+        );
+        take_request_stats_chunk_entries(
+            &mut self.pending_account_request_rollups,
+            &mut chunk.pending_account_request_rollups,
+            &mut remaining,
+        );
+        take_request_stats_chunk_entries(
+            &mut self.pending_request_log_catalog,
+            &mut chunk.pending_request_log_catalog,
+            &mut remaining,
+        );
+        chunk
+    }
+
+    fn absorb(&mut self, other: Self) {
+        for (key, counts) in other.pending_dashboard_rollups {
+            self.pending_dashboard_rollups.entry(key).or_default().add(counts);
+        }
+        for (key, delta) in other.pending_api_key_usage {
+            self.pending_api_key_usage.entry(key).or_default().add(delta);
+        }
+        for (token_id, delta) in other.pending_auth_token_activity {
+            self.pending_auth_token_activity
+                .entry(token_id)
+                .or_default()
+                .add(delta);
+        }
+        for (key, delta) in other.pending_account_request_rollups {
+            self.pending_account_request_rollups
+                .entry(key)
+                .or_default()
+                .add(delta);
+        }
+        for (key, delta) in other.pending_request_log_catalog {
+            *self.pending_request_log_catalog.entry(key).or_default() += delta;
+        }
+    }
+
+    fn requeue_into(self, state: &mut RequestStatsCoalescerState) {
+        for (key, counts) in self.pending_dashboard_rollups {
+            state.pending_dashboard_rollups.entry(key).or_default().add(counts);
+        }
+        for (key, delta) in self.pending_api_key_usage {
+            state.pending_api_key_usage.entry(key).or_default().add(delta);
+        }
+        for (token_id, delta) in self.pending_auth_token_activity {
+            state
+                .pending_auth_token_activity
+                .entry(token_id)
+                .or_default()
+                .add(delta);
+        }
+        for (key, delta) in self.pending_account_request_rollups {
+            state
+                .pending_account_request_rollups
+                .entry(key)
+                .or_default()
+                .add(delta);
+        }
+        for (key, delta) in self.pending_request_log_catalog {
+            *state.pending_request_log_catalog.entry(key).or_default() += delta;
+        }
+        if let Some(created_at) = self.drained_oldest_pending_created_at {
+            state.oldest_pending_created_at = Some(
+                state
+                    .oldest_pending_created_at
+                    .map(|current| current.min(created_at))
+                    .unwrap_or(created_at),
+            );
+        }
+        if let Some(created_at) = self.drained_newest_pending_created_at {
+            state.newest_pending_created_at = Some(
+                state
+                    .newest_pending_created_at
+                    .map(|current| current.max(created_at))
+                    .unwrap_or(created_at),
+            );
+        }
+    }
+}
+
+fn take_request_stats_chunk_entries<K, V>(
+    source: &mut HashMap<K, V>,
+    target: &mut HashMap<K, V>,
+    remaining: &mut usize,
+) where
+    K: std::cmp::Eq + std::hash::Hash,
+{
+    if *remaining == 0 {
+        return;
+    }
+    for (key, value) in std::mem::take(source) {
+        if *remaining == 0 {
+            source.insert(key, value);
+        } else {
+            target.insert(key, value);
+            *remaining -= 1;
+        }
+    }
+}
+
 impl KeyStore {
+    #[cfg(debug_assertions)]
     pub(crate) async fn flush_request_stats_writes(&self) -> Result<(), ProxyError> {
-        self.flush_request_stats_writes_with_wait_policy(&self.pool, Duration::from_secs(10), None)
-            .await
+        self.flush_request_stats_writes_with_wait_policy(
+            Duration::from_secs(10),
+            None,
+            true,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn flush_request_stats_writes_in_background(
+        &self,
+    ) -> Result<RequestStatsBackgroundFlushOutcome, ProxyError> {
+        let permit = match self
+            .sqlite_runtime
+            .try_admit_maintenance_bulk(SqliteOperation::RequestStatsFlush)
+        {
+            Ok(permit) => permit,
+            Err(reason) => return Ok(RequestStatsBackgroundFlushOutcome::Deferred(reason)),
+        };
+        let result = self
+            .flush_request_stats_writes_with_wait_policy(
+                // A background slice must yield before a foreground control
+                // transaction can spend its own 100ms admission budget. Four
+                // adaptive chunks can cover at most 250 logical keys while
+                // the wall-clock budget remains the primary bound.
+                Duration::from_millis(50),
+                Some(self.backend_time.instant_now() + Duration::from_millis(50)),
+                false,
+                Some(REQUEST_STATS_BACKGROUND_MAX_COMMITTED_CHUNKS),
+            )
+            .await;
+        drop(permit);
+        match result {
+            Ok(()) => Ok(RequestStatsBackgroundFlushOutcome::Flushed),
+            Err(err) if is_transient_sqlite_write_error(&err) => Ok(
+                RequestStatsBackgroundFlushOutcome::Deferred(
+                    SqliteAdmissionDeferReason::RecentContention,
+                ),
+            ),
+            Err(err) if is_request_stats_flush_wait_budget_exhausted(&err) => {
+                self.sqlite_runtime.record_deferred(
+                    SqliteOperation::RequestStatsFlush,
+                    SqliteAdmissionDeferReason::RecentContention,
+                );
+                Ok(RequestStatsBackgroundFlushOutcome::Deferred(
+                    SqliteAdmissionDeferReason::RecentContention,
+                ))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub(crate) fn request_stats_read_freshness(&self) -> RequestStatsReadFreshness {
@@ -32,45 +227,25 @@ impl KeyStore {
         }
     }
 
-    pub(crate) async fn best_effort_flush_request_stats_writes_for_maintenance(
+    pub(crate) fn request_stats_durable_freshness_for_maintenance(
         &self,
-        operation: &'static str,
-    ) -> Result<RequestStatsReadFreshness, ProxyError> {
-        const RETRY_BUDGET: Duration = Duration::from_millis(100);
-        let inflight_wait_deadline = self.backend_time.instant_now() + RETRY_BUDGET;
-        match self
-            .flush_request_stats_writes_with_wait_policy(
-                &self.pool,
-                RETRY_BUDGET,
-                Some(inflight_wait_deadline),
-            )
-            .await
-        {
-            Ok(()) => Ok(RequestStatsReadFreshness::Fresh),
-            Err(err)
-                if is_transient_sqlite_write_error(&err)
-                    || is_request_stats_flush_wait_budget_exhausted(&err) =>
-            {
-                tracing::debug!(
-                    component = "dashboard_rollup_integrity",
-                    operation,
-                    retry_budget_ms = RETRY_BUDGET.as_millis() as u64,
-                    error = %err,
-                    "deferring integrity work until request statistics are durable"
-                );
-                Ok(RequestStatsReadFreshness::DurableFallback)
-            }
-            Err(err) => Err(err),
-        }
+    ) -> RequestStatsReadFreshness {
+        self.request_stats_read_freshness()
     }
 
     async fn flush_request_stats_writes_with_wait_policy(
         &self,
-        pool: &SqlitePool,
         retry_budget: Duration,
         inflight_wait_deadline: Option<Instant>,
+        log_transient_exhaustion: bool,
+        max_committed_chunks: Option<usize>,
     ) -> Result<(), ProxyError> {
         loop {
+            if inflight_wait_deadline.is_some_and(|deadline| {
+                self.backend_time.instant_now() >= deadline
+            }) {
+                return Err(request_stats_flush_wait_budget_exhausted_error());
+            }
             let pending = {
                 let mut state = self.request_stats_coalescer.state.lock().await;
                 if state.flushing {
@@ -122,56 +297,24 @@ impl KeyStore {
                 continue;
             };
 
-            if let Some(deadline) = inflight_wait_deadline {
-                let remaining = deadline.saturating_duration_since(self.backend_time.instant_now());
-                let flush_task = Self::spawn_request_stats_flush_drained_batch_task(
-                    self.request_stats_coalescer.clone(),
-                    self.backend_time.clone(),
-                    pool.clone(),
-                    retry_budget,
-                    drained,
-                );
-                if remaining.is_zero() {
-                    std::mem::drop(flush_task);
-                    return Err(request_stats_flush_wait_budget_exhausted_error());
-                }
-                match tokio::time::timeout(remaining, flush_task).await {
-                    Ok(Ok(Ok(()))) => continue,
-                    Ok(Ok(Err(err))) => return Err(err),
-                    Ok(Err(err)) => {
-                        return Err(ProxyError::Other(format!(
-                        "request stats flush task failed: {err}"
-                    )))
-                    }
-                    Err(_) => return Err(request_stats_flush_wait_budget_exhausted_error()),
-                }
-            }
-
+            // Once this worker owns a drained batch, keep its admission permit
+            // until the bounded flush returns the batch to the coalescer or
+            // commits it. A detached flush would outlive the bulk permit and
+            // could reacquire the SQLite writer under foreground pressure.
             Self::flush_request_stats_writes_drained_batch(
                 self.request_stats_coalescer.clone(),
                 self.backend_time.clone(),
-                pool.clone(),
+                self.sqlite_runtime.clone(),
                 retry_budget,
                 drained,
+                log_transient_exhaustion,
+                max_committed_chunks,
             )
             .await?;
+            if max_committed_chunks.is_some() {
+                return Ok(());
+            }
         }
-    }
-
-    fn spawn_request_stats_flush_drained_batch_task(
-        request_stats_coalescer: RequestStatsCoalescer,
-        backend_time: BackendTime,
-        pool: SqlitePool,
-        retry_budget: Duration,
-        drained: DrainedRequestStatsFlushBatch,
-    ) -> tokio::task::JoinHandle<Result<(), ProxyError>> {
-        tokio::spawn(Self::flush_request_stats_writes_drained_batch(
-            request_stats_coalescer,
-            backend_time,
-            pool,
-            retry_budget,
-            drained,
-        ))
     }
 
     #[cfg(test)]
@@ -181,9 +324,27 @@ impl KeyStore {
         inflight_wait_deadline: Option<Instant>,
     ) -> Result<(), ProxyError> {
         self.flush_request_stats_writes_with_wait_policy(
-            &self.pool,
             retry_budget,
             inflight_wait_deadline,
+            true,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn flush_request_stats_background_slice_for_test(
+        &self,
+    ) -> Result<(), ProxyError> {
+        // CI can spend a few scheduler quanta opening the test database. Keep
+        // the production 50ms slice unchanged while giving this deterministic
+        // contract test enough bounded time to observe one finite slice.
+        const TEST_SLICE_BUDGET: Duration = Duration::from_millis(250);
+        self.flush_request_stats_writes_with_wait_policy(
+            TEST_SLICE_BUDGET,
+            Some(self.backend_time.instant_now() + TEST_SLICE_BUDGET),
+            false,
+            Some(REQUEST_STATS_BACKGROUND_MAX_COMMITTED_CHUNKS),
         )
         .await
     }
@@ -191,69 +352,54 @@ impl KeyStore {
     async fn flush_request_stats_writes_drained_batch(
         request_stats_coalescer: RequestStatsCoalescer,
         backend_time: BackendTime,
-        pool: SqlitePool,
+        sqlite_runtime: SqliteRuntime,
         retry_budget: Duration,
         drained: DrainedRequestStatsFlushBatch,
+        log_transient_exhaustion: bool,
+        max_committed_chunks: Option<usize>,
     ) -> Result<(), ProxyError> {
-        let pending_batch_counts = format!(
-            "dashboard={},api_key={},auth_token={},account_rollup={},request_catalog={}",
-            drained.pending_dashboard_rollups.len(),
-            drained.pending_api_key_usage.len(),
-            drained.pending_auth_token_activity.len(),
-            drained.pending_account_request_rollups.len(),
-            drained.pending_request_log_catalog.len(),
-        );
-        let log_fields = SqliteContentionLogFields {
-            operation: "flush_request_stats_writes",
-            request_path: "/internal/request-stats-flush",
-            request_kind: "internal:request-stats-flush",
-            billing_subject_kind: "unknown",
-            retry_budget_ms: retry_budget.as_millis() as u64,
-            pending_batch_counts: pending_batch_counts.as_str(),
-            oldest_pending_created_at: drained.drained_oldest_pending_created_at,
-            newest_pending_created_at: drained.drained_newest_pending_created_at,
-        };
         let retry_deadline = backend_time.instant_now() + retry_budget;
         let operation_started = Instant::now();
-        let mut retry_attempt = 0usize;
+        let mut uncommitted = drained;
+        // Start conservatively because one logical key can fan out into several
+        // rollup writes. Increase only after a transaction stays within budget.
+        let mut chunk_size = REQUEST_STATS_FLUSH_MIN_LOGICAL_KEYS;
+        let mut committed_chunks = 0usize;
         let flush_result = loop {
-            match Self::flush_request_stats_writes_once(
-                &pool,
+            if uncommitted.is_empty() {
+                break Ok(());
+            }
+            if backend_time.instant_now() >= retry_deadline {
+                break Err(request_stats_flush_wait_budget_exhausted_error());
+            }
+
+            let chunk = uncommitted.take_chunk(chunk_size);
+            let chunk_started = Instant::now();
+            match Self::flush_request_stats_chunk_with_retry(
+                &sqlite_runtime,
                 &backend_time,
-                &drained.pending_dashboard_rollups,
-                &drained.pending_api_key_usage,
-                &drained.pending_auth_token_activity,
-                &drained.pending_account_request_rollups,
-                &drained.pending_request_log_catalog,
+                retry_deadline,
+                operation_started,
+                &chunk,
+                log_transient_exhaustion,
             )
             .await
             {
-                Ok(()) => break Ok(()),
+                Ok(()) => {
+                    committed_chunks = committed_chunks.saturating_add(1);
+                    if chunk_started.elapsed() > REQUEST_STATS_FLUSH_SLOW_TRANSACTION {
+                        chunk_size = (chunk_size / 2).max(REQUEST_STATS_FLUSH_MIN_LOGICAL_KEYS);
+                    } else {
+                        chunk_size = (chunk_size + REQUEST_STATS_FLUSH_MIN_LOGICAL_KEYS)
+                            .min(REQUEST_STATS_FLUSH_MAX_LOGICAL_KEYS);
+                    }
+                    if max_committed_chunks.is_some_and(|limit| committed_chunks >= limit) {
+                        break Ok(());
+                    }
+                }
                 Err(err) => {
-                    if !is_transient_sqlite_write_error(&err) {
-                        break Err(err);
-                    }
-                    let now = backend_time.instant_now();
-                    if now >= retry_deadline {
-                        log_sqlite_transient_write_exhaustion_with_fields(
-                            log_fields,
-                            retry_attempt + 1,
-                            operation_started.elapsed(),
-                            &err,
-                        );
-                        break Err(err);
-                    }
-                    let remaining = retry_deadline.saturating_duration_since(now);
-                    let backoff = sqlite_transient_write_retry_delay(retry_attempt).min(remaining);
-                    log_sqlite_transient_write_retry_with_fields(
-                        log_fields,
-                        retry_attempt + 1,
-                        backoff,
-                        operation_started.elapsed(),
-                        &err,
-                    );
-                    backend_time.sleep(backoff).await;
-                    retry_attempt += 1;
+                    uncommitted.absorb(chunk);
+                    break Err(err);
                 }
             }
         };
@@ -265,51 +411,17 @@ impl KeyStore {
             if let Err(err) = flush_result {
                 state.flushing_oldest_created_at = None;
                 state.flushing_newest_created_at = None;
-                for (key, counts) in drained.pending_dashboard_rollups {
-                    state.pending_dashboard_rollups.entry(key).or_default().add(counts);
-                }
-                for (key, delta) in drained.pending_api_key_usage {
-                    state.pending_api_key_usage.entry(key).or_default().add(delta);
-                }
-                for (token_id, delta) in drained.pending_auth_token_activity {
-                    state
-                        .pending_auth_token_activity
-                        .entry(token_id)
-                        .or_default()
-                        .add(delta);
-                }
-                for (key, delta) in drained.pending_account_request_rollups {
-                    state
-                        .pending_account_request_rollups
-                        .entry(key)
-                        .or_default()
-                        .add(delta);
-                }
-                for (key, delta) in drained.pending_request_log_catalog {
-                    *state.pending_request_log_catalog.entry(key).or_default() += delta;
-                }
-                if let Some(created_at) = drained.drained_oldest_pending_created_at {
-                    state.oldest_pending_created_at = Some(
-                        state
-                            .oldest_pending_created_at
-                            .map(|current| current.min(created_at))
-                            .unwrap_or(created_at),
-                    );
-                }
-                if let Some(created_at) = drained.drained_newest_pending_created_at {
-                    state.newest_pending_created_at = Some(
-                        state
-                            .newest_pending_created_at
-                            .map(|current| current.max(created_at))
-                            .unwrap_or(created_at),
-                    );
-                }
+                uncommitted.requeue_into(&mut state);
                 RequestStatsCoalescer::mark_flush_deadline_if_pending(&mut state);
                 request_stats_coalescer.flushed.notify_waiters();
                 return Err(err);
             }
             state.flushing_oldest_created_at = None;
             state.flushing_newest_created_at = None;
+            // A background admission owns a small, wall-clock-bounded group
+            // of committed transactions. Return every remaining key before
+            // releasing the coalescer so the next nominal tick can resume.
+            uncommitted.requeue_into(&mut state);
             if RequestStatsCoalescer::pending_key_count(&state) == 0 {
                 state.oldest_pending_created_at = None;
                 state.newest_pending_created_at = None;
@@ -325,18 +437,130 @@ impl KeyStore {
         Ok(())
     }
 
-    async fn flush_request_stats_writes_once(
-        pool: &SqlitePool,
+    async fn flush_request_stats_chunk_with_retry(
+        sqlite_runtime: &SqliteRuntime,
         backend_time: &BackendTime,
-        pending_dashboard_rollups: &HashMap<(i64, i64), DashboardRequestRollupCounts>,
-        pending_api_key_usage: &HashMap<(String, i64), ApiKeyUsageBucketDelta>,
-        pending_auth_token_activity: &HashMap<String, AuthTokenActivityDelta>,
-        pending_account_request_rollups: &HashMap<AccountRequestRollupKey, AccountUsageRollupDelta>,
-        pending_request_log_catalog: &HashMap<RequestLogCatalogRollupKey, i64>,
+        retry_deadline: Instant,
+        operation_started: Instant,
+        chunk: &DrainedRequestStatsFlushBatch,
+        log_transient_exhaustion: bool,
+    ) -> Result<(), ProxyError> {
+        let pending_batch_counts = format!(
+            "dashboard={},api_key={},auth_token={},account_rollup={},request_catalog={}",
+            chunk.pending_dashboard_rollups.len(),
+            chunk.pending_api_key_usage.len(),
+            chunk.pending_auth_token_activity.len(),
+            chunk.pending_account_request_rollups.len(),
+            chunk.pending_request_log_catalog.len(),
+        );
+        let log_fields = SqliteContentionLogFields {
+            operation: "flush_request_stats_writes",
+            request_path: "/internal/request-stats-flush",
+            request_kind: "internal:request-stats-flush",
+            billing_subject_kind: "unknown",
+            retry_budget_ms: retry_deadline
+                .saturating_duration_since(backend_time.instant_now())
+                .as_millis() as u64,
+            pending_batch_counts: pending_batch_counts.as_str(),
+            oldest_pending_created_at: chunk.drained_oldest_pending_created_at,
+            newest_pending_created_at: chunk.drained_newest_pending_created_at,
+        };
+        let mut retry_attempt = 0usize;
+        loop {
+            match Self::flush_request_stats_writes_once(
+                sqlite_runtime,
+                backend_time,
+                retry_deadline,
+                chunk,
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) if is_transient_sqlite_write_error(&err) => {
+                    let now = backend_time.instant_now();
+                    if now >= retry_deadline {
+                        if log_transient_exhaustion {
+                            log_sqlite_transient_write_exhaustion_with_fields(
+                                log_fields,
+                                retry_attempt + 1,
+                                operation_started.elapsed(),
+                                &err,
+                            );
+                        }
+                        return Err(err);
+                    }
+                    let backoff = sqlite_transient_write_retry_delay(retry_attempt)
+                        .min(retry_deadline.saturating_duration_since(now));
+                    sqlite_runtime.record_retry(SqliteOperation::RequestStatsFlush);
+                    if log_transient_exhaustion {
+                        log_sqlite_transient_write_retry_with_fields(
+                            log_fields,
+                            retry_attempt + 1,
+                            backoff,
+                            operation_started.elapsed(),
+                            &err,
+                        );
+                    }
+                    backend_time.sleep(backoff).await;
+                    retry_attempt += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn flush_request_stats_writes_once(
+        sqlite_runtime: &SqliteRuntime,
+        backend_time: &BackendTime,
+        retry_deadline: Instant,
+        chunk: &DrainedRequestStatsFlushBatch,
+    ) -> Result<(), ProxyError> {
+        let remaining = retry_deadline.saturating_duration_since(backend_time.instant_now());
+        if remaining.is_zero() {
+            sqlite_runtime.record_deferred(
+                SqliteOperation::RequestStatsFlush,
+                SqliteAdmissionDeferReason::RecentContention,
+            );
+            return Err(ProxyError::Database(sqlx::Error::PoolTimedOut));
+        }
+        match tokio::time::timeout(
+            remaining,
+            Self::flush_request_stats_writes_once_within_deadline(
+                sqlite_runtime,
+                backend_time,
+                retry_deadline,
+                chunk,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                sqlite_runtime.record_deferred(
+                    SqliteOperation::RequestStatsFlush,
+                    SqliteAdmissionDeferReason::RecentContention,
+                );
+                Err(ProxyError::Database(sqlx::Error::PoolTimedOut))
+            }
+        }
+    }
+
+    async fn flush_request_stats_writes_once_within_deadline(
+        sqlite_runtime: &SqliteRuntime,
+        backend_time: &BackendTime,
+        retry_deadline: Instant,
+        chunk: &DrainedRequestStatsFlushBatch,
     ) -> Result<(), ProxyError> {
         let updated_at = backend_time.now_ts();
-        let mut tx = pool.begin().await?;
-        let mut dashboard_entries = pending_dashboard_rollups
+        let mut tx = sqlite_runtime
+            .begin_immediate_before(
+                SqliteOperation::RequestStatsFlush,
+                retry_deadline.into(),
+            )
+            .await?;
+        let write_result = async {
+        let mut dashboard_entries = chunk
+            .pending_dashboard_rollups
             .iter()
             .map(|(key, counts)| (*key, *counts))
             .collect::<Vec<_>>();
@@ -352,7 +576,8 @@ impl KeyStore {
             .await?;
         }
 
-        let mut api_key_usage_entries = pending_api_key_usage
+        let mut api_key_usage_entries = chunk
+            .pending_api_key_usage
             .iter()
             .map(|(key, delta)| (key.clone(), *delta))
             .collect::<Vec<_>>();
@@ -368,7 +593,8 @@ impl KeyStore {
             .await?;
         }
 
-        let mut auth_token_activity_entries = pending_auth_token_activity
+        let mut auth_token_activity_entries = chunk
+            .pending_auth_token_activity
             .iter()
             .map(|(token_id, delta)| (token_id.clone(), delta.clone()))
             .collect::<Vec<_>>();
@@ -377,7 +603,8 @@ impl KeyStore {
             Self::upsert_auth_token_activity_delta(&mut tx, &token_id, delta).await?;
         }
 
-        let mut account_request_rollup_entries = pending_account_request_rollups
+        let mut account_request_rollup_entries = chunk
+            .pending_account_request_rollups
             .iter()
             .map(|(key, delta)| (key.clone(), *delta))
             .collect::<Vec<_>>();
@@ -484,7 +711,8 @@ impl KeyStore {
             }
         }
 
-        let mut request_log_catalog_entries = pending_request_log_catalog
+        let mut request_log_catalog_entries = chunk
+            .pending_request_log_catalog
             .iter()
             .map(|(key, delta)| (key.clone(), *delta))
             .collect::<Vec<_>>();
@@ -505,8 +733,10 @@ impl KeyStore {
         .execute(&mut *tx)
         .await?;
 
-        tx.commit().await?;
         Ok(())
+        }
+        .await;
+        tx.finish(write_result).await
     }
 
     async fn fetch_api_key_usage_bucket_success_count(
@@ -663,6 +893,6 @@ fn request_stats_flush_wait_budget_exhausted_error() -> ProxyError {
     ProxyError::Other("request stats flush wait budget exhausted".to_string())
 }
 
-fn is_request_stats_flush_wait_budget_exhausted(err: &ProxyError) -> bool {
-    matches!(err, ProxyError::Other(message) if message == "request stats flush wait budget exhausted")
+fn is_request_stats_flush_wait_budget_exhausted(error: &ProxyError) -> bool {
+    matches!(error, ProxyError::Other(message) if message == "request stats flush wait budget exhausted")
 }

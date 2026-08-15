@@ -40,6 +40,64 @@ async fn scheduled_job_aging_prevents_request_logs_gc_from_starving_ha_gc() {
 }
 
 #[tokio::test]
+async fn blocked_remote_queue_page_does_not_hide_local_ha_gc_work() {
+    let db_path = temp_db_path("scheduled-job-remote-head-local-fallback");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
+
+    for index in 0..17 {
+        let key_id = format!("remote-head-{index}");
+        sqlx::query(
+            "INSERT INTO api_keys (id, api_key, status, created_at) VALUES (?, ?, 'active', ?)",
+        )
+        .bind(&key_id)
+        .bind(format!("tvly-{key_id}"))
+        .bind(Utc::now().timestamp())
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("create remote job key");
+        proxy
+            .scheduled_job_enqueue("quota_sync", "manual", Some(&key_id), 1)
+            .await
+            .expect("enqueue independently-addressable remote job");
+    }
+    let local = proxy
+        .scheduled_job_enqueue("ha_outbox_gc", "scheduler", None, 1)
+        .await
+        .expect("enqueue local HA GC work behind remote queue");
+
+    let head = proxy
+        .fetch_queued_scheduled_jobs(16)
+        .await
+        .expect("fetch blocked remote head page");
+    assert!(
+        head.iter().all(|job| job.job_type == "quota_sync"),
+        "the first page deliberately contains only remote work"
+    );
+    let local_fallback = proxy
+        .fetch_next_queued_scheduled_job_excluding_types(&[
+            "quota_sync",
+            "quota_sync/manual",
+            "quota_sync/hot",
+            "linuxdo_user_status_sync",
+            "linuxdo_credit_recharge_lifecycle",
+            "upstream_reconciliation",
+            "forward_proxy_geo_refresh",
+        ])
+        .await
+        .expect("find local maintenance fallback")
+        .expect("eligible local job remains discoverable behind remote head");
+    assert_eq!(local_fallback.id, local.job_id);
+    assert_eq!(local_fallback.job_type, "ha_outbox_gc");
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn ha_gc_continuation_finishes_job_and_requeues_atomically() {
     let db_path = temp_db_path("ha-gc-continuation-transaction");
     let db_str = db_path.to_string_lossy().to_string();
@@ -426,23 +484,81 @@ async fn stale_reaper_recovers_ha_gc_once_with_delay() {
 }
 
 #[tokio::test]
-async fn request_log_body_gc_candidate_query_uses_partial_body_index() {
-    let db_path = temp_db_path("request-log-body-gc-partial-index");
+async fn stale_reaper_recovers_short_control_jobs_and_request_log_continuations() {
+    let db_path = temp_db_path("scheduled-job-stale-control-reaper");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
-    let index_before_maintenance: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM observability.sqlite_master WHERE type = 'index' AND name = ?",
-    )
-    .bind("idx_request_logs_body_gc_cursor")
-    .fetch_optional(&proxy.key_store.pool)
-    .await
-    .expect("query body GC index before maintenance task");
-    assert!(
-        index_before_maintenance.is_none(),
-        "body-GC partial index must not be built on the startup schema path"
+    let control = proxy
+        .scheduled_job_enqueue("mcp_sessions_gc", "auto", None, 1)
+        .await
+        .expect("enqueue short control job");
+    let request_logs = proxy
+        .scheduled_job_enqueue("request_logs_gc", "auto", None, 1)
+        .await
+        .expect("enqueue request-log GC");
+    proxy
+        .scheduled_job_mark_running(control.job_id)
+        .await
+        .expect("claim short control job")
+        .expect("short control job is due");
+    proxy
+        .scheduled_job_mark_running(request_logs.job_id)
+        .await
+        .expect("claim request-log GC")
+        .expect("request-log GC is due");
+    let now = Utc::now().timestamp();
+    sqlx::query("UPDATE scheduled_jobs SET started_at = ? WHERE id = ?")
+        .bind(now - 301)
+        .bind(control.job_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("age short control job");
+    sqlx::query("UPDATE scheduled_jobs SET started_at = ? WHERE id = ?")
+        .bind(now - 121)
+        .bind(request_logs.job_id)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("age unresolved request-log continuation");
+
+    assert_eq!(
+        proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover stale control work"),
+        2
     );
+    let recovered: Vec<(i64, String, i64, String)> = sqlx::query_as(
+        "SELECT id, status, available_at, message FROM scheduled_jobs WHERE id IN (?, ?) ORDER BY id",
+    )
+    .bind(control.job_id)
+    .bind(request_logs.job_id)
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read recovered rows");
+    assert_eq!(recovered[0].0, control.job_id);
+    assert_eq!(recovered[0].1, "queued");
+    assert!(recovered[0].2 >= now + 29);
+    assert_eq!(recovered[0].3, "deferred=stale_control_recovery");
+    assert_eq!(recovered[1].0, request_logs.job_id);
+    assert_eq!(recovered[1].1, "queued");
+    assert!(recovered[1].2 >= now + 299);
+    assert_eq!(recovered[1].3, "deferred=stale_request_logs_gc_recovery");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn request_log_body_gc_candidate_query_uses_time_cursor_index() {
+    let db_path = temp_db_path("request-log-body-gc-time-index");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
     sqlx::query(
         r#"
         WITH RECURSIVE candidates(id) AS (
@@ -475,22 +591,13 @@ async fn request_log_body_gc_candidate_query_uses_partial_body_index() {
     .execute(&proxy.key_store.pool)
     .await
     .expect("seed body-bearing request log");
-    proxy
-        .ensure_request_log_body_gc_cursor_index()
-        .await
-        .expect("create partial body-GC index");
-    proxy
-        .ensure_request_log_body_gc_cursor_index()
-        .await
-        .expect("repeat partial body-GC index creation");
-
     let plan = sqlx::query(
         r#"
         EXPLAIN QUERY PLAN
         SELECT id, created_at
-        FROM observability.request_logs
-        WHERE (request_body IS NOT NULL OR response_body IS NOT NULL)
-          AND created_at >= 0
+        FROM observability.request_logs INDEXED BY idx_request_logs_time
+        WHERE created_at >= 0
+          AND (request_body IS NOT NULL OR response_body IS NOT NULL)
         ORDER BY created_at ASC, id ASC
         LIMIT 100
         "#,
@@ -507,8 +614,8 @@ async fn request_log_body_gc_candidate_query_uses_partial_body_index() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        details.contains("idx_request_logs_body_gc_cursor"),
-        "expected partial body-GC index, got query plan:\n{details}"
+        details.contains("idx_request_logs_time"),
+        "expected request-log time cursor index, got query plan:\n{details}"
     );
 
     let _ = std::fs::remove_file(&db_path);

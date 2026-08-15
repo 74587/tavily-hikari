@@ -46,6 +46,14 @@ struct TriggerJobResponse {
     promoted: bool,
 }
 
+fn manual_trigger_failure_status(err: &ProxyError) -> StatusCode {
+    if tavily_hikari::is_transient_sqlite_write_error(err) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 fn manual_trigger_requires_key(job_type: &str) -> bool {
     matches!(job_type, "quota_sync")
 }
@@ -255,15 +263,31 @@ async fn post_trigger_job(
         )
             .into_response()),
         Err(err) => {
-            eprintln!("manual job trigger error: {err}");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            if tavily_hikari::is_transient_sqlite_write_error(&err) {
+                tracing::debug!(
+                    component = "scheduler",
+                    event = "manual_trigger_unavailable",
+                    defer_reason = "sqlite_contention",
+                    job_type,
+                    "manual trigger rejected because no durable representative could be admitted"
+                );
+                return Err(manual_trigger_failure_status(&err));
+            }
+            tracing::error!(
+                component = "scheduler",
+                event = "manual_trigger_failed",
+                job_type,
+                err = %err,
+                "manual scheduled job trigger failed"
+            );
+            Err(manual_trigger_failure_status(&err))
         }
     }
 }
 
 #[cfg(test)]
 mod manual_trigger_tests {
-    use super::{ManualTriggerKeyIdError, manual_trigger_key_id_for_claim};
+    use super::{ManualTriggerKeyIdError, ProxyError, manual_trigger_failure_status, manual_trigger_key_id_for_claim};
 
     #[test]
     fn manual_global_jobs_reject_key_id() {
@@ -280,6 +304,22 @@ mod manual_trigger_tests {
         let key_id = manual_trigger_key_id_for_claim("quota_sync", Some("key-1".to_string()))
             .expect("quota key accepted");
         assert_eq!(key_id.as_deref(), Some("key-1"));
+    }
+
+    #[test]
+    fn manual_transient_sqlite_pressure_returns_no_synthetic_job_id() {
+        assert_eq!(
+            manual_trigger_failure_status(&ProxyError::Database(sqlx::Error::PoolTimedOut)),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn manual_non_transient_failure_is_internal_error() {
+        assert_eq!(
+            manual_trigger_failure_status(&ProxyError::Other("test failure".to_string())),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
 

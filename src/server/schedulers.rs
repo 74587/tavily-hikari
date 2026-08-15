@@ -1,4 +1,5 @@
 use tavily_hikari::{
+    ClaimedReconciliationRunOutcome,
     LinuxDoCreditRechargeOrder,
     LINUXDO_CREDIT_RECHARGE_REFUND_EXTERNAL_SUCCEEDED_PHASE,
     LINUXDO_CREDIT_RECHARGE_STATUS_REFUNDED,
@@ -7,6 +8,7 @@ use tavily_hikari::{
     decode_linuxdo_credit_refund_external_success_marker,
     format_ha_outbox_gc_report_message, format_linuxdo_credit_money,
     HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
+    HA_OUTBOX_GC_IDLE_DISCOVERY_SECS,
     HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS,
     linuxdo_credit_recharge_system_refund_retry_delay_secs,
     linuxdo_credit_refund_params as shared_linuxdo_credit_refund_params,
@@ -57,12 +59,9 @@ const TRIGGER_SOURCE_SCHEDULER: &str = "scheduler";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_AUTO: &str = "auto";
 const REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS: i64 = 5 * 60;
-const HA_OUTBOX_GC_RECHECK_SECS: u64 = 5 * 60;
 const HA_OUTBOX_GC_BASELINE_SECS: i64 = 60 * 60;
-const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE: &str = "request_logs_body_gc_index_ensure";
 const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE: &str =
     "auth_token_logs_alert_index_ensure";
-const REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE: &str = "dashboard_rollup_integrity";
 const DASHBOARD_ROLLUP_INTEGRITY_FAILURE_BACKOFF_SECS: i64 = 60;
 const DASHBOARD_ROLLUP_INTEGRITY_WATCHDOG_SECS: u64 = 60;
@@ -105,10 +104,17 @@ async fn enqueue_scheduled_job_result(
     key_id: Option<&str>,
     trigger_source: &str,
 ) -> Result<tavily_hikari::ScheduledJobEnqueueResult, ProxyError> {
-    let result = state
-        .proxy
-        .scheduled_job_enqueue(job_type, trigger_source, key_id, 1)
-        .await?;
+    let result = if trigger_source == TRIGGER_SOURCE_MANUAL {
+        state
+            .proxy
+            .scheduled_job_enqueue_foreground(job_type, trigger_source, key_id, 1)
+            .await?
+    } else {
+        state
+            .proxy
+            .scheduled_job_enqueue(job_type, trigger_source, key_id, 1)
+            .await?
+    };
     maintenance_worker_wake_for_state(state).notify_one();
     Ok(result)
 }
@@ -171,12 +177,27 @@ async fn enqueue_scheduled_job_logged(
             Some(result.job_id)
         }
         Err(err) => {
-            tavily_hikari::emit_db_operation_error_log(
-                "scheduled job enqueue",
-                started.elapsed(),
-                Some(context.as_str()),
-                &err,
-            );
+            let transient = tavily_hikari::is_transient_sqlite_write_error(&err);
+            if transient {
+                tracing::debug!(
+                    component = "scheduler",
+                    event = "job_enqueue_deferred",
+                    job_type,
+                    trigger_source,
+                    key_id = key_id.unwrap_or("-"),
+                    defer_reason = "sqlite_contention",
+                    retry_via = "durable_representative_or_stale_reaper",
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    err = %err,
+                );
+            } else {
+                tavily_hikari::emit_db_operation_error_log(
+                    "scheduled job enqueue",
+                    started.elapsed(),
+                    Some(context.as_str()),
+                    &err,
+                );
+            }
             if job_type == "upstream_reconciliation" {
                 let now = state.proxy.backend_time().now_ts();
                 if let Err(meta_err) = state
@@ -192,23 +213,36 @@ async fn enqueue_scheduled_job_logged(
                         err = %meta_err,
                     );
                 }
+                if transient {
+                    tracing::debug!(
+                        component = "reconciliation",
+                        event = "enqueue_deferred",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        job_type,
+                        defer_reason = "sqlite_contention",
+                        err = %err,
+                    );
+                } else {
+                    tracing::warn!(
+                        component = "reconciliation",
+                        event = "enqueue_exhausted",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        job_type,
+                        err = %err,
+                    );
+                }
+            }
+            if !transient {
                 tracing::warn!(
-                    component = "reconciliation",
-                    event = "enqueue_exhausted",
-                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    component = "scheduler",
+                    event = "job_enqueue_failed",
                     job_type,
+                    trigger_source,
+                    key_id = key_id.unwrap_or("-"),
                     err = %err,
+                    "{log_prefix}: enqueue job error: {err}"
                 );
             }
-            tracing::warn!(
-                component = "scheduler",
-                event = "job_enqueue_failed",
-                job_type,
-                trigger_source,
-                key_id = key_id.unwrap_or("-"),
-                err = %err,
-                "{log_prefix}: enqueue job error: {err}"
-            );
             None
         }
     }
@@ -336,17 +370,18 @@ fn duration_until_next_local_daily_run(now: DateTime<Local>, hour: u32, minute: 
     tavily_hikari::duration_until_next_local_daily_run(now, hour, minute)
 }
 
+const REMOTE_IO_SCHEDULED_JOB_TYPES: [&str; 7] = [
+    "quota_sync",
+    "quota_sync/manual",
+    "quota_sync/hot",
+    LINUXDO_USER_STATUS_SYNC_JOB_TYPE,
+    LINUXDO_CREDIT_RECHARGE_LIFECYCLE_JOB_TYPE,
+    "upstream_reconciliation",
+    "forward_proxy_geo_refresh",
+];
+
 fn scheduled_job_uses_remote_io(job_type: &str) -> bool {
-    matches!(
-        job_type,
-        "quota_sync"
-            | "quota_sync/manual"
-            | "quota_sync/hot"
-            | LINUXDO_USER_STATUS_SYNC_JOB_TYPE
-            | LINUXDO_CREDIT_RECHARGE_LIFECYCLE_JOB_TYPE
-            | "upstream_reconciliation"
-            | "forward_proxy_geo_refresh"
-    )
+    REMOTE_IO_SCHEDULED_JOB_TYPES.contains(&job_type)
 }
 
 fn scheduled_job_uses_db_execution_gate(job_type: &str) -> bool {
@@ -385,6 +420,16 @@ async fn dequeue_next_scheduled_job(
 
         selected = Some(candidate);
         break;
+    }
+
+    if selected.is_none() {
+        // The remote-I/O slot is intentionally single-filed. Do not let an
+        // arbitrarily long remote queue hide eligible local maintenance behind
+        // the first dequeue page while that slot is busy.
+        selected = state
+            .proxy
+            .fetch_next_queued_scheduled_job_excluding_types(&REMOTE_IO_SCHEDULED_JOB_TYPES)
+            .await?;
     }
 
     let Some(candidate) = selected else {
@@ -432,58 +477,18 @@ async fn dequeue_next_scheduled_job(
 async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
     let job_type = job.job_type.clone();
     let key_id = job.key_id.clone();
-    let trigger_source = job.trigger_source.clone();
     let claimed_job = ClaimedScheduledJob {
         job_id: job.id,
         claim_generation: job.claim_generation,
         _job_execution_gate: None,
     };
-    let completed = run_manual_claimed_job(
+    run_manual_claimed_job(
         state.clone(),
         job_type.clone(),
         key_id.clone(),
         claimed_job,
     )
     .await;
-    // HA GC persists its continuation together with job completion. The stale
-    // reaper is the sole recovery path when that transaction cannot commit;
-    // enqueueing again here creates an unbounded retry loop.
-    let continuation_delay = match job_type.as_str() {
-        "request_logs_gc" if !completed => Some(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS),
-        _ => None,
-    };
-    if let Some(continuation_delay) = continuation_delay {
-        let available_at = state
-            .proxy
-            .backend_time()
-            .now_ts()
-            .saturating_add(continuation_delay);
-        match enqueue_scheduled_job_at(
-            state.as_ref(),
-            &job_type,
-            key_id.as_deref(),
-            TRIGGER_SOURCE_AUTO,
-            available_at,
-        )
-        .await
-        {
-            Ok(continuation_job_id) => tracing::debug!(
-                component = %job_type,
-                event = "continuation_queued",
-                trigger_source = %trigger_source,
-                continuation_job_id,
-                continuation_delay_secs = continuation_delay,
-                available_at,
-            ),
-            Err(err) => tracing::warn!(
-                component = %job_type,
-                event = "continuation_enqueue_failed",
-                trigger_source = %trigger_source,
-                continuation_delay_secs = continuation_delay,
-                err = %err,
-            ),
-        }
-    }
 }
 
 fn spawn_dashboard_rollup_integrity_scheduler(state: Arc<AppState>) {
@@ -584,12 +589,21 @@ async fn run_dashboard_rollup_integrity_claimed_job(
         claim_generation,
         _job_execution_gate: existing_gate,
     } = claimed_job;
-    let _job_execution_gate = match existing_gate {
-        Some(gate) => gate,
-        None => acquire_db_job_execution_gate_for_state(state.as_ref()).await,
-    };
-    let _maintenance = acquire_db_maintenance_read_gate().await;
+    drop(existing_gate);
     let now = state.proxy.backend_time().now_ts();
+    let _bulk_admission = match state.proxy.admit_dashboard_rollup_integrity() {
+        tavily_hikari::SqliteAdmissionOutcome::Admitted(permit) => permit,
+        tavily_hikari::SqliteAdmissionOutcome::Deferred { reason } => {
+            return finish_dashboard_rollup_integrity_and_enqueue(
+                state.as_ref(),
+                job_id,
+                claim_generation,
+                &format!("state=deferred admission={reason}"),
+                now.saturating_add(30),
+            )
+            .await;
+        }
+    };
     let (message, next_delay_secs) = match state.proxy.run_dashboard_rollup_integrity_slice().await {
         Ok(result) => (format!("state={}", result.state), result.next_delay_secs),
         Err(err) => {
@@ -664,12 +678,26 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
                     }
                 }
                 Err(err) => {
-                    tracing::error!(
-                        component = "scheduler",
-                        event = "maintenance_dequeue_failed",
-                        err = %err,
-                    );
-                    state.proxy.backend_time().sleep(Duration::from_secs(1)).await;
+                    if tavily_hikari::is_transient_sqlite_write_error(&err) {
+                        tracing::debug!(
+                            component = "scheduler",
+                            event = "maintenance_dequeue_deferred",
+                            defer_reason = "sqlite_contention",
+                            retry_delay_secs = 30_u64,
+                            err = %err,
+                        );
+                        tokio::select! {
+                            _ = wake.notified() => {}
+                            _ = state.proxy.backend_time().sleep(Duration::from_secs(30)) => {}
+                        }
+                    } else {
+                        tracing::error!(
+                            component = "scheduler",
+                            event = "maintenance_dequeue_failed",
+                            err = %err,
+                        );
+                        state.proxy.backend_time().sleep(Duration::from_secs(1)).await;
+                    }
                 }
             }
         }
@@ -684,6 +712,13 @@ fn spawn_upstream_reconciliation_startup_resume(state: Arc<AppState>) {
             .await
         {
             Ok(()) => maintenance_worker_wake_for_state(state.as_ref()).notify_one(),
+            Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => tracing::debug!(
+                component = "reconciliation",
+                event = "startup_resume_enqueue_deferred",
+                defer_reason = "sqlite_contention",
+                retry_via = "stale_reaper",
+                err = %err,
+            ),
             Err(err) => tracing::error!(
                 component = "reconciliation",
                 event = "startup_resume_enqueue_failed",
@@ -916,12 +951,12 @@ fn spawn_ha_outbox_gc_scheduler(state: Arc<AppState>) {
             }
 
             // The hourly baseline discovers newly expired records. Between sweeps,
-            // this only restores a lost continuation when durable GC state still
-            // reports channel debt.
+            // the controller either restores pending debt or rechecks an expired
+            // state observation before admitting another indexed channel slice.
             state
                 .proxy
                 .backend_time()
-                .sleep(Duration::from_secs(HA_OUTBOX_GC_RECHECK_SECS))
+                .sleep(Duration::from_secs(HA_OUTBOX_GC_IDLE_DISCOVERY_SECS as u64))
                 .await;
         }
     });
@@ -992,19 +1027,6 @@ fn spawn_request_logs_gc_scheduler(state: Arc<AppState>) {
     });
 }
 
-fn spawn_request_logs_body_gc_index_ensure_scheduler(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        let _ = enqueue_scheduled_job_logged(
-            state.as_ref(),
-            REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE,
-            None,
-            TRIGGER_SOURCE_SCHEDULER,
-            "request-logs-body-gc-index",
-        )
-        .await;
-    });
-}
-
 fn spawn_auth_token_logs_alert_index_ensure_scheduler(state: Arc<AppState>) {
     tokio::spawn(async move {
         let _ = enqueue_scheduled_job_logged(
@@ -1028,14 +1050,33 @@ async fn run_request_logs_gc_catchup_claimed_job(
         _job_execution_gate,
     } = claimed_job;
     drop(_job_execution_gate);
-    let _job_execution_gate = acquire_db_job_execution_gate_for_state(state.as_ref()).await;
-    let _maintenance = acquire_db_maintenance_read_gate().await;
+    let _bulk_admission = match state.proxy.admit_request_logs_gc() {
+        tavily_hikari::SqliteAdmissionOutcome::Admitted(permit) => permit,
+        tavily_hikari::SqliteAdmissionOutcome::Deferred { reason } => {
+            let msg = format!("deferred={reason}");
+            tracing::debug!(
+                component = "request_logs_gc",
+                event = "deferred",
+                job_id,
+                defer_reason = reason,
+                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                "request-log GC deferred before SQLite connection acquisition"
+            );
+            return finish_request_logs_gc_with_continuation(
+                &state,
+                job_id,
+                claim_generation,
+                "success",
+                msg,
+            )
+            .await;
+        }
+    };
     let result = state
         .proxy
         .gc_request_logs_with_options(scheduled_request_logs_gc_options())
         .await;
-    drop(_maintenance);
-    drop(_job_execution_gate);
+    drop(_bulk_admission);
 
     match result {
         Ok(report) => {
@@ -1069,104 +1110,101 @@ async fn run_request_logs_gc_catchup_claimed_job(
                     "request-log GC is incomplete without progress"
                 );
             }
-            let _ = state
-                .proxy
-                .scheduled_job_update_message(job_id, Some(&msg))
-                .await;
-            let _ = state
-                .proxy
-                .scheduled_job_finish_claimed(job_id, claim_generation, "success", Some(&msg))
-                .await;
-            report.completed
-        }
-        Err(err) => {
-            let _ = state
-                .proxy
-                .scheduled_job_finish_claimed(
+            if report.completed {
+                match state
+                    .proxy
+                    .scheduled_job_finish_claimed(job_id, claim_generation, "success", Some(&msg))
+                    .await
+                {
+                    Ok(()) => true,
+                    Err(err) if err.is_stale_claim() => true,
+                    Err(err) => {
+                        tracing::warn!(
+                            component = "request_logs_gc",
+                            event = "completion_persist_deferred",
+                            job_id,
+                            claim_generation,
+                            stale_reaper_after_secs = 120_u64,
+                            err = %err,
+                            "request-log GC completion remains running for stale-reaper recovery"
+                        );
+                        false
+                    }
+                }
+            } else {
+                finish_request_logs_gc_with_continuation(
+                    &state,
                     job_id,
                     claim_generation,
-                    "error",
-                    Some(&err.to_string()),
+                    "success",
+                    msg,
                 )
-                .await;
-            false
+                .await
+            }
+        }
+        Err(err) => {
+            finish_request_logs_gc_with_continuation(
+                &state,
+                job_id,
+                claim_generation,
+                "error",
+                format!("error={err}"),
+            )
+            .await
         }
     }
 }
 
-async fn run_request_logs_body_gc_index_ensure_claimed_job(
-    state: Arc<AppState>,
-    claimed_job: ClaimedScheduledJob,
+async fn finish_request_logs_gc_with_continuation(
+    state: &Arc<AppState>,
+    job_id: i64,
+    claim_generation: i64,
+    status: &str,
+    message: String,
 ) -> bool {
-    let ClaimedScheduledJob {
-        job_id,
-        claim_generation,
-        _job_execution_gate,
-    } = claimed_job;
-    drop(_job_execution_gate);
-    let _job_execution_gate = acquire_db_job_execution_gate_for_state(state.as_ref()).await;
-    let _maintenance = acquire_db_maintenance_write_gate().await;
-    let result = state.proxy.ensure_request_log_body_gc_cursor_index().await;
-    drop(_maintenance);
-    drop(_job_execution_gate);
-
-    match result {
-        Ok(()) => {
-            let _ = state
-                .proxy
-                .scheduled_job_finish_claimed(
-                    job_id,
-                    claim_generation,
-                    "success",
-                    Some("partial_index_ready"),
-                )
-                .await;
+    let available_at = state
+        .proxy
+        .backend_time()
+        .now_ts()
+        .saturating_add(REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS);
+    match state
+        .proxy
+        .scheduled_job_finish_and_enqueue_auto_at_with_status(
+            job_id,
+            claim_generation,
+            status,
+            "request_logs_gc",
+            None,
+            1,
+            Some(&message),
+            available_at,
+        )
+        .await
+    {
+        Ok(continuation) => {
+            tracing::debug!(
+                component = "request_logs_gc",
+                event = "continuation_queued",
+                job_id,
+                continuation_job_id = continuation.job_id,
+                continuation_created = continuation.created,
+                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                available_at,
+            );
             true
         }
+        Err(err) if err.is_stale_claim() => true,
         Err(err) => {
-            let _ = state
-                .proxy
-                .scheduled_job_finish_claimed(
-                    job_id,
-                    claim_generation,
-                    "error",
-                    Some(&err.to_string()),
-                )
-                .await;
-            let available_at = state
-                .proxy
-                .backend_time()
-                .now_ts()
-                .saturating_add(REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS);
-            match enqueue_scheduled_job_at(
-                state.as_ref(),
-                REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE,
-                None,
-                TRIGGER_SOURCE_AUTO,
-                available_at,
-            )
-            .await
-            {
-                Ok(retry_job_id) => tracing::warn!(
-                    component = "request_logs_gc",
-                    event = "body_gc_index_retry_queued",
-                    failed_job_id = job_id,
-                    retry_job_id,
-                    retry_delay_secs = REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS,
-                    available_at,
-                    err = %err,
-                    "request-log body GC index build failed; retry queued"
-                ),
-                Err(retry_err) => tracing::warn!(
-                    component = "request_logs_gc",
-                    event = "body_gc_index_retry_enqueue_failed",
-                    failed_job_id = job_id,
-                    retry_delay_secs = REQUEST_LOGS_BODY_GC_INDEX_ENSURE_RETRY_DELAY_SECS,
-                    err = %err,
-                    retry_err = %retry_err,
-                    "request-log body GC index build failed and retry could not be queued"
-                ),
-            }
+            tracing::warn!(
+                component = "request_logs_gc",
+                event = "continuation_persist_deferred",
+                job_id,
+                claim_generation,
+                continuation_delay_secs = REQUEST_LOGS_GC_CONTINUATION_DELAY_SECS,
+                stale_reaper_after_secs = 120_u64,
+                err = %err,
+                "request-log GC continuation remains running for stale-reaper recovery"
+            );
             false
         }
     }
@@ -1270,30 +1308,35 @@ async fn run_ha_outbox_gc_claimed_job(
     } = claimed_job;
     drop(_job_execution_gate);
 
-    let Some(_gc_lease) = try_acquire_online_ha_gc_lease() else {
+    let foreground_rps = state.proxy.foreground_activity_rps();
+    let _bulk_admission = match state.proxy.admit_ha_outbox_gc() {
+        tavily_hikari::SqliteAdmissionOutcome::Admitted(permit) => permit,
+        tavily_hikari::SqliteAdmissionOutcome::Deferred { reason } => {
         tracing::debug!(
             component = "ha_outbox_gc",
             event = "deferred",
             job_id,
             claim_generation,
-            defer_reason = "gc_lease_busy",
+            defer_reason = reason,
             continuation_delay_secs = HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
         );
         return finish_ha_gc_with_continuation(
             &state,
             job_id,
             claim_generation,
-            "deferred=gc_lease_busy".to_string(),
+            format!("deferred={reason}"),
             HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS,
         )
         .await;
+        }
     };
+    let proxy = state.proxy.clone();
     let result = state
         .proxy
         .gc_ha_outbox_online_with_foreground_activity(
-            foreground_activity_rps(),
-            foreground_activity_low_pressure_since_floor(),
-            foreground_activity_rps,
+            foreground_rps,
+            state.proxy.foreground_activity_low_pressure_since_floor(),
+            move || proxy.foreground_activity_rps(),
         )
         .await;
 
@@ -2422,9 +2465,6 @@ async fn run_manual_claimed_job(
     if job_type == "request_logs_gc" {
         return run_request_logs_gc_catchup_claimed_job(state, claimed_job).await;
     }
-    if job_type == REQUEST_LOGS_BODY_GC_INDEX_ENSURE_JOB_TYPE {
-        return run_request_logs_body_gc_index_ensure_claimed_job(state, claimed_job).await;
-    }
     if job_type == AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE {
         let ClaimedScheduledJob {
             job_id,
@@ -2560,7 +2600,7 @@ async fn run_manual_claimed_job(
         }
         "upstream_reconciliation" => {
             drop(_job_execution_gate);
-            let foreground_rps = foreground_activity_rps();
+            let foreground_rps = state.proxy.foreground_activity_rps();
             if foreground_rps > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
                 return defer_reconciliation_for_foreground(
                     &state,
@@ -2573,7 +2613,7 @@ async fn run_manual_claimed_job(
             let selected_run = {
                 let run = tokio::time::timeout(
                     Duration::from_secs(20),
-                    state.proxy.run_upstream_reconciliation_once_claimed(
+                    state.proxy.run_upstream_reconciliation_once_claimed_outcome(
                         &state.usage_base,
                         job_id,
                         claim_generation,
@@ -2581,7 +2621,7 @@ async fn run_manual_claimed_job(
                 );
                 tokio::pin!(run);
                 tokio::select! {
-                    foreground_rps = wait_for_foreground_maintenance_pressure() => Err(foreground_rps),
+                    foreground_rps = wait_for_foreground_maintenance_pressure(&state.proxy) => Err(foreground_rps),
                     result = &mut run => Ok(result),
                 }
             };
@@ -2598,7 +2638,7 @@ async fn run_manual_claimed_job(
                 }
             };
             match run_result {
-                Ok(Ok(settled)) => {
+                Ok(Ok(ClaimedReconciliationRunOutcome::Completed { settled })) => {
                     match state.proxy.upstream_reconciliation_representative_available_at().await {
                         Ok(Some(available_at)) => state
                             .proxy
@@ -2616,6 +2656,15 @@ async fn run_manual_claimed_job(
                         Ok(None) => finish(state, "success", format!("settled={settled}")).await,
                         Err(err) => finish(state, "error", err.to_string()).await,
                     }
+                }
+                Ok(Ok(ClaimedReconciliationRunOutcome::Deferred { reason })) => {
+                    defer_reconciliation_for_sqlite_admission(
+                        &state,
+                        job_id,
+                        claim_generation,
+                        reason,
+                    )
+                    .await
                 }
                 Ok(Err(err)) => finish(state, "error", err.to_string()).await,
                 Err(_) => {
@@ -2714,10 +2763,10 @@ async fn run_manual_claimed_job(
     }
 }
 
-async fn wait_for_foreground_maintenance_pressure() -> i64 {
+async fn wait_for_foreground_maintenance_pressure(proxy: &TavilyProxy) -> i64 {
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let foreground_rps = foreground_activity_rps();
+        let foreground_rps = proxy.foreground_activity_rps();
         if foreground_rps > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
             return foreground_rps;
         }
@@ -2748,6 +2797,37 @@ async fn defer_reconciliation_for_foreground(
             None,
             1,
             Some("outcome=foreground_pressure"),
+            available_at,
+        )
+        .await
+        .is_ok()
+}
+
+async fn defer_reconciliation_for_sqlite_admission(
+    state: &Arc<AppState>,
+    job_id: i64,
+    claim_generation: i64,
+    defer_reason: &'static str,
+) -> bool {
+    let available_at = state.proxy.backend_time().now_ts().saturating_add(30);
+    tracing::debug!(
+        component = "reconciliation",
+        event = "local_preparation_deferred",
+        job_id,
+        claim_generation,
+        defer_reason,
+        available_at,
+        "reconciliation retained its representative after SQLite admission defer"
+    );
+    state
+        .proxy
+        .scheduled_job_finish_and_enqueue_auto_at(
+            job_id,
+            claim_generation,
+            "upstream_reconciliation",
+            None,
+            1,
+            Some(&format!("outcome=sqlite_admission_deferred defer_reason={defer_reason}")),
             available_at,
         )
         .await

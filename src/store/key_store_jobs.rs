@@ -335,73 +335,73 @@ impl KeyStore {
         attempt: i64,
     ) -> Result<i64, ProxyError> {
         let started_at = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            let result = async {
-                let mut conn = begin_immediate_sqlite_connection(&self.pool).await?;
-                if let Some((job_id, status, _current_trigger_source)) =
-                    Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id).await?
-                    && status == "running"
-                {
-                    conn.commit().await?;
-                    return Ok::<i64, ProxyError>(job_id);
-                }
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = async {
+            if let Some((job_id, status, _current_trigger_source)) =
+                Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id).await?
+                && status == "running"
+            {
+                return Ok::<i64, ProxyError>(job_id);
+            }
 
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO scheduled_jobs (
-                        job_type,
-                        trigger_source,
-                        key_id,
-                        status,
-                        attempt,
-                        queued_at,
-                        available_at,
-                        started_at
-                    )
-                    VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
-                    "#,
+            let res = sqlx::query(
+                r#"
+                INSERT INTO scheduled_jobs (
+                    job_type,
+                    trigger_source,
+                    key_id,
+                    status,
+                    attempt,
+                    queued_at,
+                    available_at,
+                    started_at
                 )
-                .bind(job_type)
-                .bind(trigger_source)
-                .bind(key_id)
-                .bind(attempt)
-                .bind(started_at)
-                .bind(started_at)
-                .bind(started_at)
-                .execute(&mut *conn)
-                .await?;
-                conn.commit().await?;
-                Ok(res.last_insert_rowid())
+                VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                "#,
+            )
+            .bind(job_type)
+            .bind(trigger_source)
+            .bind(key_id)
+            .bind(attempt)
+            .bind(started_at)
+            .bind(started_at)
+            .bind(started_at)
+            .execute(&mut *conn)
+            .await?;
+            Ok(res.last_insert_rowid())
+        }
+        .await;
+        match result {
+            Ok(job_id) => {
+                conn.finish(Ok(())).await?;
+                Ok(job_id)
             }
-            .await;
-
-            match result {
-                Ok(job_id) => return Ok(job_id),
-                Err(err) => {
-                    if Self::is_scheduled_job_active_identity_conflict(&err)
-                        && let Some((job_id, _status, _current_trigger_source)) =
-                            self.scheduled_job_lookup_active(job_type, key_id).await?
-                    {
-                        return Ok(job_id);
-                    }
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job start",
-                        retry_attempt,
-                        deadline,
-                        &err,
+            Err(err) if Self::is_scheduled_job_active_identity_conflict(&err) => {
+                let original_error = match conn.finish(Err(err)).await {
+                    Err(err) => err,
+                    Ok(()) => unreachable!("failed scheduled job transaction committed"),
+                };
+                if let Some((job_id, _status, _current_trigger_source)) =
+                    self.scheduled_job_lookup_active(
+                        job_type,
+                        key_id,
+                        SqliteOperation::ScheduledJobControl,
                     )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
+                    .await?
+                {
+                    Ok(job_id)
+                } else {
+                    Err(original_error)
                 }
             }
-        };
+            Err(err) => match conn.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("failed scheduled job transaction committed"),
+            },
+        }
     }
 
     async fn abandon_stale_quota_sync_job_locked(
@@ -471,8 +471,13 @@ impl KeyStore {
         &self,
         job_type: &str,
         key_id: Option<&str>,
+        operation: SqliteOperation,
     ) -> Result<Option<(i64, String, String)>, ProxyError> {
-        sqlx::query_as::<_, (i64, String, String)>(
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(operation)
+            .await?;
+        let lookup = sqlx::query_as::<_, (i64, String, String)>(
             r#"
             SELECT id, status, trigger_source
             FROM scheduled_jobs
@@ -486,9 +491,14 @@ impl KeyStore {
         .bind(job_type)
         .bind(key_id)
         .bind(key_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
-        .map_err(ProxyError::from)
+        .map_err(ProxyError::from);
+        let close = conn.close().await;
+        match (lookup, close) {
+            (Ok(row), Ok(())) => Ok(row),
+            (Err(err), _) | (_, Err(err)) => Err(err),
+        }
     }
 
     pub(crate) async fn scheduled_job_enqueue(
@@ -499,8 +509,34 @@ impl KeyStore {
         attempt: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
         let available_at = self.backend_time.now_ts();
-        self.scheduled_job_enqueue_at(job_type, trigger_source, key_id, attempt, available_at)
+        self.scheduled_job_enqueue_at_with_operation(
+            job_type,
+            trigger_source,
+            key_id,
+            attempt,
+            available_at,
+            SqliteOperation::ScheduledJobControl,
+        )
             .await
+    }
+
+    pub(crate) async fn scheduled_job_enqueue_foreground(
+        &self,
+        job_type: &str,
+        trigger_source: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        let available_at = self.backend_time.now_ts();
+        self.scheduled_job_enqueue_at_with_operation(
+            job_type,
+            trigger_source,
+            key_id,
+            attempt,
+            available_at,
+            SqliteOperation::ForegroundJobTrigger,
+        )
+        .await
     }
 
     pub(crate) async fn scheduled_job_enqueue_at(
@@ -511,126 +547,176 @@ impl KeyStore {
         attempt: i64,
         available_at: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        self.scheduled_job_enqueue_at_with_operation(
+            job_type,
+            trigger_source,
+            key_id,
+            attempt,
+            available_at,
+            SqliteOperation::ScheduledJobControl,
+        )
+        .await
+    }
+
+    async fn scheduled_job_enqueue_at_with_operation(
+        &self,
+        job_type: &str,
+        trigger_source: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        available_at: i64,
+        operation: SqliteOperation,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
         // Fast-path repeated coalesce reads so owner-facing manual triggers do not
         // fail behind an unrelated long-lived write window.
-        if Self::scheduled_job_stale_group(job_type).is_none()
-            && let Some((job_id, status, current_trigger_source)) =
-                self.scheduled_job_lookup_active(job_type, key_id).await?
-        {
+        let active_representative = if Self::scheduled_job_stale_group(job_type).is_none() {
+            self.scheduled_job_lookup_active(job_type, key_id, operation)
+                .await?
+        } else {
+            None
+        };
+        if let Some((job_id, status, current_trigger_source)) = active_representative.as_ref() {
             let promoted = Self::should_promote_scheduled_job_trigger_source(
                 job_type,
-                &current_trigger_source,
+                current_trigger_source,
                 trigger_source,
             );
             if !promoted && (trigger_source != "manual" || status != "queued") {
                 return Ok(ScheduledJobEnqueueResult {
-                    job_id,
+                    job_id: *job_id,
                     created: false,
                     promoted: false,
-                    status,
-                    trigger_source: current_trigger_source,
+                    status: status.clone(),
+                    trigger_source: current_trigger_source.clone(),
                 });
             }
         }
 
         let queued_at = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            let result = async {
-                let mut conn = begin_immediate_sqlite_connection(&self.pool).await?;
-                Self::abandon_stale_quota_sync_job_locked(&mut conn, job_type, key_id, queued_at)
-                    .await?;
-                if let Some((job_id, status, current_trigger_source)) =
-                    Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id).await?
-                {
-                    let promoted = Self::should_promote_scheduled_job_trigger_source(
-                        job_type,
-                        &current_trigger_source,
-                        trigger_source,
-                    );
-                    if promoted || (trigger_source == "manual" && status == "queued") {
-                        sqlx::query(
-                            r#"UPDATE scheduled_jobs
-                               SET trigger_source = CASE WHEN ? THEN ? ELSE trigger_source END,
-                                   available_at = CASE WHEN status = 'queued' THEN MIN(available_at, ?) ELSE available_at END
-                               WHERE id = ?"#,
-                        )
-                        .bind(promoted)
-                        .bind(trigger_source)
-                        .bind(queued_at)
-                        .bind(job_id)
-                        .execute(&mut *conn)
-                        .await?;
-                    }
-                    conn.commit().await?;
-                    let effective_trigger_source = if promoted {
-                        trigger_source.to_string()
-                    } else {
-                        current_trigger_source
-                    };
-                    return Ok::<ScheduledJobEnqueueResult, ProxyError>(ScheduledJobEnqueueResult {
+        let mut conn = match self
+            .sqlite_runtime
+            .begin_immediate(operation)
+            .await
+        {
+            Ok(conn) => conn,
+            Err(err) if crate::is_transient_sqlite_write_error(&err) => {
+                if let Some((job_id, status, trigger_source)) = active_representative {
+                    return Ok(ScheduledJobEnqueueResult {
                         job_id,
                         created: false,
-                        promoted,
+                        promoted: false,
                         status,
-                        trigger_source: effective_trigger_source,
+                        trigger_source,
                     });
                 }
-
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO scheduled_jobs (
-                        job_type,
-                        trigger_source,
-                        key_id,
-                        status,
-                        attempt,
-                        queued_at,
-                        available_at,
-                        started_at,
-                        finished_at
-                    )
-                    VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, NULL)
-                    "#,
-                )
-                .bind(job_type)
-                .bind(trigger_source)
-                .bind(key_id)
-                .bind(attempt)
-                .bind(queued_at)
-                .bind(available_at)
-                .execute(&mut *conn)
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        let result = async {
+            Self::abandon_stale_quota_sync_job_locked(&mut conn, job_type, key_id, queued_at)
                 .await?;
-                conn.commit().await?;
-                Ok(ScheduledJobEnqueueResult {
-                    job_id: res.last_insert_rowid(),
-                    created: true,
-                    promoted: false,
-                    status: "queued".to_string(),
-                    trigger_source: trigger_source.to_string(),
-                })
-            }
-            .await;
-
-            match result {
-                Ok(outcome) => return Ok(outcome),
-                Err(err) => {
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job enqueue",
-                        retry_attempt,
-                        deadline,
-                        &err,
+            if let Some((job_id, status, current_trigger_source)) =
+                Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id).await?
+            {
+                let promoted = Self::should_promote_scheduled_job_trigger_source(
+                    job_type,
+                    &current_trigger_source,
+                    trigger_source,
+                );
+                if promoted || (trigger_source == "manual" && status == "queued") {
+                    sqlx::query(
+                        r#"UPDATE scheduled_jobs
+                           SET trigger_source = CASE WHEN ? THEN ? ELSE trigger_source END,
+                               available_at = CASE WHEN status = 'queued' THEN MIN(available_at, ?) ELSE available_at END
+                           WHERE id = ?"#,
                     )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
+                    .bind(promoted)
+                    .bind(trigger_source)
+                    .bind(queued_at)
+                    .bind(job_id)
+                    .execute(&mut *conn)
+                    .await?;
                 }
+                let effective_trigger_source = if promoted {
+                    trigger_source.to_string()
+                } else {
+                    current_trigger_source
+                };
+                return Ok::<ScheduledJobEnqueueResult, ProxyError>(ScheduledJobEnqueueResult {
+                    job_id,
+                    created: false,
+                    promoted,
+                    status,
+                    trigger_source: effective_trigger_source,
+                });
             }
+
+            let res = sqlx::query(
+                r#"
+                INSERT INTO scheduled_jobs (
+                    job_type,
+                    trigger_source,
+                    key_id,
+                    status,
+                    attempt,
+                    queued_at,
+                    available_at,
+                    started_at,
+                    finished_at
+                )
+                VALUES (?, ?, ?, 'queued', ?, ?, ?, NULL, NULL)
+                "#,
+            )
+            .bind(job_type)
+            .bind(trigger_source)
+            .bind(key_id)
+            .bind(attempt)
+            .bind(queued_at)
+            .bind(available_at)
+            .execute(&mut *conn)
+            .await?;
+            Ok(ScheduledJobEnqueueResult {
+                job_id: res.last_insert_rowid(),
+                created: true,
+                promoted: false,
+                status: "queued".to_string(),
+                trigger_source: trigger_source.to_string(),
+            })
+        }
+        .await;
+        match result {
+            Ok(outcome) => {
+                conn.finish(Ok(())).await?;
+                Ok(outcome)
+            }
+            Err(err) if crate::is_transient_sqlite_write_error(&err) => {
+                let original_error = match conn.finish(Err(err)).await {
+                    Err(err) => err,
+                    Ok(()) => unreachable!("failed control transaction committed"),
+                };
+                // The active representative is already durable. Under a short
+                // control write budget, returning it is preferable to turning
+                // a coalesced manual wake into a foreground 500 solely to
+                // promote metadata that the next unlocked scheduler pass can
+                // update safely.
+                if let Some((job_id, status, current_trigger_source)) =
+                    self.scheduled_job_lookup_active(job_type, key_id, operation).await?
+                {
+                    return Ok(ScheduledJobEnqueueResult {
+                        job_id,
+                        created: false,
+                        promoted: false,
+                        status,
+                        trigger_source: current_trigger_source,
+                    });
+                }
+                Err(original_error)
+            }
+            Err(err) => match conn.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("failed scheduled job transaction committed"),
+            },
         }
     }
 
@@ -645,25 +731,45 @@ impl KeyStore {
         message: Option<&str>,
         available_at: i64,
     ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
-        let finished_at = self.backend_time.now_ts();
-        let mut raw_conn = tokio::time::timeout(
-            Duration::from_millis(100),
-            self.pool.acquire(),
+        self.scheduled_job_finish_and_enqueue_auto_at_with_status(
+            job_id,
+            claim_generation,
+            "success",
+            job_type,
+            key_id,
+            attempt,
+            message,
+            available_at,
         )
         .await
-        .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
-        sqlx::query("PRAGMA busy_timeout = 100")
-            .execute(&mut *raw_conn)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn scheduled_job_finish_and_enqueue_auto_at_with_status(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+        status: &str,
+        job_type: &str,
+        key_id: Option<&str>,
+        attempt: i64,
+        message: Option<&str>,
+        available_at: i64,
+    ) -> Result<ScheduledJobEnqueueResult, ProxyError> {
+        let finished_at = self.backend_time.now_ts();
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
             .await?;
-        let mut conn = ImmediateSqliteTransaction::begin(raw_conn).await?;
         let result = async {
             // A deferred online slice must not turn a short SQLite writer conflict
             // into the scheduler's long retry window.
             let updated = sqlx::query(
                 r#"UPDATE scheduled_jobs
-                   SET status = 'success', message = ?, finished_at = ?
+                   SET status = ?, message = ?, finished_at = ?
                    WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
             )
+            .bind(status)
             .bind(message)
             .bind(finished_at)
             .bind(job_id)
@@ -729,19 +835,13 @@ impl KeyStore {
         .await;
         match result {
             Ok(result) => {
-                sqlx::query(&format!(
-                    "PRAGMA busy_timeout = {}",
-                    SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
-                ))
-                .execute(&mut *conn)
-                .await?;
-                conn.commit().await?;
+                conn.finish(Ok(())).await?;
                 Ok(result)
             }
-            Err(err) => {
-                let _ = conn.rollback().await;
-                Err(err)
-            }
+            Err(err) => match conn.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("failed control transaction cannot commit"),
+            },
         }
     }
 
@@ -766,11 +866,15 @@ impl KeyStore {
             LIMIT ?
             "#
         );
-        sqlx::query_as::<_, (i64, String, String, Option<String>, i64, i64, i64, i64)>(&query)
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, i64, i64, i64)>(&query)
             .bind(now)
             .bind(now)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await
             .map(|rows| {
                 rows.into_iter()
@@ -790,18 +894,99 @@ impl KeyStore {
                     )
                     .collect()
             })
-            .map_err(ProxyError::from)
+            .map_err(ProxyError::from);
+        let close = conn.close().await;
+        match (result, close) {
+            (Ok(rows), Ok(())) => Ok(rows),
+            (Err(err), _) | (_, Err(err)) => Err(err),
+        }
+    }
+
+    pub(crate) async fn fetch_next_queued_scheduled_job_excluding_types(
+        &self,
+        excluded_job_types: &[&str],
+    ) -> Result<Option<QueuedScheduledJob>, ProxyError> {
+        if excluded_job_types.is_empty() {
+            return Ok(self.fetch_queued_scheduled_jobs(1).await?.into_iter().next());
+        }
+
+        let now = self.backend_time.now_ts();
+        let priority_sql = Self::scheduled_job_effective_priority_sql(
+            "job_type",
+            "trigger_source",
+            "queued_at",
+        );
+        let placeholders = std::iter::repeat_n("?", excluded_job_types.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            r#"
+            SELECT id, job_type, trigger_source, key_id, attempt, queued_at, available_at,
+                   {priority_sql} AS effective_priority
+            FROM scheduled_jobs
+            WHERE status = 'queued'
+              AND available_at <= ?
+              AND job_type NOT IN ({placeholders})
+            ORDER BY effective_priority ASC, available_at ASC, queued_at ASC, id ASC
+            LIMIT 1
+            "#,
+        );
+        let mut query = sqlx::query_as::<_, (i64, String, String, Option<String>, i64, i64, i64, i64)>(&query)
+            .bind(now)
+            .bind(now);
+        for job_type in excluded_job_types {
+            query = query.bind(*job_type);
+        }
+
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = query
+            .fetch_optional(&mut *conn)
+            .await
+            .map(|row| {
+                row.map(
+                    |(id, job_type, trigger_source, key_id, attempt, queued_at, available_at, effective_priority)| {
+                        QueuedScheduledJob {
+                            id,
+                            job_type,
+                            trigger_source,
+                            key_id,
+                            attempt,
+                            queued_at,
+                            available_at,
+                            effective_priority,
+                        }
+                    },
+                )
+            })
+            .map_err(ProxyError::from);
+        let close = conn.close().await;
+        match (result, close) {
+            (Ok(job), Ok(())) => Ok(job),
+            (Err(err), _) | (_, Err(err)) => Err(err),
+        }
     }
 
     pub(crate) async fn next_queued_scheduled_job_available_at(
         &self,
     ) -> Result<Option<i64>, ProxyError> {
-        sqlx::query_scalar(
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = sqlx::query_scalar(
             "SELECT MIN(available_at) FROM scheduled_jobs WHERE status = 'queued'",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await
-        .map_err(ProxyError::from)
+        .map_err(ProxyError::from);
+        let close = conn.close().await;
+        match (result, close) {
+            (Ok(available_at), Ok(())) => Ok(available_at),
+            (Err(err), _) | (_, Err(err)) => Err(err),
+        }
     }
 
     pub(crate) async fn scheduled_job_mark_running(
@@ -809,11 +994,11 @@ impl KeyStore {
         job_id: i64,
     ) -> Result<Option<JobLog>, ProxyError> {
         let started_at = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            let result = async {
-                let mut conn = begin_immediate_sqlite_connection(&self.pool).await?;
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = async {
                 let updated = sqlx::query(
                     r#"
                     UPDATE scheduled_jobs
@@ -831,7 +1016,6 @@ impl KeyStore {
                 .execute(&mut *conn)
                 .await?;
                 if updated.rows_affected() == 0 {
-                    conn.commit().await?;
                     return Ok::<Option<JobLog>, ProxyError>(None);
                 }
                 let row = sqlx::query_as::<
@@ -874,7 +1058,6 @@ impl KeyStore {
                 .bind(job_id)
                 .fetch_optional(&mut *conn)
                 .await?;
-                conn.commit().await?;
                 Ok(row.map(
                     |(
                         id,
@@ -906,23 +1089,15 @@ impl KeyStore {
                 ))
             }
             .await;
-
-            match result {
-                Ok(job) => return Ok(job),
-                Err(err) => {
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job mark running",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
+        match result {
+            Ok(job) => {
+                conn.finish(Ok(())).await?;
+                Ok(job)
+            }
+            Err(err) => {
+                match conn.finish(Err(err)).await {
+                    Err(err) => Err(err),
+                    Ok(()) => unreachable!("failed scheduled job transaction committed"),
                 }
             }
         }
@@ -1011,6 +1186,10 @@ impl KeyStore {
         job_id: i64,
         claim_generation: i64,
     ) -> Result<bool, ProxyError> {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::ScheduledJobControl)
+            .await?;
         let current: i64 = sqlx::query_scalar(
             r#"
             SELECT EXISTS(
@@ -1022,8 +1201,9 @@ impl KeyStore {
         )
         .bind(job_id)
         .bind(claim_generation)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
+        conn.close().await?;
         Ok(current != 0)
     }
 
@@ -1035,77 +1215,66 @@ impl KeyStore {
         attempt: i64,
     ) -> Result<Option<i64>, ProxyError> {
         let now = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            let result = async {
-                let mut conn = begin_immediate_sqlite_connection(&self.pool).await?;
-                Self::abandon_stale_quota_sync_job_locked(&mut conn, job_type, key_id, now).await?;
-                if Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id)
-                    .await?
-                    .is_some()
-                {
-                    conn.commit().await?;
-                    return Ok::<Option<i64>, ProxyError>(None);
-                }
-                let res = sqlx::query(
-                    r#"
-                    INSERT INTO scheduled_jobs (
-                        job_type,
-                        trigger_source,
-                        key_id,
-                        status,
-                        attempt,
-                        queued_at,
-                        available_at,
-                        claim_generation,
-                        started_at,
-                        finished_at
-                    )
-                    VALUES (?, ?, ?, 'running', ?, ?, ?, 1, ?, NULL)
-                    "#,
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = async {
+            Self::abandon_stale_quota_sync_job_locked(&mut conn, job_type, key_id, now).await?;
+            if Self::scheduled_job_lookup_active_locked(&mut conn, job_type, key_id)
+                .await?
+                .is_some()
+            {
+                return Ok::<Option<i64>, ProxyError>(None);
+            }
+            let res = sqlx::query(
+                r#"
+                INSERT INTO scheduled_jobs (
+                    job_type,
+                    trigger_source,
+                    key_id,
+                    status,
+                    attempt,
+                    queued_at,
+                    available_at,
+                    claim_generation,
+                    started_at,
+                    finished_at
                 )
-                .bind(job_type)
-                .bind(trigger_source)
-                .bind(key_id)
-                .bind(attempt)
-                .bind(now)
-                .bind(now)
-                .bind(now)
-                .execute(&mut *conn)
-                .await?;
-                conn.commit().await?;
-                Ok(Some(res.last_insert_rowid()))
+                VALUES (?, ?, ?, 'running', ?, ?, ?, 1, ?, NULL)
+                "#,
+            )
+            .bind(job_type)
+            .bind(trigger_source)
+            .bind(key_id)
+            .bind(attempt)
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+            Ok(Some(res.last_insert_rowid()))
+        }
+        .await;
+        match result {
+            Ok(job_id) => {
+                conn.finish(Ok(())).await?;
+                Ok(job_id)
             }
-            .await;
-
-            match result {
-                Ok(job_id) => return Ok(job_id),
-                Err(err) => {
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job claim",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
+            Err(err) => match conn.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("failed scheduled job transaction committed"),
+            },
         }
     }
 
     pub(crate) async fn abandon_active_scheduled_jobs(&self) -> Result<u64, ProxyError> {
         let now = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            match sqlx::query(
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = sqlx::query(
                 r#"
                 UPDATE scheduled_jobs
                 SET status = CASE
@@ -1146,30 +1315,22 @@ impl KeyStore {
                     )
                   AND finished_at IS NULL
                 "#,
-            )
-            .bind(now)
-            .bind(now.saturating_add(30))
-            .execute(&self.pool)
-            .await
-            {
-                Ok(result) => return Ok(result.rows_affected()),
-                Err(err) => {
-                    let err = ProxyError::Database(err);
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job abandon",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
+        )
+        .bind(now)
+        .bind(now.saturating_add(30))
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(ProxyError::Database);
+        match result {
+            Ok(rows) => {
+                conn.finish(Ok(())).await?;
+                Ok(rows)
             }
+            Err(err) => match conn.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("failed control transaction cannot commit"),
+            },
         }
     }
 
@@ -1179,30 +1340,58 @@ impl KeyStore {
 
     pub(crate) async fn recover_stale_scheduled_jobs(&self) -> Result<u64, ProxyError> {
         let now = self.backend_time.now_ts();
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
         let result = sqlx::query(
             r#"UPDATE scheduled_jobs
                SET status = 'queued',
                    started_at = NULL,
                    finished_at = NULL,
-                   available_at = ?,
+                   available_at = CASE
+                       WHEN job_type = 'request_logs_gc' THEN ?
+                       ELSE ?
+                   END,
                    claim_generation = claim_generation + 1,
                    message = CASE
                        WHEN job_type = 'ha_outbox_gc' THEN 'deferred=stale_recovery'
-                       ELSE 'deferred=stale_reconciliation_recovery'
+                       WHEN job_type = 'upstream_reconciliation' THEN 'deferred=stale_reconciliation_recovery'
+                       WHEN job_type = 'request_logs_gc' THEN 'deferred=stale_request_logs_gc_recovery'
+                       ELSE 'deferred=stale_control_recovery'
                    END
                WHERE status = 'running'
                  AND started_at IS NOT NULL
                  AND (
                      (job_type = 'ha_outbox_gc' AND started_at <= ?)
                      OR (job_type = 'upstream_reconciliation' AND started_at <= ?)
+                     OR (job_type = 'request_logs_gc' AND started_at <= ?)
+                     OR (
+                         job_type NOT IN ('ha_outbox_gc', 'upstream_reconciliation', 'request_logs_gc', 'db_compaction')
+                         AND started_at <= ?
+                     )
                  )"#,
         )
+        .bind(now.saturating_add(300))
         .bind(now.saturating_add(30))
         .bind(now.saturating_sub(120))
         .bind(now.saturating_sub(60))
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
+        .bind(now.saturating_sub(120))
+        .bind(now.saturating_sub(300))
+        .execute(&mut *conn)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(ProxyError::Database);
+        match result {
+            Ok(rows) => {
+                conn.finish(Ok(())).await?;
+                Ok(rows)
+            }
+            Err(err) => match conn.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("failed control transaction cannot commit"),
+            },
+        }
     }
 
     pub(crate) async fn scheduled_job_finish(
@@ -1212,39 +1401,22 @@ impl KeyStore {
         message: Option<&str>,
     ) -> Result<(), ProxyError> {
         let finished_at = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            match sqlx::query(
-                r#"UPDATE scheduled_jobs SET status = ?, message = ?, finished_at = ? WHERE id = ?"#,
-            )
-            .bind(status)
-            .bind(message)
-            .bind(finished_at)
-            .bind(job_id)
-            .execute(&self.pool)
-            .await
-            {
-                Ok(_) => break,
-                Err(err) => {
-                    let err = ProxyError::Database(err);
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job finish",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        Ok(())
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = sqlx::query(
+            r#"UPDATE scheduled_jobs SET status = ?, message = ?, finished_at = ? WHERE id = ?"#,
+        )
+        .bind(status)
+        .bind(message)
+        .bind(finished_at)
+        .bind(job_id)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(ProxyError::Database);
+        conn.finish(result).await
     }
 
     pub(crate) async fn scheduled_job_finish_claimed(
@@ -1255,47 +1427,31 @@ impl KeyStore {
         message: Option<&str>,
     ) -> Result<(), ProxyError> {
         let finished_at = self.backend_time.now_ts();
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            match sqlx::query(
-                r#"UPDATE scheduled_jobs
-                   SET status = ?, message = ?, finished_at = ?
-                   WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
-            )
-            .bind(status)
-            .bind(message)
-            .bind(finished_at)
-            .bind(job_id)
-            .bind(claim_generation)
-            .execute(&self.pool)
-            .await
-            {
-                Ok(updated) if updated.rows_affected() == 0 => {
-                    return Err(ProxyError::StaleClaim {
-                        job_id,
-                        claim_generation,
-                    });
-                }
-                Ok(_) => return Ok(()),
-                Err(err) => {
-                    let err = ProxyError::Database(err);
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job finish claimed",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let write_result = match sqlx::query(
+            r#"UPDATE scheduled_jobs
+               SET status = ?, message = ?, finished_at = ?
+               WHERE id = ? AND status = 'running' AND claim_generation = ?"#,
+        )
+        .bind(status)
+        .bind(message)
+        .bind(finished_at)
+        .bind(job_id)
+        .bind(claim_generation)
+        .execute(&mut *conn)
+        .await
+        {
+            Ok(updated) if updated.rows_affected() == 0 => Err(ProxyError::StaleClaim {
+                job_id,
+                claim_generation,
+            }),
+            Ok(_) => Ok(()),
+            Err(err) => Err(ProxyError::Database(err)),
+        };
+        conn.finish(write_result).await
     }
 
     pub(crate) async fn scheduled_job_update_message(
@@ -1303,34 +1459,17 @@ impl KeyStore {
         job_id: i64,
         message: Option<&str>,
     ) -> Result<(), ProxyError> {
-        let deadline = self.backend_time.deadline_after(Duration::from_secs(10));
-        let mut retry_attempt = 0usize;
-        loop {
-            match sqlx::query(r#"UPDATE scheduled_jobs SET message = ? WHERE id = ?"#)
-                .bind(message)
-                .bind(job_id)
-                .execute(&self.pool)
-                .await
-            {
-                Ok(_) => break,
-                Err(err) => {
-                    let err = ProxyError::Database(err);
-                    if sleep_before_sqlite_transient_write_retry(
-                        &self.backend_time,
-                        "scheduled job update message",
-                        retry_attempt,
-                        deadline,
-                        &err,
-                    )
-                    .await
-                    {
-                        retry_attempt += 1;
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        Ok(())
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ScheduledJobControl)
+            .await?;
+        let result = sqlx::query(r#"UPDATE scheduled_jobs SET message = ? WHERE id = ?"#)
+            .bind(message)
+            .bind(job_id)
+            .execute(&mut *conn)
+            .await
+            .map(|_| ())
+            .map_err(ProxyError::Database);
+        conn.finish(result).await
     }
 }

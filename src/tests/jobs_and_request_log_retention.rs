@@ -64,33 +64,8 @@ async fn quota_subject_lock_retries_transient_sqlite_write_lock() {
 }
 
 #[tokio::test]
-async fn scheduled_job_start_retries_transient_sqlite_write_lock() {
-    let db_path = temp_db_path("scheduled-job-start-retries-sqlite-lock");
-    let db_str = db_path.to_string_lossy().to_string();
-    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
-        .await
-        .expect("proxy created");
-    let release = hold_sqlite_write_lock_for_test(&proxy.key_store.pool).await;
-    let job_type = format!(
-        "sqlite_lock_retry_test_{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    );
-
-    let job_id = proxy
-        .scheduled_job_start(&job_type, None, 1)
-        .await
-        .expect("scheduled job starts after transient sqlite write lock");
-    assert!(job_id > 0);
-    release.await.expect("release task");
-
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-}
-
-#[tokio::test]
-async fn abandon_running_scheduled_jobs_retries_transient_sqlite_write_lock() {
-    let db_path = temp_db_path("scheduled-job-abandon-retries-sqlite-lock");
+async fn abandon_running_scheduled_jobs_defers_to_the_next_stale_recovery_after_writer_lock() {
+    let db_path = temp_db_path("scheduled-job-abandon-defers-sqlite-lock");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
@@ -101,12 +76,27 @@ async fn abandon_running_scheduled_jobs_retries_transient_sqlite_write_lock() {
         .expect("scheduled job starts");
     let release = hold_sqlite_write_lock_for_test(&proxy.key_store.pool).await;
 
+    let started = Instant::now();
+    let err = proxy
+        .abandon_running_scheduled_jobs()
+        .await
+        .expect_err("short control transaction must yield to the held writer lock");
+    assert!(
+        is_transient_sqlite_write_error(&err),
+        "expected bounded SQLite writer contention error, got {err}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "stale recovery must not wait behind the writer lock (elapsed={:?})",
+        started.elapsed()
+    );
+    release.await.expect("release task");
+
     let abandoned = proxy
         .abandon_running_scheduled_jobs()
         .await
-        .expect("abandon retries after transient sqlite write lock");
+        .expect("the next stale recovery persists after the lock releases");
     assert_eq!(abandoned, 1);
-    release.await.expect("release task");
 
     let status: String = sqlx::query_scalar("SELECT status FROM scheduled_jobs WHERE id = ?")
         .bind(job_id)
@@ -1086,7 +1076,7 @@ async fn linuxdo_tag_binding_refresh_rewrites_correct_binding_periodically() {
     let _ = std::fs::remove_file(db_path);
 }
 
-async fn seed_request_log_for_gc(pool: &SqlitePool, created_at: i64, path: &str) -> i64 {
+pub(super) async fn seed_request_log_for_gc(pool: &SqlitePool, created_at: i64, path: &str) -> i64 {
     sqlx::query_scalar(
         r#"
         INSERT INTO observability.request_logs (
@@ -1108,6 +1098,11 @@ async fn seed_request_log_for_gc(pool: &SqlitePool, created_at: i64, path: &str)
     .fetch_one(pool)
     .await
     .expect("seed request log")
+}
+
+async fn prepare_request_log_body_gc(_proxy: &TavilyProxy) {
+    // The online scanner uses the durable request-log time index and must not
+    // create a partial index while foreground requests may be writing.
 }
 
 async fn seed_auth_token_log_reference_for_gc(
@@ -1697,6 +1692,7 @@ async fn request_logs_gc_clears_expired_body_without_deleting_visible_row() {
     )
     .await
     .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let mut settings = proxy.get_system_settings().await.expect("load settings");
     settings.request_log_retention.max_log_retention_days = 32;
     settings.request_log_retention.global.business_body_days = 1;
@@ -1880,6 +1876,7 @@ async fn request_logs_gc_reevaluates_persisted_body_retention_days_after_policy_
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
 
     let mut settings = proxy.get_system_settings().await.expect("load settings");
     settings.request_log_retention.global.business_body_days = 7;
@@ -1960,6 +1957,7 @@ async fn request_logs_gc_honors_debug_sharing_opt_out_for_persisted_debug_profil
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let user = proxy
         .upsert_oauth_account(&OAuthAccountProfile {
             provider: "github".to_string(),
@@ -2058,6 +2056,7 @@ async fn request_logs_gc_scans_past_unexpired_body_to_clear_later_expired_body()
     )
     .await
     .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let user = proxy
         .upsert_oauth_account(&OAuthAccountProfile {
             provider: "github".to_string(),
@@ -2205,6 +2204,7 @@ async fn request_logs_gc_resumes_body_scan_after_unexpired_scan_limit() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let user = proxy
         .upsert_oauth_account(&OAuthAccountProfile {
             provider: "github".to_string(),
@@ -2328,6 +2328,7 @@ async fn request_logs_gc_restarts_body_scan_when_cursor_restart_time_is_due() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
 
     let now = Utc::now().timestamp();
     let expired_id: i64 = sqlx::query_scalar(
@@ -2395,6 +2396,7 @@ async fn request_logs_gc_continues_when_body_scan_only_advances_cursor() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let user = proxy
         .upsert_oauth_account(&OAuthAccountProfile {
             provider: "github".to_string(),
@@ -2467,14 +2469,17 @@ async fn request_logs_gc_continues_when_body_scan_only_advances_cursor() {
     let report = proxy
         .gc_request_logs_with_options(RequestLogsGcOptions {
             batch_size: 1,
-            max_batches: 3,
+            max_batches: 10,
             max_runtime_secs: 30,
             inter_batch_sleep_ms: 0,
         })
         .await
         .expect("run multi-batch request logs gc");
     assert_eq!(report.cleaned_request_log_bodies, 1);
-    assert!(report.completed);
+    assert!(
+        report.completed,
+        "expected the final cursor pass to complete: {report:?}"
+    );
     assert!(!report.has_more);
     assert!(report.unique_retention_users == 1 && report.retention_context_cache_hits >= 63);
 
@@ -2499,6 +2504,7 @@ async fn request_logs_gc_preserves_cursor_until_retained_bodies_expire() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let user = proxy
         .upsert_oauth_account(&OAuthAccountProfile {
             provider: "github".to_string(),
@@ -2875,6 +2881,7 @@ async fn request_logs_gc_bounded_deletes_old_rows_and_preserves_recent_rows() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let now = Utc::now().timestamp();
     let old_ts = now - 40 * 24 * 60 * 60;
     let recent_ts = now - 2 * 24 * 60 * 60;
@@ -2937,6 +2944,7 @@ async fn request_logs_gc_bounded_reports_partial_and_resumes() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let old_ts = Utc::now().timestamp() - 40 * 24 * 60 * 60;
     for idx in 0..3 {
         seed_request_log_for_gc(&proxy.key_store.pool, old_ts + idx, "/mcp").await;
@@ -2986,6 +2994,7 @@ async fn request_logs_gc_retries_transient_sqlite_write_lock() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let old_ts = Utc::now().timestamp() - 40 * 24 * 60 * 60;
     let old_id = seed_request_log_for_gc(&proxy.key_store.pool, old_ts, "/mcp").await;
     seal_request_log_day_for_gc(&proxy.key_store.pool, old_ts).await;
@@ -3028,6 +3037,7 @@ async fn request_logs_gc_body_cleanup_retries_transient_sqlite_write_lock() {
     let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
         .await
         .expect("proxy created");
+    prepare_request_log_body_gc(&proxy).await;
     let mut settings = proxy.get_system_settings().await.expect("load settings");
     settings.request_log_retention.max_log_retention_days = 32;
     settings.request_log_retention.global.business_body_days = 0;

@@ -65,6 +65,17 @@ impl DashboardRollupIntegrityWorkItem {
 }
 
 impl KeyStore {
+    pub(crate) fn dashboard_overview_refresh_defer_reason(&self) -> Option<SqliteAdmissionDeferReason> {
+        self.sqlite_runtime.dashboard_read_defer_reason()
+    }
+
+    pub(crate) fn try_admit_dashboard_rollup_integrity(
+        &self,
+    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
+        self.sqlite_runtime
+            .try_admit_maintenance_bulk(SqliteOperation::DashboardIntegrityWrite)
+    }
+
     pub(crate) async fn reset_dashboard_rollup_integrity_pending_work_on_startup(
         &self,
     ) -> Result<(), ProxyError> {
@@ -94,6 +105,10 @@ impl KeyStore {
     pub(crate) async fn dashboard_rollup_integrity_status(
         &self,
     ) -> Result<DashboardRollupIntegrityStatus, ProxyError> {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::DashboardIntegrityWrite)
+            .await?;
         let now = self.backend_time.now_ts();
         let state = sqlx::query(
             r#"
@@ -102,7 +117,7 @@ impl KeyStore {
             WHERE id = 1
             "#,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
         let unverified_bucket_count: i64 = sqlx::query_scalar(
             r#"
@@ -115,7 +130,7 @@ impl KeyStore {
             )
             "#,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
         let DashboardRollupIntegrityStateRow {
             last_verified_at,
@@ -141,7 +156,7 @@ impl KeyStore {
             "SELECT MIN(created_at) FROM request_logs WHERE visibility = ?",
         )
         .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
         let hot_backlog_bucket_count = hot_cursor
             .zip(hot_fence)
@@ -173,14 +188,16 @@ impl KeyStore {
         } else {
             "healthy"
         };
-        Ok(DashboardRollupIntegrityStatus {
+        let result = DashboardRollupIntegrityStatus {
             state: state.to_string(),
             last_verified_at,
             next_attempt_at,
             unverified_bucket_count: unverified_bucket_count
                 + hot_backlog_bucket_count
                 + history_backlog_bucket_count,
-        })
+        };
+        conn.close().await?;
+        Ok(result)
     }
 
     pub(crate) async fn run_dashboard_rollup_integrity_slice(
@@ -554,11 +571,7 @@ impl KeyStore {
             });
         }
 
-        if self
-            .best_effort_flush_request_stats_writes_for_maintenance(
-                "dashboard_rollup_integrity_before_replace",
-            )
-            .await?
+        if self.request_stats_durable_freshness_for_maintenance()
             != RequestStatsReadFreshness::Fresh
         {
             self.persist_dashboard_rollup_integrity_work_item(&item, now).await?;
@@ -1416,43 +1429,82 @@ impl KeyStore {
         &self,
         threshold: i64,
     ) -> Result<Option<i64>, ProxyError> {
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::DashboardIntegrityWrite)
+            .await?;
         let oldest: Option<i64> = sqlx::query_scalar(
             "SELECT MIN(created_at) FROM request_logs WHERE visibility = ? AND created_at < ?",
         )
         .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
         .bind(threshold)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
         let Some(oldest) = oldest else {
+            conn.close().await?;
             return Ok(Some(threshold));
         };
         let day_start = local_day_bucket_start_utc_ts(oldest);
         let day_end = next_local_day_start_utc_ts(day_start);
         if day_end > threshold {
+            conn.close().await?;
             return Ok(None);
         }
         let sealed: Option<String> = sqlx::query_scalar(
             "SELECT counts_json FROM dashboard_rollup_daily_seals WHERE bucket_start = ?",
         )
         .bind(day_start)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
         let Some(counts_json) = sealed else {
+            conn.close().await?;
             return Ok(None);
         };
         let expected: DashboardRequestRollupCounts = serde_json::from_str(&counts_json)
             .map_err(|err| ProxyError::Other(format!("invalid dashboard day seal: {err}")))?;
-        let minute_actual = self
-            .load_dashboard_rollup_counts(day_start, day_end)
-            .await?
-            .into_values()
+        let minute_rows = sqlx::query(
+            r#"
+            SELECT bucket_start, total_requests, success_count, error_count, quota_exhausted_count,
+                   valuable_success_count, valuable_failure_count, valuable_failure_429_count,
+                   other_success_count, other_failure_count, unknown_count, mcp_non_billable,
+                   mcp_billable, api_non_billable, api_billable, local_estimated_credits
+            FROM dashboard_request_rollup_buckets
+            WHERE bucket_secs = ? AND bucket_start >= ? AND bucket_start < ?
+            "#,
+        )
+        .bind(SECS_PER_MINUTE)
+        .bind(day_start)
+        .bind(day_end)
+        .fetch_all(&mut *conn)
+        .await?;
+        let minute_actual = minute_rows
+            .into_iter()
+            .map(|row| Self::dashboard_rollup_counts_from_row(&row))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .fold(DashboardRequestRollupCounts::default(), |mut total, value| {
                 total.add(value);
                 total
             });
-        let daily_actual = self
-            .load_dashboard_rollup_bucket(day_start, SECS_PER_DAY)
-            .await?;
+        let daily_row = sqlx::query(
+            r#"
+            SELECT total_requests, success_count, error_count, quota_exhausted_count,
+                   valuable_success_count, valuable_failure_count, valuable_failure_429_count,
+                   other_success_count, other_failure_count, unknown_count, mcp_non_billable,
+                   mcp_billable, api_non_billable, api_billable, local_estimated_credits
+            FROM dashboard_request_rollup_buckets
+            WHERE bucket_start = ? AND bucket_secs = ?
+            "#,
+        )
+        .bind(day_start)
+        .bind(SECS_PER_DAY)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let daily_actual = daily_row
+            .map(|row| Self::dashboard_rollup_counts_from_row(&row))
+            .transpose()?
+            .unwrap_or_default();
+        conn.close().await?;
         if minute_actual != expected || daily_actual != expected {
             return Ok(None);
         }

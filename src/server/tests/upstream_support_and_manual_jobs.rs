@@ -1994,6 +1994,57 @@ pub(super) async fn manual_jobs_trigger_coalesces_running_job_and_returns_repres
 }
 
 #[tokio::test]
+pub(super) async fn manual_ha_gc_trigger_rejects_without_a_synthetic_job_when_admission_fails() {
+    let db_path = temp_db_path("manual-ha-gc-trigger-no-synthetic-job");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
+    let release = hold_sqlite_write_lock_for_manual_trigger_test(&db_str, Duration::from_secs(1)).await;
+    let admin_addr = spawn_keys_admin_server(
+        proxy.clone(),
+        ForwardAuthConfig::new(None, None, None, None),
+        true,
+    )
+    .await;
+
+    let response = Client::new()
+        .post(format!("http://{admin_addr}/api/jobs/trigger"))
+        .json(&serde_json::json!({ "jobType": "ha_outbox_gc" }))
+        .send()
+        .await
+        .expect("manual HA GC trigger response");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "a trigger that could not persist a representative must not claim acceptance"
+    );
+    release.await.expect("release writer lock");
+
+    let inspection_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&db_str)
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .expect("open inspection pool");
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM scheduled_jobs WHERE job_type = 'ha_outbox_gc'",
+    )
+    .fetch_one(&inspection_pool)
+    .await
+    .expect("count HA GC representatives");
+    assert_eq!(rows, 0, "no durable job exists after rejected admission");
+
+    let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(format!("{db_str}-shm"));
+    let _ = std::fs::remove_file(format!("{db_str}-wal"));
+}
+
+#[tokio::test]
 pub(super) async fn manual_jobs_trigger_coalesces_running_manual_job_without_waiting_for_write_lock() {
     let db_path = temp_db_path("manual-jobs-trigger-running-manual-fast-path");
     let db_str = db_path.to_string_lossy().to_string();
@@ -2922,86 +2973,4 @@ pub(super) struct LinuxDoOauthMockBehavior {
     pub(super) refresh_error: Option<(StatusCode, Value)>,
 }
 
-pub(super) async fn spawn_linuxdo_oauth_mock_server_with_behavior(
-    behavior: LinuxDoOauthMockBehavior,
-) -> SocketAddr {
-    let app = Router::new()
-        .route(
-            "/oauth2/token",
-            post({
-                let behavior = behavior.clone();
-                move |Form(form): Form<HashMap<String, String>>| {
-                    let behavior = behavior.clone();
-                    async move {
-                        match form.get("grant_type").map(String::as_str) {
-                            Some("authorization_code") => {
-                                let mut payload = json!({
-                                    "access_token": behavior.authorization_access_token,
-                                });
-                                if let Some(refresh_token) =
-                                    behavior.authorization_refresh_token.as_deref()
-                                {
-                                    payload["refresh_token"] = json!(refresh_token);
-                                }
-                                (StatusCode::OK, Json(payload))
-                            }
-                            Some("refresh_token") => {
-                                if let Some((status, payload)) = behavior.refresh_error.clone() {
-                                    return (status, Json(payload));
-                                }
-                                let mut payload = json!({
-                                    "access_token": behavior.refresh_access_token,
-                                });
-                                if let Some(refresh_token) =
-                                    behavior.refresh_refresh_token.as_deref()
-                                {
-                                    payload["refresh_token"] = json!(refresh_token);
-                                }
-                                (StatusCode::OK, Json(payload))
-                            }
-                            _ => (
-                                StatusCode::BAD_REQUEST,
-                                Json(json!({ "error": "unsupported_grant_type" })),
-                            ),
-                        }
-                    }
-                }
-            }),
-        )
-        .route(
-            "/api/user",
-            get({
-                let behavior = behavior.clone();
-                move |headers: HeaderMap| {
-                    let behavior = behavior.clone();
-                    async move {
-                        let authorization = headers
-                            .get(axum::http::header::AUTHORIZATION)
-                            .and_then(|value| value.to_str().ok());
-                        let auth_expected =
-                            format!("Bearer {}", behavior.authorization_access_token);
-                        let refresh_expected = format!("Bearer {}", behavior.refresh_access_token);
-                        if authorization == Some(auth_expected.as_str()) {
-                            return (StatusCode::OK, Json(behavior.authorization_profile));
-                        }
-                        if authorization == Some(refresh_expected.as_str()) {
-                            return (StatusCode::OK, Json(behavior.refresh_profile));
-                        }
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            Json(json!({ "error": "invalid_token" })),
-                        )
-                    }
-                }
-            }),
-        );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service())
-            .await
-            .unwrap();
-    });
-    addr
-}
+include!("upstream_support_and_manual_jobs/oauth_mock_server.rs");

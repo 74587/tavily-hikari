@@ -127,7 +127,10 @@ source when a usable persisted runtime already exists.
   `job_type`.
 - Manual scheduled-job triggers must use the same execution path as scheduler runs, coalesce onto an
   existing `queued`/`running` representative row of the same logical job, and return that
-  representative `job_id` instead of rejecting on a shared execution gate timeout.
+  representative `job_id` instead of rejecting on a shared execution gate timeout. If foreground
+  SQLite admission cannot persist an `ha_outbox_gc` representative, the endpoint returns `503`; it
+  must not claim `202` acceptance with a synthetic job id. The controller/watchdog owns automatic
+  recovery without a background retry loop.
 - Manual trigger responses may add queue-state hints such as representative `status`,
   `coalesced=true`, and `promoted=true` as long as the existing `jobId` / `jobType` /
   `triggerSource` contract remains backward compatible.
@@ -157,7 +160,14 @@ source when a usable persisted runtime already exists.
   trigger may reuse and immediately unlock its queued representative row. Body cleanup must cache
   retention context per unique user for a bounded pass, and its `(created_at, id)` partial body
   cursor index must be built by a low-priority post-ready maintenance task rather than schema
-  bootstrap.
+  bootstrap. The online scheduler obtains `maintenance_bulk` admission before acquiring a
+  connection; when a required local-day seal is absent it records one typed incomplete result and
+  defers instead of repeating raw-row, reference-unlink, or rollup work in that slice.
+- The request-log GC completion and its incomplete five-minute continuation must be one fenced
+  queue transaction. If the short control transaction cannot commit, the current claim remains
+  running for the request-log stale reaper; it must not finish first and then silently lose a
+  separate continuation enqueue. A permanent GC error must retain `error` status on the completed
+  claim while still recording its delayed continuation.
 - Service startup must abandon leftover `queued` or `running` maintenance rows from the previous
   process lifetime rather than implicitly resuming them after restart, except an automatic
   `request_logs_gc` continuation that remains queued so its persisted `available_at` delay survives.
@@ -187,6 +197,16 @@ source when a usable persisted runtime already exists.
   background windows. Dashboard, summary, hourly-window, and rankings reads must serve durable data
   without acquiring a write connection or synchronously flushing; pending/flushing state may affect
   internal freshness while the existing HTTP response shape remains unchanged.
+- The three-connection application pool reserves two actual or immediately allocatable slots for
+  foreground work. Bulk maintenance takes one instance-local permit only when foreground arrival
+  rate is at most `5 rps` and the preceding five seconds contain no pool-timeout or SQLite busy
+  outcome. Admission rejection occurs before pool acquisition and records a typed deferred reason.
+- Scheduled-job metadata writes are `maintenance_control`: they use a `100ms` connection/writer
+  budget, do not wait for the bulk permit, and never start an unbounded retry task. A durable
+  representative row or claim-fenced stale recovery owns later retry.
+- Scheduler dequeue and next-wake reads are also `maintenance_control`: they acquire through the
+  same bounded operation path. If the remote-I/O slot makes the first candidate page ineligible,
+  the scheduler must perform one bounded local-only fallback lookup before yielding.
 - The same bounded in-memory buffering model may also cover other request-derived observability
   counters such as auth-token activity and account request-rate buckets, provided billing truth
   stays synchronous and owner-facing reads use durable fallback instead of inheriting any write-side
@@ -272,7 +292,8 @@ source when a usable persisted runtime already exists.
   the finish transaction; a transient conflict may use a fixed, bounded same-generation retry, or
   leave the running claim for stale reaper recovery. It must never create an unbounded background
   retry loop.
-- Reconciliation candidate selection is bounded by indexed pages before hydration. Three consecutive
+- Reconciliation candidate selection and key/cooldown hydration are bounded local bulk work before
+  any remote request; they must acquire admission and release it before remote I/O. Three consecutive
   rounds with eligible candidates but no remote attempt and exhausted local budget enter a persisted
   short local backoff with one delayed representative job. Only actual upstream 429 attempts enter
   the persisted `2/5/10/30` minute remote backoff and honor `Retry-After`.
@@ -351,8 +372,9 @@ source when a usable persisted runtime already exists.
 - A continuously incomplete request-log GC cannot prevent an aged `ha_outbox_gc` row from being
   claimed after the five-minute age window. Delayed automatic continuations remain ineligible after
   process recreation, while a manual trigger reuses and immediately unlocks the representative row.
-- Body-GC cursor queries use `observability.idx_request_logs_body_gc_cursor`, and a same-user
-  candidate page reports one retention context with cache hits for subsequent candidates.
+- Body-GC cursor queries use the schema-validated `observability.idx_request_logs_time` cursor
+  with a fixed scan window. A same-user candidate page reports one retention context with cache
+  hits for subsequent candidates. Online cleanup must not create or analyze body-specific indexes.
 - Online HA outbox GC must use a non-blocking maintenance write lease and a one-second slice
   budget. If the lease or SQLite writer is busy, it must finish the current scheduled row and
   persist a bounded continuation handoff instead of waiting through the scheduler's long retry
@@ -364,8 +386,12 @@ source when a usable persisted runtime already exists.
   slice halves its next batch before retrying. Legacy-resource cursor verification is not retention
   debt and must continue no faster than five minutes, so a clean large outbox cannot become a
   permanent fast maintenance loop. The five-minute scheduler watchdog may coalesce with the current
-  representative only when durable GC state reports channel debt; the hourly baseline sweep discovers
-  newly expired rows and the watchdog rediscovers a lost continuation within five minutes.
+  representative when durable GC state reports channel debt. When the mask is empty, it may perform only
+  a short controller-state observation-age read; an overdue observation adds its specific channel to
+  the pending mask and wakes the normal indexed, admission-gated channel probe rather than scanning an
+  outbox in the watchdog. The hourly baseline sweep
+  discovers newly expired rows and the watchdog rediscovers both lost continuations and stale empty
+  observations within five minutes.
 - Per-channel HA GC state must retain cumulative deleted rows, the last high watermark, ingress
   sequence delta, and estimated net-row delta. These are low-cost trend evidence for the read-only
   `ha_outbox_cleanup_once --dry-run` path and must not introduce an online exact `COUNT(*)`.

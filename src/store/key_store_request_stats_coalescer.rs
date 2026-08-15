@@ -53,6 +53,7 @@ pub(crate) struct RequestLogRollupInput<'a> {
     pub(crate) request_log_catalog_key: Option<RequestLogCatalogRollupKey>,
 }
 
+#[cfg(any(test, debug_assertions))]
 #[derive(Debug, Clone)]
 pub struct RequestStatsPostFlushPause {
     pub(crate) arrived: Arc<Notify>,
@@ -60,6 +61,7 @@ pub struct RequestStatsPostFlushPause {
     pub(crate) released: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[cfg(any(test, debug_assertions))]
 impl RequestStatsPostFlushPause {
     #[doc(hidden)]
     pub async fn wait_until_arrived(&self) {
@@ -89,7 +91,6 @@ impl Default for RequestStatsCoalescer {
 }
 
 impl RequestStatsCoalescer {
-    pub(crate) const MAX_PENDING_KEYS: usize = 100;
     pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
     pub(crate) fn pending_key_count(state: &RequestStatsCoalescerState) -> usize {
@@ -458,28 +459,6 @@ impl RequestStatsCoalescer {
     pub(crate) async fn pending_newest_created_at(&self) -> Option<i64> {
         let state = self.state.lock().await;
         state.newest_pending_created_at
-    }
-
-    pub(crate) async fn freshness_created_at_bounds(&self) -> Option<(i64, i64)> {
-        let state = self.state.lock().await;
-        let oldest_created_at = match (
-            state.oldest_pending_created_at,
-            state.flushing_oldest_created_at,
-        ) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        }?;
-        let newest_created_at = match (
-            state.newest_pending_created_at,
-            state.flushing_newest_created_at,
-        ) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        }
-        .unwrap_or(oldest_created_at);
-        Some((oldest_created_at, newest_created_at))
     }
 
     pub(crate) async fn pending_dashboard_freshness_signature(&self) -> [i64; 10] {

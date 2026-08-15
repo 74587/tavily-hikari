@@ -10,7 +10,7 @@ type HaOutboxGcChannelStateRow = (
     String,
 );
 const HA_GC_CHANNEL_CLAIM_STALE_SECS: i64 = 120;
-type HaGcChannelEligibility = (String, Option<i64>, i64, Option<i64>);
+type HaGcChannelEligibility = (String, Option<i64>, i64, Option<i64>, Option<i64>);
 
 #[derive(Debug, Clone, Copy)]
 struct HaGcChannelClaim {
@@ -46,7 +46,7 @@ impl HaGcController {
             }
             eligibility
                 .iter()
-                .find_map(|(name, next_retry_at, generation, claim_started_at)| {
+                .find_map(|(name, next_retry_at, generation, claim_started_at, _)| {
                 (name == candidate.as_str()
                     && next_retry_at.is_none_or(|available_at| available_at <= now)
                     && claim_started_at.is_none_or(|started_at| {
@@ -78,9 +78,9 @@ impl HaGcController {
             if pending_channel_mask & KeyStore::ha_outbox_gc_channel_mask(candidate) == 0 {
                 continue;
             }
-            let Some((_, next_retry_at, _, claim_started_at)) = eligibility
+            let Some((_, next_retry_at, _, claim_started_at, _)) = eligibility
                 .iter()
-                .find(|(name, _, _, _)| name == candidate.as_str())
+                .find(|(name, _, _, _, _)| name == candidate.as_str())
             else {
                 continue;
             };
@@ -99,9 +99,29 @@ impl HaGcController {
         }
         earliest_retry_at.map(|retry_at| retry_at.saturating_sub(now).max(1))
     }
+
+    fn stale_observation_mask(now: i64, eligibility: &[HaGcChannelEligibility]) -> i64 {
+        let observed_before = now.saturating_sub(crate::HA_OUTBOX_GC_IDLE_DISCOVERY_SECS);
+        eligibility.iter().fold(0, |mask, (name, _, _, _, observed_at)| {
+            let channel = KeyStore::ha_outbox_gc_channel_from_name(name);
+            if observed_at.is_none_or(|observed_at| observed_at <= observed_before)
+            {
+                mask | KeyStore::ha_outbox_gc_channel_mask(channel)
+            } else {
+                mask
+            }
+        })
+    }
 }
 
 impl KeyStore {
+    pub(crate) fn try_admit_ha_outbox_gc(
+        &self,
+    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
+        self.sqlite_runtime
+            .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+    }
+
     pub(crate) async fn defer_claimed_ha_gc_channel_for_busy(
         &self,
         channel: HaSyncChannel,
@@ -111,13 +131,10 @@ impl KeyStore {
         foreground_rps: i64,
         started: Instant,
     ) -> Result<HaOutboxGcReport, ProxyError> {
-        let mut raw_conn = tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
-            .await
-            .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??;
-        sqlx::query("PRAGMA busy_timeout = 100")
-            .execute(&mut *raw_conn)
+        let mut conn = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::HaOutboxGc)
             .await?;
-        let mut conn = ImmediateSqliteTransaction::begin(raw_conn).await?;
         let result = async {
             let now = self.backend_time.now_ts();
             let channel_delay_secs = crate::HA_OUTBOX_GC_DEFERRED_CONTINUATION_DELAY_SECS;
@@ -161,7 +178,7 @@ impl KeyStore {
             .execute(&mut *conn)
             .await?;
             let eligibility = sqlx::query_as::<_, HaGcChannelEligibility>(
-                "SELECT channel, next_retry_at, claim_generation, claim_started_at FROM ha_outbox_gc_channel_state",
+                "SELECT channel, next_retry_at, claim_generation, claim_started_at, last_observed_at FROM ha_outbox_gc_channel_state",
             )
             .fetch_all(&mut *conn)
             .await?;
@@ -190,31 +207,48 @@ impl KeyStore {
             })
         }
         .await;
-        match result {
-            Ok(report) => {
-                sqlx::query(&format!(
-                    "PRAGMA busy_timeout = {}",
-                    crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
-                ))
-                .execute(&mut *conn)
-                .await?;
-                conn.commit().await?;
-                Ok(report)
-            }
-            Err(err) => {
-                let _ = conn.rollback().await;
-                Err(err)
-            }
-        }
+        let report = result?;
+        conn.finish(Ok(())).await?;
+        Ok(report)
     }
 
     pub(crate) async fn ha_outbox_gc_watchdog_needed(&self) -> Result<bool, ProxyError> {
-        let pending_channel_mask: Option<i64> = sqlx::query_scalar(
-            "SELECT pending_channel_mask FROM ha_outbox_gc_state WHERE id = 'local'",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(pending_channel_mask.is_none_or(|mask| mask & 7 != 0))
+        // A zero pending mask is only a completed observation, not a permanent
+        // proof that every channel stays empty. Recheck the tiny controller
+        // state table at the scheduler's five-minute cadence so a historical
+        // channel missed by an older state writer is admitted for a fresh,
+        // indexed slice without putting an outbox scan in the watchdog.
+        let observed_before = self
+            .backend_time
+            .now_ts()
+            .saturating_sub(crate::HA_OUTBOX_GC_IDLE_DISCOVERY_SECS);
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::HaOutboxGcWatchdog)
+            .await?;
+        let result: Result<bool, ProxyError> = async {
+            let state: Option<(i64, i64)> = sqlx::query_as(
+                r#"
+                SELECT pending_channel_mask,
+                       EXISTS(
+                           SELECT 1
+                             FROM ha_outbox_gc_channel_state
+                            WHERE last_observed_at IS NULL OR last_observed_at <= ?
+                       )
+                  FROM ha_outbox_gc_state
+                 WHERE id = 'local'
+                "#,
+            )
+            .bind(observed_before)
+            .fetch_optional(&mut *conn)
+            .await?;
+            Ok(state.is_none_or(|(pending_channel_mask, discovery_due)| {
+                pending_channel_mask & 7 != 0 || discovery_due != 0
+            }))
+        }
+        .await;
+        conn.close().await?;
+        result
     }
 
     pub(crate) async fn gc_ha_outbox_online(&self) -> Result<HaOutboxGcReport, ProxyError> {
@@ -273,17 +307,14 @@ impl KeyStore {
         let started = Instant::now();
         let deadline = started + Duration::from_secs(options.max_runtime_secs.max(1));
         let mut pooled_conn = Some(
-            tokio::time::timeout(Duration::from_millis(100), self.pool.acquire())
-                .await
-                .map_err(|_| ProxyError::Database(sqlx::Error::PoolTimedOut))??,
+            self.sqlite_runtime
+                .acquire_operation_connection(SqliteOperation::HaOutboxGc)
+                .await?,
         );
         let result = async {
             let conn = pooled_conn
                 .as_mut()
                 .expect("online HA GC must own a pooled connection");
-            sqlx::query("PRAGMA busy_timeout = 100")
-                .execute(&mut **conn)
-                .await?;
             let state_now = self.backend_time.now_ts();
             let (persisted_low_pressure_since, _persisted_recovery_mode, persisted_recovery_deadline):
                 (Option<i64>, i64, Option<i64>) = sqlx::query_as(
@@ -327,18 +358,25 @@ impl KeyStore {
             )
             .fetch_one(&mut **conn)
             .await?;
-            let pending_channel_mask = if pending_channel_mask == 0 {
+            let was_completed_observation = pending_channel_mask == 0;
+            let persisted_pending_channel_mask = if was_completed_observation {
                 7
             } else {
                 pending_channel_mask & 7
             };
             let preferred = Self::ha_outbox_gc_channel_from_name(&next_channel);
             let mut eligibility = sqlx::query_as::<_, HaGcChannelEligibility>(
-                "SELECT channel, next_retry_at, claim_generation, claim_started_at FROM ha_outbox_gc_channel_state",
+                "SELECT channel, next_retry_at, claim_generation, claim_started_at, last_observed_at FROM ha_outbox_gc_channel_state",
             )
             .fetch_all(&mut **conn)
             .await?;
             let state_now = self.backend_time.now_ts();
+            // Discovery is an in-memory probe set. It must join this slice's
+            // fair rotation, but it is not durable debt until the selected
+            // channel confirms more work. Otherwise an empty unknown channel
+            // would create a one-second wake loop after every foreground burst.
+            let discovery_channel_mask = HaGcController::stale_observation_mask(state_now, &eligibility);
+            let pending_channel_mask = persisted_pending_channel_mask | discovery_channel_mask;
             let selected = HaGcController::claim_eligible_channel(
                 preferred,
                 pending_channel_mask,
@@ -348,7 +386,7 @@ impl KeyStore {
             let Some(claim) = selected else {
                 let next_retry_at = eligibility
                     .iter()
-                    .filter_map(|(name, retry_at, _, claim_started_at)| {
+                    .filter_map(|(name, retry_at, _, claim_started_at, _)| {
                         let channel = Self::ha_outbox_gc_channel_from_name(name);
                         if pending_channel_mask & Self::ha_outbox_gc_channel_mask(channel) == 0 {
                             return None;
@@ -472,12 +510,11 @@ impl KeyStore {
                     }
                 }
                 let batch_started = Instant::now();
-                let mut transaction = ImmediateSqliteTransaction::begin(
-                    batch_conn
-                        .take()
-                        .expect("online HA GC batch must retain its pooled connection"),
-                )
-                .await?;
+                let mut transaction = batch_conn
+                    .as_mut()
+                    .expect("online HA GC batch must retain its pooled connection")
+                    .begin_immediate()
+                    .await?;
                 let batch_result = async {
                     let (deleted_invalid, scanned_more_legacy, scanned_legacy_rows) =
                         Self::delete_ha_invalid_legacy_events_bounded_on_conn(
@@ -531,7 +568,7 @@ impl KeyStore {
                 let (deleted_invalid, deleted_retention, scanned_more_legacy, scanned_legacy_rows) =
                     match batch_result {
                         Ok(result) => {
-                            batch_conn = Some(transaction.commit_connection().await?);
+                            transaction.commit().await?;
                             result
                         }
                         Err(err) => {
@@ -585,9 +622,9 @@ impl KeyStore {
             let high_watermark = Self::ha_channel_high_watermark_on_conn(conn, channel).await?;
             let channel_mask = Self::ha_outbox_gc_channel_mask(channel);
             let next_pending_channel_mask = if channel_has_more {
-                pending_channel_mask | channel_mask
+                persisted_pending_channel_mask | channel_mask
             } else {
-                pending_channel_mask & !channel_mask
+                persisted_pending_channel_mask & !channel_mask
             };
             let next_channel = Self::next_ha_outbox_gc_channel(channel);
             sqlx::query(
@@ -631,23 +668,27 @@ impl KeyStore {
             };
             let channel_next_retry_at =
                 channel_continuation_delay_secs.map(|delay| now.saturating_add(delay));
-            if let Some((_, next_retry_at, generation, claim_started_at)) = eligibility
+            if let Some((_, next_retry_at, generation, claim_started_at, last_observed_at)) = eligibility
                 .iter_mut()
-                .find(|(name, _, _, _)| name == channel.as_str())
+                .find(|(name, _, _, _, _)| name == channel.as_str())
             {
                 *next_retry_at = channel_next_retry_at;
                 *generation = claim.generation;
                 *claim_started_at = None;
+                *last_observed_at = Some(now);
             }
+            let wake_channel_mask = (!completed).then(|| {
+                next_pending_channel_mask | HaGcController::stale_observation_mask(now, &eligibility)
+            });
             let continuation_delay_secs = (!completed).then(|| {
                 HaGcController::next_wake_delay_secs(
                     next_channel,
-                    next_pending_channel_mask,
+                    wake_channel_mask.expect("pending debt retains a wake mask"),
                     now,
                     &eligibility,
-                    // A fair handoff is intentionally faster than the normal
-                    // same-channel cadence: another ready channel must not sit
-                    // behind this channel's defer or five-second progression.
+                    // A durable debt channel gives another eligible channel a
+                    // prompt fair handoff. Unknown-only probes do not persist a
+                    // continuation, so they cannot form a normal-mode fast loop.
                     crate::HA_OUTBOX_GC_RECOVERY_CONTINUATION_DELAY_SECS,
                 )
             })
@@ -822,7 +863,7 @@ impl KeyStore {
                     self.defer_claimed_ha_gc_channel_for_busy(
                         channel,
                         claim.generation,
-                        pending_channel_mask,
+                        persisted_pending_channel_mask,
                         options,
                         observed_foreground_rps,
                         started,
@@ -833,13 +874,29 @@ impl KeyStore {
             }
         }
         .await;
-        if let Some(mut conn) = pooled_conn.take() {
-            let _ = sqlx::query(&format!(
-                "PRAGMA busy_timeout = {}",
-                crate::store::SQLITE_BUSY_TIMEOUT_DEFAULT.as_millis()
-            ))
-            .execute(&mut *conn)
-            .await;
+        let deleted_rows = result
+            .as_ref()
+            .map(|report| report.deleted_rows)
+            .unwrap_or_default();
+        let connection_closed = if let Some(conn) = pooled_conn.take() {
+            match conn.close().await {
+                Ok(()) => true,
+                Err(err) => {
+                    tracing::warn!(
+                        component = "ha_outbox_gc",
+                        event = "connection_cleanup_failed",
+                        error = %err,
+                        "discarded online HA GC connection after cleanup failure"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if connection_closed && deleted_rows > 0 {
+            self.sqlite_runtime
+                .release_bulk_heap_after_connection_close();
         }
         result
     }

@@ -98,8 +98,6 @@ pub async fn serve(
             "scheduled-jobs: stale queued/running cleanup warning"
         ),
     }
-    spawn_ha_standby_sync_task(state.clone());
-    spawn_ha_peer_observation_task(state.clone());
     tracing::info!(
         component = "startup",
         event = "admin_auth_modes",
@@ -560,6 +558,11 @@ pub async fn serve(
         }
     });
 
+    // Reuse the same bounded singleflight that serves cold dashboard reads so
+    // the first external clients after a rolling restart inherit its head
+    // start instead of racing a one-second cold build.
+    prewarm_dashboard_overview_snapshot(&state).await;
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     tracing::info!(
@@ -571,6 +574,11 @@ pub async fn serve(
 
     // Always-on HA tasks must stay available on standby/recovery so health, role
     // refresh, and pull-sync keep working even while business traffic is fenced.
+    // Start them after the dashboard singleflight prewarm: a cold restart must
+    // not let HA observation work consume the small SQLite pool ahead of the
+    // first administrative snapshot.
+    spawn_ha_standby_sync_task(state.clone());
+    spawn_ha_peer_observation_task(state.clone());
     spawn_ha_edgeone_authority_task(state.clone());
     spawn_ha_control_plane_gc_task(state.clone());
     spawn_background_tasks_for_current_role(state.clone()).await;
@@ -581,7 +589,10 @@ pub async fn serve(
     axum::serve(
         listener,
         router
-            .layer(axum::middleware::from_fn(db_maintenance_http_gate))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                db_maintenance_http_gate,
+            ))
             .with_state(state)
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
@@ -875,15 +886,28 @@ struct HaSyncPerfEvent<'a> {
 async fn emit_ha_sync_perf_event(
     state: &AppState,
     perf: HaSyncPerfEvent<'_>,
-) -> Result<(), ProxyError> {
+) {
     let sampling = tavily_hikari::sample_ha_perf_event(perf.event, perf.channel, perf.elapsed);
     let outbox = if sampling.capture_heavy_stats {
-        Some(
-            state
-                .proxy
-                .ha_channel_outbox_stats(perf.channel, perf.peer_node_id)
-                .await?,
-        )
+        match state
+            .proxy
+            .ha_channel_outbox_stats(perf.channel, perf.peer_node_id)
+            .await
+        {
+            Ok(stats) => Some(stats),
+            Err(_) => {
+                // Sync state has already been applied. Its sampled diagnostic
+                // must not turn a completed replication step into a retry.
+                tracing::debug!(
+                    component = "ha",
+                    event = perf.event,
+                    channel = perf.channel.as_str(),
+                    outcome = "outbox_stats_unavailable",
+                    "HA sync diagnostic sample unavailable"
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -940,7 +964,6 @@ async fn emit_ha_sync_perf_event(
             "ha perf"
         );
     }
-    Ok(())
 }
 
 fn is_ha_retryable_foreign_key_gap(
@@ -1079,7 +1102,7 @@ async fn run_ha_standby_sync_once(
                     detail: Some("baseline_applied"),
                 },
             )
-            .await?;
+            .await;
         }
 
         let target = format!(
@@ -1198,7 +1221,7 @@ async fn run_ha_standby_sync_once(
                 detail: None,
             },
         )
-        .await?;
+        .await;
         let ack_target = format!("{}/api/admin/ha/events/ack", source_url.trim_end_matches('/'));
         let _ = client
             .post(ack_target)
@@ -1540,7 +1563,6 @@ fn spawn_business_background_tasks(state: Arc<AppState>) {
     spawn_mcp_sessions_gc_scheduler(state.clone());
     spawn_mcp_session_init_backoffs_gc_scheduler(state.clone());
     spawn_request_logs_gc_scheduler(state.clone());
-    spawn_request_logs_body_gc_index_ensure_scheduler(state.clone());
     spawn_dashboard_rollup_integrity_scheduler(state.clone());
     spawn_auth_token_logs_alert_index_ensure_scheduler(state.clone());
     if state.linuxdo_oauth.is_user_sync_scheduler_enabled() {
@@ -1722,7 +1744,7 @@ async fn apply_ha_baseline_response_stream(
             detail: Some(detail),
         },
     )
-    .await?;
+    .await;
     Ok(result)
 }
 
@@ -1783,7 +1805,7 @@ async fn apply_ha_events_response_stream(
             detail: None,
         },
     )
-    .await?;
+    .await;
     Ok(result)
 }
 

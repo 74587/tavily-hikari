@@ -77,18 +77,36 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
         .scheduled_job_enqueue("ha_outbox_gc", "test", None, 1)
         .await
         .expect("enqueue control worker job");
-    let initial_claim = state
-        .proxy
-        .scheduled_job_mark_running(initial.job_id)
+    // Claim admission has its own bounded concurrency regression coverage. This
+    // fixture isolates controller wake persistence and must not depend on an
+    // unrelated 100ms test-pool control budget.
+    let initial_started_at = Utc::now().timestamp();
+    assert_eq!(
+        sqlx::query(
+            "UPDATE scheduled_jobs SET status = 'running', started_at = ?, claim_generation = claim_generation + 1 WHERE id = ? AND status = 'queued'",
+        )
+        .bind(initial_started_at)
+        .bind(initial.job_id)
+        .execute(&pool)
         .await
-        .expect("claim control worker job")
-        .expect("initial job is due");
+        .expect("claim control worker job in the isolated fixture")
+        .rows_affected(),
+        1
+    );
+    let initial_claim_generation: i64 = sqlx::query_scalar(
+        "SELECT claim_generation FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(initial.job_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read control worker claim generation");
+    assert_eq!(state.proxy.foreground_activity_rps(), 0, "test starts without foreground pressure");
     assert!(
         run_ha_outbox_gc_claimed_job(
             state.clone(),
             ClaimedScheduledJob {
-                job_id: initial_claim.id,
-                claim_generation: initial_claim.claim_generation,
+                job_id: initial.job_id,
+                claim_generation: initial_claim_generation,
                 _job_execution_gate: None,
             },
         )
@@ -125,18 +143,33 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
         .execute(&pool)
         .await
         .expect("advance continuation to its fair wake");
-    let billing_claim = state
-        .proxy
-        .scheduled_job_mark_running(continuation.0)
+    let billing_started_at = Utc::now().timestamp();
+    assert_eq!(
+        sqlx::query(
+            "UPDATE scheduled_jobs SET status = 'running', started_at = ?, claim_generation = claim_generation + 1 WHERE id = ? AND status = 'queued' AND available_at <= ?",
+        )
+        .bind(billing_started_at)
+        .bind(continuation.0)
+        .bind(billing_started_at)
+        .execute(&pool)
         .await
-        .expect("claim billing worker job")
-        .expect("fair continuation is due");
+        .expect("claim billing worker job in the isolated fixture")
+        .rows_affected(),
+        1
+    );
+    let billing_claim_generation: i64 = sqlx::query_scalar(
+        "SELECT claim_generation FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(continuation.0)
+    .fetch_one(&pool)
+    .await
+    .expect("read billing worker claim generation");
     assert!(
         run_ha_outbox_gc_claimed_job(
             state.clone(),
             ClaimedScheduledJob {
-                job_id: billing_claim.id,
-                claim_generation: billing_claim.claim_generation,
+                job_id: continuation.0,
+                claim_generation: billing_claim_generation,
                 _job_execution_gate: None,
             },
         )
@@ -149,6 +182,7 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
     .await
     .expect("read billing progress");
     assert!(!billing_remaining, "billing must advance on the fair wake");
+
 
     drop(state);
     pool.close().await;
@@ -309,6 +343,144 @@ async fn ha_gc_productive_continuation_lock_defers_to_stale_reaper() {
         "stale recovery must preserve the 30-second continuation delay"
     );
     assert_eq!(recovered.3.as_deref(), Some("deferred=stale_recovery"));
+
+    drop(state);
+    pool.close().await;
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn request_logs_gc_handoff_preserves_error_and_defers_to_stale_reaper() {
+    let db_path = temp_db_path("request-logs-gc-continuation-lock");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("create proxy");
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let queued = proxy
+        .scheduled_job_enqueue("request_logs_gc", "test", None, 1)
+        .await
+        .expect("enqueue request-log GC");
+    let claimed = proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim request-log GC")
+        .expect("request-log GC is due");
+    let lock_options = SqliteConnectOptions::new()
+        .filename(&db_str)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(Duration::from_millis(0));
+    let mut lock_conn = sqlx::SqliteConnection::connect_with(&lock_options)
+        .await
+        .expect("connect writer lock holder");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut lock_conn)
+        .await
+        .expect("hold SQLite writer lock");
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        admin_passkey: AdminPasskeyOptions::disabled(),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+        dev_open_admin: false,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+        dashboard_overview_cache: new_dashboard_overview_cache(),
+    });
+    assert!(
+        !tokio::time::timeout(
+            Duration::from_millis(500),
+            finish_request_logs_gc_with_continuation(
+                &state,
+                claimed.id,
+                claimed.claim_generation,
+                "success",
+                "incomplete=true".to_string(),
+            )
+        )
+        .await
+        .expect("request-log GC handoff must yield under writer contention")
+    );
+    let running: String = sqlx::query_scalar("SELECT status FROM scheduled_jobs WHERE id = ?")
+        .bind(claimed.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read unresolved request-log claim");
+    assert_eq!(running, "running");
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut lock_conn)
+        .await
+        .expect("release SQLite writer lock");
+    lock_conn.close().await.expect("close writer lock holder");
+    let recovery_now = Utc::now().timestamp();
+    sqlx::query("UPDATE scheduled_jobs SET started_at = ? WHERE id = ?")
+        .bind(recovery_now - 120)
+        .bind(claimed.id)
+        .execute(&pool)
+        .await
+        .expect("age unresolved request-log continuation");
+    assert_eq!(
+        state
+            .proxy
+            .recover_stale_scheduled_jobs()
+            .await
+            .expect("recover request-log GC continuation"),
+        1
+    );
+    let recovered: (String, i64, String) = sqlx::query_as(
+        "SELECT status, available_at, message FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(claimed.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read recovered request-log continuation");
+    assert_eq!(recovered.0, "queued");
+    assert!(recovered.1 >= recovery_now + 299);
+    assert_eq!(recovered.2, "deferred=stale_request_logs_gc_recovery");
+
+    sqlx::query("UPDATE scheduled_jobs SET status = 'success' WHERE id = ?")
+        .bind(claimed.id)
+        .execute(&pool)
+        .await
+        .expect("retire the recovered continuation before the error handoff case");
+
+    let failed = state
+        .proxy
+        .scheduled_job_enqueue("request_logs_gc", "test", None, 1)
+        .await
+        .expect("enqueue failing request-log GC");
+    let failed_claim = state
+        .proxy
+        .scheduled_job_mark_running(failed.job_id)
+        .await
+        .expect("claim failing request-log GC")
+        .expect("failing request-log GC is due");
+    assert!(
+        finish_request_logs_gc_with_continuation(
+            &state,
+            failed_claim.id,
+            failed_claim.claim_generation,
+            "error",
+            "error=permanent_failure".to_string(),
+        )
+        .await,
+        "error must finish the failed job and retain its continuation"
+    );
+    let failed_status: String = sqlx::query_scalar("SELECT status FROM scheduled_jobs WHERE id = ?")
+        .bind(failed_claim.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read failed request-log GC status");
+    assert_eq!(failed_status, "error", "permanent GC errors remain observable");
 
     drop(state);
     pool.close().await;

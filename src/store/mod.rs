@@ -19,7 +19,8 @@ mod immediate_transaction;
 mod sqlite_runtime;
 pub(crate) use immediate_transaction::ImmediateSqliteTransaction;
 pub(crate) use sqlite_runtime::{
-    SqliteImmediateTransaction, SqliteOperation, SqliteReadSnapshot, SqliteRuntime,
+    SqliteAdmissionDeferReason, SqliteImmediateTransaction, SqliteMaintenanceBulkPermit,
+    SqliteOperation, SqliteReadSnapshot, SqliteRuntime,
 };
 
 pub(crate) struct ObservabilityOfflineGuard {
@@ -796,6 +797,9 @@ pub(crate) async fn open_sqlite_pool_with_observability(
     )
     .await?;
     let mut pool_options = SqlitePoolOptions::new()
+        // Keep startup lazy so the fixed pool does not allocate three SQLite
+        // page caches before foreground traffic exists. Admission observes
+        // actual idle capacity once the pool has grown under load.
         .min_connections(1)
         .max_connections(attach_plan.max_connections);
     if let Some(observability_database_path) = attach_plan.target_path {
@@ -2674,6 +2678,7 @@ include!("key_store_sessions.rs");
 include!("key_store_mcp_session_bindings.rs");
 include!("key_store_system_settings.rs");
 include!("key_store_upstream_reconciliation.rs");
+include!("key_store_upstream_reconciliation_admission.rs");
 include!("key_store_users_and_oauth.rs");
 include!("key_store_linuxdo_credit_recharge.rs");
 include!("key_store_request_log_body_retention.rs");

@@ -16,6 +16,10 @@ DASHBOARD_CLIENTS = 20
 DASHBOARD_INTERVAL_SECS = 60.0
 BUSINESS_CLIENTS = 5
 BUSINESS_INTERVAL_SECS = 1.0
+# A production-shaped snapshot may have bounded startup maintenance reclaiming
+# the three SQLite connections. Bootstrap traffic is outside the measured load
+# lane, so give both variants the same finite window to become ready.
+BOOTSTRAP_DEADLINE_SECS = 180.0
 
 
 class Recorder:
@@ -94,7 +98,7 @@ def request(
 
 
 def create_test_api_key(host: str, port: int) -> None:
-    deadline = time.monotonic() + 60.0
+    deadline = time.monotonic() + BOOTSTRAP_DEADLINE_SECS
     while True:
         connection = http.client.HTTPConnection(host, port, timeout=10)
         try:
@@ -127,7 +131,7 @@ def create_test_access_token(host: str, port: int) -> str:
     business-lane coverage, while keeping all retry writes inside the COW test
     database.
     """
-    deadline = time.monotonic() + 60.0
+    deadline = time.monotonic() + BOOTSTRAP_DEADLINE_SECS
     while True:
         connection = http.client.HTTPConnection(host, port, timeout=10)
         try:
@@ -177,6 +181,15 @@ def next_periodic_deadline(
     """Advance a lane without replaying intervals missed by a slow request."""
     scheduled = previous_deadline + interval_secs
     return scheduled if scheduled > now else now + interval_secs
+
+
+def recovery_tail_secs_for_duration(duration_secs: int, requested_secs: int | None) -> int:
+    recovery_tail_secs = requested_secs
+    if recovery_tail_secs is None:
+        recovery_tail_secs = 60 if duration_secs > 120 else 0
+    if recovery_tail_secs < 0 or recovery_tail_secs >= duration_secs:
+        raise ValueError("recovery tail must be non-negative and shorter than the total duration")
+    return recovery_tail_secs
 
 
 def dashboard_lane(
@@ -257,22 +270,34 @@ def interrupted_ha_export(stop: threading.Event, recorder: Recorder, host: str, 
 
 
 def trigger_ha_gc(stop: threading.Event, recorder: Recorder, host: str, port: int) -> None:
+    def trigger() -> None:
+        trigger_ha_gc_once(recorder, host, port)
+
+    periodic(stop, 60.0, trigger)
+
+
+def trigger_ha_gc_once(recorder: Recorder, host: str, port: int) -> None:
     payload = json.dumps({"jobType": "ha_outbox_gc"}).encode()
     headers = {"Content-Type": "application/json"}
-    periodic(
-        stop,
-        60.0,
-        lambda: request(recorder, "ha_gc_trigger", "POST", host, port, "/api/jobs/trigger", payload, headers),
-    )
+    request(recorder, "ha_gc_trigger", "POST", host, port, "/api/jobs/trigger", payload, headers)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration-secs", type=int, required=True)
+    parser.add_argument("--recovery-tail-secs", type=int)
     parser.add_argument("--host", default="app")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    try:
+        recovery_tail_secs = recovery_tail_secs_for_duration(
+            args.duration_secs,
+            args.recovery_tail_secs,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    traffic_duration_secs = args.duration_secs - recovery_tail_secs
 
     recorder = Recorder()
     stop = threading.Event()
@@ -306,13 +331,20 @@ def main() -> None:
     for thread in threads:
         thread.start()
     try:
-        time.sleep(args.duration_secs)
+        time.sleep(traffic_duration_secs)
     finally:
         stop.set()
         for thread in threads:
             thread.join(timeout=2)
+    if recovery_tail_secs:
+        # This preserves the ten-minute total while proving that a debt worker
+        # can reclaim expired rows once foreground traffic leaves the pool.
+        trigger_ha_gc_once(recorder, args.host, args.port)
+        time.sleep(recovery_tail_secs)
     summary = recorder.summary()
     summary["durationSecs"] = args.duration_secs
+    summary["trafficDurationSecs"] = traffic_duration_secs
+    summary["recoveryTailSecs"] = recovery_tail_secs
     summary["dashboardClients"] = DASHBOARD_CLIENTS
     summary["dashboardIntervalSecs"] = DASHBOARD_INTERVAL_SECS
     summary["startedAt"] = int(started)
