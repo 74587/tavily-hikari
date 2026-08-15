@@ -1443,7 +1443,14 @@ impl KeyStore {
             .await?;
         self.apply_ha_gc_legacy_cursor_migration().await?;
         self.apply_reconciliation_engine_state_migration().await?;
-        self.apply_reconciliation_outcome_repair_migration().await?;
+        // A freshly bootstrapped database has no historical shadow outcomes
+        // to repair, so do not manufacture projection debt on first startup.
+        self.record_schema_migration(
+            RECONCILIATION_OUTCOME_REPAIR_VERSION,
+            RECONCILIATION_OUTCOME_REPAIR_NAME,
+            RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
+        )
+        .await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
