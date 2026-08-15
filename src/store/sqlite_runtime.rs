@@ -210,6 +210,7 @@ struct SqliteRuntimeInner {
     pool: SqlitePool,
     maximum_connections: u32,
     maintenance_bulk: Arc<Semaphore>,
+    maintenance_shutdown: AtomicBool,
     last_bulk_heap_trim_at: Mutex<Option<Instant>>,
     last_contention_at: Mutex<Option<Instant>>,
     contention_warning_active: AtomicBool,
@@ -350,6 +351,7 @@ impl SqliteRuntime {
                 pool,
                 maximum_connections: maximum_connections.max(1),
                 maintenance_bulk: Arc::new(Semaphore::new(1)),
+                maintenance_shutdown: AtomicBool::new(false),
                 last_bulk_heap_trim_at: Mutex::new(None),
                 last_contention_at: Mutex::new(None),
                 contention_warning_active: AtomicBool::new(false),
@@ -453,6 +455,14 @@ impl SqliteRuntime {
         operation: SqliteOperation,
     ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
         debug_assert!(operation.is_maintenance_bulk());
+        if self
+            .inner
+            .maintenance_shutdown
+            .load(AtomicOrdering::Acquire)
+        {
+            self.record_deferred(operation, SqliteAdmissionDeferReason::BulkBusy);
+            return Err(SqliteAdmissionDeferReason::BulkBusy);
+        }
         let reason = self.maintenance_bulk_defer_reason_for(operation);
         if let Some(reason) = reason {
             self.record_deferred(operation, reason);
@@ -465,6 +475,17 @@ impl SqliteRuntime {
                 Err(SqliteAdmissionDeferReason::BulkBusy)
             }
         }
+    }
+
+    pub(crate) async fn shutdown_maintenance_bulk(&self, timeout: Duration) -> bool {
+        self.inner
+            .maintenance_shutdown
+            .store(true, AtomicOrdering::Release);
+        matches!(
+            tokio::time::timeout(timeout, self.inner.maintenance_bulk.clone().acquire_owned())
+                .await,
+            Ok(Ok(_))
+        )
     }
 
     pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
@@ -2173,6 +2194,32 @@ mod tests {
             .await
             .expect("rollback control transaction");
         drop(bulk);
+    }
+
+    #[tokio::test]
+    async fn maintenance_shutdown_waits_for_the_active_slice_and_blocks_new_bulk() {
+        let runtime = three_connection_runtime().await;
+        let bulk = runtime
+            .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
+            .expect("active projection slice");
+        let shutdown_runtime = runtime.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_runtime
+                .shutdown_maintenance_bulk(Duration::from_secs(1))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        assert_eq!(
+            runtime
+                .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+                .expect_err("shutdown must reject new maintenance slices"),
+            SqliteAdmissionDeferReason::BulkBusy,
+        );
+
+        drop(bulk);
+        assert!(shutdown.await.expect("maintenance shutdown task"));
     }
 
     #[tokio::test]

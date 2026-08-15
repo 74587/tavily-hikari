@@ -613,6 +613,17 @@ pub async fn serve(
             "request stats coalescer did not drain before shutdown grace period"
         );
     }
+    if !post_shutdown_state
+        .proxy
+        .shutdown_sqlite_maintenance_bulk(Duration::from_secs(5))
+        .await
+    {
+        tracing::warn!(
+            component = "shutdown",
+            event = "sqlite_maintenance_drain_timeout",
+            "SQLite maintenance did not reach a safe boundary before shutdown"
+        );
+    }
     tracing::info!(
         component = "shutdown",
         event = "server_shutdown_complete",

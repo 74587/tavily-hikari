@@ -25,6 +25,9 @@
   `BEGIN IMMEDIATE`. A `25..100` row stable-keyset read is aggregated in memory, followed by one short
   claim-fenced merge/cursor-CAS transaction. Handled stale claims explicitly roll back; runtime budgets
   are checked between phases rather than cancelling an open transaction.
+- Graceful shutdown marks instance-owned maintenance-bulk admission closed and waits for its single
+  active permit to return before process exit. This lets an in-flight projection micro-slice finish
+  explicitly while preventing a replacement maintenance slice from starting during drain.
 
 - Added a runtime logging contract for the online service surface based on `tracing` +
   `tracing-subscriber`. Runtime logging now defaults to JSON lines on stderr, exposes a documented

@@ -78,6 +78,9 @@
   SQLite contention, and the 20-second run deadline prevent the next safe phase from starting; they
   never cancel an open transaction. An unfinished projection persists a typed continuation and
   resumes after restart without skipping work.
+- Graceful process shutdown closes maintenance-bulk admission before exit and waits for the active
+  micro-slice to reach its explicit commit or rollback boundary. A rolling restart therefore does
+  not use physical-connection discard as the normal projection cancellation mechanism.
 - Every attempted work generation ends as exactly one typed result. `settled`, `no_adjustment`, and
   compare-mode `observed` are terminal. `upstream_429`, `transport_failure`, `semantic_failure`, and
   `local_pressure` are retryable and keep independent durable streaks and retry deadlines.
