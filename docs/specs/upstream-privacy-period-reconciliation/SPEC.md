@@ -210,22 +210,64 @@
 
 ## Visual Evidence
 
-PR: none (current-SHA evidence displayed in review; repository image asset awaits owner approval)
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery`
+- scenario: local-pressure and upstream-429 states
+- requested_viewport: `1440x900`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `element`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Shows independent local-pressure and upstream-429 outcomes in the current
+  reconciliation status surface.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation local pressure and upstream 429](./assets/reconciliation-engine-pressure-desktop.png)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
-- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery` and `Mobile`
-- scenario: current reconciliation status gallery with pending, active, degraded, backoff, unknown,
-  budget-exhausted and empty/error states
-- requested_viewport: `desktop default`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery`
+- scenario: projecting, observed, and recovered terminal progression
+- requested_viewport: `1440x900`
 - viewport_strategy: `storybook-viewport`
-- capture_scope: `browser-viewport`
+- capture_scope: `element`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Captured from the final implementation SHA and displayed in the owner review.
-  The evidence covers desktop and `393x852` mobile rendering. No stale screenshot is reused and no
-  image asset is committed until owner approval.
-- submission_gate: `owner_approval_pending`
+- evidence_note: Separately proves projection progress, compare-mode observed terminal semantics,
+  and recovered status on the final UI source SHA.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation projection in progress](./assets/reconciliation-engine-projecting-desktop.png)
+
+PR: include
+
+![Reconciliation observed terminal](./assets/reconciliation-engine-observed-desktop.png)
+
+PR: include
+
+![Reconciliation recovered state](./assets/reconciliation-engine-recovered-desktop.png)
+
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/MobileStateGallery`
+- scenario: observed terminal responsive layout
+- requested_viewport: `393x852`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `element`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Verifies the observed terminal diagnostics remain readable at the required mobile
+  viewport without changing the public response contract.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation observed terminal mobile](./assets/reconciliation-engine-observed-mobile.png)
 
 ## Related PRs
 
