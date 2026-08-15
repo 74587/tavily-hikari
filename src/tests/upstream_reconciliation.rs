@@ -596,6 +596,34 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
         .await
         .expect("insert additional pending research");
     }
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("disable live projection for historical source fixture");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark historical projection incomplete");
+    sqlx::query(
+        r#"INSERT INTO upstream_reconciliation_usage (
+             token_id, key_id, period_code, project_id, billing_subject,
+             period_start, period_end, request_count, first_used_at,
+             last_used_at, updated_at, settlement_mode
+           ) VALUES ('historical-projection-token', ?, '2026-07-15/H1',
+                     'historical-projection-project',
+                     'token:historical-projection-token', ?, ?, 1, ?, ?, ?, 'shadow')"#,
+    )
+    .bind(&key_id)
+    .bind(now - 8_000)
+    .bind(now - 7_000)
+    .bind(now - 8_000)
+    .bind(now - 7_000)
+    .bind(now - 7_000)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert historical projection source");
 
     let usage_started = Arc::new(AtomicUsize::new(usize::MAX));
     let usage_started_for_route = Arc::clone(&usage_started);
@@ -714,6 +742,20 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     .await
     .expect("read terminal research");
     assert_eq!(terminal_at, Some(now));
+    let projection_state: (i64, i64) = sqlx::query_as(
+        "SELECT scanned_rows, transaction_p95_ms FROM upstream_reconciliation_projection_state WHERE id = 'local'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read projection progress after primary reconciliation");
+    assert!(
+        projection_state.0 > 0,
+        "main work must not starve projection"
+    );
+    assert!(
+        projection_state.1 > 0 && projection_state.1 < 100,
+        "projection transaction p95 must be observed below 100ms"
+    );
 
     let _ = std::fs::remove_file(db_path);
 }

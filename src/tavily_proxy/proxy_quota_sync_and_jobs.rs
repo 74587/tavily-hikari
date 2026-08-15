@@ -1707,6 +1707,42 @@ impl TavilyProxy {
             .as_ref()
             .map(|value| value.budget_exhausted)
             .unwrap_or(true);
+        if result.is_ok() && std::time::Instant::now() < remote_request_deadline {
+            match self.admit_upstream_reconciliation_projection() {
+                SqliteAdmissionOutcome::Admitted(projection_admission) => {
+                    let projection = match claimed_job {
+                        Some((job_id, claim_generation)) => self
+                            .key_store
+                            .advance_upstream_reconciliation_work_projection_claimed(
+                                job_id,
+                                claim_generation,
+                            )
+                            .await,
+                        None => self
+                            .key_store
+                            .advance_upstream_reconciliation_work_projection()
+                            .await,
+                    };
+                    drop(projection_admission);
+                    match projection {
+                        Ok(ReconciliationProjectionSliceOutcome::Advanced { .. })
+                        | Ok(ReconciliationProjectionSliceOutcome::Deferred { .. }) => {}
+                        Ok(ReconciliationProjectionSliceOutcome::StaleClaim) => {
+                            return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
+                        }
+                        Err(err) if is_transient_sqlite_write_error(&err) => {}
+                        Err(err) => return Err(err),
+                    }
+                }
+                SqliteAdmissionOutcome::Deferred { reason } => {
+                    tracing::debug!(
+                        component = "reconciliation",
+                        event = "projection_deferred_after_main",
+                        defer_reason = reason,
+                    );
+                }
+            }
+        }
         let research_started_at = std::time::Instant::now();
         let (
             research_polled_count,
