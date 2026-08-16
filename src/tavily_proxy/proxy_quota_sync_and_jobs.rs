@@ -552,16 +552,10 @@ impl TavilyProxy {
         if remaining.is_zero() {
             return Ok((0, 0, 0, 0, 0, true));
         }
-        let candidates = match tokio::time::timeout(
-            remaining,
-            self.key_store
-                .next_upstream_reconciliation_research_candidates(80),
-        )
-        .await
-        {
-            Ok(candidates) => candidates?,
-            Err(_) => return Ok((0, 0, 0, 0, 0, true)),
-        };
+        let candidates = self
+            .key_store
+            .next_upstream_reconciliation_research_candidates(80)
+            .await?;
         let candidate_count = candidates.len() as i64;
         tracing::debug!(
             component = "reconciliation",

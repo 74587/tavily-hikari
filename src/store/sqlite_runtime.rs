@@ -132,11 +132,11 @@ impl SqliteOperation {
 
     fn busy_timeout_override_ms(self) -> Option<i64> {
         match self {
-            // Dashboard integrity already used this per-connection short
-            // timeout before workload admission existed. All new admission
-            // paths retain the database's configured busy timeout and use an
-            // explicit operation budget instead.
-            Self::DashboardIntegrityWrite => Some(100),
+            // These bounded maintenance phases must yield before their
+            // cooperative run budget expires. A connection-local timeout
+            // returns writer contention as a typed defer without cancelling
+            // a future that still owns the physical connection.
+            Self::DashboardIntegrityWrite | Self::ReconciliationProjection => Some(100),
             _ => None,
         }
     }
@@ -1986,6 +1986,33 @@ mod tests {
             .acquire()
             .await
             .expect("pooled connection after rollback");
+        let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read restored busy timeout");
+        assert_eq!(busy_timeout_ms, DEFAULT_BUSY_TIMEOUT_MS);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_projection_uses_and_restores_short_busy_timeout() {
+        let runtime = single_connection_runtime().await;
+        let mut transaction = runtime
+            .begin_immediate(SqliteOperation::ReconciliationProjection)
+            .await
+            .expect("projection transaction");
+        let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("read projection busy timeout");
+        assert_eq!(busy_timeout_ms, 100);
+        transaction.rollback().await.expect("rollback projection");
+
+        let mut conn = runtime
+            .inner
+            .pool
+            .acquire()
+            .await
+            .expect("pooled connection after projection");
         let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
             .fetch_one(&mut *conn)
             .await
