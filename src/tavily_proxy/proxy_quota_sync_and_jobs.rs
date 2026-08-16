@@ -1770,6 +1770,7 @@ impl TavilyProxy {
             .map(|value| value.budget_exhausted)
             .unwrap_or(true);
         let research_started_at = std::time::Instant::now();
+        let mut research_local_pressure = false;
         let (
             research_polled_count,
             research_terminal_count,
@@ -1806,6 +1807,7 @@ impl TavilyProxy {
                     return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
                 }
                 Err(err) if is_transient_sqlite_write_error(&err) => {
+                    research_local_pressure = true;
                     tracing::debug!(
                         component = "reconciliation",
                         event = "research_sweep_deferred",
@@ -1937,6 +1939,7 @@ impl TavilyProxy {
                     && upstream_429_retry_windows.saturating_mul(2)
                         >= attempted_candidate_count.max(1);
                 let local_pressure = local_usage_rate_limit_windows > 0
+                    || research_local_pressure
                     || ((candidate_count > 0 || preparation_budget_exhausted)
                         && attempted_candidate_count == 0
                         && budget_exhausted);
