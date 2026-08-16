@@ -31,6 +31,9 @@ type ReconciliationProjectionSourceRow = (
     Option<i64>,
 );
 
+type ReconciliationProjectionStateRow =
+    (String, String, String, i64, i64, i64, i64, i64, i64, i64, i64, i64);
+
 struct ReconciliationProjectionController<'a> {
     store: &'a KeyStore,
 }
@@ -70,27 +73,24 @@ impl<'a> ReconciliationProjectionController<'a> {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let state: (String, String, String, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-            r#"SELECT cursor_token_id, cursor_key_id, cursor_period_code,
+        let read_result = async {
+            let state: ReconciliationProjectionStateRow = sqlx::query_as(
+                r#"SELECT cursor_token_id, cursor_key_id, cursor_period_code,
                       batch_size, fast_slice_streak, completed,
                       tx_hold_le_10, tx_hold_le_25, tx_hold_le_50,
                       tx_hold_le_100, tx_hold_le_250, tx_hold_over_250
                FROM upstream_reconciliation_projection_state WHERE id = 'local'"#,
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        if state.5 != 0 {
-            conn.close().await?;
-            return Ok(ReconciliationProjectionSliceOutcome::Advanced {
-                scanned_rows: 0,
-                completed: true,
-            });
-        }
-        let batch_size = state
-            .3
-            .clamp(RECONCILIATION_PROJECTION_MIN_BATCH, RECONCILIATION_PROJECTION_MAX_BATCH);
-        let rows: Vec<ReconciliationProjectionSourceRow> =
-            sqlx::query_as(
+            )
+            .fetch_one(&mut *conn)
+            .await?;
+            if state.5 != 0 {
+                return Ok((state, Vec::new()));
+            }
+            let batch_size = state.3.clamp(
+                RECONCILIATION_PROJECTION_MIN_BATCH,
+                RECONCILIATION_PROJECTION_MAX_BATCH,
+            );
+            let rows = sqlx::query_as(
                 r#"SELECT u.token_id, u.key_id, u.period_code, u.project_id,
                           u.billing_subject, u.settlement_mode, u.period_start,
                           u.period_end, u.updated_at, s.status, s.delta_credits
@@ -107,8 +107,20 @@ impl<'a> ReconciliationProjectionController<'a> {
             .bind(batch_size)
             .fetch_all(&mut *conn)
             .await?;
-        conn.close().await?;
-
+            Ok((state, rows))
+        }
+        .await;
+        let (state, rows): (ReconciliationProjectionStateRow, Vec<ReconciliationProjectionSourceRow>) =
+            conn.complete_query(read_result).await?;
+        if state.5 != 0 {
+            return Ok(ReconciliationProjectionSliceOutcome::Advanced {
+                scanned_rows: 0,
+                completed: true,
+            });
+        }
+        let batch_size = state
+            .3
+            .clamp(RECONCILIATION_PROJECTION_MIN_BATCH, RECONCILIATION_PROJECTION_MAX_BATCH);
         let Some(last) = rows.last().map(|row| (row.0.clone(), row.1.clone(), row.2.clone()))
         else {
             let mut tx = self

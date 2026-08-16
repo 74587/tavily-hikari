@@ -116,20 +116,21 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let claim_current = if let Some((job_id, claim_generation)) = claimed_job {
-            sqlx::query_scalar::<_, i64>(
+        let read_result = async {
+            let claim_current = if let Some((job_id, claim_generation)) = claimed_job {
+                sqlx::query_scalar::<_, i64>(
                 "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE id = ? AND status = 'running' AND claim_generation = ?)",
             )
             .bind(job_id)
             .bind(claim_generation)
             .fetch_one(&mut *conn)
-            .await?
-                != 0
-        } else {
-            true
-        };
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            r#"
+                .await?
+                    != 0
+            } else {
+                true
+            };
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                r#"
             SELECT key, value
             FROM meta
             WHERE key IN (?, ?, ?, ?, ?, ?, ?)
@@ -142,9 +143,12 @@ impl KeyStore {
         .bind(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1)
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1)
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
-        .fetch_all(&mut *conn)
-        .await?;
-        conn.close().await?;
+            .fetch_all(&mut *conn)
+            .await?;
+            Ok((claim_current, rows))
+        }
+        .await;
+        let (claim_current, rows) = conn.complete_query(read_result).await?;
         let values = rows.into_iter().collect::<std::collections::HashMap<_, _>>();
         let value_i64 = |key: &str| {
             values
@@ -1280,7 +1284,7 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
+        let rows_result = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
             r#"
             WITH pending AS (
                 SELECT
@@ -1326,8 +1330,8 @@ impl KeyStore {
         .bind(day_window.end)
         .bind(limit.max(1))
         .fetch_all(&mut *conn)
-        .await?;
-        conn.close().await?;
+        .await;
+        let rows = conn.complete_query(rows_result).await?;
         Ok(rows
             .into_iter()
             .map(|(request_id, token_id, key_id, period_code, billing_subject, period_end, poll_attempt_count, _, _)| {
@@ -1589,11 +1593,11 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = query
+        let rows_result = query
             .build_query_as::<UpstreamReconciliationCandidateRow>()
             .fetch_all(&mut *conn)
-            .await?;
-        conn.close().await?;
+            .await;
+        let rows = conn.complete_query(rows_result).await?;
         Ok(self.build_upstream_reconciliation_candidates(rows, now))
     }
 
@@ -1718,11 +1722,11 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = query
+        let rows_result = query
             .build_query_as::<(String, String, String)>()
             .fetch_all(&mut *conn)
-            .await?;
-        conn.close().await?;
+            .await;
+        let rows = conn.complete_query(rows_result).await?;
         let mut grouped = std::collections::HashMap::new();
         for (token_id, period_code, key_id) in rows {
             grouped
@@ -1776,11 +1780,11 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = query
+        let rows_result = query
             .build_query_as::<(String, String, i64)>()
             .fetch_all(&mut *conn)
-            .await?;
-        conn.close().await?;
+            .await;
+        let rows = conn.complete_query(rows_result).await?;
         Ok(rows
             .into_iter()
             .map(|(token_id, period_code, credits)| ((token_id, period_code), credits))

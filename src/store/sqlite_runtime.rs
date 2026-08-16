@@ -1126,6 +1126,38 @@ pub(crate) struct SqliteOperationConnection {
 }
 
 impl SqliteOperationConnection {
+    pub(crate) async fn complete_query<T>(
+        mut self,
+        query_result: Result<T, sqlx::Error>,
+    ) -> Result<T, ProxyError> {
+        let conn = self.conn.take().expect("SQLite operation connection");
+        let restore_result = restore_operation_connection(conn, self.restore_busy_timeout).await;
+        match (query_result, restore_result) {
+            (Ok(value), Ok(())) => {
+                self.runtime.record_success(
+                    self.operation,
+                    self.pool_wait,
+                    Duration::ZERO,
+                    self.started_at.elapsed(),
+                    0,
+                );
+                Ok(value)
+            }
+            (Err(query_err), _) => {
+                let err = ProxyError::Database(query_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, Duration::ZERO, &err);
+                Err(err)
+            }
+            (Ok(_), Err(restore_err)) => {
+                let err = ProxyError::Database(restore_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, Duration::ZERO, &err);
+                Err(err)
+            }
+        }
+    }
+
     pub(crate) async fn begin_immediate(
         &mut self,
     ) -> Result<SqliteOperationTransaction<'_>, ProxyError> {

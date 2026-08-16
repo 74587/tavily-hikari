@@ -406,6 +406,53 @@ async fn reconciliation_projection_rolls_back_sql_errors_without_discarding_conn
 }
 
 #[tokio::test]
+async fn reconciliation_projection_returns_read_errors_without_discarding_connection() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-projection-read-error"],
+        "http://127.0.0.1:9",
+        &db_string,
+    )
+    .await
+    .expect("create proxy");
+    sqlx::query("DROP TABLE upstream_reconciliation_usage")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove projection source");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark projection incomplete");
+
+    proxy
+        .key_store
+        .advance_upstream_reconciliation_work_projection()
+        .await
+        .expect_err("projection source read fails");
+    assert_eq!(
+        proxy
+            .key_store
+            .sqlite_runtime
+            .discarded_connections_for_test(SqliteOperation::ReconciliationProjection),
+        0,
+        "ordinary read errors must return the operation connection to the pool"
+    );
+    let tx = proxy
+        .key_store
+        .sqlite_runtime
+        .begin_immediate(SqliteOperation::ReconciliationProjection)
+        .await
+        .expect("next transaction begins after the read error");
+    tx.rollback().await.expect("rollback clean transaction");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn reconciliation_projection_rejects_stale_claim() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
