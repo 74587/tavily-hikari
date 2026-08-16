@@ -40,12 +40,15 @@
 - 内存 INFO 快照最多每 5 分钟真实读取一次 `/proc` 与 cgroup；slow/error 事件立即采集。
 - SQLite workload 以固定 operation/workload class 在有界内存窗口聚合；每 60 秒最多一条
   `component=db event=sqlite_workload_window` INFO，报告调用量、pool/begin wait、transaction hold、
-  retries、logical rows、admitted/deferred 与原因、当前/峰值 pool acquire waiter、窗口最小 idle、
+  fixed-bucket transaction-hold p95、retries、logical rows、admitted/deferred 与原因、当前/峰值 pool acquire waiter、窗口最小 idle、
   错误/丢弃连接以及 process/cgroup write-byte delta。不得记录 SQL、参数或请求正文。
 - `ha_outbox_gc_watchdog` 是短 `maintenance_control` state read，按同一窗口归因；它不输出逐次
   INFO/WARN，也不收集或输出 outbox inventory。
 - 内存字段同时报告 cgroup `anon/file/swap` 与进程 `RssAnon/RssFile/VmSwap`，避免把文件页缓存
   误诊为堆泄漏。
+- Reconciliation run observation reports mode, projection phase/scanned rows/batch/transaction p95,
+  hydrate/first-remote/remote/finalization/research timing, typed outcome counts, continuation reason,
+  and next retry. Stable cursor values, token/key identifiers, SQL, and request content remain private.
 - 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。

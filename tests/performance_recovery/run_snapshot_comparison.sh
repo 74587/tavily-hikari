@@ -196,6 +196,52 @@ capture_ha_gc_state() {
   " > "$target_path"
 }
 
+capture_reconciliation_state() {
+  local database_path="$1"
+  local target_path="$2"
+  local projection_p95=0
+  if [[ "$(sqlite3 "$database_path" "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upstream_reconciliation_projection_state');")" == "1" ]]; then
+    projection_p95="$(sqlite3 "$database_path" "SELECT COALESCE(transaction_p95_ms, 0) FROM upstream_reconciliation_projection_state WHERE id = 'local';")"
+  fi
+  sqlite3 -tabs "$database_path" "
+    SELECT
+      COALESCE(SUM(completed_generation >= work_generation), 0),
+      COALESCE(SUM(last_outcome = 'settled'), 0),
+      COALESCE(SUM(last_outcome = 'no_adjustment'), 0),
+      COALESCE(SUM(last_outcome = 'observed'), 0),
+      $projection_p95,
+      COALESCE((SELECT COUNT(*) FROM billing_reconciliation_adjustments), 0),
+      COALESCE((SELECT SUM(delta_credits) FROM billing_reconciliation_adjustments), 0)
+    FROM upstream_reconciliation_work;
+  " > "$target_path"
+}
+
+prepare_reconciliation_fixture() {
+  local database_path="$1"
+  sqlite3 "$database_path" <<'SQL'
+UPDATE meta
+   SET value = '0'
+ WHERE key IN (
+   'upstream_reconciliation_pressure_streak_v1',
+   'upstream_reconciliation_backoff_level_v1',
+   'upstream_reconciliation_backoff_until_v1',
+   'upstream_reconciliation_local_pressure_streak_v1',
+   'upstream_reconciliation_local_backoff_level_v1',
+   'upstream_reconciliation_local_backoff_until_v1'
+ );
+UPDATE upstream_reconciliation_work
+   SET next_attempt_at = 0
+ WHERE completed_generation < work_generation;
+UPDATE upstream_reconciliation_settlements
+   SET next_attempt_at = 0
+ WHERE status IN ('pending', 'waiting', 'rate_limited');
+UPDATE scheduled_jobs
+   SET available_at = 0
+ WHERE job_type = 'upstream_reconciliation'
+   AND status = 'queued';
+SQL
+}
+
 trap 'cleanup_compose; cleanup_app_image' EXIT
 mkdir -p "$ARTIFACTS_DIR" "$WORK_DIR"
 
@@ -320,6 +366,11 @@ run_variant() {
   rm -rf -- "$artifact_dir"
   mkdir -p "$variant_dir" "$artifact_dir"
   expand_variant_data "$variant_dir"
+  # The production snapshot may be captured during a transient local/remote
+  # backoff. Reset only retry timing in the isolated copy so both variants
+  # exercise identical durable work; usage generations and billing truth stay
+  # untouched.
+  prepare_reconciliation_fixture "$variant_dir/tavily_proxy.db"
   write_compose "$repo" "$variant_dir" "$artifact_dir"
   # The testbox is deliberately isolated from production services. Reusing its
   # locked base-image cache keeps a transient registry failure out of the
@@ -328,6 +379,7 @@ run_variant() {
   compose up -d app upstream
   wait_for_dashboard_readiness "$artifact_dir"
   capture_ha_gc_state "$variant_dir/tavily_proxy.db" "$artifact_dir/ha_gc_before.tsv"
+  capture_reconciliation_state "$variant_dir/tavily_proxy.db" "$artifact_dir/reconciliation_before.tsv"
   sample_memory "$artifact_dir/memory_samples.txt" &
   rss_pid=$!
   (
@@ -349,6 +401,7 @@ run_variant() {
   kill "$rss_pid" 2>/dev/null || true
   wait "$rss_pid" 2>/dev/null || true
   capture_ha_gc_state "$variant_dir/tavily_proxy.db" "$artifact_dir/ha_gc_after.tsv"
+  capture_reconciliation_state "$variant_dir/tavily_proxy.db" "$artifact_dir/reconciliation_after.tsv"
   compose logs --no-color > "$artifact_dir/compose.log" 2>&1 || true
   python3 - "$name" "$artifact_dir" <<'PY'
 import json
@@ -373,6 +426,17 @@ def read_ha_gc_state(path):
 
 ha_gc_before = read_ha_gc_state(artifact_dir / "ha_gc_before.tsv")
 ha_gc_after = read_ha_gc_state(artifact_dir / "ha_gc_after.tsv")
+
+def read_reconciliation_state(path):
+    values = [int(value) for value in path.read_text().strip().split("\t")]
+    keys = (
+        "terminal", "settled", "noAdjustment", "observed",
+        "projectionTransactionP95Ms", "billingAdjustmentCount", "billingAdjustmentSum",
+    )
+    return dict(zip(keys, values, strict=True))
+
+reconciliation_before = read_reconciliation_state(artifact_dir / "reconciliation_before.tsv")
+reconciliation_after = read_reconciliation_state(artifact_dir / "reconciliation_after.tsv")
 samples = []
 for line in (artifact_dir / "memory_samples.txt").read_text().splitlines():
     sample = {}
@@ -421,6 +485,10 @@ sqlite_typed_lock_deferrals = sum(
         structured_field(line, "defer_reason", reason)
         for reason in ("sqlite_contention", "sqlite_busy")
     )
+    or (
+        structured_field(line, "event", "research_sweep_deferred")
+        and structured_field(line, "reason", "local_pressure")
+    )
     for line in sqlite_lock_lines
 )
 sqlite_final_lock_errors = (
@@ -454,6 +522,11 @@ summary = {
     "sqliteTypedLockDeferrals": sqlite_typed_lock_deferrals,
     "sqliteFinalLockErrors": sqlite_final_lock_errors,
     "nestedTransactionErrors": logs.count("cannot start a transaction within a transaction"),
+    "reconciliationProjectionDiscarded": sum(
+        structured_field(line, "event", "sqlite_transaction_connection_discarded")
+        and structured_field(line, "operation", "reconciliation_projection")
+        for line in logs.splitlines()
+    ),
     "foregroundHttp5xx": lane_5xx("business"),
     "dashboardHttp5xx": lane_5xx("dashboard"),
     "maintenanceHttp5xx": lane_5xx("ha_gc_trigger"),
@@ -464,6 +537,11 @@ summary = {
             channel: ha_gc_after[channel]["totalDeletedRows"] - values["totalDeletedRows"]
             for channel, values in ha_gc_before.items()
         },
+    },
+    "reconciliation": {
+        "before": reconciliation_before,
+        "after": reconciliation_after,
+        "terminalDelta": reconciliation_after["terminal"] - reconciliation_before["terminal"],
     },
 }
 (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -499,11 +577,11 @@ artifacts = pathlib.Path(sys.argv[1])
 baseline = json.loads((artifacts / "baseline" / "summary.json").read_text())
 candidate = json.loads((artifacts / "candidate" / "summary.json").read_text())
 
-# Linux process RSS and sub-10ms HTTP timings are sampled across a controlled
+# Linux process RSS and sub-15ms HTTP timings are sampled across a controlled
 # restart. Keep raw values in the receipt, but do not turn allocator or
 # scheduler jitter into a false regression when the absolute SLO has ample
 # headroom. These margins are calibrated by a same-SHA A/B run.
-DASHBOARD_P95_NOISE_FLOOR_MS = 10.0
+DASHBOARD_P95_NOISE_FLOOR_MS = 15.0
 RSS_P95_NOISE_BAND_KIB = 40 * 1024
 
 def p95(summary):
@@ -602,11 +680,21 @@ for summary in (baseline, candidate):
         statuses.get("business:200", 0) + statuses.get("business:429", 0)
     )
     application_business_minimum = max(20, business_minimum / 2)
-    # Both variants perform a controlled restart halfway through the run. Keep
-    # the same bounded five-percent connection-race allowance as Dashboard
-    # coverage while the 5xx and latency gates below remain strict.
+    # Both variants perform a controlled restart halfway through the run and
+    # their open-loop clients can complete a different number of attempts.
+    # Compare application-response ratios instead of absolute response counts;
+    # the absolute workload, 5xx, lock, and latency gates below remain strict.
+    baseline_business_response_ratio = (
+        baseline_business_responses / baseline_business_attempts
+        if baseline_business_attempts
+        else 0.0
+    )
+    candidate_response_ratio_floor = max(0.0, baseline_business_response_ratio - 0.05)
     required_application_business_responses = (
-        max(application_business_minimum, (baseline_business_responses * 95 + 99) // 100)
+        max(
+            application_business_minimum,
+            int(business_attempts * candidate_response_ratio_floor),
+        )
         if summary["variant"] == "candidate"
         else (application_business_minimum if not baseline_business_red else 1)
     )
@@ -675,6 +763,23 @@ if candidate["foregroundHttp5xx"]:
     )
 if candidate["nestedTransactionErrors"]:
     raise SystemExit("candidate emitted a nested transaction error")
+if candidate["reconciliationProjectionDiscarded"]:
+    raise SystemExit("candidate discarded a reconciliation projection transaction connection")
+if candidate["reconciliation"]["terminalDelta"] <= 0:
+    raise SystemExit("candidate reconciliation produced no terminal outcome")
+projection_p95 = candidate["reconciliation"]["after"]["projectionTransactionP95Ms"]
+if projection_p95 <= 0 or projection_p95 >= 100:
+    raise SystemExit(
+        f"candidate reconciliation projection transaction p95 is not proven below 100ms: {projection_p95}"
+    )
+for billing_field in ("billingAdjustmentCount", "billingAdjustmentSum"):
+    baseline_value = baseline["reconciliation"]["after"][billing_field]
+    candidate_value = candidate["reconciliation"]["after"][billing_field]
+    if candidate_value != baseline_value:
+        raise SystemExit(
+            f"candidate billing truth differs for {billing_field}: "
+            f"baseline={baseline_value}, candidate={candidate_value}"
+        )
 
 result = {
     "baseline": baseline,

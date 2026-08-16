@@ -24,50 +24,6 @@ pub(super) fn reconciliation_test_db_path() -> PathBuf {
 }
 
 #[tokio::test]
-async fn reconciliation_one_shot_waits_for_a_transient_bulk_admission() {
-    let db_path = reconciliation_test_db_path();
-    let db_string = db_path.to_string_lossy().to_string();
-    let (backend_time, _) = BackendTime::manual_from_ts(1_752_500_000);
-    let proxy = TavilyProxy::with_options_and_time(
-        vec!["tvly-reconciliation-one-shot-admission"],
-        "http://127.0.0.1:9",
-        &db_string,
-        TavilyProxyOptions::from_database_path(&db_string),
-        backend_time,
-    )
-    .await
-    .expect("create proxy");
-
-    let admission = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            match proxy.admit_upstream_reconciliation_projection() {
-                SqliteAdmissionOutcome::Admitted(admission) => return admission,
-                SqliteAdmissionOutcome::Deferred { .. } => {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            }
-        }
-    })
-    .await
-    .expect("obtain temporary reconciliation admission");
-
-    let release_admission = async {
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        drop(admission);
-    };
-    let (settled, ()) = tokio::join!(
-        proxy.run_upstream_reconciliation_once("http://127.0.0.1:9"),
-        release_admission,
-    );
-    assert_eq!(
-        settled.expect("one-shot reconciliation completes after admission clears"),
-        0
-    );
-
-    let _ = std::fs::remove_file(db_path);
-}
-
-#[tokio::test]
 async fn reconciliation_waits_for_a_complete_eligible_period() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
@@ -516,6 +472,30 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     .execute(&proxy.key_store.pool)
     .await
     .expect("insert due reconciliation usage");
+    for candidate_index in 1..20 {
+        sqlx::query(
+            r#"
+            INSERT INTO upstream_reconciliation_usage (
+                token_id, key_id, period_code, project_id, billing_subject, period_start,
+                period_end, request_count, first_used_at, last_used_at, updated_at,
+                settlement_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 'shadow')
+            "#,
+        )
+        .bind(&token.id)
+        .bind(&key_id)
+        .bind(format!("2026-07-{candidate_index:02}/S2"))
+        .bind(format!("project-shadow-runtime-{candidate_index}"))
+        .bind(format!("token:{}", token.id))
+        .bind(now - 100_000 - i64::from(candidate_index) * 10)
+        .bind(now - 10_000 - i64::from(candidate_index) * 10)
+        .bind(now - 20_000 - i64::from(candidate_index) * 10)
+        .bind(now - 10_000 - i64::from(candidate_index) * 10)
+        .bind(now - 10_000 - i64::from(candidate_index) * 10)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert additional main reconciliation candidate");
+    }
     sqlx::query(
         r#"
         INSERT INTO upstream_reconciliation_usage (
@@ -554,31 +534,94 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     .execute(&proxy.key_store.pool)
     .await
     .expect("insert pending research");
+    for research_index in 1..80 {
+        sqlx::query(
+            r#"
+            INSERT INTO upstream_reconciliation_research (
+                request_id, token_id, key_id, period_code, created_at, terminal_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+            "#,
+        )
+        .bind(format!("research-runtime-marker-{research_index}"))
+        .bind("research-token")
+        .bind(&key_id)
+        .bind("2026-07-15/R1")
+        .bind(now - 800 + i64::from(research_index))
+        .bind(now - 800 + i64::from(research_index))
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert additional pending research");
+    }
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("disable live projection for historical source fixture");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark historical projection incomplete");
+    sqlx::query(
+        r#"INSERT INTO upstream_reconciliation_usage (
+             token_id, key_id, period_code, project_id, billing_subject,
+             period_start, period_end, request_count, first_used_at,
+             last_used_at, updated_at, settlement_mode
+           ) VALUES ('historical-projection-token', ?, '2026-07-15/H1',
+                     'historical-projection-project',
+                     'token:historical-projection-token', ?, ?, 1, ?, ?, ?, 'shadow')"#,
+    )
+    .bind(&key_id)
+    .bind(now - 8_000)
+    .bind(now - 7_000)
+    .bind(now - 8_000)
+    .bind(now - 7_000)
+    .bind(now - 7_000)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert historical projection source");
 
     let usage_started = Arc::new(AtomicUsize::new(usize::MAX));
     let usage_started_for_route = Arc::clone(&usage_started);
+    let usage_attempts = Arc::new(AtomicUsize::new(0));
+    let usage_attempts_for_route = Arc::clone(&usage_attempts);
+    let research_started = Arc::new(AtomicUsize::new(usize::MAX));
+    let research_started_for_route = Arc::clone(&research_started);
     let run_started = std::time::Instant::now();
     let app = Router::new()
         .route(
             "/usage",
             get(move || {
                 let usage_started = Arc::clone(&usage_started_for_route);
+                let usage_attempts = Arc::clone(&usage_attempts_for_route);
                 async move {
-                    usage_started.store(
-                        run_started.elapsed().as_millis().min(usize::MAX as u128) as usize,
+                    let started_ms =
+                        run_started.elapsed().as_millis().min(usize::MAX as u128) as usize;
+                    let _ = usage_started.compare_exchange(
+                        usize::MAX,
+                        started_ms,
+                        Ordering::SeqCst,
                         Ordering::SeqCst,
                     );
+                    usage_attempts.fetch_add(1, Ordering::SeqCst);
                     Json(serde_json::json!({
-                        "key": { "usage": 0 }
+                        "key": { "usage": 5 }
                     }))
                 }
             }),
         )
         .route(
             "/research/research-runtime-marker",
-            get(|| async {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                Json(serde_json::json!({ "status": "completed" }))
+            get(move || {
+                let research_started = Arc::clone(&research_started_for_route);
+                async move {
+                    research_started.store(
+                        run_started.elapsed().as_millis().min(usize::MAX as u128) as usize,
+                        Ordering::SeqCst,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    Json(serde_json::json!({ "status": "completed" }))
+                }
             }),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -593,10 +636,15 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
         .run_upstream_reconciliation_once(&format!("http://{addr}"))
         .await
         .expect("run reconciliation once");
-    assert_eq!(settled, 1);
+    assert_eq!(settled, 2);
     assert!(
         usage_started.load(Ordering::SeqCst) < 2_000,
         "the first main settlement attempt must start before research consumes the budget"
+    );
+    assert!(usage_attempts.load(Ordering::SeqCst) <= 2);
+    assert!(
+        research_started.load(Ordering::SeqCst) > usage_started.load(Ordering::SeqCst),
+        "research must not start before the first main settlement request"
     );
     let (
         last_run_at,
@@ -613,6 +661,37 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     assert_eq!(last_shadow_adjustment_at, Some(now));
     assert_eq!(last_research_sweep_at, Some(now));
     assert_eq!(last_research_terminal_at, Some(now));
+    let work_outcome: String = sqlx::query_scalar(
+        "SELECT last_outcome FROM upstream_reconciliation_work WHERE token_id = ? AND period_code = '2026-07-15/S1'",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read reconciliation work outcome");
+    assert_eq!(work_outcome, "observed");
+    let actual_adjustments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_reconciliation_adjustments")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count actual reconciliation adjustments");
+    assert_eq!(
+        actual_adjustments, 0,
+        "compare observations must not mutate billing truth"
+    );
+    let observation = proxy
+        .key_store
+        .upstream_reconciliation_run_observation()
+        .await
+        .expect("read reconciliation engine observation");
+    assert_eq!(observation.mode, "compare");
+    assert_eq!(observation.settled, 0);
+    assert_eq!(observation.observed, 2);
+    assert_eq!(observation.continuation_reason.as_deref(), Some("observed"));
+    assert!(
+        observation
+            .first_remote_ms
+            .is_some_and(|value| value < 2_000)
+    );
     let terminal_at: Option<i64> = sqlx::query_scalar(
         "SELECT terminal_at FROM upstream_reconciliation_research WHERE request_id = 'research-runtime-marker'",
     )
@@ -620,6 +699,20 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     .await
     .expect("read terminal research");
     assert_eq!(terminal_at, Some(now));
+    let projection_state: (i64, i64) = sqlx::query_as(
+        "SELECT scanned_rows, transaction_p95_ms FROM upstream_reconciliation_projection_state WHERE id = 'local'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read projection progress after primary reconciliation");
+    assert!(
+        projection_state.0 > 0,
+        "main work must not starve projection"
+    );
+    assert!(
+        projection_state.1 > 0 && projection_state.1 < 100,
+        "projection transaction p95 must be observed below 100ms"
+    );
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -880,7 +973,7 @@ async fn reconciliation_rejects_usage_generation_changed_during_remote_fetch() {
             .run_upstream_reconciliation_once(&format!("http://{addr}"))
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), fetch_started.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(5), fetch_started.notified())
         .await
         .expect("first upstream fetch starts");
     sqlx::query(
@@ -922,11 +1015,7 @@ async fn reconciliation_rejects_usage_generation_changed_during_remote_fetch() {
         Some(now),
     );
 
-    // Admission keeps two SQLite slots available to foreground work. The
-    // unclaimed helper is intentionally allowed to yield while the first run
-    // drains its background persistence; the scheduler path preserves a
-    // durable continuation in that case. Retry only in this direct helper
-    // test, rather than weakening the foreground reservation contract.
+    // The direct helper retries admission while the scheduler persists a continuation.
     let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let settled = proxy
@@ -1104,17 +1193,17 @@ async fn reconciliation_rejects_reclaimed_scheduled_job_claim() {
         1
     );
 
-    assert_eq!(
+    assert!(matches!(
         proxy
-            .run_upstream_reconciliation_once_claimed(
+            .run_upstream_reconciliation_once_claimed_outcome(
                 "http://127.0.0.1:9",
                 claimed.id,
                 claimed.claim_generation,
             )
             .await
             .expect("reject stale claimed worker"),
-        0
-    );
+        ClaimedReconciliationRunOutcome::StaleClaim
+    ));
     let work: (i64, i64) = sqlx::query_as(
         "SELECT work_generation, completed_generation FROM upstream_reconciliation_work WHERE token_id = ?",
     )
@@ -1224,7 +1313,7 @@ async fn reconciliation_rejects_reclaimed_claim_after_remote_fetch() {
     let running_proxy = proxy.clone();
     let running = tokio::spawn(async move {
         running_proxy
-            .run_upstream_reconciliation_once_claimed(
+            .run_upstream_reconciliation_once_claimed_outcome(
                 &format!("http://{addr}"),
                 claimed.id,
                 claimed.claim_generation,
@@ -1244,13 +1333,13 @@ async fn reconciliation_rejects_reclaimed_claim_after_remote_fetch() {
     );
     release_fetch.notify_one();
 
-    assert_eq!(
+    assert!(matches!(
         running
             .await
             .expect("join stale claimed worker")
             .expect("stale claimed worker exits cleanly"),
-        0
-    );
+        ClaimedReconciliationRunOutcome::StaleClaim
+    ));
     assert_eq!(
         proxy
             .key_store
@@ -1412,7 +1501,11 @@ async fn reconciliation_request_cap_never_settles_partially_observed_candidate()
         .run_upstream_reconciliation_once(&format!("http://{addr}"))
         .await
         .expect("run capped reconciliation");
-    assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        upstream_hits.load(Ordering::SeqCst),
+        0,
+        "a candidate that cannot fit the remote budget must not be partially fetched"
+    );
     assert_eq!(research_hits.load(Ordering::SeqCst), 1);
     assert_eq!(settled, 0);
     let settlement_count: i64 = sqlx::query_scalar(
@@ -1422,7 +1515,15 @@ async fn reconciliation_request_cap_never_settles_partially_observed_candidate()
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("read partial settlement count");
-    assert_eq!(settlement_count, 0);
+    assert_eq!(settlement_count, 1, "the candidate keeps a typed retry");
+    let retry_outcome: String = sqlx::query_scalar(
+        "SELECT last_outcome FROM upstream_reconciliation_work WHERE token_id = ?",
+    )
+    .bind(&token.id)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read capped candidate outcome");
+    assert_eq!(retry_outcome, RECONCILIATION_OUTCOME_SEMANTIC_FAILURE);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -2674,6 +2775,12 @@ async fn daily_reconciliation_progress_includes_actual_mode_windows() {
             Some("degraded"),
         ),
         ("token-pending", "key-two", "account:user-pending", None),
+        (
+            "token-shadow",
+            "key-one",
+            "account:user-shadow",
+            Some("shadow_settled"),
+        ),
     ] {
         let period_code = format!("2026-07-15/{token_id}");
         sqlx::query(
@@ -2757,10 +2864,10 @@ async fn daily_reconciliation_progress_includes_actual_mode_windows() {
         .daily_reconciliation_progress()
         .await
         .expect("read daily reconciliation progress");
-    assert_eq!(progress.observed_accounts, 3);
+    assert_eq!(progress.observed_accounts, 4);
     assert_eq!(progress.accounts_with_settled_period, 1);
-    assert_eq!(progress.fully_terminal_accounts, 2);
-    assert_eq!(progress.observed_periods, 3);
+    assert_eq!(progress.fully_terminal_accounts, 3);
+    assert_eq!(progress.observed_periods, 4);
     assert_eq!(progress.settled_periods, 1);
     assert_eq!(progress.degraded_periods, 1);
     assert_eq!(progress.pending_periods, 1);

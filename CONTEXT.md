@@ -29,6 +29,22 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   work returns uncommitted deltas or records a retry time; unrelated eligible work remains free to
   progress.
 
+## Reconciliation Terms
+
+- `reconciliation mode`: the durable-work policy selected for a run. `disabled` preserves work but
+  does not schedule a representative, `compare` observes upstream differences without changing
+  billing truth, and `active` applies the existing billing settlement rules.
+- `projection slice`: one resumable, claim-fenced historical-usage page. Its bounded read happens
+  outside the write transaction; work merge and the stable keyset cursor advance commit atomically.
+- `terminal outcome`: a current work generation that needs no retry. Active non-zero differences
+  are `settled`, zero differences are `no_adjustment`, and compare-mode non-zero differences are
+  `observed`.
+- `observation terminal`: the `observed` terminal outcome. It records shadow evidence while leaving
+  billing truth unchanged and is never counted as a settlement.
+- `retryable outcome`: `upstream_429`, `transport_failure`, `semantic_failure`, or
+  `local_pressure`. It preserves the current work generation and its independent retry state until
+  a later terminal outcome.
+
 ## HA Terms
 
 - `full_master`: the only node allowed to handle full writes.

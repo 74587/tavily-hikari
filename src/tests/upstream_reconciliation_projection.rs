@@ -8,6 +8,80 @@ use std::{
 use tokio::net::TcpListener;
 
 #[tokio::test]
+async fn reconciliation_projection_micro_slices_resume() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-projection-slices"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("disable live projection for backfill fixture");
+    proxy
+        .key_store
+        .set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1,
+            0,
+        )
+        .await
+        .expect("mark historical projection pending");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("reset projection controller state");
+    sqlx::query(
+        r#"WITH RECURSIVE rows(n) AS (
+             VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 60
+           )
+           INSERT INTO upstream_reconciliation_usage (
+             token_id, key_id, period_code, project_id, billing_subject,
+             period_start, period_end, request_count, first_used_at,
+             last_used_at, updated_at, settlement_mode
+           )
+           SELECT printf('slice-token-%03d', n), printf('slice-key-%03d', n),
+                  '2026-07-15/S1', printf('slice-project-%03d', n),
+                  printf('token:slice-%03d', n), ?, ?, 1, ?, ?, ?, 'shadow'
+           FROM rows"#,
+    )
+    .bind(now - 4_000)
+    .bind(now - 900)
+    .bind(now - 1_000)
+    .bind(now - 900)
+    .bind(now - 900)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert projection fixture");
+
+    proxy
+        .key_store
+        .advance_upstream_reconciliation_work_projection()
+        .await
+        .expect("advance one projection slice");
+    let projected: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_reconciliation_work")
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("count projected work");
+    assert_eq!(
+        projected, 25,
+        "the first durable micro-slice starts at 25 rows"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn reconciliation_research_sweep_does_not_hold_an_empty_main_run() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
@@ -133,6 +207,57 @@ async fn reconciliation_research_sweep_does_not_hold_an_empty_main_run() {
         "research's independent budget must not report primary local pressure"
     );
 
+    for _ in 0..3 {
+        proxy.fail_next_reconciliation_research_read_for_test();
+        assert_eq!(
+            proxy
+                .run_upstream_reconciliation_once(&format!("http://{addr}"))
+                .await
+                .expect("defer transient research pressure"),
+            0
+        );
+    }
+    let (streak, level, backoff_until) = proxy
+        .key_store
+        .upstream_reconciliation_local_backoff_state()
+        .await
+        .expect("read research pressure backoff");
+    assert_eq!((streak, level), (3, 1));
+    assert!(backoff_until >= now + 30);
+    assert!(
+        proxy
+            .key_store
+            .upstream_reconciliation_continuation_at()
+            .await
+            .expect("read durable continuation")
+            .is_some_and(|continuation_at| continuation_at >= backoff_until)
+    );
+    let (work_generation, completed_generation): (i64, i64) = sqlx::query_as(
+        "SELECT work_generation, completed_generation FROM upstream_reconciliation_work \
+         WHERE token_id = 'research-budget-token' AND period_code = '2026-07-15/R1'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read preserved main terminal work");
+    assert_eq!(completed_generation, work_generation);
+    assert_eq!(
+        proxy
+            .key_store
+            .sqlite_runtime
+            .discarded_connections_for_test(SqliteOperation::ReconciliationProjection),
+        0
+    );
+    let transaction = proxy
+        .key_store
+        .sqlite_runtime
+        .begin_immediate(SqliteOperation::ReconciliationProjection)
+        .await
+        .expect("begin transaction after transient research read");
+    transaction
+        .rollback()
+        .await
+        .expect("rollback reusable projection connection");
+
     drop(proxy);
     let _ = std::fs::remove_file(db_path);
 }
@@ -175,6 +300,12 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
         .await
         .expect("mark existing usage projection pending");
     sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("reset projection controller state");
+    sqlx::query(
         r#"WITH RECURSIVE rows(n) AS (
              VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 501
            )
@@ -199,7 +330,7 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
     .await
     .expect("insert paged projection fixture");
     let projection_plan: Vec<String> = sqlx::query(
-        "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM upstream_reconciliation_usage WHERE rowid > 0 LIMIT 1)",
+        "EXPLAIN QUERY PLAN SELECT token_id, key_id, period_code FROM upstream_reconciliation_usage WHERE (token_id, key_id, period_code) > ('', '', '') ORDER BY token_id, key_id, period_code LIMIT 25",
     )
     .fetch_all(&proxy.key_store.pool)
     .await
@@ -208,10 +339,9 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
     .map(|row| row.try_get("detail").expect("read plan detail"))
     .collect();
     assert!(
-        projection_plan
-            .iter()
-            .any(|detail| detail.contains("USING INTEGER PRIMARY KEY")),
-        "the unfinished source projection check must seek by rowid, not scan usage"
+        projection_plan.iter().any(|detail| detail
+            .contains("USING COVERING INDEX sqlite_autoindex_upstream_reconciliation_usage_1")),
+        "the projection cursor must seek through the stable usage primary key"
     );
 
     assert!(
@@ -224,16 +354,13 @@ async fn reconciliation_projection_preserves_global_min_across_backfill_pages() 
             .is_empty(),
         "candidate selection must not write or scan the legacy projection before main settlement"
     );
-    proxy
-        .key_store
-        .advance_upstream_reconciliation_work_projection()
-        .await
-        .expect("advance first projection page");
-    proxy
-        .key_store
-        .advance_upstream_reconciliation_work_projection()
-        .await
-        .expect("advance second projection page");
+    for _ in 0..24 {
+        proxy
+            .key_store
+            .advance_upstream_reconciliation_work_projection()
+            .await
+            .expect("advance projection micro-slice");
+    }
     let projected: (String, String, String) = sqlx::query_as(
         "SELECT project_id, billing_subject, settlement_mode FROM upstream_reconciliation_work WHERE token_id = 'projection-token' AND period_code = '2026-07-15/S1'",
     )
@@ -290,6 +417,12 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
         .await
         .expect("mark existing usage projection pending");
     sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("reset projection controller state");
+    sqlx::query(
         r#"WITH RECURSIVE rows(n) AS (
              VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 501
            )
@@ -328,8 +461,8 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
             .upstream_reconciliation_continuation_at()
             .await
             .expect("continue incomplete source projection"),
-        Some(now + 30),
-        "the source cursor must remain durable work after its current projected page drains"
+        Some(now + 1),
+        "low-pressure source projection must remain durable work after its current page drains"
     );
     proxy
         .ensure_upstream_reconciliation_representative_job()
@@ -341,7 +474,7 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("read next-page representative");
-    assert_eq!(continuation, (1, now + 30));
+    assert_eq!(continuation, (1, now + 1));
 
     proxy
         .key_store
@@ -354,7 +487,7 @@ async fn reconciliation_projection_continues_after_a_settled_backfill_page() {
         .await
         .expect("select second projected page");
     assert_eq!(next_page.candidates.len(), 1);
-    assert_eq!(next_page.candidates[0].token_id, "projection-page-501");
+    assert_eq!(next_page.candidates[0].token_id, "projection-page-026");
 
     let _ = std::fs::remove_file(db_path);
 }

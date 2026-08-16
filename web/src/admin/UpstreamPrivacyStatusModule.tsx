@@ -590,6 +590,46 @@ export default function UpstreamPrivacyStatusModule({
                   value={`${numberFormatter.format(status.reconciliationLastAttempted ?? 0)} / ${numberFormatter.format(status.reconciliationLastSettled ?? 0)} / ${numberFormatter.format(status.reconciliationLastNoAdjustment ?? 0)} / ${numberFormatter.format(status.reconciliationLastUpstream429 ?? 0)}`}
                 />
                 <PrivacyStat
+                  label={language === 'zh' ? '投影状态 / 批量' : 'Projection / batch'}
+                  value={status.reconciliationRunObservation == null
+                    ? strings.statusMissing
+                    : `${status.reconciliationRunObservation.projectionState} · ${numberFormatter.format(status.reconciliationRunObservation.projectionBatchSize)}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '投影累计 / 事务 P95' : 'Projection rows / transaction P95'}
+                  value={status.reconciliationRunObservation == null
+                    ? strings.statusMissing
+                    : `${numberFormatter.format(status.reconciliationRunObservation.projectionScannedRows)} · ${numberFormatter.format(status.reconciliationRunObservation.projectionTransactionP95Ms)} ms`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '结算 / 无调整 / 仅观测' : 'Settled / no adjustment / observed'}
+                  value={status.reconciliationRunObservation == null
+                    ? strings.statusMissing
+                    : `${numberFormatter.format(status.reconciliationRunObservation.settled)} / ${numberFormatter.format(status.reconciliationRunObservation.noAdjustment)} / ${numberFormatter.format(status.reconciliationRunObservation.observed)}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '429 / 传输 / 语义 / 本地压力' : '429 / transport / semantic / local pressure'}
+                  value={status.reconciliationRunObservation == null
+                    ? strings.statusMissing
+                    : `${numberFormatter.format(status.reconciliationRunObservation.upstream429)} / ${numberFormatter.format(status.reconciliationRunObservation.transportFailure)} / ${numberFormatter.format(status.reconciliationRunObservation.semanticFailure)} / ${numberFormatter.format(status.reconciliationRunObservation.localPressure)}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '阶段耗时（准备 / 首次远端 / 远端）' : 'Phase ms (hydrate / first remote / remote)'}
+                  value={status.reconciliationRunObservation == null
+                    ? strings.statusMissing
+                    : `${numberFormatter.format(status.reconciliationRunObservation.hydrateMs)} / ${status.reconciliationRunObservation.firstRemoteMs == null ? '-' : numberFormatter.format(status.reconciliationRunObservation.firstRemoteMs)} / ${numberFormatter.format(status.reconciliationRunObservation.remoteMs)}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '收尾 / Research / 续跑' : 'Finalization / research / continuation'}
+                  value={status.reconciliationRunObservation == null
+                    ? strings.statusMissing
+                    : `${numberFormatter.format(status.reconciliationRunObservation.finalizationMs)} / ${numberFormatter.format(status.reconciliationRunObservation.researchMs)} ms · ${status.reconciliationRunObservation.continuationReason ?? (language === 'zh' ? '无' : 'None')}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '下次引擎尝试' : 'Next engine attempt'}
+                  value={formatOptionalTimestamp(status.reconciliationRunObservation?.nextRetryAt ?? null, timestampFormatter, strings.statusMissing)}
+                />
+                <PrivacyStat
                   label={language === 'zh' ? '预算状态' : 'Budget status'}
                   value={status.reconciliationLastBudgetExhausted ? (language === 'zh' ? '已耗尽' : 'Exhausted') : (language === 'zh' ? '正常' : 'Within budget')}
                 />

@@ -26,6 +26,14 @@ const RECONCILIATION_PROJECTION_LIFECYCLE_CHECKSUM: &str =
 const HA_GC_LEGACY_CURSOR_VERSION: i64 = 8;
 const HA_GC_LEGACY_CURSOR_NAME: &str = "ha-gc-per-channel-legacy-cursor-v1";
 const HA_GC_LEGACY_CURSOR_CHECKSUM: &str = "sha256:ac41cf12d5e848f3a1b9d276e0f4598c";
+const RECONCILIATION_ENGINE_STATE_VERSION: i64 = 9;
+const RECONCILIATION_ENGINE_STATE_NAME: &str = "reconciliation-engine-state-v1";
+const RECONCILIATION_ENGINE_STATE_CHECKSUM: &str =
+    "sha256:614b3746410a20742499208d97764b88";
+const RECONCILIATION_OUTCOME_REPAIR_VERSION: i64 = 10;
+const RECONCILIATION_OUTCOME_REPAIR_NAME: &str = "reconciliation-shadow-outcome-repair-v1";
+const RECONCILIATION_OUTCOME_REPAIR_CHECKSUM: &str =
+    "sha256:0c3d8491c7064ba6a47fce9bb28c6220";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -662,6 +670,16 @@ impl KeyStore {
                 HA_GC_LEGACY_CURSOR_NAME,
                 HA_GC_LEGACY_CURSOR_CHECKSUM,
             ),
+            (
+                RECONCILIATION_ENGINE_STATE_VERSION,
+                RECONCILIATION_ENGINE_STATE_NAME,
+                RECONCILIATION_ENGINE_STATE_CHECKSUM,
+            ),
+            (
+                RECONCILIATION_OUTCOME_REPAIR_VERSION,
+                RECONCILIATION_OUTCOME_REPAIR_NAME,
+                RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -708,6 +726,46 @@ impl KeyStore {
         {
             return Err(ProxyError::Other(
                 "schema migration object validation failed at version 8".to_string(),
+            ));
+        }
+        if self
+            .schema_migration_applied(RECONCILIATION_ENGINE_STATE_VERSION)
+            .await?
+            && (!self
+                .schema_object_exists("main", "upstream_reconciliation_projection_state")
+                .await?
+                || !self
+                    .schema_object_exists("main", "upstream_reconciliation_run_observation")
+                    .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "transport_failure_streak")
+                    .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "transport_retry_at")
+                    .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "semantic_failure_streak")
+                    .await?
+                || !self
+                    .table_column_exists("upstream_reconciliation_work", "semantic_retry_at")
+                    .await?
+                || !self
+                    .schema_named_object_exists(
+                        "main",
+                        "trigger",
+                        "trg_upstream_reconciliation_work_failure_reset_insert",
+                    )
+                    .await?
+                || !self
+                    .schema_named_object_exists(
+                        "main",
+                        "trigger",
+                        "trg_upstream_reconciliation_work_failure_reset_update",
+                    )
+                    .await?)
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 9".to_string(),
             ));
         }
         if self
@@ -847,6 +905,139 @@ impl KeyStore {
             HA_GC_LEGACY_CURSOR_VERSION,
             HA_GC_LEGACY_CURSOR_NAME,
             HA_GC_LEGACY_CURSOR_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_reconciliation_engine_state_migration(&self) -> Result<(), ProxyError> {
+        for (column, definition) in [
+            ("transport_failure_streak", "INTEGER NOT NULL DEFAULT 0"),
+            ("transport_retry_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("semantic_failure_streak", "INTEGER NOT NULL DEFAULT 0"),
+            ("semantic_retry_at", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !self
+                .table_column_exists("upstream_reconciliation_work", column)
+                .await?
+            {
+                sqlx::query(&format!(
+                    "ALTER TABLE upstream_reconciliation_work ADD COLUMN {column} {definition}"
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS upstream_reconciliation_projection_state (
+                id TEXT PRIMARY KEY NOT NULL CHECK(id = 'local'),
+                cursor_token_id TEXT NOT NULL DEFAULT '',
+                cursor_key_id TEXT NOT NULL DEFAULT '',
+                cursor_period_code TEXT NOT NULL DEFAULT '',
+                batch_size INTEGER NOT NULL DEFAULT 25,
+                fast_slice_streak INTEGER NOT NULL DEFAULT 0,
+                scanned_rows INTEGER NOT NULL DEFAULT 0,
+                transaction_p95_ms INTEGER NOT NULL DEFAULT 0,
+                tx_hold_le_10 INTEGER NOT NULL DEFAULT 0,
+                tx_hold_le_25 INTEGER NOT NULL DEFAULT 0,
+                tx_hold_le_50 INTEGER NOT NULL DEFAULT 0,
+                tx_hold_le_100 INTEGER NOT NULL DEFAULT 0,
+                tx_hold_le_250 INTEGER NOT NULL DEFAULT 0,
+                tx_hold_over_250 INTEGER NOT NULL DEFAULT 0,
+                completed INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER NOT NULL DEFAULT 0,
+                last_defer_reason TEXT,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        let legacy_complete = self
+            .get_meta_i64(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
+            .await?
+            .unwrap_or(0);
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_projection_state (id, completed)
+               VALUES ('local', ?)
+               ON CONFLICT(id) DO NOTHING"#,
+        )
+        .bind(i64::from(legacy_complete != 0))
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS upstream_reconciliation_run_observation (
+                id TEXT PRIMARY KEY NOT NULL CHECK(id = 'local'),
+                mode TEXT NOT NULL DEFAULT 'disabled',
+                projection_state TEXT NOT NULL DEFAULT 'unknown',
+                projection_scanned_rows INTEGER NOT NULL DEFAULT 0,
+                projection_batch_size INTEGER NOT NULL DEFAULT 25,
+                projection_transaction_p95_ms INTEGER NOT NULL DEFAULT 0,
+                cursor_advanced INTEGER NOT NULL DEFAULT 0,
+                hydrate_ms INTEGER NOT NULL DEFAULT 0,
+                first_remote_ms INTEGER,
+                remote_ms INTEGER NOT NULL DEFAULT 0,
+                finalization_ms INTEGER NOT NULL DEFAULT 0,
+                research_ms INTEGER NOT NULL DEFAULT 0,
+                settled_count INTEGER NOT NULL DEFAULT 0,
+                no_adjustment_count INTEGER NOT NULL DEFAULT 0,
+                observed_count INTEGER NOT NULL DEFAULT 0,
+                upstream_429_count INTEGER NOT NULL DEFAULT 0,
+                transport_failure_count INTEGER NOT NULL DEFAULT 0,
+                semantic_failure_count INTEGER NOT NULL DEFAULT 0,
+                local_pressure_count INTEGER NOT NULL DEFAULT 0,
+                continuation_reason TEXT,
+                next_retry_at INTEGER,
+                observed_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("INSERT INTO upstream_reconciliation_run_observation (id) VALUES ('local') ON CONFLICT(id) DO NOTHING")
+            .execute(&self.pool)
+            .await?;
+        for (name, event) in [
+            ("trg_upstream_reconciliation_work_failure_reset_insert", "INSERT"),
+            ("trg_upstream_reconciliation_work_failure_reset_update", "UPDATE"),
+        ] {
+            sqlx::query(&format!(
+                r#"CREATE TRIGGER IF NOT EXISTS {name}
+                   AFTER {event} ON upstream_reconciliation_usage
+                   BEGIN
+                     UPDATE upstream_reconciliation_work
+                        SET transport_failure_streak = 0,
+                            transport_retry_at = 0,
+                            semantic_failure_streak = 0,
+                            semantic_retry_at = 0
+                      WHERE token_id = NEW.token_id AND period_code = NEW.period_code;
+                   END"#
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+        self.record_schema_migration(
+            RECONCILIATION_ENGINE_STATE_VERSION,
+            RECONCILIATION_ENGINE_STATE_NAME,
+            RECONCILIATION_ENGINE_STATE_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_reconciliation_outcome_repair_migration(&self) -> Result<(), ProxyError> {
+        // Historical terminal outcomes are repaired by the existing bounded
+        // projection slices. Startup only resets the local derived cursor.
+        sqlx::query(
+            r#"UPDATE upstream_reconciliation_projection_state
+               SET cursor_token_id = '', cursor_key_id = '', cursor_period_code = '',
+                   completed = 0, next_retry_at = 0,
+                   last_defer_reason = 'outcome_repair_pending', updated_at = ?
+               WHERE id = 'local'"#,
+        )
+        .bind(self.backend_time.now_ts())
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            RECONCILIATION_OUTCOME_REPAIR_VERSION,
+            RECONCILIATION_OUTCOME_REPAIR_NAME,
+            RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
         )
         .await
     }
@@ -1209,6 +1400,18 @@ impl KeyStore {
         {
             self.apply_ha_gc_legacy_cursor_migration().await?;
         }
+        if !self
+            .schema_migration_applied(RECONCILIATION_ENGINE_STATE_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_engine_state_migration().await?;
+        }
+        if !self
+            .schema_migration_applied(RECONCILIATION_OUTCOME_REPAIR_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_outcome_repair_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1239,6 +1442,15 @@ impl KeyStore {
         self.apply_reconciliation_projection_lifecycle_migration()
             .await?;
         self.apply_ha_gc_legacy_cursor_migration().await?;
+        self.apply_reconciliation_engine_state_migration().await?;
+        // A freshly bootstrapped database has no historical shadow outcomes
+        // to repair, so do not manufacture projection debt on first startup.
+        self.record_schema_migration(
+            RECONCILIATION_OUTCOME_REPAIR_VERSION,
+            RECONCILIATION_OUTCOME_REPAIR_NAME,
+            RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
+        )
+        .await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1246,7 +1458,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 8_i64,
+            migration_count = 10_i64,
         );
         Ok(())
     }

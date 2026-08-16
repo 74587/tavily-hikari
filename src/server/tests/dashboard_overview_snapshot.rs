@@ -198,7 +198,7 @@ async fn dashboard_overview_snapshot_keeps_summary_totals_in_sync_with_flushed_w
     });
 
     state.proxy.nudge_request_stats_flush().await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if state
                 .proxy

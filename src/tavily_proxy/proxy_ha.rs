@@ -121,6 +121,25 @@ impl TavilyProxy {
             })
     }
 
+    pub async fn shutdown_sqlite_maintenance_bulk(&self, timeout: Duration) -> bool {
+        self.key_store
+            .sqlite_runtime
+            .shutdown_maintenance_bulk(timeout)
+            .await
+    }
+
+    pub fn begin_sqlite_maintenance_run_shutdown(&self) {
+        self.key_store
+            .sqlite_runtime
+            .begin_maintenance_run_shutdown();
+    }
+
+    pub(crate) fn sqlite_maintenance_runs_shutting_down(&self) -> bool {
+        self.key_store
+            .sqlite_runtime
+            .maintenance_runs_shutting_down()
+    }
+
     pub async fn run_dashboard_rollup_integrity_slice(
         &self,
     ) -> Result<DashboardRollupIntegrityRun, ProxyError> {
@@ -404,6 +423,12 @@ impl TavilyProxy {
                 reason: reason.as_str(),
             },
         }
+    }
+
+    pub async fn prewarm_upstream_reconciliation_projection_capacity(&self) {
+        self.key_store
+            .prewarm_upstream_reconciliation_projection_capacity()
+            .await;
     }
 
     pub fn record_foreground_activity(&self) {

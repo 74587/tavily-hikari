@@ -11,12 +11,16 @@ pub(crate) const RECONCILIATION_RETRY_REASON_UPSTREAM_429: &str = "upstream429";
 pub(crate) const RECONCILIATION_RETRY_REASON_OTHER: &str = "other";
 pub(crate) const RECONCILIATION_OUTCOME_SETTLED: &str = "settled";
 pub(crate) const RECONCILIATION_OUTCOME_NO_ADJUSTMENT: &str = "no_adjustment";
+pub(crate) const RECONCILIATION_OUTCOME_OBSERVED: &str = "observed";
 pub(crate) const RECONCILIATION_OUTCOME_UPSTREAM_429: &str = "upstream_429";
 pub(crate) const RECONCILIATION_OUTCOME_TRANSPORT_FAILURE: &str = "transport_failure";
 pub(crate) const RECONCILIATION_OUTCOME_SEMANTIC_FAILURE: &str = "semantic_failure";
 pub(crate) const RECONCILIATION_OUTCOME_LOCAL_PRESSURE: &str = "local_pressure";
 pub(crate) const META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1: &str =
     "upstream_reconciliation_work_projection_complete_v1";
+const RECONCILIATION_PROJECTION_MIN_BATCH: i64 = 25;
+const RECONCILIATION_PROJECTION_MAX_BATCH: i64 = 100;
+const RECONCILIATION_PROJECTION_HOLD_BUCKETS_MS: [i64; 6] = [10, 25, 50, 100, 250, 251];
 const RECONCILIATION_RECENT_LANE_BUDGET: i64 = 12;
 const RECONCILIATION_BACKLOG_LANE_BUDGET: i64 = 8;
 const RECONCILIATION_QUEUE_ESTIMATE_LIMIT: i64 = 64;
@@ -61,6 +65,9 @@ pub(crate) struct ReconciliationWorkFence {
     pub(crate) claimed_job: Option<(i64, i64)>,
 }
 
+
+
+
 fn upstream_reconciliation_shadow_ready(settings: &SystemSettings) -> bool {
     settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
         && settings.api_rebalance_enabled
@@ -95,6 +102,12 @@ impl KeyStore {
             .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
     }
 
+    pub(crate) async fn prewarm_upstream_reconciliation_projection_capacity(&self) {
+        self.sqlite_runtime
+            .prewarm_reconciliation_projection_capacity()
+            .await;
+    }
+
     pub(crate) async fn upstream_reconciliation_run_admission_state(
         &self,
         claimed_job: Option<(i64, i64)>,
@@ -103,20 +116,21 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let claim_current = if let Some((job_id, claim_generation)) = claimed_job {
-            sqlx::query_scalar::<_, i64>(
+        let read_result = async {
+            let claim_current = if let Some((job_id, claim_generation)) = claimed_job {
+                sqlx::query_scalar::<_, i64>(
                 "SELECT EXISTS(SELECT 1 FROM scheduled_jobs WHERE id = ? AND status = 'running' AND claim_generation = ?)",
             )
             .bind(job_id)
             .bind(claim_generation)
             .fetch_one(&mut *conn)
-            .await?
-                != 0
-        } else {
-            true
-        };
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            r#"
+                .await?
+                    != 0
+            } else {
+                true
+            };
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                r#"
             SELECT key, value
             FROM meta
             WHERE key IN (?, ?, ?, ?, ?, ?, ?)
@@ -129,9 +143,12 @@ impl KeyStore {
         .bind(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1)
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1)
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
-        .fetch_all(&mut *conn)
-        .await?;
-        conn.close().await?;
+            .fetch_all(&mut *conn)
+            .await?;
+            Ok((claim_current, rows))
+        }
+        .await;
+        let (claim_current, rows) = conn.complete_query(read_result).await?;
         let values = rows.into_iter().collect::<std::collections::HashMap<_, _>>();
         let value_i64 = |key: &str| {
             values
@@ -615,17 +632,17 @@ impl KeyStore {
         // A one-time versioned lifecycle flag keeps historical source projection off the hot
         // continuation read path. New usage is maintained by triggers and therefore never
         // reopens a completed period merely because the legacy cursor is absent.
-        let projection_pending: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key = ?",
+        let projection_state: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT completed, next_retry_at FROM upstream_reconciliation_projection_state WHERE id = 'local'",
         )
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
         .fetch_optional(&mut *conn)
-        .await?
-        .unwrap_or(0);
+        .await?;
         // Historical projection is local maintenance, not a main-settlement retry. Keep the
         // representative delayed while no durable candidate exists so a disabled or not-yet
         // ready reconciliation configuration cannot spin an immediate worker loop.
-        let projection_at = (projection_pending == 0).then_some(now.saturating_add(30));
+        let projection_at = projection_state
+            .filter(|(completed, _)| *completed == 0)
+            .map(|(_, next_retry_at)| next_retry_at.max(now.saturating_add(1)));
         let Some(pending_at) = (match (work_at, research_at, projection_at) {
             (Some(work_at), Some(research_at), Some(projection_at)) => {
                 Some(work_at.min(research_at).min(projection_at))
@@ -1267,7 +1284,18 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
+        #[cfg(test)]
+        if self
+            .sqlite_runtime
+            .take_reconciliation_research_read_failure_for_test()
+        {
+            let injected_result: Result<
+                Vec<crate::models::UpstreamReconciliationResearchCandidate>,
+                sqlx::Error,
+            > = Err(sqlx::Error::PoolTimedOut);
+            return conn.complete_query(injected_result).await;
+        }
+        let rows_result = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
             r#"
             WITH pending AS (
                 SELECT
@@ -1313,8 +1341,8 @@ impl KeyStore {
         .bind(day_window.end)
         .bind(limit.max(1))
         .fetch_all(&mut *conn)
-        .await?;
-        conn.close().await?;
+        .await;
+        let rows = conn.complete_query(rows_result).await?;
         Ok(rows
             .into_iter()
             .map(|(request_id, token_id, key_id, period_code, billing_subject, period_end, poll_attempt_count, _, _)| {
@@ -1452,73 +1480,20 @@ impl KeyStore {
     /// this bounded slice is only for historical rows that predate them.
     pub(crate) async fn advance_upstream_reconciliation_work_projection(
         &self,
-    ) -> Result<(), ProxyError> {
-        const CURSOR_KEY: &str = "upstream_reconciliation_work_cursor_v1";
-        let mut transaction = self
-            .sqlite_runtime
-            .begin_immediate(SqliteOperation::ReconciliationProjection)
-            .await?;
-        let projection_complete: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key = ?",
-        )
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .unwrap_or(0);
-        if projection_complete != 0 {
-            transaction.finish(Ok(())).await?;
-            return Ok(());
-        }
-        let cursor: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key = ?",
-        )
-        .bind(CURSOR_KEY)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .unwrap_or(0);
-        let next_cursor: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(rowid) FROM (SELECT rowid FROM upstream_reconciliation_usage WHERE rowid > ? ORDER BY rowid LIMIT 500)",
-        )
-        .bind(cursor)
-        .fetch_one(&mut *transaction)
-        .await?;
-        let Some(next_cursor) = next_cursor else {
-            sqlx::query("INSERT INTO meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-                .bind(META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1)
-                .execute(&mut *transaction)
-                .await?;
-            return transaction.finish(Ok(())).await;
-        };
-        sqlx::query(
-            r#"INSERT INTO upstream_reconciliation_work (
-                 token_id, period_code, project_id, billing_subject, settlement_mode,
-                 period_start, period_end, scheduling_key_id, updated_at
-               )
-               SELECT token_id, period_code, MIN(project_id), MIN(billing_subject),
-                      MIN(settlement_mode), MIN(period_start), MAX(period_end), MIN(key_id),
-                      MAX(updated_at)
-               FROM upstream_reconciliation_usage
-               WHERE rowid > ? AND rowid <= ?
-               GROUP BY token_id, period_code
-               ON CONFLICT(token_id, period_code) DO UPDATE SET
-                 project_id = MIN(upstream_reconciliation_work.project_id, excluded.project_id),
-                 billing_subject = MIN(upstream_reconciliation_work.billing_subject, excluded.billing_subject),
-                 settlement_mode = MIN(upstream_reconciliation_work.settlement_mode, excluded.settlement_mode),
-                 period_start = MIN(upstream_reconciliation_work.period_start, excluded.period_start),
-                 period_end = MAX(upstream_reconciliation_work.period_end, excluded.period_end),
-                 scheduling_key_id = MIN(upstream_reconciliation_work.scheduling_key_id, excluded.scheduling_key_id),
-                 updated_at = MAX(upstream_reconciliation_work.updated_at, excluded.updated_at)"#,
-        )
-        .bind(cursor)
-        .bind(next_cursor)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(CURSOR_KEY)
-            .bind(next_cursor.to_string())
-            .execute(&mut *transaction)
-            .await?;
-        transaction.finish(Ok(())).await
+    ) -> Result<ReconciliationProjectionSliceOutcome, ProxyError> {
+        ReconciliationProjectionController::new(self)
+            .advance_slice(None)
+            .await
+    }
+
+    pub(crate) async fn advance_upstream_reconciliation_work_projection_claimed(
+        &self,
+        job_id: i64,
+        claim_generation: i64,
+    ) -> Result<ReconciliationProjectionSliceOutcome, ProxyError> {
+        ReconciliationProjectionController::new(self)
+            .advance_slice(Some((job_id, claim_generation)))
+            .await
     }
 
     async fn query_upstream_reconciliation_candidates(
@@ -1629,11 +1604,11 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = query
+        let rows_result = query
             .build_query_as::<UpstreamReconciliationCandidateRow>()
             .fetch_all(&mut *conn)
-            .await?;
-        conn.close().await?;
+            .await;
+        let rows = conn.complete_query(rows_result).await?;
         Ok(self.build_upstream_reconciliation_candidates(rows, now))
     }
 
@@ -1758,11 +1733,11 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = query
+        let rows_result = query
             .build_query_as::<(String, String, String)>()
             .fetch_all(&mut *conn)
-            .await?;
-        conn.close().await?;
+            .await;
+        let rows = conn.complete_query(rows_result).await?;
         let mut grouped = std::collections::HashMap::new();
         for (token_id, period_code, key_id) in rows {
             grouped
@@ -1816,11 +1791,11 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
-        let rows = query
+        let rows_result = query
             .build_query_as::<(String, String, i64)>()
             .fetch_all(&mut *conn)
-            .await?;
-        conn.close().await?;
+            .await;
+        let rows = conn.complete_query(rows_result).await?;
         Ok(rows
             .into_iter()
             .map(|(token_id, period_code, credits)| ((token_id, period_code), credits))
@@ -1935,6 +1910,10 @@ impl KeyStore {
             SET completed_generation = ?,
                 next_attempt_at = 0,
                 last_outcome = ?,
+                transport_failure_streak = 0,
+                transport_retry_at = 0,
+                semantic_failure_streak = 0,
+                semantic_retry_at = 0,
                 updated_at = ?
             WHERE token_id = ? AND period_code = ?
               AND work_generation = ?
@@ -1977,6 +1956,10 @@ impl KeyStore {
             SET completed_generation = COALESCE(?, work_generation),
                 next_attempt_at = 0,
                 last_outcome = ?,
+                transport_failure_streak = 0,
+                transport_retry_at = 0,
+                semantic_failure_streak = 0,
+                semantic_retry_at = 0,
                 updated_at = ?
             WHERE token_id = ? AND period_code = ?
               AND completed_generation < work_generation
@@ -2015,9 +1998,40 @@ impl KeyStore {
             .lock_reconciliation_work_generation(&mut tx, candidate, fence)
             .await?
         {
+            tx.rollback().await?;
             return Ok(());
         }
         let expected_generation = fence.map(|fence| fence.work_generation);
+        let (transport_streak, persisted_transport_retry_at, semantic_streak, persisted_semantic_retry_at):
+            (i64, i64, i64, i64) = sqlx::query_as(
+                r#"SELECT transport_failure_streak, transport_retry_at,
+                          semantic_failure_streak, semantic_retry_at
+                   FROM upstream_reconciliation_work
+                   WHERE token_id = ? AND period_code = ?"#,
+            )
+            .bind(&candidate.token_id)
+            .bind(&candidate.period_code)
+            .fetch_one(&mut *tx)
+            .await?;
+        let transport_retry_at = match outcome {
+            RECONCILIATION_OUTCOME_TRANSPORT_FAILURE => {
+                Some(now.saturating_add(
+                    [30, 60, 120, 300][transport_streak.min(3) as usize],
+                ))
+            }
+            _ => None,
+        };
+        let semantic_retry_at = match outcome {
+            RECONCILIATION_OUTCOME_SEMANTIC_FAILURE => {
+                Some(now.saturating_add(
+                    [300, 900, 1800, 3600][semantic_streak.min(3) as usize],
+                ))
+            }
+            _ => None,
+        };
+        let effective_next_attempt_at = next_attempt_at
+            .max(transport_retry_at.unwrap_or(persisted_transport_retry_at))
+            .max(semantic_retry_at.unwrap_or(persisted_semantic_retry_at));
         sqlx::query(
             r#"
             INSERT INTO upstream_reconciliation_settlements (
@@ -2042,7 +2056,7 @@ impl KeyStore {
         .bind(candidate.period_end)
         .bind(status)
         .bind(normalized_reason)
-        .bind(next_attempt_at)
+        .bind(effective_next_attempt_at)
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -2050,14 +2064,25 @@ impl KeyStore {
         sqlx::query(
             r#"
             UPDATE upstream_reconciliation_work
-            SET next_attempt_at = ?, last_outcome = ?, updated_at = ?
+            SET next_attempt_at = ?, last_outcome = ?,
+                transport_failure_streak = transport_failure_streak + CASE WHEN ? = 'transport_failure' THEN 1 ELSE 0 END,
+                transport_retry_at = CASE WHEN ? = 'transport_failure' THEN ? ELSE transport_retry_at END,
+                semantic_failure_streak = semantic_failure_streak + CASE WHEN ? = 'semantic_failure' THEN 1 ELSE 0 END,
+                semantic_retry_at = CASE WHEN ? = 'semantic_failure' THEN ? ELSE semantic_retry_at END,
+                updated_at = ?
             WHERE token_id = ? AND period_code = ?
               AND completed_generation < work_generation
               AND (? IS NULL OR work_generation = ?)
             "#,
         )
-        .bind(next_attempt_at)
+        .bind(effective_next_attempt_at)
         .bind(outcome)
+        .bind(outcome)
+        .bind(outcome)
+        .bind(transport_retry_at.unwrap_or(0))
+        .bind(outcome)
+        .bind(outcome)
+        .bind(semantic_retry_at.unwrap_or(0))
         .bind(now)
         .bind(&candidate.token_id)
         .bind(&candidate.period_code)
@@ -2110,6 +2135,7 @@ impl KeyStore {
             )
             .await?
         {
+            tx.rollback().await?;
             return Ok(false);
         }
         if delta == 0 {
@@ -2329,7 +2355,7 @@ impl KeyStore {
         let completion_outcome = if delta == 0 {
             RECONCILIATION_OUTCOME_NO_ADJUSTMENT
         } else {
-            RECONCILIATION_OUTCOME_SETTLED
+            RECONCILIATION_OUTCOME_OBSERVED
         };
         let expected_generation = fence.map(|fence| fence.work_generation);
         if !self
@@ -2342,6 +2368,7 @@ impl KeyStore {
             )
             .await?
         {
+            tx.rollback().await?;
             return Ok(false);
         }
         if delta == 0 {
@@ -2445,7 +2472,7 @@ impl KeyStore {
                 &mut tx,
                 candidate,
                 expected_generation,
-                RECONCILIATION_OUTCOME_SETTLED,
+                RECONCILIATION_OUTCOME_OBSERVED,
                 now,
             )
             .await?;
@@ -2503,7 +2530,7 @@ impl KeyStore {
             &mut tx,
             candidate,
             expected_generation,
-            RECONCILIATION_OUTCOME_SETTLED,
+            RECONCILIATION_OUTCOME_OBSERVED,
             now,
         )
         .await?;
@@ -2690,7 +2717,7 @@ impl KeyStore {
                         u.token_id,
                         u.period_code,
                         MIN(u.billing_subject) AS billing_subject,
-                        MAX(CASE WHEN s.status IN ('settled', 'shadow_settled') THEN 1 ELSE 0 END) AS settled,
+                        MAX(CASE WHEN s.status = 'settled' THEN 1 ELSE 0 END) AS settled,
                         MAX(CASE WHEN s.status IN ('settled', 'degraded', 'shadow_settled', 'shadow_degraded') THEN 1 ELSE 0 END) AS terminal,
                         MAX(CASE WHEN s.status IN ('degraded', 'shadow_degraded') THEN 1 ELSE 0 END) AS degraded
                     FROM upstream_reconciliation_usage u

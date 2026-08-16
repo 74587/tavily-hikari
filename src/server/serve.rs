@@ -598,6 +598,7 @@ pub async fn serve(
     )
     .with_graceful_shutdown(async move {
         shutdown_signal().await;
+        shutdown_proxy.begin_sqlite_maintenance_run_shutdown();
         shutdown_proxy.nudge_request_stats_flush().await;
     })
     .await?;
@@ -611,6 +612,17 @@ pub async fn serve(
             event = "request_stats_drain_timeout",
             err = %err,
             "request stats coalescer did not drain before shutdown grace period"
+        );
+    }
+    if !post_shutdown_state
+        .proxy
+        .shutdown_sqlite_maintenance_bulk(Duration::from_secs(5))
+        .await
+    {
+        tracing::warn!(
+            component = "shutdown",
+            event = "sqlite_maintenance_drain_timeout",
+            "SQLite maintenance did not reach a safe boundary before shutdown"
         );
     }
     tracing::info!(

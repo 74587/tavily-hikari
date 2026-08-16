@@ -94,6 +94,30 @@ export interface ReconciliationLocalBackoff {
   lastRecoveredAt: number | null
 }
 
+export interface ReconciliationRunObservation {
+  mode: 'disabled' | 'compare' | 'active' | string
+  projectionState: 'unknown' | 'projecting' | 'complete' | 'deferred' | string
+  projectionScannedRows: number
+  projectionBatchSize: number
+  projectionTransactionP95Ms: number
+  cursorAdvanced: boolean
+  hydrateMs: number
+  firstRemoteMs: number | null
+  remoteMs: number
+  finalizationMs: number
+  researchMs: number
+  settled: number
+  noAdjustment: number
+  observed: number
+  upstream429: number
+  transportFailure: number
+  semanticFailure: number
+  localPressure: number
+  continuationReason: string | null
+  nextRetryAt: number | null
+  observedAt: number | null
+}
+
 export interface UpstreamPrivacyStatus {
   phase: 'configured' | 'draining' | 'pending' | 'compare' | 'active' | 'degraded'
   configuredProjectIdMode: UpstreamProjectIdMode
@@ -131,6 +155,7 @@ export interface UpstreamPrivacyStatus {
   reconciliationLastBudgetExhausted?: boolean
   reconciliationObservation: ReconciliationObservation
   reconciliationLocalBackoff: ReconciliationLocalBackoff
+  reconciliationRunObservation?: ReconciliationRunObservation
   retryBuckets: UpstreamReconciliationRetryBuckets
   currentPeriodBoundUsersByKey: UpstreamKeyActivityPoint[]
   currentPeriodPendingProjectIdsByKey: UpstreamKeyActivityPoint[]

@@ -62,6 +62,32 @@ pub struct ReconciliationLocalBackoff {
     pub last_recovered_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReconciliationRunObservation {
+    pub mode: String,
+    pub projection_state: String,
+    pub projection_scanned_rows: i64,
+    pub projection_batch_size: i64,
+    pub projection_transaction_p95_ms: i64,
+    pub cursor_advanced: bool,
+    pub hydrate_ms: i64,
+    pub first_remote_ms: Option<i64>,
+    pub remote_ms: i64,
+    pub finalization_ms: i64,
+    pub research_ms: i64,
+    pub settled: i64,
+    pub no_adjustment: i64,
+    pub observed: i64,
+    pub upstream_429: i64,
+    pub transport_failure: i64,
+    pub semantic_failure: i64,
+    pub local_pressure: i64,
+    pub continuation_reason: Option<String>,
+    pub next_retry_at: Option<i64>,
+    pub observed_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamPrivacyStatus {
@@ -107,6 +133,8 @@ pub struct UpstreamPrivacyStatus {
     pub reconciliation_last_budget_exhausted: bool,
     pub reconciliation_observation: ReconciliationObservation,
     pub reconciliation_local_backoff: ReconciliationLocalBackoff,
+    #[serde(default)]
+    pub reconciliation_run_observation: ReconciliationRunObservation,
     pub retry_buckets: UpstreamReconciliationRetryBuckets,
     pub current_period_bound_users_by_key: Vec<UpstreamKeyActivityPoint>,
     pub current_period_pending_project_ids_by_key: Vec<UpstreamKeyActivityPoint>,

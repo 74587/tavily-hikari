@@ -28,7 +28,14 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let projection_state: (i64, i64, i64) = sqlx::query_as(
+        "SELECT batch_size, scanned_rows, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read reconciliation engine projection state");
+    assert_eq!(projection_state, (25, 0, 1));
     let projection_complete: i64 = sqlx::query_scalar(
         "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'upstream_reconciliation_work_projection_complete_v1'",
     )
@@ -54,6 +61,207 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
     .expect_err("checksum drift must reject startup");
     assert!(error.to_string().contains("checksum mismatch"));
 
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_projection() {
+    let db_path = temp_db_path("reconciliation-engine-state-v9");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-engine-state-v9".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+    for statement in [
+        "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_insert",
+        "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_update",
+        "DROP TABLE upstream_reconciliation_projection_state",
+        "DROP TABLE upstream_reconciliation_run_observation",
+        "ALTER TABLE upstream_reconciliation_work DROP COLUMN transport_failure_streak",
+        "ALTER TABLE upstream_reconciliation_work DROP COLUMN transport_retry_at",
+        "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_failure_streak",
+        "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_retry_at",
+        "DELETE FROM schema_migrations WHERE version IN (9, 10)",
+    ] {
+        sqlx::query(statement)
+            .execute(&proxy.key_store.pool)
+            .await
+            .unwrap_or_else(|err| panic!("apply legacy fixture statement {statement}: {err}"));
+    }
+    for (suffix, delta_credits) in [("zero", 0_i64), ("nonzero", 3_i64)] {
+        let token_id = format!("migration-shadow-{suffix}");
+        let period_code = format!("2026-07-15/{suffix}");
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_usage (
+                 token_id, key_id, period_code, project_id, billing_subject,
+                 settlement_mode, period_start, period_end, request_count,
+                 first_used_at, last_used_at, updated_at
+               ) VALUES (?, 'migration-key', ?, 'migration-project', ?, 'shadow',
+                         1, 2, 1, 1, 2, 2)"#,
+        )
+        .bind(&token_id)
+        .bind(&period_code)
+        .bind(format!("token:{token_id}"))
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert historical shadow usage");
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_settlements (
+                 settlement_key, token_id, period_code, project_id, billing_subject,
+                 period_start, period_end, status, delta_credits, created_at,
+                 updated_at, settled_at
+               ) VALUES (?, ?, ?, 'migration-project', ?, 1, 2,
+                         'shadow_settled', ?, 2, 2, 2)"#,
+        )
+        .bind(format!("v1:{token_id}:{period_code}"))
+        .bind(&token_id)
+        .bind(&period_code)
+        .bind(format!("token:{token_id}"))
+        .bind(delta_credits)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("insert historical shadow settlement");
+        sqlx::query(
+            "UPDATE upstream_reconciliation_work SET completed_generation = work_generation, last_outcome = 'settled' WHERE token_id = ? AND period_code = ?",
+        )
+        .bind(&token_id)
+        .bind(&period_code)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("shape legacy terminal outcome");
+    }
+    proxy
+        .key_store
+        .set_meta_i64(
+            META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1,
+            0,
+        )
+        .await
+        .expect("mark legacy projection incomplete");
+
+    assert!(
+        !proxy
+            .key_store
+            .prepare_versioned_schema()
+            .await
+            .expect("resume additive reconciliation migration"),
+        "an existing database must not request full bootstrap"
+    );
+    let state: (String, String, String, i64) = sqlx::query_as(
+        "SELECT cursor_token_id, cursor_key_id, cursor_period_code, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read migrated stable projection cursor");
+    assert_eq!(state, (String::new(), String::new(), String::new(), 0));
+    let recorded_v9_checksum: String =
+        sqlx::query_scalar("SELECT checksum FROM schema_migrations WHERE version = 9")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read the immutable v9 migration identity");
+    assert_eq!(
+        recorded_v9_checksum,
+        "sha256:614b3746410a20742499208d97764b88"
+    );
+    let startup_outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT last_outcome FROM upstream_reconciliation_work WHERE token_id LIKE 'migration-shadow-%' ORDER BY token_id",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("startup migration must not scan and repair historical work");
+    assert_eq!(startup_outcomes, vec!["settled", "settled"]);
+    for _ in 0..10 {
+        let slice = proxy
+            .key_store
+            .advance_upstream_reconciliation_work_projection()
+            .await
+            .expect("advance bounded outcome repair projection");
+        if matches!(
+            slice,
+            crate::store::ReconciliationProjectionSliceOutcome::Advanced {
+                completed: true,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+    let repaired_outcomes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT token_id, last_outcome FROM upstream_reconciliation_work WHERE token_id LIKE 'migration-shadow-%' ORDER BY token_id",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read repaired shadow outcomes");
+    assert_eq!(
+        repaired_outcomes,
+        vec![
+            (
+                "migration-shadow-nonzero".to_string(),
+                "observed".to_string()
+            ),
+            (
+                "migration-shadow-zero".to_string(),
+                "no_adjustment".to_string()
+            ),
+        ]
+    );
+    let repair_plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+        r#"EXPLAIN QUERY PLAN
+           UPDATE upstream_reconciliation_work
+              SET last_outcome = CASE
+                    WHEN token_id = ? AND period_code = ? THEN 'observed'
+                    ELSE last_outcome
+                  END
+            WHERE completed_generation >= work_generation
+              AND ((token_id = ? AND period_code = ?)
+                OR (token_id = ? AND period_code = ?))"#,
+    )
+    .bind("migration-shadow-nonzero")
+    .bind("2026-07-15/nonzero")
+    .bind("migration-shadow-nonzero")
+    .bind("2026-07-15/nonzero")
+    .bind("migration-shadow-zero")
+    .bind("2026-07-15/zero")
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("explain bounded terminal repair");
+    assert!(
+        repair_plan
+            .iter()
+            .all(|(_, _, _, detail)| !detail.contains("SCAN ")),
+        "terminal repair must not scan the work table: {repair_plan:?}"
+    );
+    assert!(
+        repair_plan
+            .iter()
+            .any(|(_, _, _, detail)| detail.contains("SEARCH ")),
+        "terminal repair must seek work by primary key: {repair_plan:?}"
+    );
+    for statement in [
+        "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_insert",
+        "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_update",
+        "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_retry_at",
+        "CREATE TRIGGER trg_upstream_reconciliation_work_failure_reset_insert AFTER INSERT ON upstream_reconciliation_usage BEGIN SELECT 1; END",
+        "CREATE TRIGGER trg_upstream_reconciliation_work_failure_reset_update AFTER UPDATE ON upstream_reconciliation_usage BEGIN SELECT 1; END",
+    ] {
+        sqlx::query(statement)
+            .execute(&proxy.key_store.pool)
+            .await
+            .unwrap_or_else(|err| panic!("apply v9 drift fixture statement {statement}: {err}"));
+    }
+    let drift_error = proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect_err("recorded v9 must reject missing retry state");
+    assert!(drift_error.to_string().contains("version 9"));
+
+    drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -548,7 +756,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

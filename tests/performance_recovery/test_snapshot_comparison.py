@@ -44,7 +44,7 @@ class SnapshotComparisonTests(unittest.TestCase):
                 self.assertSetEqual(comparison_resources(variable), resources)
 
     def test_comparison_keeps_calibrated_noise_bounds_and_raw_metrics(self) -> None:
-        self.assertIn("DASHBOARD_P95_NOISE_FLOOR_MS = 10.0", COMPARISON)
+        self.assertIn("DASHBOARD_P95_NOISE_FLOOR_MS = 15.0", COMPARISON)
         self.assertIn("RSS_P95_NOISE_BAND_KIB = 40 * 1024", COMPARISON)
         self.assertIn("absolute_floor=DASHBOARD_P95_NOISE_FLOOR_MS", COMPARISON)
         self.assertIn("additive_tolerance=RSS_P95_NOISE_BAND_KIB", COMPARISON)
@@ -59,10 +59,22 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('candidate["sqliteFinalLockErrors"]', COMPARISON)
         self.assertIn('structured_field(line, "defer_reason", reason)', COMPARISON)
         self.assertIn('("sqlite_contention", "sqlite_busy")', COMPARISON)
-        self.assertIn('(baseline_business_responses * 95 + 99) // 100', COMPARISON)
+        self.assertIn('structured_field(line, "event", "research_sweep_deferred")', COMPARISON)
+        self.assertIn('structured_field(line, "reason", "local_pressure")', COMPARISON)
+        self.assertIn("baseline_business_response_ratio", COMPARISON)
+        self.assertIn("baseline_business_response_ratio - 0.05", COMPARISON)
+        self.assertIn("business_attempts * candidate_response_ratio_floor", COMPARISON)
         self.assertIn('"database table is locked"', COMPARISON)
         self.assertIn('"database schema is locked"', COMPARISON)
         self.assertIn('"database is busy"', COMPARISON)
+        self.assertIn('"terminalDelta": reconciliation_after["terminal"]', COMPARISON)
+        self.assertIn('"reconciliationProjectionDiscarded"', COMPARISON)
+        self.assertIn('candidate reconciliation produced no terminal outcome', COMPARISON)
+        self.assertIn('projection transaction p95 is not proven below 100ms', COMPARISON)
+        self.assertIn('candidate billing truth differs', COMPARISON)
+        self.assertIn("prepare_reconciliation_fixture", COMPARISON)
+        self.assertIn("completed_generation < work_generation", COMPARISON)
+        self.assertIn("upstream_reconciliation_backoff_until_v1", COMPARISON)
 
 
 if __name__ == "__main__":

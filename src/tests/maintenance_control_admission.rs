@@ -341,12 +341,18 @@ async fn reconciliation_claim_fence_and_run_marker_use_control_budget() {
     );
 
     let projection_started = Instant::now();
-    let projection_err = proxy
+    let projection_outcome = proxy
         .key_store
-        .advance_upstream_reconciliation_work_projection()
+        .advance_upstream_reconciliation_work_projection_claimed(
+            claimed.id,
+            claimed.claim_generation,
+        )
         .await
-        .expect_err("legacy projection must not wait behind foreground pool saturation");
-    assert!(is_transient_sqlite_write_error(&projection_err));
+        .expect("projection pressure must be represented as a typed outcome");
+    assert!(matches!(
+        projection_outcome,
+        ReconciliationProjectionSliceOutcome::Deferred { .. }
+    ));
     assert!(
         projection_started.elapsed() < Duration::from_millis(250),
         "legacy projection exceeded its bulk acquisition budget: {:?}",

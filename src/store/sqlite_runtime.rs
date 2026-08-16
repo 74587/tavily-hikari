@@ -16,8 +16,10 @@ const MAINTENANCE_BULK_MAX_FOREGROUND_RPS: i64 = 5;
 const MAINTENANCE_BULK_CONTENTION_COOLDOWN: Duration = Duration::from_secs(5);
 const MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS: u32 = 2;
 const MAINTENANCE_BULK_HEAP_TRIM_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const MAINTENANCE_RUN_SLOTS: u32 = 1_024;
 const FOREGROUND_ACTIVITY_BUCKETS: usize = 10;
 const FOREGROUND_ACTIVITY_BUCKET_MS: u64 = 100;
+const TRANSACTION_HOLD_BUCKET_UPPER_MS: [u64; 6] = [10, 25, 50, 100, 250, 251];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SqliteAdmissionDeferReason {
@@ -40,6 +42,11 @@ impl SqliteAdmissionDeferReason {
 
 #[derive(Debug)]
 pub(crate) struct SqliteMaintenanceBulkPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Debug)]
+pub(crate) struct SqliteMaintenanceRunLease {
     _permit: OwnedSemaphorePermit,
 }
 
@@ -125,11 +132,11 @@ impl SqliteOperation {
 
     fn busy_timeout_override_ms(self) -> Option<i64> {
         match self {
-            // Dashboard integrity already used this per-connection short
-            // timeout before workload admission existed. All new admission
-            // paths retain the database's configured busy timeout and use an
-            // explicit operation budget instead.
-            Self::DashboardIntegrityWrite => Some(100),
+            // These bounded maintenance phases must yield before their
+            // cooperative run budget expires. A connection-local timeout
+            // returns writer contention as a typed defer without cancelling
+            // a future that still owns the physical connection.
+            Self::DashboardIntegrityWrite | Self::ReconciliationProjection => Some(100),
             _ => None,
         }
     }
@@ -149,9 +156,12 @@ impl SqliteOperation {
     fn probes_recent_contention(self) -> bool {
         // The coalescer can atomically restore an uncommitted batch. Let it
         // make one bounded attempt on its nominal wake instead of extending a
-        // prior writer conflict into a multi-second metrics backlog. Other
-        // bulk work keeps the full contention cooldown.
-        matches!(self, Self::RequestStatsFlush)
+        // prior writer conflict into a multi-second backlog. Projection uses
+        // the same bounded probe; other bulk work keeps the full cooldown.
+        matches!(
+            self,
+            Self::RequestStatsFlush | Self::ReconciliationProjection
+        )
     }
 }
 
@@ -171,6 +181,7 @@ struct OperationWindow {
     pool_wait_ms: u64,
     begin_wait_ms: u64,
     hold_ms: u64,
+    hold_histogram: [u64; TRANSACTION_HOLD_BUCKET_UPPER_MS.len()],
     rows_affected: u64,
     deferred_by_reason: BTreeMap<SqliteAdmissionDeferReason, u64>,
 }
@@ -205,6 +216,9 @@ struct SqliteRuntimeInner {
     pool: SqlitePool,
     maximum_connections: u32,
     maintenance_bulk: Arc<Semaphore>,
+    maintenance_shutdown: AtomicBool,
+    maintenance_runs: Arc<Semaphore>,
+    maintenance_run_shutdown: AtomicBool,
     last_bulk_heap_trim_at: Mutex<Option<Instant>>,
     last_contention_at: Mutex<Option<Instant>>,
     contention_warning_active: AtomicBool,
@@ -212,6 +226,8 @@ struct SqliteRuntimeInner {
     acquire_waiters: AtomicU32,
     peak_acquire_waiters: AtomicU32,
     workload: Mutex<WorkloadWindow>,
+    #[cfg(test)]
+    fail_next_reconciliation_research_read: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -323,6 +339,18 @@ pub(crate) struct SqliteRuntime {
 }
 
 impl SqliteRuntime {
+    #[cfg(test)]
+    pub(crate) fn discarded_connections_for_test(&self, operation: SqliteOperation) -> u64 {
+        self.inner
+            .workload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .operations
+            .get(&operation)
+            .map(|metrics| metrics.discarded_connections)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn new(pool: SqlitePool) -> Self {
         Self::with_max_connections(pool, crate::SQLITE_POOL_MAX_CONNECTIONS_DEFAULT)
     }
@@ -333,6 +361,9 @@ impl SqliteRuntime {
                 pool,
                 maximum_connections: maximum_connections.max(1),
                 maintenance_bulk: Arc::new(Semaphore::new(1)),
+                maintenance_shutdown: AtomicBool::new(false),
+                maintenance_runs: Arc::new(Semaphore::new(MAINTENANCE_RUN_SLOTS as usize)),
+                maintenance_run_shutdown: AtomicBool::new(false),
                 last_bulk_heap_trim_at: Mutex::new(None),
                 last_contention_at: Mutex::new(None),
                 contention_warning_active: AtomicBool::new(false),
@@ -340,8 +371,24 @@ impl SqliteRuntime {
                 acquire_waiters: AtomicU32::new(0),
                 peak_acquire_waiters: AtomicU32::new(0),
                 workload: Mutex::new(WorkloadWindow::default()),
+                #[cfg(test)]
+                fail_next_reconciliation_research_read: AtomicBool::new(false),
             }),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_reconciliation_research_read_for_test(&self) {
+        self.inner
+            .fail_next_reconciliation_research_read
+            .store(true, AtomicOrdering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_reconciliation_research_read_failure_for_test(&self) -> bool {
+        self.inner
+            .fail_next_reconciliation_research_read
+            .swap(false, AtomicOrdering::AcqRel)
     }
 
     pub(crate) fn record_foreground_activity(&self) {
@@ -436,6 +483,14 @@ impl SqliteRuntime {
         operation: SqliteOperation,
     ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
         debug_assert!(operation.is_maintenance_bulk());
+        if self
+            .inner
+            .maintenance_shutdown
+            .load(AtomicOrdering::Acquire)
+        {
+            self.record_deferred(operation, SqliteAdmissionDeferReason::BulkBusy);
+            return Err(SqliteAdmissionDeferReason::BulkBusy);
+        }
         let reason = self.maintenance_bulk_defer_reason_for(operation);
         if let Some(reason) = reason {
             self.record_deferred(operation, reason);
@@ -447,6 +502,80 @@ impl SqliteRuntime {
                 self.record_deferred(operation, SqliteAdmissionDeferReason::BulkBusy);
                 Err(SqliteAdmissionDeferReason::BulkBusy)
             }
+        }
+    }
+
+    pub(crate) async fn shutdown_maintenance_bulk(&self, timeout: Duration) -> bool {
+        self.begin_maintenance_run_shutdown();
+        self.inner
+            .maintenance_shutdown
+            .store(true, AtomicOrdering::Release);
+        matches!(
+            tokio::time::timeout(timeout, async {
+                let bulk = self.inner.maintenance_bulk.clone().acquire_owned().await?;
+                let runs = self
+                    .inner
+                    .maintenance_runs
+                    .clone()
+                    .acquire_many_owned(MAINTENANCE_RUN_SLOTS)
+                    .await?;
+                Ok::<_, tokio::sync::AcquireError>((bulk, runs))
+            })
+            .await,
+            Ok(Ok(_))
+        )
+    }
+
+    pub(crate) fn begin_maintenance_run_shutdown(&self) {
+        self.inner
+            .maintenance_run_shutdown
+            .store(true, AtomicOrdering::Release);
+    }
+
+    pub(crate) fn maintenance_runs_shutting_down(&self) -> bool {
+        self.inner
+            .maintenance_run_shutdown
+            .load(AtomicOrdering::Acquire)
+    }
+
+    pub(crate) fn try_start_maintenance_run(&self) -> Option<SqliteMaintenanceRunLease> {
+        if self.maintenance_runs_shutting_down() {
+            return None;
+        }
+        self.inner
+            .maintenance_runs
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| SqliteMaintenanceRunLease { _permit: permit })
+    }
+
+    pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
+        if self.has_foreground_pool_capacity()
+            || self.inner.pool.size() >= self.inner.maximum_connections
+            || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
+        {
+            return;
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut held = Vec::new();
+        while self.inner.pool.size() < self.inner.maximum_connections {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, self.inner.pool.acquire()).await {
+                Ok(Ok(conn)) => held.push(conn),
+                _ => break,
+            }
+        }
+        drop(held);
+        while Instant::now() < deadline
+            && self.inner.pool.num_idle()
+                < MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS as usize
+        {
+            tokio::task::yield_now().await;
         }
     }
 
@@ -884,6 +1013,15 @@ impl SqliteRuntime {
             .begin_wait_ms
             .saturating_add(begin_wait.as_millis() as u64);
         metrics.hold_ms = metrics.hold_ms.saturating_add(hold.as_millis() as u64);
+        if deferred.is_none() && !error {
+            let hold_ms = hold.as_millis().min(u64::MAX as u128) as u64;
+            let hold_bucket = TRANSACTION_HOLD_BUCKET_UPPER_MS
+                .iter()
+                .position(|upper| hold_ms <= *upper)
+                .unwrap_or(TRANSACTION_HOLD_BUCKET_UPPER_MS.len() - 1);
+            metrics.hold_histogram[hold_bucket] =
+                metrics.hold_histogram[hold_bucket].saturating_add(1);
+        }
         metrics.rows_affected = metrics.rows_affected.saturating_add(rows_affected);
         let idle_connections = self.inner.pool.num_idle().min(u32::MAX as usize) as u32;
         let in_use_connections = self.inner.pool.size().saturating_sub(idle_connections);
@@ -1006,6 +1144,38 @@ pub(crate) struct SqliteOperationConnection {
 }
 
 impl SqliteOperationConnection {
+    pub(crate) async fn complete_query<T>(
+        mut self,
+        query_result: Result<T, sqlx::Error>,
+    ) -> Result<T, ProxyError> {
+        let conn = self.conn.take().expect("SQLite operation connection");
+        let restore_result = restore_operation_connection(conn, self.restore_busy_timeout).await;
+        match (query_result, restore_result) {
+            (Ok(value), Ok(())) => {
+                self.runtime.record_success(
+                    self.operation,
+                    self.pool_wait,
+                    Duration::ZERO,
+                    self.started_at.elapsed(),
+                    0,
+                );
+                Ok(value)
+            }
+            (Err(query_err), _) => {
+                let err = ProxyError::Database(query_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, Duration::ZERO, &err);
+                Err(err)
+            }
+            (Ok(_), Err(restore_err)) => {
+                let err = ProxyError::Database(restore_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, Duration::ZERO, &err);
+                Err(err)
+            }
+        }
+    }
+
     pub(crate) async fn begin_immediate(
         &mut self,
     ) -> Result<SqliteOperationTransaction<'_>, ProxyError> {
@@ -1478,7 +1648,7 @@ fn format_operation_window(operations: &BTreeMap<SqliteOperation, OperationWindo
                 .collect::<Vec<_>>()
                 .join("|");
             format!(
-                "{}/{}:calls={},deferred={},defer_reasons={},errors={},retries={},discarded={},pool_wait_ms={},begin_wait_ms={},hold_ms={},rows={}",
+                "{}/{}:calls={},deferred={},defer_reasons={},errors={},retries={},discarded={},pool_wait_ms={},begin_wait_ms={},hold_ms={},hold_p95_ms={},rows={}",
                 operation.workload_class(),
                 operation.as_str(),
                 metrics.calls,
@@ -1490,11 +1660,28 @@ fn format_operation_window(operations: &BTreeMap<SqliteOperation, OperationWindo
                 metrics.pool_wait_ms,
                 metrics.begin_wait_ms,
                 metrics.hold_ms,
+                transaction_hold_p95_ms(&metrics.hold_histogram),
                 metrics.rows_affected,
             )
         })
         .collect::<Vec<_>>()
         .join(";")
+}
+
+fn transaction_hold_p95_ms(histogram: &[u64; TRANSACTION_HOLD_BUCKET_UPPER_MS.len()]) -> u64 {
+    let samples = histogram.iter().sum::<u64>();
+    if samples == 0 {
+        return 0;
+    }
+    let target = samples.saturating_mul(95).saturating_add(99) / 100;
+    let mut cumulative = 0_u64;
+    for (index, count) in histogram.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative >= target {
+            return TRANSACTION_HOLD_BUCKET_UPPER_MS[index];
+        }
+    }
+    TRANSACTION_HOLD_BUCKET_UPPER_MS[TRANSACTION_HOLD_BUCKET_UPPER_MS.len() - 1]
 }
 
 fn read_process_write_bytes() -> Option<u64> {
@@ -1603,6 +1790,16 @@ mod tests {
         assert_eq!(metrics.pool_wait_ms, 5);
         assert_eq!(metrics.begin_wait_ms, 6);
         assert_eq!(metrics.hold_ms, 7);
+        assert_eq!(transaction_hold_p95_ms(&metrics.hold_histogram), 10);
+    }
+
+    #[test]
+    fn transaction_hold_histogram_reports_the_fixed_p95_bucket() {
+        let mut histogram = [0; TRANSACTION_HOLD_BUCKET_UPPER_MS.len()];
+        histogram[0] = 94;
+        histogram[3] = 5;
+        histogram[5] = 1;
+        assert_eq!(transaction_hold_p95_ms(&histogram), 100);
     }
 
     #[test]
@@ -1815,6 +2012,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconciliation_projection_uses_and_restores_short_busy_timeout() {
+        let runtime = single_connection_runtime().await;
+        let mut transaction = runtime
+            .begin_immediate(SqliteOperation::ReconciliationProjection)
+            .await
+            .expect("projection transaction");
+        let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("read projection busy timeout");
+        assert_eq!(busy_timeout_ms, 100);
+        transaction.rollback().await.expect("rollback projection");
+
+        let mut conn = runtime
+            .inner
+            .pool
+            .acquire()
+            .await
+            .expect("pooled connection after projection");
+        let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read restored busy timeout");
+        assert_eq!(busy_timeout_ms, DEFAULT_BUSY_TIMEOUT_MS);
+    }
+
+    #[tokio::test]
     async fn admitted_maintenance_work_keeps_the_configured_busy_timeout() {
         let runtime = single_connection_runtime().await;
         for operation in [
@@ -1897,6 +2121,98 @@ mod tests {
                 .expect("second foreground connection");
 
         drop((second_foreground, first_foreground, bulk));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_projection_can_probe_a_partially_open_idle_pool() {
+        let runtime = SqliteRuntime::with_max_connections(
+            SqlitePoolOptions::new()
+                .min_connections(1)
+                .max_connections(3)
+                .connect_with(
+                    SqliteConnectOptions::from_str("sqlite::memory:")
+                        .expect("SQLite options")
+                        .create_if_missing(true),
+                )
+                .await
+                .expect("lazy three connection pool"),
+            3,
+        );
+        let foreground = runtime.inner.pool.acquire().await.expect("foreground");
+        let second = runtime.inner.pool.acquire().await.expect("grow pool");
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime.inner.pool.num_idle() < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("returned connection becomes idle");
+        assert_eq!(runtime.inner.pool.size(), 2);
+        assert_eq!(runtime.inner.pool.num_idle(), 1);
+
+        assert_eq!(
+            runtime
+                .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+                .expect_err("ordinary bulk work still reserves two foreground slots"),
+            SqliteAdmissionDeferReason::PoolPressure
+        );
+        runtime.prewarm_reconciliation_projection_capacity().await;
+        assert_eq!(runtime.inner.pool.size(), 3);
+        assert_eq!(runtime.inner.pool.num_idle(), 2);
+        runtime.mark_recent_contention_for_test();
+        let projection = runtime
+            .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
+            .expect("a bounded projection slice may probe prewarmed capacity");
+        let projection_tx = runtime
+            .begin_immediate(SqliteOperation::ReconciliationProjection)
+            .await
+            .expect("bounded projection transaction");
+        let second_foreground =
+            tokio::time::timeout(Duration::from_millis(250), runtime.inner.pool.acquire())
+                .await
+                .expect("foreground can open the final reserved connection")
+                .expect("foreground connection");
+
+        drop(second_foreground);
+        projection_tx.rollback().await.expect("rollback projection");
+        drop((projection, foreground));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_projection_prewarm_does_not_block_foreground_capacity() {
+        let runtime = SqliteRuntime::with_max_connections(
+            SqlitePoolOptions::new()
+                .min_connections(1)
+                .max_connections(3)
+                .connect_with(
+                    SqliteConnectOptions::from_str("sqlite::memory:")
+                        .expect("SQLite options")
+                        .create_if_missing(true),
+                )
+                .await
+                .expect("lazy three connection pool"),
+            3,
+        );
+        let existing_foreground = runtime.inner.pool.acquire().await.expect("foreground");
+        let grow = runtime.inner.pool.acquire().await.expect("grow pool");
+        drop(grow);
+
+        let prewarm_runtime = runtime.clone();
+        let foreground_pool = runtime.inner.pool.clone();
+        let started = Instant::now();
+        let ((), foreground) = tokio::join!(
+            prewarm_runtime.prewarm_reconciliation_projection_capacity(),
+            async {
+                tokio::time::timeout(Duration::from_millis(250), foreground_pool.acquire())
+                    .await
+                    .expect("foreground wait remains bounded during prewarm")
+                    .expect("foreground connection")
+            }
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        drop((foreground, existing_foreground));
     }
 
     #[tokio::test]
@@ -1999,6 +2315,58 @@ mod tests {
             .await
             .expect("rollback control transaction");
         drop(bulk);
+    }
+
+    #[tokio::test]
+    async fn maintenance_shutdown_waits_for_the_active_slice_and_blocks_new_bulk() {
+        let runtime = three_connection_runtime().await;
+        let bulk = runtime
+            .try_admit_maintenance_bulk(SqliteOperation::ReconciliationProjection)
+            .expect("active projection slice");
+        let shutdown_runtime = runtime.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_runtime
+                .shutdown_maintenance_bulk(Duration::from_secs(1))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        assert_eq!(
+            runtime
+                .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+                .expect_err("shutdown must reject new maintenance slices"),
+            SqliteAdmissionDeferReason::BulkBusy,
+        );
+
+        drop(bulk);
+        assert!(shutdown.await.expect("maintenance shutdown task"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_shutdown_waits_for_an_active_run_without_reserving_bulk() {
+        let runtime = three_connection_runtime().await;
+        let run = runtime
+            .try_start_maintenance_run()
+            .expect("active reconciliation run");
+        let bulk = runtime
+            .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+            .expect("a run lease must not reserve the bulk permit");
+        drop(bulk);
+
+        runtime.begin_maintenance_run_shutdown();
+        assert!(runtime.try_start_maintenance_run().is_none());
+        let shutdown_runtime = runtime.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_runtime
+                .shutdown_maintenance_bulk(Duration::from_secs(1))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+
+        drop(run);
+        assert!(shutdown.await.expect("maintenance shutdown task"));
     }
 
     #[tokio::test]

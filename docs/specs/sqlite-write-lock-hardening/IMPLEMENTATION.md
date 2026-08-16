@@ -21,6 +21,17 @@
 
 - Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance. Additive HA GC migrations include the per-channel legacy cursor and seed it from the former shared cursor before recording the migration, so an upgraded database preserves completed legacy-scan progress.
 - Reconciliation circuit fields are committed through one cancellation-safe immediate transaction. HA GC channel completion checks its persisted claim generation before clearing the claim.
+- Reconciliation historical projection no longer scans and aggregates 500 source rows while holding
+  `BEGIN IMMEDIATE`. A `25..100` row stable-keyset read is aggregated in memory, followed by one short
+  claim-fenced merge/cursor-CAS transaction. Handled stale claims explicitly roll back; runtime budgets
+  are checked between phases rather than cancelling an open transaction.
+- Graceful shutdown marks new reconciliation-run admission closed as soon as the process receives
+  its shutdown signal, then drains both the instance-owned maintenance-bulk permit and active run
+  leases. A run lease remains held across remote I/O without reserving SQLite bulk admission, so an
+  already-observed remote result can finish its claim-fenced write while no new research begins.
+- Claimed reconciliation projection transfers that permit into its short transaction task. Caller
+  cancellation drops only the join handle; the task retains admission through explicit commit or
+  rollback, so it cannot expose an unfinished transaction or overlap a replacement bulk slice.
 
 - Added a runtime logging contract for the online service surface based on `tracing` +
   `tracing-subscriber`. Runtime logging now defaults to JSON lines on stderr, exposes a documented

@@ -68,10 +68,32 @@
 - 远端请求启动、观察结果、结算写入和 Research 状态落盘均受同一轮截止时间约束；最后的持久化收尾预算不得被新一轮远端请求抢占。
 - 本地预算耗尽只推进独立 local backoff，不增加 upstream 429 压力；local backoff 的持久化元数据随 HA meta 增量和 baseline 同步，接管后继续执行原退避而不是立即重试。
 - Historical usage projection has a versioned durable lifecycle. An upgraded database with legacy
-  usage advances one bounded page only when no durable candidate is ready, and its representative
-  waits 30 seconds before the next page. Candidate selection never aggregates raw usage. New usage
-  is maintained by write triggers, and a usage update after terminal settlement reopens that
-  generation without reviving a completed no-adjustment period through the legacy cursor.
+  usage advances stable `(token_id, key_id, period_code)` keyset micro-slices only when no durable
+  candidate is ready. A slice reads at most `25..100` rows outside the write transaction, then
+  atomically merges work and advances its claim-fenced cursor in one short transaction. Candidate
+  selection never aggregates raw usage. New usage is maintained by write triggers, and a usage
+  update after terminal settlement reopens that generation without reviving a completed
+  no-adjustment period through the legacy cursor.
+- Reconciliation budgets are cooperative boundaries, not cancellation timers. Foreground pressure,
+  SQLite contention, and the 20-second run deadline prevent the next safe phase from starting; they
+  never cancel an open transaction. An unfinished projection persists a typed continuation and
+  resumes after restart without skipping work.
+- Graceful process shutdown first closes admission for new reconciliation runs, then waits for both
+  the active bulk slice and any already-started run to reach explicit durable boundaries. The run
+  lease does not reserve the bulk permit across remote I/O; it only makes remote-result finalization
+  visible to shutdown. Research does not start after shutdown begins. A rolling restart therefore
+  does not use physical-connection discard as the normal projection or finalization mechanism.
+- A claimed projection micro-slice owns its bulk permit in an independent task until the durable
+  boundary completes. Cancelling the scheduler caller cannot release admission early or abandon an
+  open projection transaction; claim and cursor fencing still reject obsolete work.
+- Every attempted work generation ends as exactly one typed result. `settled`, `no_adjustment`, and
+  compare-mode `observed` are terminal. `upstream_429`, `transport_failure`, `semantic_failure`, and
+  `local_pressure` are retryable and keep independent durable streaks and retry deadlines.
+- Compare-mode non-zero differences write only the shadow observation and complete as `observed`;
+  they do not create an actual billing adjustment and are not included in settled totals.
+- Main settlement work always precedes the terminal Research sweep. Candidate preparation and at
+  most one optional projection slice share the two-second preparation budget; Research uses at most
+  two seconds of the remaining run budget after main finalization.
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）
@@ -196,22 +218,64 @@
 
 ## Visual Evidence
 
-PR: none (current-SHA evidence displayed in review; repository image asset awaits owner approval)
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery`
+- scenario: local-pressure and upstream-429 states
+- requested_viewport: `1440x900`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `element`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Shows independent local-pressure and upstream-429 outcomes in the current
+  reconciliation status surface.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation local pressure and upstream 429](./assets/reconciliation-engine-pressure-desktop.png)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
-- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery` and `Mobile`
-- scenario: current reconciliation status gallery with pending, active, degraded, backoff, unknown,
-  budget-exhausted and empty/error states
-- requested_viewport: `desktop default`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery`
+- scenario: projecting, observed, and recovered terminal progression
+- requested_viewport: `1440x900`
 - viewport_strategy: `storybook-viewport`
-- capture_scope: `browser-viewport`
+- capture_scope: `element`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Captured from the final implementation SHA and displayed in the owner review.
-  The evidence covers desktop and `393x852` mobile rendering. No stale screenshot is reused and no
-  image asset is committed until owner approval.
-- submission_gate: `owner_approval_pending`
+- evidence_note: Separately proves projection progress, compare-mode observed terminal semantics,
+  and recovered status on the final UI source SHA.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation projection in progress](./assets/reconciliation-engine-projecting-desktop.png)
+
+PR: include
+
+![Reconciliation observed terminal](./assets/reconciliation-engine-observed-desktop.png)
+
+PR: include
+
+![Reconciliation recovered state](./assets/reconciliation-engine-recovered-desktop.png)
+
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/MobileStateGallery`
+- scenario: observed terminal responsive layout
+- requested_viewport: `393x852`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `element`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Verifies the observed terminal diagnostics remain readable at the required mobile
+  viewport without changing the public response contract.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation observed terminal mobile](./assets/reconciliation-engine-observed-mobile.png)
 
 ## Related PRs
 
