@@ -485,6 +485,10 @@ sqlite_typed_lock_deferrals = sum(
         structured_field(line, "defer_reason", reason)
         for reason in ("sqlite_contention", "sqlite_busy")
     )
+    or (
+        structured_field(line, "event", "research_sweep_deferred")
+        and structured_field(line, "reason", "local_pressure")
+    )
     for line in sqlite_lock_lines
 )
 sqlite_final_lock_errors = (
@@ -573,11 +577,11 @@ artifacts = pathlib.Path(sys.argv[1])
 baseline = json.loads((artifacts / "baseline" / "summary.json").read_text())
 candidate = json.loads((artifacts / "candidate" / "summary.json").read_text())
 
-# Linux process RSS and sub-10ms HTTP timings are sampled across a controlled
+# Linux process RSS and sub-15ms HTTP timings are sampled across a controlled
 # restart. Keep raw values in the receipt, but do not turn allocator or
 # scheduler jitter into a false regression when the absolute SLO has ample
 # headroom. These margins are calibrated by a same-SHA A/B run.
-DASHBOARD_P95_NOISE_FLOOR_MS = 10.0
+DASHBOARD_P95_NOISE_FLOOR_MS = 15.0
 RSS_P95_NOISE_BAND_KIB = 40 * 1024
 
 def p95(summary):

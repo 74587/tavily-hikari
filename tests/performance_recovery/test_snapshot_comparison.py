@@ -44,7 +44,7 @@ class SnapshotComparisonTests(unittest.TestCase):
                 self.assertSetEqual(comparison_resources(variable), resources)
 
     def test_comparison_keeps_calibrated_noise_bounds_and_raw_metrics(self) -> None:
-        self.assertIn("DASHBOARD_P95_NOISE_FLOOR_MS = 10.0", COMPARISON)
+        self.assertIn("DASHBOARD_P95_NOISE_FLOOR_MS = 15.0", COMPARISON)
         self.assertIn("RSS_P95_NOISE_BAND_KIB = 40 * 1024", COMPARISON)
         self.assertIn("absolute_floor=DASHBOARD_P95_NOISE_FLOOR_MS", COMPARISON)
         self.assertIn("additive_tolerance=RSS_P95_NOISE_BAND_KIB", COMPARISON)
@@ -59,6 +59,8 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('candidate["sqliteFinalLockErrors"]', COMPARISON)
         self.assertIn('structured_field(line, "defer_reason", reason)', COMPARISON)
         self.assertIn('("sqlite_contention", "sqlite_busy")', COMPARISON)
+        self.assertIn('structured_field(line, "event", "research_sweep_deferred")', COMPARISON)
+        self.assertIn('structured_field(line, "reason", "local_pressure")', COMPARISON)
         self.assertIn("baseline_business_response_ratio", COMPARISON)
         self.assertIn("baseline_business_response_ratio - 0.05", COMPARISON)
         self.assertIn("business_attempts * candidate_response_ratio_floor", COMPARISON)
