@@ -195,6 +195,209 @@ async fn alert_projection_serves_admin_events_and_groups_after_full_coverage() {
 }
 
 #[tokio::test]
+async fn alert_projection_keeps_dashboard_tail_complete_while_history_catches_up() {
+    let db_path = temp_db_path("alert-projection-independent-history");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_560_000;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-independent-history".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    let history_at = now - 60 * 24 * 60 * 60;
+    for index in 0..26 {
+        insert_projected_rate_limit_alert(
+            &proxy,
+            &format!("projection-history-{index}"),
+            history_at,
+        )
+        .await;
+    }
+    insert_projected_rate_limit_alert(&proxy, "projection-recent", now).await;
+
+    for _ in 0..12 {
+        proxy
+            .key_store
+            .advance_alert_projection_slice()
+            .await
+            .expect("advance independent projection lane");
+        let status = proxy
+            .dashboard_alert_projection_status()
+            .await
+            .expect("read projection status");
+        let recent = proxy
+            .recent_alerts_summary(24)
+            .await
+            .expect("read recent projected alert summary");
+        if status.recent_coverage == "ok" && status.coverage == "projecting" {
+            assert_eq!(recent.total_events, 1);
+            assert!(!recent.stale);
+            break;
+        }
+    }
+
+    let status = proxy
+        .dashboard_alert_projection_status()
+        .await
+        .expect("read final independent projection status");
+    assert_eq!(status.recent_coverage, "ok");
+    assert_eq!(status.coverage, "projecting");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_does_not_offer_partial_tail_as_dashboard_data() {
+    let db_path = temp_db_path("alert-projection-dashboard-partial");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_565_000;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-dashboard-partial".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(&proxy, "projection-unprojected", now).await;
+    let raw_projection = proxy
+        .recent_alerts_summary(24)
+        .await
+        .expect("inspect incomplete projection");
+    assert!(raw_projection.stale);
+    assert_eq!(raw_projection.coverage, "projecting");
+    assert!(
+        proxy.dashboard_recent_alerts_summary(24).await.is_err(),
+        "Dashboard must retain last-good data instead of accepting partial alerts"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_recent_summary_does_not_silently_truncate_events() {
+    let db_path = temp_db_path("alert-projection-summary-exact-count");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_570_000;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-summary-exact-count".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    let payload = serde_json::json!({
+        "source_kind": ALERT_SOURCE_AUTH_TOKEN_LOG,
+        "source_id": "placeholder",
+        "row_sort_id": "placeholder",
+        "alert_type": ALERT_TYPE_UPSTREAM_RATE_LIMITED_429,
+        "occurred_at": now,
+        "token_id": "projection-summary-token",
+        "key_id": null,
+        "request_log_id": null,
+        "method": null,
+        "path": null,
+        "query": null,
+        "request_kind_key": null,
+        "request_kind_label": null,
+        "request_kind_detail": null,
+        "result_status": null,
+        "failure_kind": null,
+        "error_message": null,
+        "counts_business_quota": null,
+        "user_id": null,
+        "user_display_name": null,
+        "user_username": null,
+        "reason_code": null,
+        "reason_summary": null,
+        "reason_detail": null,
+        "job_id": null,
+        "job_type": null,
+        "job_trigger_source": null,
+        "job_status": null,
+        "job_attempt": null,
+        "job_message": null,
+        "job_queued_at": null,
+        "job_started_at": null,
+        "job_finished_at": null,
+    });
+    let mut tx = proxy
+        .key_store
+        .pool
+        .begin()
+        .await
+        .expect("begin sidecar seed");
+    for index in 0..10_001_i64 {
+        let source_id = format!("summary-{index}");
+        let row_sort_id = format!("atl:{index:020}");
+        let mut row = payload.clone();
+        row["source_id"] = serde_json::Value::String(source_id.clone());
+        row["row_sort_id"] = serde_json::Value::String(row_sort_id.clone());
+        sqlx::query(
+            r#"INSERT INTO observability.dashboard_alert_projection_events
+                    (source_kind, source_id, occurred_at, row_sort_id, payload_json, projected_at)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(ALERT_SOURCE_AUTH_TOKEN_LOG)
+        .bind(source_id)
+        .bind(now)
+        .bind(row_sort_id)
+        .bind(row.to_string())
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .expect("seed exact projected alert count");
+    }
+    tx.commit().await.expect("commit sidecar seed");
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_state \
+         SET phase = 'idle', observed_at = ?, stale_reason = NULL",
+    )
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark Dashboard tail complete");
+
+    let summary = proxy
+        .dashboard_recent_alerts_summary(24)
+        .await
+        .expect("read exact derived summary");
+    assert_eq!(summary.total_events, 10_001);
+    assert_eq!(
+        summary
+            .counts_by_type
+            .iter()
+            .find(|count| count.alert_type == ALERT_TYPE_UPSTREAM_RATE_LIMITED_429)
+            .map(|count| count.count),
+        Some(10_001)
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts_cursors() {
     let db_path = temp_db_path("alert-projection-admin-history-migration");
     let db_string = db_path.to_string_lossy().to_string();
@@ -226,6 +429,10 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
         .execute(&proxy.key_store.pool)
         .await
         .expect("simulate a pre-admin-history ledger");
+    sqlx::query("DROP TABLE observability.dashboard_alert_projection_history_state")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate a pre-admin-history sidecar");
 
     proxy
         .key_store
@@ -233,16 +440,26 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
         .await
         .expect("apply the cursor-only administrator history migration");
 
-    let (reset_sources, retained_events): (i64, i64) = sqlx::query_as(
+    let (preserved_tail_sources, reset_history_sources, retained_events): (i64, i64, i64) = sqlx::query_as(
         "SELECT \
            (SELECT COUNT(*) FROM observability.dashboard_alert_projection_state \
+             WHERE cursor_occurred_at = ? AND cursor_row_sort_id = 'legacy-window' AND phase = 'idle'), \
+           (SELECT COUNT(*) FROM observability.dashboard_alert_projection_history_state \
              WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'), \
            (SELECT COUNT(*) FROM observability.dashboard_alert_projection_events)",
     )
+    .bind(now.saturating_sub(30 * 24 * 60 * 60))
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("verify cursor-only administrator history migration");
-    assert_eq!(reset_sources, 3);
+    assert_eq!(
+        preserved_tail_sources, 3,
+        "Dashboard tail must keep its complete cursor"
+    );
+    assert_eq!(
+        reset_history_sources, 3,
+        "admin history starts from an independent cursor"
+    );
     assert_eq!(retained_events, 1, "migration must not rewrite the sidecar");
 
     drop(proxy);

@@ -2,7 +2,10 @@ impl TavilyProxy {
     pub async fn advance_dashboard_alert_projection_slice(&self) -> Result<bool, ProxyError> {
         Ok(matches!(
             self.key_store.advance_alert_projection_slice().await?,
-            AlertProjectionSliceOutcome::Advanced { rows, .. } if rows > 0
+            AlertProjectionSliceOutcome::Advanced {
+                dashboard_dirty: true,
+                ..
+            }
         ))
     }
 

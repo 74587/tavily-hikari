@@ -1354,12 +1354,7 @@ async fn build_dashboard_overview_payload(
     let (recent_alerts, recent_alerts_token) = state
         .proxy
         .dashboard_recent_alerts_summary_with_token(24)
-        .await
-        .unwrap_or_else(|_| {
-            let summary = tavily_hikari::RecentAlertsSummary::default();
-            let token = fallback_recent_alerts_token(&summary);
-            (summary, token)
-        });
+        .await?;
 
     let hourly_window_anchor = dashboard_hourly_window_anchor(now_ts);
     let recent_job_signatures = recent_jobs
@@ -1481,25 +1476,6 @@ async fn dashboard_request_log_retention(
     let retention_days = settings.request_log_retention.max_log_retention_days;
     let now = state.proxy.backend_time().local_now();
     Ok((retention_days, dashboard_retention_since(retention_days, now)))
-}
-
-fn fallback_recent_alerts_token(summary: &tavily_hikari::RecentAlertsSummary) -> [i64; 4] {
-    let top_group_last_seen_sum = summary
-        .top_groups
-        .iter()
-        .map(|group| group.last_seen)
-        .sum::<i64>();
-    let typed_count_sum = summary
-        .counts_by_type
-        .iter()
-        .map(|item| item.count)
-        .sum::<i64>();
-    [
-        summary.total_events,
-        summary.grouped_count,
-        top_group_last_seen_sum,
-        typed_count_sum,
-    ]
 }
 
 fn dashboard_retention_since(retention_days: i64, now: chrono::DateTime<Local>) -> i64 {
@@ -1666,12 +1642,7 @@ async fn compute_dashboard_overview_freshness(
     let (recent_alerts, recent_alerts_token) = state
         .proxy
         .dashboard_recent_alerts_summary_with_token(24)
-        .await
-        .unwrap_or_else(|_| {
-            let summary = tavily_hikari::RecentAlertsSummary::default();
-            let token = fallback_recent_alerts_token(&summary);
-            (summary, token)
-        });
+        .await?;
     Ok(DashboardOverviewFreshness {
         summary: [
             summary.total_requests,

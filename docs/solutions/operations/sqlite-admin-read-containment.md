@@ -106,9 +106,11 @@ reads:
   invalidations; an HTTP or SSE request under pressure returns the last-good snapshot with explicit
   stale coverage instead of recomputing freshness.
 - Keep dashboard alert summaries out of the raw CTE hot path. Persist a sidecar projection using a
-  stable source cursor plus fence/tail replay, and make the read model consume only projected
-  events. Expose projection coverage, observation time, and stale reason rather than issuing an
-  exact event count on every admin status read.
+  stable source cursor plus fence/tail replay, with an independent recent Dashboard tail and
+  historical administrator lane. The read model consumes only complete recent coverage and retains
+  last-good data while its tail catches up; Events/Groups wait for complete historical coverage.
+  Expose coverage, observation time, and stale reason rather than issuing an exact event count on
+  every admin status read.
 - A derived alert projection must be a lower-priority maintenance writer. The Dashboard may consume
   only its bounded recent window, while administrator Events/Groups switch to the sidecar only after
   a stable cursor has replayed complete source history and reports explicit `ok` coverage. Keep

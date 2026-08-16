@@ -88,8 +88,9 @@
   is maintained by triggers. A completed lifecycle must not requeue a completed no-adjustment
   work generation; pre-trigger usage updates still reopen their generation, and equal
   usage/settlement timestamps remain conservatively reopenable because they have second precision.
-- 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。管理员
-  Events/Groups 在 projection coverage 为 `ok` 时读取 observability sidecar；cursor 追赶、stale 或
+- 告警读取全部来自可重建 `AlertProjection`。recent tail 与管理员历史使用独立 cursor/fence：Dashboard
+  HTTP/SSE 只消费 `recent_coverage=ok` 的共享 read model，否则保留 last-good；管理员 Events/Groups
+  仅在 complete history coverage 为 `ok` 时读取 observability sidecar。任一 cursor 追赶、stale 或
   rolling upgrade 期间保守回退既有原始查询，不能把未投影历史表示为空。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通

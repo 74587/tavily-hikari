@@ -49,7 +49,7 @@ const ALERT_PROJECTION_RECENT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 const ALERT_PROJECTION_ADMIN_HISTORY_VERSION: i64 = 14;
 const ALERT_PROJECTION_ADMIN_HISTORY_NAME: &str = "dashboard-alert-projection-admin-history-v1";
 const ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM: &str =
-    "sha256:01dfcf338e547614567b24be52c4d968";
+    "sha256:ff6f5901c3a603feac18afbbb04a1cdf";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -844,6 +844,17 @@ impl KeyStore {
             ));
         }
         if self
+            .schema_migration_applied(ALERT_PROJECTION_ADMIN_HISTORY_VERSION)
+            .await?
+            && !self
+                .schema_object_exists("observability", "dashboard_alert_projection_history_state")
+                .await?
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 14".to_string(),
+            ));
+        }
+        if self
             .schema_migration_applied(RECONCILIATION_WORK_VERSION)
             .await?
             && (!self
@@ -1271,22 +1282,39 @@ impl KeyStore {
     }
 
     async fn apply_alert_projection_admin_history_migration(&self) -> Result<(), ProxyError> {
-        // The administrator Events and Groups views can page older alerts than
-        // the dashboard's thirty-day window. Reset only the durable cursors so
-        // the existing micro-slice worker replays full source history after
-        // startup; this migration neither scans business tables nor deletes a
-        // usable tail from the derived sidecar.
+        // Dashboard freshness and administrator completeness have different
+        // progress contracts. Preserve the recent tail cursor and start an
+        // independent historical backfill below its current boundary. That
+        // keeps the last 30-day read model complete while Events and Groups
+        // catch up older rows without a startup scan or sidecar rewrite.
         sqlx::query(
-            r#"UPDATE observability.dashboard_alert_projection_state
-                   SET cursor_occurred_at = 0, cursor_row_sort_id = '',
-                       fence_occurred_at = NULL, fence_row_sort_id = NULL,
-                       generation = generation + 1, phase = 'catching_up',
-                       observed_at = NULL, stale_reason = NULL
-                 WHERE cursor_occurred_at <> 0
-                    OR cursor_row_sort_id <> ''
-                    OR phase <> 'catching_up'
-                    OR observed_at IS NOT NULL
-                    OR stale_reason IS NOT NULL"#,
+            r#"CREATE TABLE IF NOT EXISTS observability.dashboard_alert_projection_history_state (
+                source_kind TEXT PRIMARY KEY NOT NULL,
+                cursor_occurred_at INTEGER NOT NULL DEFAULT 0,
+                cursor_row_sort_id TEXT NOT NULL DEFAULT '',
+                fence_occurred_at INTEGER,
+                fence_row_sort_id TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
+                phase TEXT NOT NULL DEFAULT 'catching_up'
+                    CHECK(phase IN ('catching_up', 'idle'))
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO observability.dashboard_alert_projection_history_state
+                    (source_kind, cursor_occurred_at, cursor_row_sort_id,
+                     fence_occurred_at, fence_row_sort_id, generation, phase)
+               SELECT source_kind,
+                      0,
+                      '',
+                      CASE WHEN cursor_occurred_at > 0 THEN cursor_occurred_at - 1 ELSE NULL END,
+                      CASE WHEN cursor_occurred_at > 0 THEN '' ELSE NULL END,
+                      0,
+                      CASE WHEN cursor_occurred_at > 0 THEN 'catching_up' ELSE 'idle' END
+                 FROM observability.dashboard_alert_projection_state
+                WHERE 1 = 1
+               ON CONFLICT(source_kind) DO NOTHING"#,
         )
         .execute(&self.pool)
         .await?;

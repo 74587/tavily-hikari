@@ -62,8 +62,19 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .await
             .expect("read fresh alert projection sources");
     assert_eq!(projection_sources, 3);
-    let full_history_cursor_sources: i64 = sqlx::query_scalar(
+    let recent_tail_sources: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM observability.dashboard_alert_projection_state \
+         WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read fresh full-history alert projection cursors");
+    assert_eq!(
+        recent_tail_sources, 0,
+        "the Dashboard tail starts at its bounded recent cursor"
+    );
+    let full_history_cursor_sources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_history_state \
          WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'",
     )
     .fetch_one(&pool)

@@ -23,10 +23,11 @@
   observability-sidecar AlertProjection advances source cursors and a fence/tail replay in the
   background. Overview-visible durable writes advance the same shared dirty generation as request
   statistics, so the ten-second rebuild cadence does not depend on the sixty-second safety probe.
-  The projection starts from the Dashboard-visible recent window rather than backfilling unbounded
-  historical alerts, writes no more than 25 projected events per slice, and treats every transient
-  SQLite acquire/read/write failure as a typed defer. After process start it yields one short
-  recovery window to HA GC before competing for the single maintenance-bulk permit.
+  The projection keeps a recent Dashboard tail and a separate historical administrator lane: tail
+  coverage must be complete before replacing last-good Dashboard data, while history may continue
+  catching up in 25-event slices. Every transient SQLite acquire/read/write failure is a typed
+  defer. After process start it yields one short recovery window to HA GC before competing for the
+  single maintenance-bulk permit.
 
 - Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance. Additive HA GC migrations include the per-channel legacy cursor and seed it from the former shared cursor before recording the migration, so an upgraded database preserves completed legacy-scan progress.
 - Reconciliation circuit fields are committed through one cancellation-safe immediate transaction. HA GC channel completion checks its persisted claim generation before clearing the claim.

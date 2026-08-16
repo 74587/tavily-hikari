@@ -57,10 +57,12 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   generation may request one shared rebuild every ten seconds; a sixty-second bounded safety probe
   catches missed invalidations. Requests under SQLite pressure return last-good coverage rather
   than starting an independent rebuild.
-- `AlertProjection`: an observability-sidecar projection with a stable source cursor and fence.
-  Dashboard alert summaries always read projected events. Administrator Events and Groups use the
-  sidecar only after complete source coverage is confirmed; while a cursor is catching up or stale,
-  they retain the established source query so incomplete history is never shown as empty.
+- `AlertProjection`: an observability-sidecar projection with separate stable cursor/fence lanes:
+  the recent tail serves Dashboard and the historical lane serves administrator Events and Groups.
+  Dashboard accepts a recent summary only at `recent_coverage=ok`; otherwise the read model retains
+  last-good data. Administrator reads use the sidecar only at complete history coverage; while it
+  catches up or is stale, they retain the established source query so incomplete history is never
+  shown as empty.
 
 ## HA Terms
 

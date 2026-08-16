@@ -53,10 +53,10 @@
   signal. A successful quota or other overview-visible write advances the shared dirty generation;
   the read model coalesces dirty rebuilds to at most once per ten seconds and uses a sixty-second
   safety probe only to catch a missed signal.
-- AlertProjection cursor/fence/tail work is background-only. Dashboard HTTP and SSE consume the
-  immutable last-good snapshot and projected alert summary; a projection observation older than its
-  coverage window is reported as `stale` with an explicit reason instead of being presented as a
-  healthy in-progress refresh.
+- AlertProjection cursor/fence work is background-only. Its recent Dashboard tail and historical
+  administrator lane report distinct coverage. Dashboard HTTP and SSE consume the immutable
+  last-good snapshot only after recent coverage is `ok`; an incomplete or expired recent observation
+  is reported as `stale` with an explicit reason instead of being presented as a healthy refresh.
 - 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。

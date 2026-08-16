@@ -558,7 +558,7 @@ impl SqliteRuntime {
             .map(|permit| SqliteMaintenanceRunLease { _permit: permit })
     }
 
-    pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
+    pub(crate) async fn prewarm_maintenance_bulk_capacity(&self) {
         if self.has_foreground_pool_capacity()
             || self.inner.pool.size() >= self.inner.maximum_connections
             || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
@@ -585,6 +585,10 @@ impl SqliteRuntime {
         {
             tokio::task::yield_now().await;
         }
+    }
+
+    pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
+        self.prewarm_maintenance_bulk_capacity().await;
     }
 
     pub(crate) fn maintenance_bulk_continue_reason(&self) -> Option<SqliteAdmissionDeferReason> {
