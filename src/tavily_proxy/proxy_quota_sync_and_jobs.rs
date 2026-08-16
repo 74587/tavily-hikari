@@ -1832,12 +1832,26 @@ impl TavilyProxy {
             .elapsed()
             .as_millis()
             .min(i64::MAX as u128) as i64;
-        await_reconciliation_post_process(
+        let run_marker_result = await_reconciliation_post_process(
             post_process_deadline,
             self.key_store
                 .mark_upstream_reconciliation_run_completed_at(self.backend_time.now_ts()),
         )
-        .await?;
+        .await;
+        if let Err(err) = run_marker_result {
+            if is_transient_sqlite_write_error(&err) {
+                tracing::debug!(
+                    component = "reconciliation",
+                    event = "run_marker_deferred",
+                    reason = "local_pressure",
+                    err = %err,
+                );
+                return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                    reason: "local_pressure",
+                });
+            }
+            return Err(err);
+        }
         match result {
             Ok(ReconciliationRunResult {
                 settled,
@@ -2190,6 +2204,17 @@ impl TavilyProxy {
                     settled,
                     no_adjustment,
                     observed,
+                })
+            }
+            Err(err) if is_transient_sqlite_write_error(&err) => {
+                tracing::debug!(
+                    component = "reconciliation",
+                    event = "settlement_deferred",
+                    reason = "local_pressure",
+                    err = %err,
+                );
+                Ok(ClaimedReconciliationRunOutcome::Deferred {
+                    reason: "local_pressure",
                 })
             }
             Err(err) => {
