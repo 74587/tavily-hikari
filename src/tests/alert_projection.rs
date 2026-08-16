@@ -523,7 +523,7 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
 async fn alert_projection_history_fence_repair_replays_old_v14_gap() {
     let db_path = temp_db_path("alert-projection-history-fence-repair");
     let db_string = db_path.to_string_lossy().to_string();
-    let now = 1_752_575_025;
+    let now: i64 = 1_752_575_025;
     let tail_boundary = now.saturating_sub(30 * 24 * 60 * 60);
     let (backend_time, _) = BackendTime::manual_from_ts(now);
     let proxy = TavilyProxy::with_options_and_time(
@@ -554,13 +554,19 @@ async fn alert_projection_history_fence_repair_replays_old_v14_gap() {
     .expect("simulate an existing completed tail");
     sqlx::query(
         "UPDATE observability.dashboard_alert_projection_history_state \
-         SET cursor_occurred_at = ?, cursor_row_sort_id = 'legacy-history', \
-             fence_occurred_at = NULL, fence_row_sort_id = NULL, phase = 'idle'",
+         SET cursor_occurred_at = 0, cursor_row_sort_id = '', \
+             fence_occurred_at = ?, fence_row_sort_id = '', phase = 'catching_up'",
     )
-    .bind(tail_boundary.saturating_sub(2))
+    .bind(tail_boundary.saturating_sub(1))
     .execute(&proxy.key_store.pool)
     .await
-    .expect("simulate old completed v14 history state");
+    .expect("simulate the old v14 one-second-short history fence");
+    let v14_checksum: String =
+        sqlx::query_scalar("SELECT checksum FROM schema_migrations WHERE version = 14")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read recorded v14 checksum");
+    assert_eq!(v14_checksum, "sha256:ff6f5901c3a603feac18afbbb04a1cdf");
     sqlx::query("DELETE FROM schema_migrations WHERE version = 15")
         .execute(&proxy.key_store.pool)
         .await
@@ -585,6 +591,14 @@ async fn alert_projection_history_fence_repair_replays_old_v14_gap() {
         repaired_sources, 3,
         "repair must reset derived history only"
     );
+    let v15_recorded: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 15 \
+         AND checksum = 'sha256:8ef5bf8e2b29acd27096657ad0d3d97e')",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("verify recorded fence repair migration");
+    assert_eq!(v15_recorded, 1);
 
     advance_alert_projection_until_full_coverage(&proxy).await;
     let boundary_events: i64 = sqlx::query_scalar(

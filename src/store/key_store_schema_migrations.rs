@@ -1355,7 +1355,7 @@ impl KeyStore {
                            WHEN tail.cursor_occurred_at > 0 THEN ''
                            ELSE NULL
                        END,
-                       generation = generation + 1,
+                       generation = history.generation + 1,
                        phase = CASE
                            WHEN tail.cursor_occurred_at > 0 THEN 'catching_up'
                            ELSE 'idle'
