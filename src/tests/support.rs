@@ -573,7 +573,7 @@ pub(super) async fn hold_sqlite_write_lock_for_test_for_with_release(
     hold_for: Duration,
     release: Option<crate::ManualBackendTime>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut immediate_conn = begin_immediate_sqlite_connection(pool)
+    let immediate_conn = begin_immediate_sqlite_connection(pool)
         .await
         .expect("begin immediate transaction");
     tokio::spawn(async move {
@@ -582,8 +582,8 @@ pub(super) async fn hold_sqlite_write_lock_for_test_for_with_release(
         } else {
             tokio::time::sleep(hold_for).await;
         }
-        sqlx::query("ROLLBACK")
-            .execute(&mut *immediate_conn)
+        immediate_conn
+            .rollback()
             .await
             .expect("rollback immediate transaction");
     })
