@@ -92,6 +92,10 @@
   HTTP/SSE 只消费 `recent_coverage=ok` 的共享 read model，否则保留 last-good；管理员 Events/Groups
   仅在 complete history coverage 为 `ok` 时读取 observability sidecar。任一 cursor 追赶、stale 或
   rolling upgrade 期间保守回退既有原始查询，不能把未投影历史表示为空。
+- 历史 lane 的 fence 必须与 recent tail 的起点同秒衔接：tail 拥有起点秒内的记录，history 包含严格更早
+  的记录，不能以时间戳减一替代复合 cursor。空闲 source probe 不得写 cursor/generation；覆盖观察只能由
+  独立低频 heartbeat 更新。Dashboard summary 只允许从 sidecar 执行时间窗固定、结果有界的 SQL 聚合，禁止
+  把整窗 `payload_json` 拉回进程后再分组。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通
   promote 必须实时探测全部已配置节点；任一节点 capability 缺失、unknown 或不可达时 fail closed。

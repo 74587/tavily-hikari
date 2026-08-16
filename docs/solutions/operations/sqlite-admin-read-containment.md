@@ -118,6 +118,10 @@ reads:
   leave the first post-start bulk window to recovery work with a durable SLO such as HA GC. During a
   full-history catch-up, keep administrator reads on the established source query rather than
   presenting incomplete sidecar coverage as an empty result.
+- Treat an empty source fence as an idle result, not as a successful projection slice. Do not bump
+  a durable cursor or generation merely to keep a scheduler loop moving. Refresh observation on a
+  separate low-frequency cadence, and keep Dashboard summary work in SQLite with fixed windows,
+  scalar counts, and a bounded top-group page rather than deserializing every projected payload.
 - Guard shared admin snapshot loaders with both a drop-time reset and a stale-loading takeover
   window. A cancelled or wedged request must not leave `loading=true` forever and make every later
   request wait on a `Notify` that will never fire.

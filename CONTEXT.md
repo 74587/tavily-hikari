@@ -63,6 +63,9 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   last-good data. Administrator reads use the sidecar only at complete history coverage; while it
   catches up or is stale, they retain the established source query so incomplete history is never
   shown as empty.
+- `idle alert probe`: a source-fence check that finds no work. It is not projection progress: it
+  never advances a cursor or generation, and a separate low-frequency observation heartbeat keeps
+  recent-tail coverage explicit.
 
 ## HA Terms
 

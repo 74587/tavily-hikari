@@ -26,8 +26,10 @@
   The projection keeps a recent Dashboard tail and a separate historical administrator lane: tail
   coverage must be complete before replacing last-good Dashboard data, while history may continue
   catching up in 25-event slices. Every transient SQLite acquire/read/write failure is a typed
-  defer. After process start it yields one short recovery window to HA GC before competing for the
-  single maintenance-bulk permit.
+  defer. An empty source probe returns an in-memory idle result without a cursor write; a low-rate
+  heartbeat refreshes tail observation separately so no-work polling cannot create a ten-second
+  writer loop. After process start it yields one short recovery window to HA GC before competing for
+  the single maintenance-bulk permit.
 
 - Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance. Additive HA GC migrations include the per-channel legacy cursor and seed it from the former shared cursor before recording the migration, so an upgraded database preserves completed legacy-scan progress.
 - Reconciliation circuit fields are committed through one cancellation-safe immediate transaction. HA GC channel completion checks its persisted claim generation before clearing the claim.

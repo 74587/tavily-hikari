@@ -32,6 +32,7 @@ struct AlertProjectionSourceState {
     fence_occurred_at: Option<i64>,
     fence_row_sort_id: Option<String>,
     generation: i64,
+    phase: String,
     lane: AlertProjectionLane,
 }
 
@@ -49,6 +50,7 @@ pub(crate) enum AlertProjectionSliceOutcome {
         complete: bool,
         dashboard_dirty: bool,
     },
+    Idle,
     Deferred { reason: SqliteAdmissionDeferReason },
 }
 
@@ -71,30 +73,33 @@ impl KeyStore {
         let query = match lane {
             AlertProjectionLane::RecentTail => {
                 r#"SELECT source_kind, cursor_occurred_at, cursor_row_sort_id,
-                          fence_occurred_at, fence_row_sort_id, generation
+                          fence_occurred_at, fence_row_sort_id, generation, phase
                      FROM observability.dashboard_alert_projection_state
-                    ORDER BY generation ASC, source_kind ASC
+                    ORDER BY
+                      CASE WHEN phase = 'catching_up' THEN 0 ELSE 1 END,
+                      generation ASC,
+                      source_kind ASC
                     LIMIT 1"#
             }
             AlertProjectionLane::History => {
                 r#"SELECT source_kind, cursor_occurred_at, cursor_row_sort_id,
-                          fence_occurred_at, fence_row_sort_id, generation
+                          fence_occurred_at, fence_row_sort_id, generation, phase
                      FROM observability.dashboard_alert_projection_history_state
                     WHERE phase = 'catching_up'
                     ORDER BY generation ASC, source_kind ASC
                     LIMIT 1"#
             }
         };
-        let result = sqlx::query_as::<_, (
+        let query = sqlx::query_as::<_, (
             String,
             i64,
             String,
             Option<i64>,
             Option<String>,
             i64,
-        )>(query)
-        .fetch_optional(&mut *conn)
-        .await;
+            String,
+        )>(query);
+        let result = query.fetch_optional(&mut *conn).await;
         let row = conn.complete_query(result).await?;
         let Some((
             source_kind,
@@ -103,6 +108,7 @@ impl KeyStore {
             fence_occurred_at,
             fence_row_sort_id,
             generation,
+            phase,
         )) = row
         else {
             return Ok(None);
@@ -114,8 +120,66 @@ impl KeyStore {
             fence_occurred_at,
             fence_row_sort_id,
             generation,
+            phase,
             lane,
         }))
+    }
+
+    async fn alert_projection_source_state_for_kind(
+        &self,
+        lane: AlertProjectionLane,
+        source_kind: &str,
+    ) -> Result<Option<AlertProjectionSourceState>, ProxyError> {
+        let table = match lane {
+            AlertProjectionLane::RecentTail => {
+                "observability.dashboard_alert_projection_state"
+            }
+            AlertProjectionLane::History => {
+                "observability.dashboard_alert_projection_history_state"
+            }
+        };
+        let query = format!(
+            "SELECT source_kind, cursor_occurred_at, cursor_row_sort_id, \
+                    fence_occurred_at, fence_row_sort_id, generation, phase \
+               FROM {table} WHERE source_kind = ?"
+        );
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let result = sqlx::query_as::<_, (
+            String,
+            i64,
+            String,
+            Option<i64>,
+            Option<String>,
+            i64,
+            String,
+        )>(&query)
+        .bind(source_kind)
+        .fetch_optional(&mut *conn)
+        .await;
+        let row = conn.complete_query(result).await?;
+        Ok(row.map(
+            |(
+                source_kind,
+                cursor_occurred_at,
+                cursor_row_sort_id,
+                fence_occurred_at,
+                fence_row_sort_id,
+                generation,
+                phase,
+            )| AlertProjectionSourceState {
+                source_kind,
+                cursor_occurred_at,
+                cursor_row_sort_id,
+                fence_occurred_at,
+                fence_row_sort_id,
+                generation,
+                phase,
+                lane,
+            },
+        ))
     }
 
     async fn alert_projection_source_fence(
@@ -395,35 +459,125 @@ impl KeyStore {
         }
     }
 
+    pub(crate) async fn refresh_alert_projection_observation(
+        &self,
+    ) -> Result<bool, ProxyError> {
+        let _admission = match self.try_admit_alert_projection() {
+            Ok(permit) => permit,
+            Err(_) => return Ok(false),
+        };
+        let now = self.backend_time.now_ts();
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::AlertProjection)
+            .await?;
+        let mut rows_affected = 0;
+        let result = async {
+            let changed = sqlx::query(
+                r#"UPDATE observability.dashboard_alert_projection_state
+                       SET observed_at = ?, stale_reason = NULL
+                     WHERE phase = 'idle'
+                       AND (observed_at IS NULL OR observed_at < ?)"#,
+            )
+            .bind(now)
+            .bind(now.saturating_sub(ALERT_PROJECTION_STALE_SECS / 2))
+            .execute(&mut *tx)
+            .await?;
+            rows_affected = changed.rows_affected();
+            Ok::<(), ProxyError>(())
+        }
+        .await;
+        tx.finish(result).await?;
+        Ok(rows_affected > 0)
+    }
+
     async fn advance_admitted_alert_projection_slice(
         &self,
     ) -> Result<AlertProjectionSliceOutcome, ProxyError> {
-        let recent = self
+        let mut recent = self
             .alert_projection_source_state(AlertProjectionLane::RecentTail)
             .await?
             .ok_or_else(|| ProxyError::Other("missing alert projection tail state".to_string()))?;
         let history = self
             .alert_projection_source_state(AlertProjectionLane::History)
             .await?;
-        // Alternate lanes whenever history has debt. A busy recent tail keeps
-        // Dashboard coverage current without permanently starving older admin
-        // history behind a continuous alert stream.
-        let state = match history {
-            Some(history) if history.generation <= recent.generation => history,
-            _ => recent,
+        let mut recent_fence = match (
+            recent.fence_occurred_at,
+            recent.fence_row_sort_id.as_deref(),
+        ) {
+            (Some(occurred_at), Some(row_sort_id)) => Some((occurred_at, row_sort_id.to_string())),
+            _ => self.alert_projection_source_fence(&recent.source_kind).await?,
+        };
+        let mut recent_has_debt = recent_fence.as_ref().is_some_and(|fence| {
+            (fence.0, fence.1.as_str())
+                > (recent.cursor_occurred_at, recent.cursor_row_sort_id.as_str())
+        });
+        // Once every tail source is idle, inspect the other two bounded
+        // source watermarks before declaring the tail idle. This preserves
+        // prompt discovery of a newly arrived alert without mutating a cursor
+        // just to rotate an in-memory scheduler clock.
+        if recent.phase == "idle" && !recent_has_debt {
+            for source_kind in ALERT_PROJECTION_SOURCES {
+                if source_kind == recent.source_kind {
+                    continue;
+                }
+                let Some(candidate) = self
+                    .alert_projection_source_state_for_kind(
+                        AlertProjectionLane::RecentTail,
+                        source_kind,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                let candidate_fence = match (
+                    candidate.fence_occurred_at,
+                    candidate.fence_row_sort_id.as_deref(),
+                ) {
+                    (Some(occurred_at), Some(row_sort_id)) => {
+                        Some((occurred_at, row_sort_id.to_string()))
+                    }
+                    _ => self.alert_projection_source_fence(&candidate.source_kind).await?,
+                };
+                let candidate_has_debt = candidate_fence.as_ref().is_some_and(|fence| {
+                    (fence.0, fence.1.as_str())
+                        > (candidate.cursor_occurred_at, candidate.cursor_row_sort_id.as_str())
+                });
+                if candidate_has_debt {
+                    recent = candidate;
+                    recent_fence = candidate_fence;
+                    recent_has_debt = true;
+                    break;
+                }
+            }
+        }
+        // The durable history lane owns catch-up whenever the selected recent
+        // source is already current. A bounded recent fence probe before each
+        // history slice keeps the Dashboard tail responsive without using tail
+        // generation bumps as an implicit round-robin clock.
+        let (state, fence) = match history {
+            Some(history) if !recent_has_debt && recent.phase == "idle" => (history, None),
+            _ => (recent, recent_fence),
         };
         let fence = match (
+            fence,
             state.fence_occurred_at,
             state.fence_row_sort_id.as_deref(),
         ) {
-            (Some(occurred_at), Some(row_sort_id)) => Some((occurred_at, row_sort_id.to_string())),
-            _ if state.lane == AlertProjectionLane::RecentTail => {
+            (Some(fence), _, _) => Some(fence),
+            (None, Some(occurred_at), Some(row_sort_id)) => {
+                Some((occurred_at, row_sort_id.to_string()))
+            }
+            (None, _, _) if state.lane == AlertProjectionLane::RecentTail => {
                 self.alert_projection_source_fence(&state.source_kind).await?
             }
-            _ => None,
+            (None, _, _) => None,
         };
         let now = self.backend_time.now_ts();
         let Some(fence) = fence else {
+            if state.lane == AlertProjectionLane::RecentTail && state.phase == "idle" {
+                return Ok(AlertProjectionSliceOutcome::Idle);
+            }
             self.persist_alert_projection_slice(&state, None, &[], None, true, now)
                 .await?;
             return Ok(AlertProjectionSliceOutcome::Advanced {
@@ -432,6 +586,13 @@ impl KeyStore {
                 dashboard_dirty: false,
             });
         };
+        if state.lane == AlertProjectionLane::RecentTail
+            && state.phase == "idle"
+            && (fence.0, fence.1.as_str())
+                <= (state.cursor_occurred_at, state.cursor_row_sort_id.as_str())
+        {
+            return Ok(AlertProjectionSliceOutcome::Idle);
+        }
         let source_keys = self
             .alert_projection_source_keys(
                 &state.source_kind,
@@ -670,68 +831,68 @@ impl KeyStore {
         let clamped_window_hours = window_hours.clamp(1, 24 * 30);
         let now = self.backend_time.now_ts();
         let since = now.saturating_sub(clamped_window_hours.saturating_mul(3600));
+        let status = self.alert_projection_status().await?;
+        let filters = AlertEventFilters {
+            alert_type: None,
+            since: Some(since),
+            until: None,
+            user_id: None,
+            token_id: None,
+            key_id: None,
+            request_kinds: &[],
+        };
+        let (top_groups, grouped_count) = self
+            .fetch_projected_alert_group_page(filters, 1, 10)
+            .await?;
+        let mut grouped_count_windows = Vec::with_capacity(3);
+        for window_hours in [1_i64, 24, 24 * 7] {
+            let grouped_since = now.saturating_sub(window_hours.saturating_mul(3600));
+            let grouped_filters = AlertEventFilters {
+                alert_type: None,
+                since: Some(grouped_since),
+                until: None,
+                user_id: None,
+                token_id: None,
+                key_id: None,
+                request_kinds: &[],
+            };
+            let grouped_count = if window_hours == clamped_window_hours {
+                grouped_count
+            } else {
+                self.fetch_projected_alert_group_count(grouped_filters).await?
+            };
+            grouped_count_windows.push(RecentAlertsGroupedWindowCount {
+                window_hours,
+                grouped_count,
+            });
+        }
+        let mut count_query = QueryBuilder::new(
+            "SELECT json_extract(payload_json, '$.alert_type') AS alert_type, COUNT(*) AS count \
+             FROM observability.dashboard_alert_projection_events WHERE occurred_at >= ",
+        );
+        count_query.push_bind(since);
+        count_query.push(" GROUP BY json_extract(payload_json, '$.alert_type')");
         let mut conn = self
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::AlertProjection)
             .await?;
-        let result = sqlx::query_scalar::<_, String>(
-            r#"SELECT payload_json
-                 FROM observability.dashboard_alert_projection_events
-                WHERE occurred_at >= ?
-                ORDER BY occurred_at DESC, row_sort_id DESC"#,
+        let result = count_query.build().fetch_all(&mut *conn).await;
+        let count_rows = conn.complete_query(result).await?;
+        let counts_by_type = Self::summarize_alert_type_count_rows(count_rows);
+        let mut total_conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let total_result = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM observability.dashboard_alert_projection_events WHERE occurred_at >= ?",
         )
         .bind(since)
-        .fetch_all(&mut *conn)
+        .fetch_one(&mut *total_conn)
         .await;
-        let payloads = conn.complete_query(result).await?;
-        let events = payloads
-            .into_iter()
-            .filter_map(|payload| serde_json::from_str::<AlertEventProjectionRow>(&payload).ok())
-            .filter_map(Self::build_alert_event_from_projection)
-            .collect::<Vec<_>>();
-        let status = self.alert_projection_status().await?;
-        let summary_for = |window: i64| {
-            let cutoff = now.saturating_sub(window.saturating_mul(3600));
-            build_group_records_from_events(
-                events
-                    .iter()
-                    .filter(|event| event.occurred_at >= cutoff)
-                    .cloned()
-                    .collect(),
-            )
-            .top_level_items
-        };
-        let current_groups = summary_for(clamped_window_hours);
-        let top_groups = current_groups
-            .iter()
-            .take(10)
-            .cloned()
-            .collect::<Vec<_>>();
-        let grouped_count = current_groups.len() as i64;
-        let grouped_count_for = |window_hours| {
-            if window_hours == clamped_window_hours {
-                grouped_count
-            } else {
-                summary_for(window_hours).len() as i64
-            }
-        };
-        let grouped_count_windows = [1_i64, 24, 24 * 7]
-            .into_iter()
-            .map(|window_hours| RecentAlertsGroupedWindowCount {
-                window_hours,
-                grouped_count: grouped_count_for(window_hours),
-            })
-            .collect::<Vec<_>>();
-        let mut counts_by_type = default_alert_type_counts();
-        for count in &mut counts_by_type {
-            count.count = events
-                .iter()
-                .filter(|event| event.alert_type == count.alert_type)
-                .count() as i64;
-        }
+        let total_events = total_conn.complete_query(total_result).await?;
         Ok(RecentAlertsSummary {
             window_hours: clamped_window_hours,
-            total_events: events.len() as i64,
+            total_events,
             grouped_count,
             grouped_count_windows,
             counts_by_type,

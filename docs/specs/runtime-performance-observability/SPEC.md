@@ -57,6 +57,10 @@
   administrator lane report distinct coverage. Dashboard HTTP and SSE consume the immutable
   last-good snapshot only after recent coverage is `ok`; an incomplete or expired recent observation
   is reported as `stale` with an explicit reason instead of being presented as a healthy refresh.
+- An idle alert probe is a no-work result, not a progress write. It leaves durable cursor/generation
+  state unchanged; a separately throttled observation heartbeat maintains recent-tail liveness.
+  Sidecar Dashboard aggregation returns only scalar counts and the bounded top-group page, never an
+  unbounded payload collection.
 - 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。

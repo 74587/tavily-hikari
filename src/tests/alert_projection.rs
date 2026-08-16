@@ -79,6 +79,36 @@ async fn advance_alert_projection_until(proxy: &TavilyProxy, projected_events: i
     );
 }
 
+async fn advance_alert_projection_until_full_coverage(proxy: &TavilyProxy) {
+    let mut outcomes = Vec::new();
+    for _ in 0..24 {
+        let outcome = proxy
+            .key_store
+            .advance_alert_projection_slice()
+            .await
+            .expect("advance alert projection history slice");
+        outcomes.push(format!("{outcome:?}"));
+        if matches!(outcome, AlertProjectionSliceOutcome::Deferred { .. }) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let status = proxy
+            .dashboard_alert_projection_status()
+            .await
+            .expect("read projection coverage");
+        if status.coverage == "ok" {
+            return;
+        }
+    }
+    let status = proxy
+        .dashboard_alert_projection_status()
+        .await
+        .expect("read final projection coverage");
+    panic!(
+        "alert projection history did not converge: {} after {outcomes:?}",
+        status.coverage
+    );
+}
+
 #[tokio::test]
 async fn alert_projection_cursor_replays_tail_without_duplicates() {
     let db_path = temp_db_path("alert-projection-tail");
@@ -148,6 +178,7 @@ async fn alert_projection_serves_admin_events_and_groups_after_full_coverage() {
 
     insert_projected_rate_limit_alert(&proxy, "projection-admin-token", now).await;
     advance_alert_projection_until(&proxy, 1).await;
+    advance_alert_projection_until_full_coverage(&proxy).await;
     let status = proxy
         .dashboard_alert_projection_status()
         .await
@@ -413,14 +444,21 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
     .await
     .expect("create proxy");
 
+    let recent_window_start = now.saturating_sub(30 * 24 * 60 * 60);
     insert_projected_rate_limit_alert(&proxy, "projection-history-token", now).await;
+    insert_projected_rate_limit_alert(
+        &proxy,
+        "projection-history-boundary-token",
+        recent_window_start.saturating_sub(1),
+    )
+    .await;
     advance_alert_projection_until(&proxy, 1).await;
     sqlx::query(
         "UPDATE observability.dashboard_alert_projection_state \
          SET cursor_occurred_at = ?, cursor_row_sort_id = 'legacy-window', \
              phase = 'idle', observed_at = ?",
     )
-    .bind(now.saturating_sub(30 * 24 * 60 * 60))
+    .bind(recent_window_start)
     .bind(now)
     .execute(&proxy.key_store.pool)
     .await
@@ -448,7 +486,7 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
              WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'), \
            (SELECT COUNT(*) FROM observability.dashboard_alert_projection_events)",
     )
-    .bind(now.saturating_sub(30 * 24 * 60 * 60))
+    .bind(recent_window_start)
     .fetch_one(&proxy.key_store.pool)
     .await
     .expect("verify cursor-only administrator history migration");
@@ -461,6 +499,105 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
         "admin history starts from an independent cursor"
     );
     assert_eq!(retained_events, 1, "migration must not rewrite the sidecar");
+
+    advance_alert_projection_until_full_coverage(&proxy).await;
+    let historical_boundary_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_events \
+         WHERE source_kind = 'auth_token_log'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read projected history boundary events");
+    assert_eq!(
+        historical_boundary_events, 2,
+        "history must include an alert from the second immediately below the tail boundary"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_idle_probe_does_not_persist_empty_cursors() {
+    let db_path = temp_db_path("alert-projection-idle-no-write");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_575_100;
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-idle-no-write".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    advance_alert_projection_until_full_coverage(&proxy).await;
+    let before: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT SUM(generation) FROM observability.dashboard_alert_projection_state \
+         UNION ALL \
+         SELECT SUM(generation) FROM observability.dashboard_alert_projection_history_state",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read cursor generations before idle probe")
+    .into_iter()
+    .sum();
+    let outcome = proxy
+        .key_store
+        .advance_alert_projection_slice()
+        .await
+        .expect("run empty alert projection probe");
+    assert_eq!(outcome, AlertProjectionSliceOutcome::Idle);
+    let after: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT SUM(generation) FROM observability.dashboard_alert_projection_state \
+         UNION ALL \
+         SELECT SUM(generation) FROM observability.dashboard_alert_projection_history_state",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read cursor generations after idle probe")
+    .into_iter()
+    .sum();
+    assert_eq!(
+        after, before,
+        "an empty probe must not write projection state"
+    );
+
+    clock.advance_wall(std::time::Duration::from_secs(91));
+    let stale = proxy
+        .dashboard_alert_projection_status()
+        .await
+        .expect("read expired tail coverage");
+    assert_eq!(stale.recent_coverage, "stale");
+    assert!(
+        proxy
+            .refresh_dashboard_alert_projection_observation()
+            .await
+            .expect("refresh idle projection observation")
+    );
+    let recovered = proxy
+        .dashboard_alert_projection_status()
+        .await
+        .expect("read refreshed tail coverage");
+    assert_eq!(recovered.recent_coverage, "ok");
+    let heartbeat_generation: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT SUM(generation) FROM observability.dashboard_alert_projection_state \
+         UNION ALL \
+         SELECT SUM(generation) FROM observability.dashboard_alert_projection_history_state",
+    )
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read cursor generations after idle heartbeat")
+    .into_iter()
+    .sum();
+    assert_eq!(
+        heartbeat_generation, before,
+        "the observation heartbeat must not advance a projection cursor"
+    );
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);
