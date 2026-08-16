@@ -1284,6 +1284,17 @@ impl KeyStore {
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::ReconciliationProjection)
             .await?;
+        #[cfg(test)]
+        if self
+            .sqlite_runtime
+            .take_reconciliation_research_read_failure_for_test()
+        {
+            let injected_result: Result<
+                Vec<crate::models::UpstreamReconciliationResearchCandidate>,
+                sqlx::Error,
+            > = Err(sqlx::Error::PoolTimedOut);
+            return conn.complete_query(injected_result).await;
+        }
         let rows_result = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
             r#"
             WITH pending AS (

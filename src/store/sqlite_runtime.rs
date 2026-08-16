@@ -226,6 +226,8 @@ struct SqliteRuntimeInner {
     acquire_waiters: AtomicU32,
     peak_acquire_waiters: AtomicU32,
     workload: Mutex<WorkloadWindow>,
+    #[cfg(test)]
+    fail_next_reconciliation_research_read: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -369,8 +371,24 @@ impl SqliteRuntime {
                 acquire_waiters: AtomicU32::new(0),
                 peak_acquire_waiters: AtomicU32::new(0),
                 workload: Mutex::new(WorkloadWindow::default()),
+                #[cfg(test)]
+                fail_next_reconciliation_research_read: AtomicBool::new(false),
             }),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_reconciliation_research_read_for_test(&self) {
+        self.inner
+            .fail_next_reconciliation_research_read
+            .store(true, AtomicOrdering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_reconciliation_research_read_failure_for_test(&self) -> bool {
+        self.inner
+            .fail_next_reconciliation_research_read
+            .swap(false, AtomicOrdering::AcqRel)
     }
 
     pub(crate) fn record_foreground_activity(&self) {

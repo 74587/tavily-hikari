@@ -1,6 +1,4 @@
 static LAST_RECONCILIATION_SUMMARY_LOG_AT: AtomicI64 = AtomicI64::new(0);
-#[cfg(test)]
-static FAIL_NEXT_RECONCILIATION_RESEARCH_READ: AtomicBool = AtomicBool::new(false);
 
 include!("reconciliation_engine.rs");
 
@@ -82,7 +80,9 @@ impl TavilyProxy {
 
     #[cfg(test)]
     pub(crate) fn fail_next_reconciliation_research_read_for_test(&self) {
-        FAIL_NEXT_RECONCILIATION_RESEARCH_READ.store(true, Ordering::Release);
+        self.key_store
+            .sqlite_runtime
+            .fail_next_reconciliation_research_read_for_test();
     }
 
     pub async fn upstream_reconciliation_shadow_compare_active_with_settings(
@@ -558,10 +558,6 @@ impl TavilyProxy {
         let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             return Ok((0, 0, 0, 0, 0, true));
-        }
-        #[cfg(test)]
-        if FAIL_NEXT_RECONCILIATION_RESEARCH_READ.swap(false, Ordering::AcqRel) {
-            return Err(ProxyError::Database(sqlx::Error::PoolTimedOut));
         }
         let candidates = self
             .key_store
