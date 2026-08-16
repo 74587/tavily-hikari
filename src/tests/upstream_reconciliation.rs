@@ -686,6 +686,7 @@ async fn run_upstream_reconciliation_once_updates_runtime_markers() {
     assert_eq!(observation.mode, "compare");
     assert_eq!(observation.settled, 0);
     assert_eq!(observation.observed, 2);
+    assert_eq!(observation.continuation_reason.as_deref(), Some("observed"));
     assert!(
         observation
             .first_remote_ms

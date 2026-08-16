@@ -46,6 +46,8 @@ enum ReconciliationProjectionWriteStatus {
 }
 
 impl<'a> ReconciliationProjectionController<'a> {
+    const SQLITE_PRESSURE_DEFER_SECS: i64 = 30;
+
     fn new(store: &'a KeyStore) -> Self {
         Self { store }
     }
@@ -56,11 +58,85 @@ impl<'a> ReconciliationProjectionController<'a> {
     ) -> Result<ReconciliationProjectionSliceOutcome, ProxyError> {
         match self.advance_slice_inner(claimed_job).await {
             Err(err) if is_transient_sqlite_write_error(&err) => {
+                match self
+                    .record_deferred_slice(claimed_job, "sqlite_pressure")
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok(ReconciliationProjectionSliceOutcome::Advanced {
+                            scanned_rows: 0,
+                            completed: true,
+                        });
+                    }
+                    Err(record_err) if is_transient_sqlite_write_error(&record_err) => {}
+                    Err(ProxyError::StaleClaim { .. }) => {
+                        return Ok(ReconciliationProjectionSliceOutcome::StaleClaim);
+                    }
+                    Err(record_err) => return Err(record_err),
+                }
                 Ok(ReconciliationProjectionSliceOutcome::Deferred {
                     reason: "sqlite_pressure",
                 })
             }
             result => result,
+        }
+    }
+
+    /// Preserve the controller-owned delay whenever a short retry window is available. A
+    /// contended writer can prevent this optional observation update too; the caller's atomic
+    /// representative continuation remains the durable recovery path in that case.
+    async fn record_deferred_slice(
+        &self,
+        claimed_job: Option<(i64, i64)>,
+        reason: &'static str,
+    ) -> Result<bool, ProxyError> {
+        let now = self.store.backend_time.now_ts();
+        let mut tx = self
+            .store
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ReconciliationProjection)
+            .await?;
+        let write_result = async {
+            if let Some((job_id, claim_generation)) = claimed_job
+                && !Self::claim_is_current(&mut tx, claimed_job).await?
+            {
+                return Err(ProxyError::StaleClaim {
+                    job_id,
+                    claim_generation,
+                });
+            }
+            let updated = sqlx::query(
+                r#"UPDATE upstream_reconciliation_projection_state
+                   SET next_retry_at = ?, last_defer_reason = ?, updated_at = ?
+                   WHERE id = 'local' AND completed = 0"#,
+            )
+            .bind(now.saturating_add(Self::SQLITE_PRESSURE_DEFER_SECS))
+            .bind(reason)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Ok(false);
+            }
+            sqlx::query(
+                "UPDATE upstream_reconciliation_run_observation SET projection_state = 'deferred', cursor_advanced = 0, observed_at = ? WHERE id = 'local'",
+            )
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            Ok(true)
+        }
+        .await;
+        match write_result {
+            Ok(persisted) => {
+                tx.finish(Ok(())).await?;
+                Ok(persisted)
+            }
+            Err(err) => {
+                tx.finish(Err(err)).await?;
+                unreachable!("finishing a failed deferred projection transaction returns the error")
+            }
         }
     }
 

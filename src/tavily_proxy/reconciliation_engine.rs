@@ -172,6 +172,14 @@ mod reconciliation_engine_tests {
             Some(ReconciliationOutcome::LocalPressure)
         );
     }
+
+    #[test]
+    fn compare_observation_is_not_classified_as_a_settlement() {
+        assert_eq!(
+            ReconciliationEngine::outcome(0, 0, 1, false, false, false, false),
+            Some(ReconciliationOutcome::Observed)
+        );
+    }
 }
 
 impl ReconciliationOutcome {

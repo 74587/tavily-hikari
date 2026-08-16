@@ -1951,7 +1951,7 @@ impl TavilyProxy {
                         && attempted_candidate_count == 0
                         && budget_exhausted);
                 let reconciliation_outcome = ReconciliationEngine::outcome(
-                    completed,
+                    settled,
                     no_adjustment,
                     observed,
                     upstream_429_observed,

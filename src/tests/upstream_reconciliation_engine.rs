@@ -546,6 +546,85 @@ async fn unclaimed_projection_preserves_typed_defer() {
 }
 
 #[tokio::test]
+async fn projection_pressure_defer_persists_state_when_the_write_window_recovers() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = local_ts(2026, 7, 15, 12, 0);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-projection-persisted-defer"],
+        "http://127.0.0.1:9",
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    sqlx::query("DROP TRIGGER trg_upstream_reconciliation_usage_work_insert")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("disable live projection");
+    sqlx::query(
+        "UPDATE upstream_reconciliation_projection_state SET completed = 0 WHERE id = 'local'",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark projection incomplete");
+    sqlx::query(
+        r#"INSERT INTO upstream_reconciliation_usage (
+             token_id, key_id, period_code, project_id, billing_subject,
+             period_start, period_end, request_count, first_used_at,
+             last_used_at, updated_at, settlement_mode
+           ) VALUES ('pressure-token', 'pressure-key', '2026-07-15/S1', 'pressure-project',
+                     'token:pressure-token', 1, 2, 1, 1, 2, 2, 'shadow')"#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert projection source");
+    sqlx::query(
+        r#"CREATE TRIGGER defer_projection_work_insert
+           BEFORE INSERT ON upstream_reconciliation_work
+           BEGIN
+             SELECT RAISE(ABORT, 'database is locked');
+           END"#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("inject transient projection write failure");
+
+    assert_eq!(
+        proxy
+            .key_store
+            .advance_upstream_reconciliation_work_projection()
+            .await
+            .expect("projection returns a typed defer"),
+        ReconciliationProjectionSliceOutcome::Deferred {
+            reason: "sqlite_pressure"
+        }
+    );
+    let state: (i64, Option<String>) = sqlx::query_as(
+        "SELECT next_retry_at, last_defer_reason FROM upstream_reconciliation_projection_state WHERE id = 'local'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read persisted deferred projection state");
+    assert_eq!(state, (now + 30, Some("sqlite_pressure".to_string())));
+    let observation = proxy
+        .key_store
+        .upstream_reconciliation_run_observation()
+        .await
+        .expect("read projection observation");
+    assert_eq!(observation.projection_state, "deferred");
+    assert_eq!(
+        observation.continuation_reason.as_deref(),
+        Some("sqlite_pressure")
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn reconciliation_without_an_eligible_key_records_semantic_retry() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
