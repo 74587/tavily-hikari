@@ -1123,32 +1123,24 @@ impl TavilyProxy {
             .saturating_sub(Self::RECONCILIATION_POST_PROCESS_HEADROOM_SECS);
         let remote_request_start_budget_secs = research_start_budget_secs;
         let mut preparation_budget_exhausted = false;
-        let candidate_remaining = preparation_deadline
-            .saturating_duration_since(std::time::Instant::now());
         let mut candidate_batch;
-        if candidate_remaining.is_zero() {
+        if preparation_deadline <= std::time::Instant::now() {
             return Ok(ClaimedReconciliationRunOutcome::Deferred {
                 reason: "local_pressure",
             });
         } else {
-            candidate_batch = match tokio::time::timeout(
-                candidate_remaining,
-                self.key_store.next_upstream_reconciliation_candidates(20),
-            )
-            .await
+            candidate_batch = match self
+                .key_store
+                .next_upstream_reconciliation_candidates(20)
+                .await
             {
-                Ok(Ok(batch)) => batch,
-                Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                Ok(batch) => batch,
+                Err(err) if is_transient_sqlite_write_error(&err) => {
                     return Ok(ClaimedReconciliationRunOutcome::Deferred {
                         reason: "local_pressure",
                     });
                 }
-                Ok(Err(err)) => return Err(err),
-                Err(_) => {
-                    return Ok(ClaimedReconciliationRunOutcome::Deferred {
-                        reason: "local_pressure",
-                    });
-                }
+                Err(err) => return Err(err),
             };
         }
         preparation_budget_exhausted |=
@@ -1185,26 +1177,18 @@ impl TavilyProxy {
                             && scanned_rows > 0
                             && std::time::Instant::now() < preparation_deadline
                         {
-                            let remaining = preparation_deadline
-                                .saturating_duration_since(std::time::Instant::now());
-                            candidate_batch = match tokio::time::timeout(
-                                remaining,
-                                self.key_store.next_upstream_reconciliation_candidates(20),
-                            )
-                            .await
+                            candidate_batch = match self
+                                .key_store
+                                .next_upstream_reconciliation_candidates(20)
+                                .await
                             {
-                                Ok(Ok(batch)) => batch,
-                                Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                                Ok(batch) => batch,
+                                Err(err) if is_transient_sqlite_write_error(&err) => {
                                     return Ok(ClaimedReconciliationRunOutcome::Deferred {
                                         reason: "local_pressure",
                                     });
                                 }
-                                Ok(Err(err)) => return Err(err),
-                                Err(_) => {
-                                    return Ok(ClaimedReconciliationRunOutcome::Deferred {
-                                        reason: "local_pressure",
-                                    });
-                                }
+                                Err(err) => return Err(err),
                             };
                         }
                     }
@@ -1257,24 +1241,18 @@ impl TavilyProxy {
                     reason: "local_pressure",
                 });
             } else {
-                match tokio::time::timeout(
-                    remaining,
-                    self.key_store.reconciliation_key_ids_batch(&candidate_keys),
-                )
-                .await
+                match self
+                    .key_store
+                    .reconciliation_key_ids_batch(&candidate_keys)
+                    .await
                 {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                    Ok(result) => result,
+                    Err(err) if is_transient_sqlite_write_error(&err) => {
                         return Ok(ClaimedReconciliationRunOutcome::Deferred {
                             reason: "local_pressure",
                         });
                     }
-                    Ok(Err(err)) => return Err(err),
-                    Err(_) => {
-                        return Ok(ClaimedReconciliationRunOutcome::Deferred {
-                            reason: "local_pressure",
-                        });
-                    }
+                    Err(err) => return Err(err),
                 }
             }
         };
@@ -1292,28 +1270,22 @@ impl TavilyProxy {
                     reason: "local_pressure",
                 });
             } else {
-                match tokio::time::timeout(
-                    remaining,
-                    self.key_store.list_active_api_key_transient_backoffs(
+                match self
+                    .key_store
+                    .list_active_api_key_transient_backoffs(
                         &all_key_ids.into_iter().collect::<Vec<_>>(),
                         Self::RECONCILIATION_BACKOFF_SCOPE,
                         self.backend_time.now_ts(),
-                    ),
-                )
-                .await
+                    )
+                    .await
                 {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(err)) if is_transient_sqlite_write_error(&err) => {
+                    Ok(result) => result,
+                    Err(err) if is_transient_sqlite_write_error(&err) => {
                         return Ok(ClaimedReconciliationRunOutcome::Deferred {
                             reason: "local_pressure",
                         });
                     }
-                    Ok(Err(err)) => return Err(err),
-                    Err(_) => {
-                        return Ok(ClaimedReconciliationRunOutcome::Deferred {
-                            reason: "local_pressure",
-                        });
-                    }
+                    Err(err) => return Err(err),
                 }
             }
         };
@@ -1694,19 +1666,11 @@ impl TavilyProxy {
                     budget_exhausted = true;
                     None
                 } else {
-                    match tokio::time::timeout(
-                        finalization_deadline
-                            .saturating_duration_since(std::time::Instant::now()),
-                        self.key_store.reconciliation_local_billed_credits_batch(&observed),
+                    Some(
+                        self.key_store
+                            .reconciliation_local_billed_credits_batch(&observed)
+                            .await?,
                     )
-                    .await
-                    {
-                        Ok(result) => Some(result?),
-                        Err(_) => {
-                            budget_exhausted = true;
-                            None
-                        }
-                    }
                 };
                 // A later remote request may exhaust the main budget after an earlier
                 // request has already succeeded. Do not let that later timeout discard
