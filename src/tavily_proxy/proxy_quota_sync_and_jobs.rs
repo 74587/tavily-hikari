@@ -1805,6 +1805,15 @@ impl TavilyProxy {
                     );
                     return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
                 }
+                Err(err) if is_transient_sqlite_write_error(&err) => {
+                    tracing::debug!(
+                        component = "reconciliation",
+                        event = "research_sweep_deferred",
+                        reason = "local_pressure",
+                        err = %err,
+                    );
+                    (0, 0, 0, 0, 0, true)
+                }
                 Err(err) => return Err(err),
             }
         } else {
