@@ -932,7 +932,31 @@ impl TavilyProxy {
         job_id: i64,
         claim_generation: i64,
     ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
-        ReconciliationEngine::run_claimed(self, usage_base, job_id, claim_generation).await
+        self.run_upstream_reconciliation_once_claimed_outcome_with_remote_io_permit(
+            usage_base,
+            job_id,
+            claim_generation,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn run_upstream_reconciliation_once_claimed_outcome_with_remote_io_permit(
+        &self,
+        usage_base: &str,
+        job_id: i64,
+        claim_generation: i64,
+        remote_io_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
+        ReconciliationEngine::run_claimed(
+            self,
+            usage_base,
+            job_id,
+            claim_generation,
+            remote_io_permit,
+        )
+        .await
     }
 
     async fn run_upstream_reconciliation_once_inner(

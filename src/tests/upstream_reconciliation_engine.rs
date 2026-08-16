@@ -272,12 +272,18 @@ async fn claimed_engine_run_reaches_a_safe_boundary_after_the_caller_is_cancelle
         .expect("hold writer lock");
 
     let cancelled_proxy = Arc::clone(&proxy);
+    let remote_io_slot = Arc::new(tokio::sync::Semaphore::new(1));
+    let remote_io_permit = remote_io_slot
+        .clone()
+        .try_acquire_owned()
+        .expect("acquire remote I/O permit");
     let task = tokio::spawn(async move {
         cancelled_proxy
-            .run_upstream_reconciliation_once_claimed_outcome(
+            .run_upstream_reconciliation_once_claimed_outcome_with_remote_io_permit(
                 "http://127.0.0.1:9",
                 claim.id,
                 claim.claim_generation,
+                Some(remote_io_permit),
             )
             .await
     });
@@ -291,6 +297,10 @@ async fn claimed_engine_run_reaches_a_safe_boundary_after_the_caller_is_cancelle
             .shutdown_maintenance_bulk(std::time::Duration::from_millis(50))
             .await,
         "shutdown must still observe the detached claimed run"
+    );
+    assert!(
+        remote_io_slot.clone().try_acquire_owned().is_err(),
+        "the detached claimed run must retain the remote I/O permit"
     );
     sqlx::query("ROLLBACK")
         .execute(&mut *writer)
@@ -306,6 +316,10 @@ async fn claimed_engine_run_reaches_a_safe_boundary_after_the_caller_is_cancelle
             .shutdown_maintenance_bulk(std::time::Duration::from_secs(2))
             .await,
         "detached claimed run reaches a safe shutdown boundary"
+    );
+    assert!(
+        remote_io_slot.try_acquire_owned().is_ok(),
+        "the remote I/O permit is released only after the run reaches a safe boundary"
     );
     assert_eq!(
         proxy

@@ -33,10 +33,12 @@ impl ReconciliationEngine {
         usage_base: &str,
         job_id: i64,
         claim_generation: i64,
+        remote_io_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
         let proxy = proxy.clone();
         let usage_base = usage_base.to_string();
         tokio::spawn(async move {
+            let _remote_io_permit = remote_io_permit;
             let Some(_run_lease) = proxy.key_store.sqlite_runtime.try_start_maintenance_run() else {
                 return Ok(ClaimedReconciliationRunOutcome::Deferred {
                     reason: "shutdown",

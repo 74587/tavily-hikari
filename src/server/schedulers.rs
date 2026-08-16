@@ -474,7 +474,11 @@ async fn dequeue_next_scheduled_job(
     }
 }
 
-async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
+async fn run_queued_scheduled_job(
+    state: Arc<AppState>,
+    job: JobLog,
+    remote_io_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) {
     let job_type = job.job_type.clone();
     let key_id = job.key_id.clone();
     let claimed_job = ClaimedScheduledJob {
@@ -487,6 +491,7 @@ async fn run_queued_scheduled_job(state: Arc<AppState>, job: JobLog) {
         job_type.clone(),
         key_id.clone(),
         claimed_job,
+        remote_io_permit,
     )
     .await;
 }
@@ -654,12 +659,11 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
                         let run_state = state.clone();
                         let run_wake = wake.clone();
                         tokio::spawn(async move {
-                            let _remote_io_permit = remote_io_permit;
-                            run_queued_scheduled_job(run_state, job).await;
+                            run_queued_scheduled_job(run_state, job, Some(remote_io_permit)).await;
                             run_wake.notify_one();
                         });
                     } else {
-                        run_queued_scheduled_job(state.clone(), job).await;
+                        run_queued_scheduled_job(state.clone(), job, None).await;
                     }
                 }
                 Ok(None) => {
@@ -2458,6 +2462,7 @@ async fn run_manual_claimed_job(
     job_type: String,
     key_id: Option<String>,
     mut claimed_job: ClaimedScheduledJob,
+    mut remote_io_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> bool {
     if job_type == "ha_outbox_gc" {
         return run_ha_outbox_gc_claimed_job(state, claimed_job).await;
@@ -2612,10 +2617,11 @@ async fn run_manual_claimed_job(
             }
             let run_result = state
                 .proxy
-                .run_upstream_reconciliation_once_claimed_outcome(
+                .run_upstream_reconciliation_once_claimed_outcome_with_remote_io_permit(
                     &state.usage_base,
                     job_id,
                     claim_generation,
+                    remote_io_permit.take(),
                 )
                 .await;
             match run_result {
