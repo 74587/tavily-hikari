@@ -41,7 +41,7 @@ TESTBOX_RUST_BASE_IMAGE="rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a
 # gate must only require progress on data the online GC may legally delete;
 # raw legacy rows outside the replication contract are handled only by the
 # bounded invalid-resource cursor and must never be treated as retention debt.
-HA_GC_CONTROL_RESOURCES="'admin_password_settings', 'announcements', 'account_entitlements', 'api_key_low_quota_depletions', 'api_key_maintenance_records', 'api_key_quarantines', 'api_keys', 'auth_tokens', 'forward_proxy_settings', 'linuxdo_credit_recharge_entitlements', 'linuxdo_credit_recharge_orders', 'meta', 'oauth_accounts', 'token_api_key_bindings', 'user_api_key_bindings', 'user_tag_bindings', 'user_tags', 'user_token_bindings', 'users'"
+HA_GC_CONTROL_RESOURCES="'admin_password_settings', 'announcements', 'account_entitlements', 'api_key_low_quota_depletions', 'api_key_maintenance_records', 'api_key_quarantines', 'api_keys', 'auth_tokens', 'forward_proxy_settings', 'linuxdo_credit_recharge_entitlements', 'linuxdo_credit_recharge_orders', 'meta', 'oauth_accounts', 'upstream_reconciliation_control_state', 'upstream_reconciliation_control_transitions', 'token_api_key_bindings', 'user_api_key_bindings', 'user_tag_bindings', 'user_tags', 'user_token_bindings', 'users'"
 HA_GC_BILLING_RESOURCES="'billing_ledger', 'billing_reconciliation_adjustments'"
 HA_GC_RUNTIME_RESOURCES="'account_monthly_quota', 'account_quota_limits', 'account_usage_buckets', 'auth_token_quota', 'forward_proxy_key_affinity', 'forward_proxy_node_overrides', 'http_project_api_key_affinity', 'mcp_sessions', 'research_requests', 'token_primary_api_key_affinity', 'token_usage_buckets', 'upstream_reconciliation_research', 'upstream_reconciliation_settlements', 'upstream_reconciliation_usage', 'upstream_reconciliation_work', 'upstream_usage_rate_attempts', 'user_primary_api_key_affinity'"
 
@@ -219,6 +219,16 @@ capture_reconciliation_state() {
 prepare_reconciliation_fixture() {
   local database_path="$1"
   sqlite3 "$database_path" <<'SQL'
+-- The comparison network has only the local stub upstream. A copied production
+-- subscription can otherwise restore persisted proxy endpoints and consume the
+-- reconciliation request budget before the request reaches that stub.
+UPDATE forward_proxy_settings
+   SET proxy_urls_json = '[]',
+       subscription_urls_json = '[]',
+       insert_direct = 1,
+       egress_socks5_enabled = 0,
+       egress_socks5_url = '',
+       updated_at = unixepoch();
 UPDATE meta
    SET value = '0'
  WHERE key IN (
@@ -240,6 +250,21 @@ UPDATE scheduled_jobs
  WHERE job_type = 'upstream_reconciliation'
    AND status = 'queued';
 SQL
+
+  local transport_isolated
+  transport_isolated="$(sqlite3 "$database_path" "
+    SELECT CASE WHEN COUNT(*) = 1
+                       AND COALESCE(SUM(COALESCE(json_array_length(proxy_urls_json), 0)), 0) = 0
+                       AND COALESCE(SUM(COALESCE(json_array_length(subscription_urls_json), 0)), 0) = 0
+                       AND COALESCE(MIN(insert_direct), 0) = 1
+                       AND COALESCE(MAX(egress_socks5_enabled), 0) = 0
+                  THEN 1 ELSE 0 END
+      FROM forward_proxy_settings;
+  ")"
+  [[ "$transport_isolated" == "1" ]] || {
+    echo "snapshot forward-proxy transport isolation failed" >&2
+    exit 3
+  }
 }
 
 trap 'cleanup_compose; cleanup_app_image' EXIT

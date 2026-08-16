@@ -75,6 +75,9 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn("prepare_reconciliation_fixture", COMPARISON)
         self.assertIn("completed_generation < work_generation", COMPARISON)
         self.assertIn("upstream_reconciliation_backoff_until_v1", COMPARISON)
+        self.assertIn("snapshot forward-proxy transport isolation failed", COMPARISON)
+        self.assertIn("subscription_urls_json = '[]'", COMPARISON)
+        self.assertIn("egress_socks5_enabled = 0", COMPARISON)
 
 
 if __name__ == "__main__":
