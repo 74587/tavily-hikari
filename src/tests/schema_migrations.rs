@@ -28,7 +28,7 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     let projection_state: (i64, i64, i64) = sqlx::query_as(
         "SELECT batch_size, scanned_rows, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
     )
@@ -101,7 +101,7 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN transport_retry_at",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_failure_streak",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_retry_at",
-        "DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12)",
+        "DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13)",
     ] {
         sqlx::query(statement)
             .execute(&proxy.key_store.pool)
@@ -783,7 +783,7 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

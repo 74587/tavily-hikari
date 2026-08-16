@@ -41,6 +41,11 @@ const RECONCILIATION_CONTROLLER_CHECKSUM: &str =
 const ALERT_PROJECTION_VERSION: i64 = 12;
 const ALERT_PROJECTION_NAME: &str = "dashboard-alert-projection-v1";
 const ALERT_PROJECTION_CHECKSUM: &str = "sha256:5c781d4f2e85029d5aac2858300d182e";
+const ALERT_PROJECTION_RECENT_WINDOW_VERSION: i64 = 13;
+const ALERT_PROJECTION_RECENT_WINDOW_NAME: &str = "dashboard-alert-projection-recent-window-v1";
+const ALERT_PROJECTION_RECENT_WINDOW_CHECKSUM: &str =
+    "sha256:4d620c7e43ae60c4f7067f4b4995c24e";
+const ALERT_PROJECTION_RECENT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -697,6 +702,11 @@ impl KeyStore {
                 ALERT_PROJECTION_NAME,
                 ALERT_PROJECTION_CHECKSUM,
             ),
+            (
+                ALERT_PROJECTION_RECENT_WINDOW_VERSION,
+                ALERT_PROJECTION_RECENT_WINDOW_NAME,
+                ALERT_PROJECTION_RECENT_WINDOW_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -1221,6 +1231,36 @@ impl KeyStore {
         .await
     }
 
+    async fn apply_alert_projection_recent_window_migration(&self) -> Result<(), ProxyError> {
+        // The dashboard consumes at most thirty days of alert history. Do not
+        // turn a schema upgrade into an unbounded historical projection: the
+        // background cursor begins at the oldest data the read model can show.
+        // A nonzero cursor is already owned by a prior projection and must not
+        // be moved forward or backward by this migration.
+        let cursor_start = self
+            .backend_time
+            .now_ts()
+            .saturating_sub(ALERT_PROJECTION_RECENT_WINDOW_SECS);
+        sqlx::query(
+            r#"UPDATE observability.dashboard_alert_projection_state
+                   SET cursor_occurred_at = ?, cursor_row_sort_id = '',
+                       fence_occurred_at = NULL, fence_row_sort_id = NULL,
+                       phase = 'catching_up', observed_at = NULL, stale_reason = NULL
+                 WHERE cursor_occurred_at = 0
+                   AND cursor_row_sort_id = ''
+                   AND generation = 0"#,
+        )
+        .bind(cursor_start)
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            ALERT_PROJECTION_RECENT_WINDOW_VERSION,
+            ALERT_PROJECTION_RECENT_WINDOW_NAME,
+            ALERT_PROJECTION_RECENT_WINDOW_CHECKSUM,
+        )
+        .await
+    }
+
     async fn apply_reconciliation_work_migration(&self) -> Result<(), ProxyError> {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS upstream_reconciliation_work (
@@ -1600,6 +1640,12 @@ impl KeyStore {
         if !self.schema_migration_applied(ALERT_PROJECTION_VERSION).await? {
             self.apply_alert_projection_migration().await?;
         }
+        if !self
+            .schema_migration_applied(ALERT_PROJECTION_RECENT_WINDOW_VERSION)
+            .await?
+        {
+            self.apply_alert_projection_recent_window_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1641,6 +1687,7 @@ impl KeyStore {
         .await?;
         self.apply_reconciliation_controller_migration().await?;
         self.apply_alert_projection_migration().await?;
+        self.apply_alert_projection_recent_window_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1648,7 +1695,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 12_i64,
+            migration_count = 13_i64,
         );
         Ok(())
     }

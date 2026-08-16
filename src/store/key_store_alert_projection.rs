@@ -1,4 +1,7 @@
-const ALERT_PROJECTION_BATCH_ROWS: i64 = 100;
+// Dashboard only renders recent alert coverage. Keep each sidecar write well
+// below the foreground writer budget; catch-up remains durable via the source
+// fence and cursor rather than a large transaction.
+const ALERT_PROJECTION_BATCH_ROWS: i64 = 25;
 const ALERT_PROJECTION_STALE_SECS: i64 = 90;
 const ALERT_PROJECTION_SUMMARY_ROW_LIMIT: i64 = 10_000;
 
@@ -171,6 +174,34 @@ impl KeyStore {
                 return Ok(AlertProjectionSliceOutcome::Deferred { reason });
             }
         };
+        match self.advance_admitted_alert_projection_slice().await {
+            Ok(outcome) => Ok(outcome),
+            Err(err) if crate::is_transient_sqlite_write_error(&err) => {
+                // No cursor update has committed, so a later scheduler wake
+                // can replay this exact fenced page. Treat all bounded slice
+                // contention uniformly; an acquire/read timeout is just as
+                // recoverable as a contended final write.
+                self.sqlite_runtime.record_deferred(
+                    SqliteOperation::AlertProjection,
+                    SqliteAdmissionDeferReason::RecentContention,
+                );
+                tracing::debug!(
+                    component = "dashboard_alert_projection",
+                    event = "deferred",
+                    defer_reason = "sqlite_contention",
+                    "deferred an alert projection slice after SQLite contention"
+                );
+                Ok(AlertProjectionSliceOutcome::Deferred {
+                    reason: SqliteAdmissionDeferReason::RecentContention,
+                })
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn advance_admitted_alert_projection_slice(
+        &self,
+    ) -> Result<AlertProjectionSliceOutcome, ProxyError> {
         let state = self.alert_projection_source_state().await?;
         let fence = match (
             state.fence_occurred_at,

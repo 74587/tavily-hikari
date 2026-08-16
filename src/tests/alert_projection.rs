@@ -173,3 +173,74 @@ async fn alert_projection_marks_expired_observation_as_stale() {
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
 }
+
+#[tokio::test]
+async fn alert_projection_writer_contention_is_a_typed_defer() {
+    let db_path = temp_db_path("alert-projection-writer-contention");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_600_000;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-contention".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    insert_projected_rate_limit_alert(&proxy, "projection-token-contention", now).await;
+
+    let mut holder =
+        connect_sqlite_test_connection(&db_string, false, false, std::time::Duration::ZERO).await;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut holder)
+        .await
+        .expect("hold writer lock");
+
+    let started = std::time::Instant::now();
+    let outcome = proxy
+        .key_store
+        .advance_alert_projection_slice()
+        .await
+        .expect("writer contention is an expected projection defer");
+    assert!(
+        matches!(
+            outcome,
+            AlertProjectionSliceOutcome::Deferred {
+                reason: SqliteAdmissionDeferReason::RecentContention
+            }
+        ),
+        "expected a typed contention defer, got {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(250),
+        "projection must yield instead of waiting behind the writer lock"
+    );
+
+    sqlx::query("ROLLBACK")
+        .execute(&mut holder)
+        .await
+        .expect("release writer lock");
+    drop(holder);
+    // Restart recovery uses a fresh runtime rather than relying on a
+    // contention cooldown. The deferred slice did not advance its cursor,
+    // so the durable source fence can safely replay it.
+    drop(proxy);
+    let (resumed_time, _) = BackendTime::manual_from_ts(now + 1);
+    let resumed = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-contention".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        resumed_time,
+    )
+    .await
+    .expect("reopen after writer contention");
+    advance_alert_projection_until(&resumed, 1).await;
+
+    drop(resumed);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
