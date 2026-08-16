@@ -25,9 +25,10 @@
   `BEGIN IMMEDIATE`. A `25..100` row stable-keyset read is aggregated in memory, followed by one short
   claim-fenced merge/cursor-CAS transaction. Handled stale claims explicitly roll back; runtime budgets
   are checked between phases rather than cancelling an open transaction.
-- Graceful shutdown marks instance-owned maintenance-bulk admission closed and waits for its single
-  active permit to return before process exit. This lets an in-flight projection micro-slice finish
-  explicitly while preventing a replacement maintenance slice from starting during drain.
+- Graceful shutdown marks new reconciliation-run admission closed as soon as the process receives
+  its shutdown signal, then drains both the instance-owned maintenance-bulk permit and active run
+  leases. A run lease remains held across remote I/O without reserving SQLite bulk admission, so an
+  already-observed remote result can finish its claim-fenced write while no new research begins.
 - Claimed reconciliation projection transfers that permit into its short transaction task. Caller
   cancellation drops only the join handle; the task retains admission through explicit commit or
   rollback, so it cannot expose an unfinished transaction or overlap a replacement bulk slice.

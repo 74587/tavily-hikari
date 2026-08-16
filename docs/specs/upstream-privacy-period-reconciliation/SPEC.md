@@ -78,9 +78,11 @@
   SQLite contention, and the 20-second run deadline prevent the next safe phase from starting; they
   never cancel an open transaction. An unfinished projection persists a typed continuation and
   resumes after restart without skipping work.
-- Graceful process shutdown closes maintenance-bulk admission before exit and waits for the active
-  micro-slice to reach its explicit commit or rollback boundary. A rolling restart therefore does
-  not use physical-connection discard as the normal projection cancellation mechanism.
+- Graceful process shutdown first closes admission for new reconciliation runs, then waits for both
+  the active bulk slice and any already-started run to reach explicit durable boundaries. The run
+  lease does not reserve the bulk permit across remote I/O; it only makes remote-result finalization
+  visible to shutdown. Research does not start after shutdown begins. A rolling restart therefore
+  does not use physical-connection discard as the normal projection or finalization mechanism.
 - A claimed projection micro-slice owns its bulk permit in an independent task until the durable
   boundary completes. Cancelling the scheduler caller cannot release admission early or abandon an
   open projection transaction; claim and cursor fencing still reject obsolete work.

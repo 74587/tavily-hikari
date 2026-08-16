@@ -34,6 +34,11 @@ impl ReconciliationEngine {
         job_id: i64,
         claim_generation: i64,
     ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
+        let Some(_run_lease) = proxy.key_store.sqlite_runtime.try_start_maintenance_run() else {
+            return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                reason: "shutdown",
+            });
+        };
         match proxy
             .run_upstream_reconciliation_once_inner(
                 usage_base,

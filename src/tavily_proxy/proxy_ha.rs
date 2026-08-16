@@ -128,6 +128,18 @@ impl TavilyProxy {
             .await
     }
 
+    pub fn begin_sqlite_maintenance_run_shutdown(&self) {
+        self.key_store
+            .sqlite_runtime
+            .begin_maintenance_run_shutdown();
+    }
+
+    pub(crate) fn sqlite_maintenance_runs_shutting_down(&self) -> bool {
+        self.key_store
+            .sqlite_runtime
+            .maintenance_runs_shutting_down()
+    }
+
     pub async fn run_dashboard_rollup_integrity_slice(
         &self,
     ) -> Result<DashboardRollupIntegrityRun, ProxyError> {

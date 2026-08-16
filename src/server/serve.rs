@@ -598,6 +598,7 @@ pub async fn serve(
     )
     .with_graceful_shutdown(async move {
         shutdown_signal().await;
+        shutdown_proxy.begin_sqlite_maintenance_run_shutdown();
         shutdown_proxy.nudge_request_stats_flush().await;
     })
     .await?;

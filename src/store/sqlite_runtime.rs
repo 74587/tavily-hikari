@@ -16,6 +16,7 @@ const MAINTENANCE_BULK_MAX_FOREGROUND_RPS: i64 = 5;
 const MAINTENANCE_BULK_CONTENTION_COOLDOWN: Duration = Duration::from_secs(5);
 const MAINTENANCE_BULK_RESERVED_FOREGROUND_CONNECTIONS: u32 = 2;
 const MAINTENANCE_BULK_HEAP_TRIM_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const MAINTENANCE_RUN_SLOTS: u32 = 1_024;
 const FOREGROUND_ACTIVITY_BUCKETS: usize = 10;
 const FOREGROUND_ACTIVITY_BUCKET_MS: u64 = 100;
 const TRANSACTION_HOLD_BUCKET_UPPER_MS: [u64; 6] = [10, 25, 50, 100, 250, 251];
@@ -41,6 +42,11 @@ impl SqliteAdmissionDeferReason {
 
 #[derive(Debug)]
 pub(crate) struct SqliteMaintenanceBulkPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Debug)]
+pub(crate) struct SqliteMaintenanceRunLease {
     _permit: OwnedSemaphorePermit,
 }
 
@@ -211,6 +217,8 @@ struct SqliteRuntimeInner {
     maximum_connections: u32,
     maintenance_bulk: Arc<Semaphore>,
     maintenance_shutdown: AtomicBool,
+    maintenance_runs: Arc<Semaphore>,
+    maintenance_run_shutdown: AtomicBool,
     last_bulk_heap_trim_at: Mutex<Option<Instant>>,
     last_contention_at: Mutex<Option<Instant>>,
     contention_warning_active: AtomicBool,
@@ -352,6 +360,8 @@ impl SqliteRuntime {
                 maximum_connections: maximum_connections.max(1),
                 maintenance_bulk: Arc::new(Semaphore::new(1)),
                 maintenance_shutdown: AtomicBool::new(false),
+                maintenance_runs: Arc::new(Semaphore::new(MAINTENANCE_RUN_SLOTS as usize)),
+                maintenance_run_shutdown: AtomicBool::new(false),
                 last_bulk_heap_trim_at: Mutex::new(None),
                 last_contention_at: Mutex::new(None),
                 contention_warning_active: AtomicBool::new(false),
@@ -478,14 +488,48 @@ impl SqliteRuntime {
     }
 
     pub(crate) async fn shutdown_maintenance_bulk(&self, timeout: Duration) -> bool {
+        self.begin_maintenance_run_shutdown();
         self.inner
             .maintenance_shutdown
             .store(true, AtomicOrdering::Release);
         matches!(
-            tokio::time::timeout(timeout, self.inner.maintenance_bulk.clone().acquire_owned())
-                .await,
+            tokio::time::timeout(timeout, async {
+                let bulk = self.inner.maintenance_bulk.clone().acquire_owned().await?;
+                let runs = self
+                    .inner
+                    .maintenance_runs
+                    .clone()
+                    .acquire_many_owned(MAINTENANCE_RUN_SLOTS)
+                    .await?;
+                Ok::<_, tokio::sync::AcquireError>((bulk, runs))
+            })
+            .await,
             Ok(Ok(_))
         )
+    }
+
+    pub(crate) fn begin_maintenance_run_shutdown(&self) {
+        self.inner
+            .maintenance_run_shutdown
+            .store(true, AtomicOrdering::Release);
+    }
+
+    pub(crate) fn maintenance_runs_shutting_down(&self) -> bool {
+        self.inner
+            .maintenance_run_shutdown
+            .load(AtomicOrdering::Acquire)
+    }
+
+    pub(crate) fn try_start_maintenance_run(&self) -> Option<SqliteMaintenanceRunLease> {
+        if self.maintenance_runs_shutting_down() {
+            return None;
+        }
+        self.inner
+            .maintenance_runs
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| SqliteMaintenanceRunLease { _permit: permit })
     }
 
     pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
@@ -2219,6 +2263,32 @@ mod tests {
         );
 
         drop(bulk);
+        assert!(shutdown.await.expect("maintenance shutdown task"));
+    }
+
+    #[tokio::test]
+    async fn maintenance_shutdown_waits_for_an_active_run_without_reserving_bulk() {
+        let runtime = three_connection_runtime().await;
+        let run = runtime
+            .try_start_maintenance_run()
+            .expect("active reconciliation run");
+        let bulk = runtime
+            .try_admit_maintenance_bulk(SqliteOperation::HaOutboxGc)
+            .expect("a run lease must not reserve the bulk permit");
+        drop(bulk);
+
+        runtime.begin_maintenance_run_shutdown();
+        assert!(runtime.try_start_maintenance_run().is_none());
+        let shutdown_runtime = runtime.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_runtime
+                .shutdown_maintenance_bulk(Duration::from_secs(1))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+
+        drop(run);
         assert!(shutdown.await.expect("maintenance shutdown task"));
     }
 

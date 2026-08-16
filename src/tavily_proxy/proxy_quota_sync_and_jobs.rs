@@ -1795,7 +1795,7 @@ impl TavilyProxy {
             research_retry_count,
             research_skipped_cooldown_count,
             research_budget_exhausted,
-        ) = if result.is_ok() {
+        ) = if result.is_ok() && !self.sqlite_maintenance_runs_shutting_down() {
             let research_deadline = remote_request_deadline.min(
                 std::time::Instant::now()
                     + std::time::Duration::from_secs(Self::RECONCILIATION_RESEARCH_SWEEP_BUDGET_SECS),
