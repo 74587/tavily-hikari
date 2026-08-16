@@ -535,9 +535,16 @@ async fn list_users(
                     .unwrap_or_default()
             });
             let shadow_daily_availability = if show_hybrid_shadow_projection {
+                // During the activation boundary the current actual-only work
+                // is intentionally not part of the historical shadow proof.
+                // Its unresolved state must not downgrade an already settled
+                // shadow window from confirmed to projected.
                 if projection.is_some_and(|value| {
-                    value.observed_window_count > 0
-                        && value.observed_window_count == value.resolved_window_count
+                    (value.observed_window_count > 0
+                        && value.observed_window_count == value.resolved_window_count)
+                        || (value.shadow_observed_window_count > 0
+                            && value.shadow_observed_window_count
+                                == value.shadow_resolved_window_count)
                 }) || (projection.is_none() && row.summary.daily_credits_used == 0)
                 {
                     Some(AdminUserShadowDailyAvailability::Confirmed)
