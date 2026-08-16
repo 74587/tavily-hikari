@@ -247,6 +247,16 @@ async fn reconciliation_research_sweep_does_not_hold_an_empty_main_run() {
             .discarded_connections_for_test(SqliteOperation::ReconciliationProjection),
         0
     );
+    let transaction = proxy
+        .key_store
+        .sqlite_runtime
+        .begin_immediate(SqliteOperation::ReconciliationProjection)
+        .await
+        .expect("begin transaction after transient research read");
+    transaction
+        .rollback()
+        .await
+        .expect("rollback reusable projection connection");
 
     drop(proxy);
     let _ = std::fs::remove_file(db_path);
