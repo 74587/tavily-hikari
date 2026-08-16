@@ -46,6 +46,10 @@ const ALERT_PROJECTION_RECENT_WINDOW_NAME: &str = "dashboard-alert-projection-re
 const ALERT_PROJECTION_RECENT_WINDOW_CHECKSUM: &str =
     "sha256:4d620c7e43ae60c4f7067f4b4995c24e";
 const ALERT_PROJECTION_RECENT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
+const ALERT_PROJECTION_ADMIN_HISTORY_VERSION: i64 = 14;
+const ALERT_PROJECTION_ADMIN_HISTORY_NAME: &str = "dashboard-alert-projection-admin-history-v1";
+const ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM: &str =
+    "sha256:01dfcf338e547614567b24be52c4d968";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -707,6 +711,11 @@ impl KeyStore {
                 ALERT_PROJECTION_RECENT_WINDOW_NAME,
                 ALERT_PROJECTION_RECENT_WINDOW_CHECKSUM,
             ),
+            (
+                ALERT_PROJECTION_ADMIN_HISTORY_VERSION,
+                ALERT_PROJECTION_ADMIN_HISTORY_NAME,
+                ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -1232,11 +1241,11 @@ impl KeyStore {
     }
 
     async fn apply_alert_projection_recent_window_migration(&self) -> Result<(), ProxyError> {
-        // The dashboard consumes at most thirty days of alert history. Do not
-        // turn a schema upgrade into an unbounded historical projection: the
-        // background cursor begins at the oldest data the read model can show.
-        // A nonzero cursor is already owned by a prior projection and must not
-        // be moved forward or backward by this migration.
+        // The first rollout consumed a bounded Dashboard window. The later
+        // administrator-history migration deliberately resets this cursor to
+        // zero so Events and Groups can switch only after full coverage. A
+        // nonzero cursor is already owned by a prior projection and must not
+        // be moved by this compatibility migration itself.
         let cursor_start = self
             .backend_time
             .now_ts()
@@ -1257,6 +1266,34 @@ impl KeyStore {
             ALERT_PROJECTION_RECENT_WINDOW_VERSION,
             ALERT_PROJECTION_RECENT_WINDOW_NAME,
             ALERT_PROJECTION_RECENT_WINDOW_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_alert_projection_admin_history_migration(&self) -> Result<(), ProxyError> {
+        // The administrator Events and Groups views can page older alerts than
+        // the dashboard's thirty-day window. Reset only the durable cursors so
+        // the existing micro-slice worker replays full source history after
+        // startup; this migration neither scans business tables nor deletes a
+        // usable tail from the derived sidecar.
+        sqlx::query(
+            r#"UPDATE observability.dashboard_alert_projection_state
+                   SET cursor_occurred_at = 0, cursor_row_sort_id = '',
+                       fence_occurred_at = NULL, fence_row_sort_id = NULL,
+                       generation = generation + 1, phase = 'catching_up',
+                       observed_at = NULL, stale_reason = NULL
+                 WHERE cursor_occurred_at <> 0
+                    OR cursor_row_sort_id <> ''
+                    OR phase <> 'catching_up'
+                    OR observed_at IS NOT NULL
+                    OR stale_reason IS NOT NULL"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            ALERT_PROJECTION_ADMIN_HISTORY_VERSION,
+            ALERT_PROJECTION_ADMIN_HISTORY_NAME,
+            ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM,
         )
         .await
     }
@@ -1646,6 +1683,12 @@ impl KeyStore {
         {
             self.apply_alert_projection_recent_window_migration().await?;
         }
+        if !self
+            .schema_migration_applied(ALERT_PROJECTION_ADMIN_HISTORY_VERSION)
+            .await?
+        {
+            self.apply_alert_projection_admin_history_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1688,6 +1731,7 @@ impl KeyStore {
         self.apply_reconciliation_controller_migration().await?;
         self.apply_alert_projection_migration().await?;
         self.apply_alert_projection_recent_window_migration().await?;
+        self.apply_alert_projection_admin_history_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1695,7 +1739,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 13_i64,
+            migration_count = 14_i64,
         );
         Ok(())
     }

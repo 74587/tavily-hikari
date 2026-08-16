@@ -843,7 +843,6 @@ const DASHBOARD_OVERVIEW_COLD_BUILD_BUDGET: Duration = Duration::from_secs(1);
 // for the same singleflight than an externally visible cold request may wait.
 const DASHBOARD_OVERVIEW_STARTUP_PREWARM_BUDGET: Duration = Duration::from_secs(5);
 const DASHBOARD_SSE_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_secs(10);
-const DASHBOARD_RECENT_ALERTS_TOKEN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
 struct DashboardTrendView {
@@ -1484,13 +1483,6 @@ async fn dashboard_request_log_retention(
     Ok((retention_days, dashboard_retention_since(retention_days, now)))
 }
 
-async fn dashboard_recent_alerts_freshness(
-    state: &Arc<AppState>,
-    window_hours: i64,
-) -> Result<tavily_hikari::RecentAlertsSummary, ProxyError> {
-    state.proxy.dashboard_recent_alerts_summary(window_hours).await
-}
-
 fn fallback_recent_alerts_token(summary: &tavily_hikari::RecentAlertsSummary) -> [i64; 4] {
     let top_group_last_seen_sum = summary
         .top_groups
@@ -1508,39 +1500,6 @@ fn fallback_recent_alerts_token(summary: &tavily_hikari::RecentAlertsSummary) ->
         top_group_last_seen_sum,
         typed_count_sum,
     ]
-}
-
-async fn dashboard_recent_alerts_token_or_fallback(
-    state: &Arc<AppState>,
-    window_hours: i64,
-    summary: &tavily_hikari::RecentAlertsSummary,
-) -> [i64; 4] {
-    match tokio::time::timeout(
-        DASHBOARD_RECENT_ALERTS_TOKEN_TIMEOUT,
-        state.proxy.dashboard_recent_alerts_token(window_hours),
-    )
-    .await
-    {
-        Ok(Ok(token)) => token,
-        Ok(Err(err)) => {
-            tracing::warn!(
-                component = "admin_read",
-                event = "dashboard_recent_alerts_token_degraded",
-                err = %err,
-                "dashboard recent-alerts token degraded to summary-derived freshness"
-            );
-            fallback_recent_alerts_token(summary)
-        }
-        Err(_) => {
-            tracing::warn!(
-                component = "admin_read",
-                event = "dashboard_recent_alerts_token_timeout",
-                timeout_ms = DASHBOARD_RECENT_ALERTS_TOKEN_TIMEOUT.as_millis() as u64,
-                "dashboard recent-alerts token timed out; using summary-derived freshness"
-            );
-            fallback_recent_alerts_token(summary)
-        }
-    }
 }
 
 fn dashboard_retention_since(retention_days: i64, now: chrono::DateTime<Local>) -> i64 {
@@ -1701,10 +1660,18 @@ async fn compute_dashboard_overview_freshness(
         .list_recent_job_signatures(DASHBOARD_RECENT_JOBS_LIMIT)
         .await
         .unwrap_or_default();
-    let recent_alerts = dashboard_recent_alerts_freshness(state, 24)
+    // The projected summary and its token must come from one sidecar read. A
+    // second aggregation here would turn the 60-second freshness probe into
+    // duplicate work on the dashboard hot path.
+    let (recent_alerts, recent_alerts_token) = state
+        .proxy
+        .dashboard_recent_alerts_summary_with_token(24)
         .await
-        .unwrap_or_else(|_| tavily_hikari::RecentAlertsSummary::default());
-    let recent_alerts_token = dashboard_recent_alerts_token_or_fallback(state, 24, &recent_alerts).await;
+        .unwrap_or_else(|_| {
+            let summary = tavily_hikari::RecentAlertsSummary::default();
+            let token = fallback_recent_alerts_token(&summary);
+            (summary, token)
+        });
     Ok(DashboardOverviewFreshness {
         summary: [
             summary.total_requests,

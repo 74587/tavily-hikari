@@ -131,6 +131,127 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
 }
 
 #[tokio::test]
+async fn alert_projection_serves_admin_events_and_groups_after_full_coverage() {
+    let db_path = temp_db_path("alert-projection-admin-read-model");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_550_000;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-admin-read-model".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(&proxy, "projection-admin-token", now).await;
+    advance_alert_projection_until(&proxy, 1).await;
+    let status = proxy
+        .dashboard_alert_projection_status()
+        .await
+        .expect("read complete projection status");
+    assert_eq!(status.coverage, "ok");
+
+    // A complete projection is the administrator read source. Removing the
+    // original alert source makes this regression fail if events or groups
+    // accidentally rebuild their CTE from auth_token_logs.
+    sqlx::query("DROP TABLE auth_token_logs")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove raw alert source after projection completed");
+
+    let events = proxy
+        .alert_events_page(None, None, None, None, None, None, &[], 1, 20)
+        .await
+        .expect("read projected administrator events");
+    assert_eq!(events.total, 1);
+    assert_eq!(events.items.len(), 1);
+    assert_eq!(events.items[0].source.kind, ALERT_SOURCE_AUTH_TOKEN_LOG);
+
+    let catalog = proxy
+        .alert_catalog()
+        .await
+        .expect("read projected administrator alert catalog");
+    assert_eq!(catalog.types.iter().map(|item| item.count).sum::<i64>(), 1);
+    assert_eq!(catalog.tokens.len(), 1);
+
+    let groups = proxy
+        .alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
+        .await
+        .expect("read projected administrator groups");
+    assert_eq!(groups.total, 1);
+    assert_eq!(groups.items.len(), 1);
+    assert_eq!(
+        groups.items[0].latest_event.source.kind,
+        ALERT_SOURCE_AUTH_TOKEN_LOG
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts_cursors() {
+    let db_path = temp_db_path("alert-projection-admin-history-migration");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_575_000;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-admin-history-migration".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(&proxy, "projection-history-token", now).await;
+    advance_alert_projection_until(&proxy, 1).await;
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_state \
+         SET cursor_occurred_at = ?, cursor_row_sort_id = 'legacy-window', \
+             phase = 'idle', observed_at = ?",
+    )
+    .bind(now.saturating_sub(30 * 24 * 60 * 60))
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("simulate a completed recent-window projection");
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 14")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate a pre-admin-history ledger");
+
+    proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect("apply the cursor-only administrator history migration");
+
+    let (reset_sources, retained_events): (i64, i64) = sqlx::query_as(
+        "SELECT \
+           (SELECT COUNT(*) FROM observability.dashboard_alert_projection_state \
+             WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'), \
+           (SELECT COUNT(*) FROM observability.dashboard_alert_projection_events)",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("verify cursor-only administrator history migration");
+    assert_eq!(reset_sources, 3);
+    assert_eq!(retained_events, 1, "migration must not rewrite the sidecar");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn alert_projection_marks_expired_observation_as_stale() {
     let db_path = temp_db_path("alert-projection-stale-observation");
     let db_string = db_path.to_string_lossy().to_string();

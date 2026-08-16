@@ -58,8 +58,9 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   catches missed invalidations. Requests under SQLite pressure return last-good coverage rather
   than starting an independent rebuild.
 - `AlertProjection`: an observability-sidecar projection with a stable source cursor and fence.
-  Dashboard alert summaries read projected events only; coverage, observation time, and stale
-  reason make an incomplete projection visible without restarting raw alert CTE work on HTTP/SSE.
+  Dashboard alert summaries always read projected events. Administrator Events and Groups use the
+  sidecar only after complete source coverage is confirmed; while a cursor is catching up or stale,
+  they retain the established source query so incomplete history is never shown as empty.
 
 ## HA Terms
 

@@ -414,4 +414,79 @@ impl KeyStore {
         Self::push_job_alert_filters(query, filters);
         query.push(")");
     }
+
+    // The read model stores the normalized source row as JSON. It deliberately
+    // has the same column contract as the raw CTE above so callers can retain
+    // grouping and pagination behavior while avoiding joins and scans of the
+    // live log tables once the projection has complete coverage.
+    fn push_projected_alert_events_cte<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+    ) {
+        query.push(
+            r#"WITH alerts AS (
+                SELECT source_kind,
+                       source_id,
+                       row_sort_id,
+                       COALESCE(json_extract(payload_json, '$.alert_type'), '') AS alert_type,
+                       occurred_at,
+                       json_extract(payload_json, '$.token_id') AS token_id,
+                       json_extract(payload_json, '$.key_id') AS key_id,
+                       json_extract(payload_json, '$.request_log_id') AS request_log_id,
+                       json_extract(payload_json, '$.method') AS method,
+                       json_extract(payload_json, '$.path') AS path,
+                       json_extract(payload_json, '$.query') AS query,
+                       json_extract(payload_json, '$.request_kind_key') AS request_kind_key,
+                       json_extract(payload_json, '$.request_kind_label') AS request_kind_label,
+                       json_extract(payload_json, '$.request_kind_detail') AS request_kind_detail,
+                       json_extract(payload_json, '$.result_status') AS result_status,
+                       json_extract(payload_json, '$.failure_kind') AS failure_kind,
+                       json_extract(payload_json, '$.error_message') AS error_message,
+                       json_extract(payload_json, '$.counts_business_quota') AS counts_business_quota,
+                       json_extract(payload_json, '$.user_id') AS user_id,
+                       json_extract(payload_json, '$.user_display_name') AS user_display_name,
+                       json_extract(payload_json, '$.user_username') AS user_username,
+                       json_extract(payload_json, '$.reason_code') AS reason_code,
+                       json_extract(payload_json, '$.reason_summary') AS reason_summary,
+                       json_extract(payload_json, '$.reason_detail') AS reason_detail,
+                       json_extract(payload_json, '$.job_id') AS job_id,
+                       json_extract(payload_json, '$.job_type') AS job_type,
+                       json_extract(payload_json, '$.job_trigger_source') AS job_trigger_source,
+                       json_extract(payload_json, '$.job_status') AS job_status,
+                       json_extract(payload_json, '$.job_attempt') AS job_attempt,
+                       json_extract(payload_json, '$.job_message') AS job_message,
+                       json_extract(payload_json, '$.job_queued_at') AS job_queued_at,
+                       json_extract(payload_json, '$.job_started_at') AS job_started_at,
+                       json_extract(payload_json, '$.job_finished_at') AS job_finished_at
+                  FROM observability.dashboard_alert_projection_events
+                 WHERE 1 = 1"#,
+        );
+        if let Some(alert_type) = filters.alert_type {
+            query
+                .push(" AND json_extract(payload_json, '$.alert_type') = ")
+                .push_bind(alert_type);
+        }
+        if let Some(since) = filters.since {
+            query.push(" AND occurred_at >= ").push_bind(since);
+        }
+        if let Some(until) = filters.until {
+            query.push(" AND occurred_at <= ").push_bind(until);
+        }
+        if let Some(user_id) = filters.user_id {
+            query
+                .push(" AND json_extract(payload_json, '$.user_id') = ")
+                .push_bind(user_id);
+        }
+        if let Some(token_id) = filters.token_id {
+            query
+                .push(" AND json_extract(payload_json, '$.token_id') = ")
+                .push_bind(token_id);
+        }
+        if let Some(key_id) = filters.key_id {
+            query
+                .push(" AND json_extract(payload_json, '$.key_id') = ")
+                .push_bind(key_id);
+        }
+        query.push(")");
+    }
 }

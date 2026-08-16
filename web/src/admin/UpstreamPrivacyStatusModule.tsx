@@ -360,7 +360,9 @@ export default function UpstreamPrivacyStatusModule({
       ? strings.statusActive
       : status.phase === 'compare'
         ? strings.statusCompareOnly
-        : strings.statusConfigured
+        : status.phase === 'active_paused'
+          ? strings.statusPaused
+          : strings.statusConfigured
     : strings.statusConfigured
   const diagnosticsLabels = language === 'zh'
       ? {

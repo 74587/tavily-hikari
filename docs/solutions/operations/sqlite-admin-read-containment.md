@@ -109,11 +109,13 @@ reads:
   stable source cursor plus fence/tail replay, and make the read model consume only projected
   events. Expose projection coverage, observation time, and stale reason rather than issuing an
   exact event count on every admin status read.
-- A derived alert projection must be a lower-priority maintenance writer: initialise its cursor at
-  the oldest Dashboard-visible window, keep writes in small replayable slices, convert transient
-  SQLite contention into a typed defer, and leave the first post-start bulk window to recovery work
-  with a durable SLO such as HA GC. Do not let a historical alert catch-up consume the only writer
-  before retention debt has received its fair first continuation.
+- A derived alert projection must be a lower-priority maintenance writer. The Dashboard may consume
+  only its bounded recent window, while administrator Events/Groups switch to the sidecar only after
+  a stable cursor has replayed complete source history and reports explicit `ok` coverage. Keep
+  writes in small replayable slices, convert transient SQLite contention into a typed defer, and
+  leave the first post-start bulk window to recovery work with a durable SLO such as HA GC. During a
+  full-history catch-up, keep administrator reads on the established source query rather than
+  presenting incomplete sidecar coverage as an empty result.
 - Guard shared admin snapshot loaders with both a drop-time reset and a stale-loading takeover
   window. A cancelled or wedged request must not leave `loading=true` forever and make every later
   request wait on a `Notify` that will never fire.

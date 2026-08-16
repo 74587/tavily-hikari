@@ -1,6 +1,7 @@
-// Dashboard only renders recent alert coverage. Keep each sidecar write well
-// below the foreground writer budget; catch-up remains durable via the source
-// fence and cursor rather than a large transaction.
+// Dashboard consumes only recent alerts, while administrator Events and Groups
+// wait for the same sidecar to finish its full durable history. Keep every
+// write well below the foreground writer budget; catch-up remains durable via
+// the source fence and cursor rather than a large transaction.
 const ALERT_PROJECTION_BATCH_ROWS: i64 = 25;
 const ALERT_PROJECTION_STALE_SECS: i64 = 90;
 const ALERT_PROJECTION_SUMMARY_ROW_LIMIT: i64 = 10_000;

@@ -28,7 +28,10 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    );
     let projection_state: (i64, i64, i64) = sqlx::query_as(
         "SELECT batch_size, scanned_rows, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
     )
@@ -59,6 +62,17 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .await
             .expect("read fresh alert projection sources");
     assert_eq!(projection_sources, 3);
+    let full_history_cursor_sources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_state \
+         WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read fresh full-history alert projection cursors");
+    assert_eq!(
+        full_history_cursor_sources, 3,
+        "the administrator sidecar starts from a durable full-history cursor without startup scans"
+    );
     sqlx::query("UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 2")
         .execute(&pool)
         .await
@@ -783,7 +797,10 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    );
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

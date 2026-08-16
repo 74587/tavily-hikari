@@ -118,8 +118,8 @@
   - `component=admin_read event=request_logs_list_completed`
   - `component=admin_read event=token_logs_catalog_completed`
   - `component=admin_read event=token_logs_list_completed`
-  - `component=admin_read event=/api/alerts/events phase=alerts_projection`
-  - `component=admin_read event=/api/alerts/groups phase=alerts_grouping`
+  - `component=admin_read event=/api/alerts/events phase=projection_sidecar|alerts_projection`
+  - `component=admin_read event=/api/alerts/groups phase=projection_sidecar|alerts_grouping`
   - `component=admin_read event=low_memory_protection_decision`
 - Forward proxy / xray startup:
   - `component=forward_proxy event=startup_runtime_begin`
