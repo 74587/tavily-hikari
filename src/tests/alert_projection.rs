@@ -309,6 +309,13 @@ async fn alert_projection_does_not_offer_partial_tail_as_dashboard_data() {
         .expect("inspect incomplete projection");
     assert!(raw_projection.stale);
     assert_eq!(raw_projection.coverage, "projecting");
+    let (cold_dashboard_summary, _) = proxy
+        .dashboard_recent_alerts_summary_for_cold_start_with_token(24)
+        .await
+        .expect("conservative cold Dashboard summary");
+    assert!(cold_dashboard_summary.stale);
+    assert_eq!(cold_dashboard_summary.total_events, 0);
+    assert_eq!(cold_dashboard_summary.grouped_count, 0);
     assert!(
         proxy.dashboard_recent_alerts_summary(24).await.is_err(),
         "Dashboard must retain last-good data instead of accepting partial alerts"

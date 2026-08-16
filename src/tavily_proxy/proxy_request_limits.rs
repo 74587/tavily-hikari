@@ -126,6 +126,36 @@ impl TavilyProxy {
         Ok((projected_summary, token))
     }
 
+    /// Produces a conservative initial Dashboard value while alert history is
+    /// being projected. The public Dashboard payload cannot represent partial
+    /// coverage, so a cold snapshot must not expose partial alert counts.
+    /// Returning an empty value lets the process establish last-good data
+    /// without converting recoverable projection work into a cold-start 5xx.
+    #[doc(hidden)]
+    pub async fn dashboard_recent_alerts_summary_for_cold_start_with_token(
+        &self,
+        window_hours: i64,
+    ) -> Result<(RecentAlertsSummary, [i64; 4]), ProxyError> {
+        let projected_summary = self
+            .key_store
+            .fetch_projected_recent_alerts_summary(window_hours)
+            .await?;
+        if !projected_summary.stale {
+            let token = dashboard_recent_alerts_projection_token(&projected_summary);
+            return Ok((projected_summary, token));
+        }
+
+        let safe_summary = RecentAlertsSummary {
+            window_hours: projected_summary.window_hours,
+            coverage: projected_summary.coverage,
+            stale: true,
+            error: projected_summary.error,
+            ..Default::default()
+        };
+        let token = dashboard_recent_alerts_projection_token(&safe_summary);
+        Ok((safe_summary, token))
+    }
+
     pub async fn dashboard_quota_charge_token(
         &self,
         stale_key_count: i64,
