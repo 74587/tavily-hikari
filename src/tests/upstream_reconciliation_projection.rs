@@ -207,6 +207,47 @@ async fn reconciliation_research_sweep_does_not_hold_an_empty_main_run() {
         "research's independent budget must not report primary local pressure"
     );
 
+    for _ in 0..3 {
+        proxy.fail_next_reconciliation_research_read_for_test();
+        assert_eq!(
+            proxy
+                .run_upstream_reconciliation_once(&format!("http://{addr}"))
+                .await
+                .expect("defer transient research pressure"),
+            0
+        );
+    }
+    let (streak, level, backoff_until) = proxy
+        .key_store
+        .upstream_reconciliation_local_backoff_state()
+        .await
+        .expect("read research pressure backoff");
+    assert_eq!((streak, level), (3, 1));
+    assert!(backoff_until >= now + 30);
+    assert!(
+        proxy
+            .key_store
+            .upstream_reconciliation_continuation_at()
+            .await
+            .expect("read durable continuation")
+            .is_some_and(|continuation_at| continuation_at >= backoff_until)
+    );
+    let (work_generation, completed_generation): (i64, i64) = sqlx::query_as(
+        "SELECT work_generation, completed_generation FROM upstream_reconciliation_work \
+         WHERE token_id = 'research-budget-token' AND period_code = '2026-07-15/R1'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read preserved main terminal work");
+    assert_eq!(completed_generation, work_generation);
+    assert_eq!(
+        proxy
+            .key_store
+            .sqlite_runtime
+            .discarded_connections_for_test(SqliteOperation::ReconciliationProjection),
+        0
+    );
+
     drop(proxy);
     let _ = std::fs::remove_file(db_path);
 }
