@@ -34,23 +34,29 @@ impl ReconciliationEngine {
         job_id: i64,
         claim_generation: i64,
     ) -> Result<ClaimedReconciliationRunOutcome, ProxyError> {
-        let Some(_run_lease) = proxy.key_store.sqlite_runtime.try_start_maintenance_run() else {
-            return Ok(ClaimedReconciliationRunOutcome::Deferred {
-                reason: "shutdown",
-            });
-        };
-        match proxy
-            .run_upstream_reconciliation_once_inner(
-                usage_base,
-                Some((job_id, claim_generation)),
-            )
-            .await
-        {
-            Err(ProxyError::StaleClaim { .. }) => {
-                Ok(ClaimedReconciliationRunOutcome::StaleClaim)
+        let proxy = proxy.clone();
+        let usage_base = usage_base.to_string();
+        tokio::spawn(async move {
+            let Some(_run_lease) = proxy.key_store.sqlite_runtime.try_start_maintenance_run() else {
+                return Ok(ClaimedReconciliationRunOutcome::Deferred {
+                    reason: "shutdown",
+                });
+            };
+            match proxy
+                .run_upstream_reconciliation_once_inner(
+                    &usage_base,
+                    Some((job_id, claim_generation)),
+                )
+                .await
+            {
+                Err(ProxyError::StaleClaim { .. }) => {
+                    Ok(ClaimedReconciliationRunOutcome::StaleClaim)
+                }
+                result => result,
             }
-            result => result,
-        }
+        })
+        .await
+        .map_err(|err| ProxyError::Other(format!("reconciliation engine task failed: {err}")))?
     }
 
     fn outcome(

@@ -222,7 +222,7 @@ async fn reconciliation_projection_is_cancellation_safe() {
 }
 
 #[tokio::test]
-async fn claimed_projection_keeps_its_admission_after_the_caller_is_cancelled() {
+async fn claimed_engine_run_reaches_a_safe_boundary_after_the_caller_is_cancelled() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
     let proxy = Arc::new(
@@ -264,10 +264,6 @@ async fn claimed_projection_keeps_its_admission_after_the_caller_is_cancelled() 
         .await
         .expect("claim representative")
         .expect("representative becomes running");
-    let admission = match proxy.admit_upstream_reconciliation_projection() {
-        SqliteAdmissionOutcome::Admitted(admission) => admission,
-        SqliteAdmissionOutcome::Deferred { reason } => panic!("admission deferred: {reason}"),
-    };
     let lock_pool = connect_sqlite_test_pool(&db_string).await;
     let mut writer = lock_pool.acquire().await.expect("acquire writer");
     sqlx::query("BEGIN IMMEDIATE")
@@ -278,16 +274,24 @@ async fn claimed_projection_keeps_its_admission_after_the_caller_is_cancelled() 
     let cancelled_proxy = Arc::clone(&proxy);
     let task = tokio::spawn(async move {
         cancelled_proxy
-            .advance_claimed_reconciliation_projection_safe(
+            .run_upstream_reconciliation_once_claimed_outcome(
+                "http://127.0.0.1:9",
                 claim.id,
                 claim.claim_generation,
-                admission,
             )
             .await
     });
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     task.abort();
     assert!(task.await.expect_err("caller is cancelled").is_cancelled());
+    assert!(
+        !proxy
+            .key_store
+            .sqlite_runtime
+            .shutdown_maintenance_bulk(std::time::Duration::from_millis(50))
+            .await,
+        "shutdown must still observe the detached claimed run"
+    );
     sqlx::query("ROLLBACK")
         .execute(&mut *writer)
         .await
@@ -295,22 +299,14 @@ async fn claimed_projection_keeps_its_admission_after_the_caller_is_cancelled() 
     drop(writer);
     lock_pool.close().await;
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let scanned_rows: i64 = sqlx::query_scalar(
-                "SELECT scanned_rows FROM upstream_reconciliation_projection_state WHERE id = 'local'",
-            )
-            .fetch_one(&proxy.key_store.pool)
-            .await
-            .expect("read projection progress");
-            if scanned_rows > 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("detached projection reaches its durable boundary");
+    assert!(
+        proxy
+            .key_store
+            .sqlite_runtime
+            .shutdown_maintenance_bulk(std::time::Duration::from_secs(2))
+            .await,
+        "detached claimed run reaches a safe shutdown boundary"
+    );
     assert_eq!(
         proxy
             .key_store
