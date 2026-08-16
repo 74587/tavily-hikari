@@ -96,6 +96,8 @@
   的记录，不能以时间戳减一替代复合 cursor。空闲 source probe 不得写 cursor/generation；覆盖观察只能由
   独立低频 heartbeat 更新。Dashboard summary 只允许从 sidecar 执行时间窗固定、结果有界的 SQL 聚合，禁止
   把整窗 `payload_json` 拉回进程后再分组。
+- 已应用的 projection migration 不得原地修改 checksum。若发现历史 cursor/fence 边界缺口，后续加法
+  migration 只能重置可重建的 history lane，由后台小片幂等重放；recent tail、原始事件与账务真相保持不变。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通
   promote 必须实时探测全部已配置节点；任一节点 capability 缺失、unknown 或不可达时 fail closed。

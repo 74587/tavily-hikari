@@ -50,6 +50,11 @@ const ALERT_PROJECTION_ADMIN_HISTORY_VERSION: i64 = 14;
 const ALERT_PROJECTION_ADMIN_HISTORY_NAME: &str = "dashboard-alert-projection-admin-history-v1";
 const ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM: &str =
     "sha256:ff6f5901c3a603feac18afbbb04a1cdf";
+const ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_VERSION: i64 = 15;
+const ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_NAME: &str =
+    "dashboard-alert-projection-admin-history-fence-repair-v1";
+const ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_CHECKSUM: &str =
+    "sha256:8ef5bf8e2b29acd27096657ad0d3d97e";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -716,6 +721,11 @@ impl KeyStore {
                 ALERT_PROJECTION_ADMIN_HISTORY_NAME,
                 ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM,
             ),
+            (
+                ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_VERSION,
+                ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_NAME,
+                ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -1308,7 +1318,7 @@ impl KeyStore {
                SELECT source_kind,
                       0,
                       '',
-                      CASE WHEN cursor_occurred_at > 0 THEN cursor_occurred_at ELSE NULL END,
+                      CASE WHEN cursor_occurred_at > 0 THEN cursor_occurred_at - 1 ELSE NULL END,
                       CASE WHEN cursor_occurred_at > 0 THEN '' ELSE NULL END,
                       0,
                       CASE WHEN cursor_occurred_at > 0 THEN 'catching_up' ELSE 'idle' END
@@ -1322,6 +1332,43 @@ impl KeyStore {
             ALERT_PROJECTION_ADMIN_HISTORY_VERSION,
             ALERT_PROJECTION_ADMIN_HISTORY_NAME,
             ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_alert_projection_admin_history_fence_repair_migration(
+        &self,
+    ) -> Result<(), ProxyError> {
+        // Version 14 gave the second immediately before the recent-tail
+        // boundary to neither lane. The admin sidecar is derived state, so
+        // reset only its durable history cursors. Replaying in background
+        // micro-slices is idempotent and avoids any startup source scan.
+        sqlx::query(
+            r#"UPDATE observability.dashboard_alert_projection_history_state AS history
+                   SET cursor_occurred_at = 0,
+                       cursor_row_sort_id = '',
+                       fence_occurred_at = CASE
+                           WHEN tail.cursor_occurred_at > 0 THEN tail.cursor_occurred_at
+                           ELSE NULL
+                       END,
+                       fence_row_sort_id = CASE
+                           WHEN tail.cursor_occurred_at > 0 THEN ''
+                           ELSE NULL
+                       END,
+                       generation = generation + 1,
+                       phase = CASE
+                           WHEN tail.cursor_occurred_at > 0 THEN 'catching_up'
+                           ELSE 'idle'
+                       END
+                  FROM observability.dashboard_alert_projection_state AS tail
+                 WHERE tail.source_kind = history.source_kind"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_VERSION,
+            ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_NAME,
+            ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_CHECKSUM,
         )
         .await
     }
@@ -1717,6 +1764,13 @@ impl KeyStore {
         {
             self.apply_alert_projection_admin_history_migration().await?;
         }
+        if !self
+            .schema_migration_applied(ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_VERSION)
+            .await?
+        {
+            self.apply_alert_projection_admin_history_fence_repair_migration()
+                .await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1760,6 +1814,8 @@ impl KeyStore {
         self.apply_alert_projection_migration().await?;
         self.apply_alert_projection_recent_window_migration().await?;
         self.apply_alert_projection_admin_history_migration().await?;
+        self.apply_alert_projection_admin_history_fence_repair_migration()
+            .await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1767,7 +1823,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 14_i64,
+            migration_count = 15_i64,
         );
         Ok(())
     }

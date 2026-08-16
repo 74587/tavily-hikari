@@ -463,7 +463,7 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
     .execute(&proxy.key_store.pool)
     .await
     .expect("simulate a completed recent-window projection");
-    sqlx::query("DELETE FROM schema_migrations WHERE version = 14")
+    sqlx::query("DELETE FROM schema_migrations WHERE version IN (14, 15)")
         .execute(&proxy.key_store.pool)
         .await
         .expect("simulate a pre-admin-history ledger");
@@ -511,6 +511,92 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
     assert_eq!(
         historical_boundary_events, 2,
         "history must include an alert from the second immediately below the tail boundary"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_history_fence_repair_replays_old_v14_gap() {
+    let db_path = temp_db_path("alert-projection-history-fence-repair");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_575_025;
+    let tail_boundary = now.saturating_sub(30 * 24 * 60 * 60);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-history-fence-repair".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(
+        &proxy,
+        "projection-history-fence-repair-token",
+        tail_boundary.saturating_sub(1),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_state \
+         SET cursor_occurred_at = ?, cursor_row_sort_id = 'legacy-tail', \
+             phase = 'idle', observed_at = ?",
+    )
+    .bind(tail_boundary)
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("simulate an existing completed tail");
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_history_state \
+         SET cursor_occurred_at = ?, cursor_row_sort_id = 'legacy-history', \
+             fence_occurred_at = NULL, fence_row_sort_id = NULL, phase = 'idle'",
+    )
+    .bind(tail_boundary.saturating_sub(2))
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("simulate old completed v14 history state");
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 15")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate upgrade from the old v14 ledger");
+
+    proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect("repair persisted v14 history fence");
+    let repaired_sources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_history_state \
+         WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' \
+           AND fence_occurred_at = ? AND fence_row_sort_id = '' \
+           AND phase = 'catching_up'",
+    )
+    .bind(tail_boundary)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read repaired history state");
+    assert_eq!(
+        repaired_sources, 3,
+        "repair must reset derived history only"
+    );
+
+    advance_alert_projection_until_full_coverage(&proxy).await;
+    let boundary_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_events \
+         WHERE source_kind = 'auth_token_log'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read repaired boundary event");
+    assert_eq!(
+        boundary_events, 1,
+        "repair must replay the omitted boundary second"
     );
 
     drop(proxy);
