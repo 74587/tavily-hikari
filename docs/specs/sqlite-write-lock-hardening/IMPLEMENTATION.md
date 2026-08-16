@@ -18,6 +18,11 @@
   permit or run a background retry loop. Runtime transaction deadlines implement their short
   writer budgets without changing the configured SQLite `busy_timeout`; bulk contention returns a
   typed deferred outcome, while a control write can reuse an already durable representative row.
+- Dashboard reads no longer make raw alert aggregation part of the HTTP/SSE path. The AppState-owned
+  read model returns its immutable last-good snapshot under pressure, while a bounded
+  observability-sidecar AlertProjection advances source cursors and a fence/tail replay in the
+  background. Overview-visible durable writes advance the same shared dirty generation as request
+  statistics, so the ten-second rebuild cadence does not depend on the sixty-second safety probe.
 
 - Startup uses `schema_migrations(version,name,checksum,applied_at)` as the synchronous additive migration ledger. New databases alone run the full schema bootstrap; existing production layouts are adopted directly after complete baseline validation, without replaying legacy bootstrap DDL. Checksum drift or missing critical objects fails startup closed. Warm production startup skips registered DDL and runs only bounded semantic maintenance. Additive HA GC migrations include the per-channel legacy cursor and seed it from the former shared cursor before recording the migration, so an upgraded database preserves completed legacy-scan progress.
 - Reconciliation circuit fields are committed through one cancellation-safe immediate transaction. HA GC channel completion checks its persisted claim generation before clearing the claim.

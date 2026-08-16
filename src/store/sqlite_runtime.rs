@@ -52,6 +52,7 @@ pub(crate) struct SqliteMaintenanceRunLease {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SqliteOperation {
+    AlertProjection,
     BillingLedgerAuditRead,
     DashboardIntegrityWrite,
     ForegroundJobTrigger,
@@ -69,6 +70,7 @@ pub(crate) enum SqliteOperation {
 impl SqliteOperation {
     fn as_str(self) -> &'static str {
         match self {
+            Self::AlertProjection => "alert_projection",
             Self::BillingLedgerAuditRead => "billing_ledger_audit_read",
             Self::DashboardIntegrityWrite => "dashboard_integrity_write",
             Self::ForegroundJobTrigger => "foreground_job_trigger",
@@ -91,7 +93,8 @@ impl SqliteOperation {
                 "maintenance_read"
             }
             Self::ScheduledJobControl | Self::HaOutboxGcWatchdog => "maintenance_control",
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
             | Self::HaOutboxGc
             | Self::RequestLogsGc
             | Self::RequestStatsFlush
@@ -102,7 +105,8 @@ impl SqliteOperation {
 
     fn acquire_budget(self) -> Duration {
         match self {
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
             | Self::ScheduledJobControl
             | Self::HaOutboxGcWatchdog => Duration::from_millis(100),
             Self::ForegroundJobTrigger => Duration::from_millis(250),
@@ -117,7 +121,8 @@ impl SqliteOperation {
 
     fn begin_budget(self) -> Duration {
         match self {
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
             | Self::RequestStatsFlush
             | Self::ScheduledJobControl
             | Self::HaOutboxGcWatchdog => Duration::from_millis(100),
@@ -136,7 +141,9 @@ impl SqliteOperation {
             // cooperative run budget expires. A connection-local timeout
             // returns writer contention as a typed defer without cancelling
             // a future that still owns the physical connection.
-            Self::DashboardIntegrityWrite | Self::ReconciliationProjection => Some(100),
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
+            | Self::ReconciliationProjection => Some(100),
             _ => None,
         }
     }
@@ -144,7 +151,8 @@ impl SqliteOperation {
     fn is_maintenance_bulk(self) -> bool {
         matches!(
             self,
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+                | Self::DashboardIntegrityWrite
                 | Self::HaOutboxGc
                 | Self::RequestLogsGc
                 | Self::RequestStatsFlush

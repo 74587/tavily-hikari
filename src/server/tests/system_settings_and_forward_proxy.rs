@@ -2771,12 +2771,12 @@ use super::upstream_support_and_manual_jobs::*;
             .json::<serde_json::Value>()
             .await
             .expect("decode system status");
-        assert_eq!(status_body["phase"].as_str(), Some("compare"));
+        assert_eq!(status_body["phase"].as_str(), Some("active"));
         assert_eq!(
             status_body["activeUpstreamMcpSessions"].as_i64(),
             Some(1)
         );
-        assert_eq!(status_body["nextEpochAt"], serde_json::Value::Null);
+        assert!(status_body["nextEpochAt"].as_i64().is_some());
         assert!(status_body.get("activeControlSessions").is_none());
         assert!(
             status_body["gates"]

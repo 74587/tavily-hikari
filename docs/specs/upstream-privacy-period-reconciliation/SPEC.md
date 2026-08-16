@@ -16,7 +16,8 @@
 - 所有 Tavily 出站调用统一通过严格 Header 白名单。
 - `X-Project-ID` 支持 `passthrough / fixed / accessToken`，默认 `accessToken`。
 - 使用稳定 token id 与业务时间段派生不可逆上游项目标识，并在 HA 节点间保持一致。
-- 在完整窗口、API/MCP Rebalance 开关均启用且旧 Control session 排空后执行一次幂等多退少补。
+- 由既有 precise-reconciliation 开关选择 compare 或 active；active 的真实账务从记录的下一完整
+  业务窗口开始执行一次幂等多退少补。
 - 提供“系统状态”页与隐藏的异常 `upstream_mcp` session 管理页，明确展示配置、实际生效状态、shadow/precise 门禁、结算队列与阻塞 session。
 
 ### Non-goals
@@ -52,7 +53,13 @@
 - secret 为自动生成的 32 字节 HA 同步秘密，任何 API、日志与状态页均不得返回。
 - 窗口按服务器业务时区划分为 `S1=00-11`、`S2=11-22`、`S3=22-24`。
 - shadow compare 仅在 `accessToken`、API Rebalance 启用、MCP Rebalance 启用时开始产数，不要求活跃 `upstream_mcp` session 清零。
-- 精准对账仅在 `accessToken`、API/MCP Rebalance 均启用（新流量全量走 rebalance）、活跃 `upstream_mcp` session 为 0 且进入下一完整窗口时启用。
+- 旧 `upstreamPreciseReconciliationEnabled` 是唯一管理员模式动作：写 `true` 不执行预检，立即
+  进入 replicated `active` controller state，并记录下一完整业务窗口为账务边界；写 `false` 回到
+  `compare`。静态 shadow 条件仍决定能否产生 upstream observation，但不阻断该模式转换。
+- 新 active controller 只允许 activation boundary 及之后的 work 写真实 billing。既有 compare
+  `observed`、`no_adjustment` 和 completed historical work 永不因转换而重放。
+- durable correctness/integrity 失效时 controller 进入 `active_paused`，同时把旧开关写回 false；
+  只有新的 true 写入可以恢复 active。
 - 结算只查询实际使用过的 `(token_id, upstream_key_id, period_code)`，每个 settlement key 只成功一次。
 - adjustment 支持正负值，归属原业务窗口并参与对应额度、HA billing 同步和审计。
 
@@ -113,8 +120,10 @@
 
 - Header 配置保存后立即影响新请求。
 - shadow compare 在静态条件满足后立即开始记录窗口 usage。
-- 精准对账 eligibility 从保存后下一时间段边界计算；边界前请求不进入精准窗口。
-- 任一门禁中途失效时，当前未结算窗口标记不完整且不结算；恢复后仍等待下一完整窗口。
+- controller active 从保存时立即可观察；真实 billing eligibility 从记录的下一时间段边界计算，
+  边界前请求只进入 shadow work。
+- controller transition、activation boundary 和 integrity pause 必须纳入 HA control baseline/events，
+  使 standby 接管后保持同一账务边界。
 - period code 使用服务器现有业务时区，格式 `YYYY-MM-DD/S1|S2|S3`。
 
 ### 对账与 adjustment
@@ -180,7 +189,10 @@
 - Given token secret 轮换、HA 节点切换或相同窗口重试，When 计算匿名 ID，Then 输出稳定一致；不同 token/窗口输出不同。
 - Given 遗留 `upstream_mcp` session 仍存在，但 `accessToken`、API Rebalance 与 MCP Rebalance 已启用，When 新请求进入当前窗口，Then shadow compare 持续产数且记录为 shadow settlement mode。
 - Given compare-only 用户列表或用户用量页，When 当日仍有未 terminal 的 shadow 窗口，Then `新方案 24h` 显示 `当前本地 24h + 已确认 shadow delta` 的混合值，并明确提示“含未对账估算”；When 当日相关窗口均已 terminal 且 `delta=0`，Then `新方案 24h` 仍显示绝对值且不再折叠为空。
-- Given precise 门禁未形成完整窗口，When 结算调度执行，Then 不产生 precise adjustment。
+- Given active controller 尚未越过 activation boundary，When 结算调度执行，Then 不产生 precise
+  adjustment，且历史 observed work 不会重放。
+- Given controller 处于 `active_paused`，When durable integrity 检查失败后结算调度执行，Then 保留
+  work 而不创建 representative，直到管理员再次把既有开关写为 true。
 - Given 多 Key、Research 等待、Retry-After、重启或 HA 接管，When 窗口结算，Then 最终只产生一条幂等 signed adjustment。
 - Given 退款或补扣，When 查询账户或未绑定 Token 的相关额度，Then 原业务窗口统计立即反映差额，S3 不增加次日额度。
 - Given 状态 API 与页面，When secret、官方 key 或 token 存在，Then 任何响应与 UI 都不显示完整敏感值。

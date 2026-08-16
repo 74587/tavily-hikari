@@ -1534,7 +1534,6 @@ async fn list_keys_pending_quota_sync_skips_quarantined_keys() {
             });
     let quarantined_id = quarantined_id.expect("quarantined key exists");
     let active_id = active_id.expect("active key exists");
-
     proxy
         .key_store
         .quarantine_key_by_id(
@@ -1686,6 +1685,9 @@ async fn summary_quota_totals_exclude_quarantined_keys() {
             });
     let quarantined_id = quarantined_id.expect("quarantined key exists");
     let active_id = active_id.expect("active key exists");
+    let dashboard_generation_before = proxy
+        .dashboard_read_generation()
+        .expect("dashboard generation available");
 
     proxy
         .key_store
@@ -1697,6 +1699,11 @@ async fn summary_quota_totals_exclude_quarantined_keys() {
         .update_quota_for_key(&active_id, 50, 40, Utc::now().timestamp())
         .await
         .expect("update active key quota");
+    assert_ne!(
+        proxy.dashboard_read_generation(),
+        Some(dashboard_generation_before),
+        "quota sync writes must invalidate the shared dashboard read model"
+    );
     proxy
         .key_store
         .quarantine_key_by_id(

@@ -49,6 +49,14 @@
 - Reconciliation run observation reports mode, projection phase/scanned rows/batch/transaction p95,
   hydrate/first-remote/remote/finalization/research timing, typed outcome counts, continuation reason,
   and next retry. Stable cursor values, token/key identifiers, SQL, and request content remain private.
+- Dashboard read-model invalidation is a durable business-write signal, not only a request-statistics
+  signal. A successful quota or other overview-visible write advances the shared dirty generation;
+  the read model coalesces dirty rebuilds to at most once per ten seconds and uses a sixty-second
+  safety probe only to catch a missed signal.
+- AlertProjection cursor/fence/tail work is background-only. Dashboard HTTP and SSE consume the
+  immutable last-good snapshot and projected alert summary; a projection observation older than its
+  coverage window is reported as `stale` with an explicit reason instead of being presented as a
+  healthy in-progress refresh.
 - 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。

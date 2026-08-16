@@ -101,6 +101,14 @@ reads:
   disabled-token or recent-job reads fail, keep the core overview payload serving and let the
   optional slice surface `error`/empty coverage semantics on the next snapshot rather than timing
   out the whole admin page.
+- Put the Dashboard overview behind one AppState-owned immutable read model. A dirty generation may
+  request one shared rebuild every ten seconds and a bounded sixty-second probe catches missed
+  invalidations; an HTTP or SSE request under pressure returns the last-good snapshot with explicit
+  stale coverage instead of recomputing freshness.
+- Keep dashboard alert summaries out of the raw CTE hot path. Persist a sidecar projection using a
+  stable source cursor plus fence/tail replay, and make the read model consume only projected
+  events. Expose projection coverage, observation time, and stale reason rather than issuing an
+  exact event count on every admin status read.
 - Guard shared admin snapshot loaders with both a drop-time reset and a stale-loading takeover
   window. A cancelled or wedged request must not leave `loading=true` forever and make every later
   request wait on a `Notify` that will never fire.

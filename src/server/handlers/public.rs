@@ -837,6 +837,7 @@ const DASHBOARD_TREND_WINDOW_SIZE: usize = 8;
 const DASHBOARD_RECENT_JOBS_LIMIT: usize = 5;
 const DASHBOARD_OVERVIEW_LOADING_STALE_AFTER: Duration = Duration::from_secs(30);
 const DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const DASHBOARD_OVERVIEW_SAFETY_PROBE_INTERVAL: Duration = Duration::from_secs(60);
 const DASHBOARD_OVERVIEW_COLD_BUILD_BUDGET: Duration = Duration::from_secs(1);
 // Startup happens before the listener accepts traffic, so it can safely wait longer
 // for the same singleflight than an externally visible cold request may wait.
@@ -930,6 +931,8 @@ async fn reset_dashboard_overview_build_count(state: &Arc<AppState>) {
     let mut cache = cache_handle.lock().await;
     cache.build_count = 0;
     cache.freshness_probe_count = 0;
+    cache.built_request_stats_generation = None;
+    cache.last_refresh_requested_at = None;
     cache.last_freshness_probe_at = None;
 }
 
@@ -953,9 +956,15 @@ async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
     let mut cache = cache_handle.lock().await;
     cache.last_freshness_probe_at = Some(
         tokio::time::Instant::now()
-            .checked_sub(DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL)
+            .checked_sub(DASHBOARD_OVERVIEW_SAFETY_PROBE_INTERVAL)
             .expect("dashboard refresh interval fits in the monotonic clock"),
     );
+}
+
+async fn mark_dashboard_overview_alert_projection_dirty(state: &AppState) {
+    let cache_handle = dashboard_overview_cache_for_state(state);
+    let mut cache = cache_handle.lock().await;
+    cache.last_freshness_probe_at = None;
 }
 
 #[cfg(test)]
@@ -1754,6 +1763,7 @@ async fn load_dashboard_overview_snapshot(
     state: &Arc<AppState>,
 ) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
     let cache_handle = dashboard_overview_cache_for_state(state.as_ref());
+    let request_stats_generation = state.proxy.dashboard_read_generation();
     let action = {
         let mut cache = cache_handle.lock().await;
             if cache.loading {
@@ -1772,11 +1782,25 @@ async fn load_dashboard_overview_snapshot(
                     cache.notify.notify_waiters();
                 }
             }
-            if let (Some(cached), Some(last_probe)) =
-                (cache.cached.as_ref(), cache.last_freshness_probe_at)
-                && last_probe.elapsed() < DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
-            {
-                DashboardOverviewLoadAction::Return(cached.snapshot.clone())
+            let has_cached = cache.cached.is_some();
+            let generation_dirty = request_stats_generation.is_some()
+                && request_stats_generation != cache.built_request_stats_generation;
+            let safety_probe_due = cache.last_freshness_probe_at.is_none_or(|last_probe| {
+                last_probe.elapsed() >= DASHBOARD_OVERVIEW_SAFETY_PROBE_INTERVAL
+            });
+            let dirty_refresh_due = generation_dirty
+                && cache.last_refresh_requested_at.is_none_or(|last_refresh| {
+                    last_refresh.elapsed() >= DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
+                });
+            if has_cached && !safety_probe_due && !dirty_refresh_due {
+                DashboardOverviewLoadAction::Return(
+                    cache
+                        .cached
+                        .as_ref()
+                        .expect("checked cached dashboard overview")
+                        .snapshot
+                        .clone(),
+                )
             } else if cache.loading {
                 if let Some(cached) = cache.cached.as_ref() {
                     DashboardOverviewLoadAction::Return(cached.snapshot.clone())
@@ -1789,6 +1813,7 @@ async fn load_dashboard_overview_snapshot(
                     && let Some(last_good) = last_good
                 {
                     cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
+                    cache.last_refresh_requested_at = Some(tokio::time::Instant::now());
                     tracing::debug!(
                         component = "admin_read",
                         event = "dashboard_overview_refresh_deferred",
@@ -1804,6 +1829,7 @@ async fn load_dashboard_overview_snapshot(
                     cache.loading = true;
                     cache.loading_generation = cache.loading_generation.wrapping_add(1);
                     cache.loading_started_at = Some(tokio::time::Instant::now());
+                    cache.last_refresh_requested_at = Some(tokio::time::Instant::now());
                     DashboardOverviewLoadAction::Refresh {
                         generation: cache.loading_generation,
                         last_good,
@@ -1983,6 +2009,7 @@ async fn refresh_dashboard_overview_snapshot(
         let mut cache = cache_handle.lock().await;
         if cache.loading_generation == load_generation {
             cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
+            cache.built_request_stats_generation = state.proxy.dashboard_read_generation();
             if let Some(cached) = cache.cached.as_ref()
                 && cached.freshness.as_ref() == &freshness
             {
@@ -2058,6 +2085,8 @@ async fn refresh_dashboard_overview_snapshot(
             snapshot: snapshot.clone(),
             freshness: snapshot.freshness.clone(),
         });
+        cache.built_request_stats_generation = state.proxy.dashboard_read_generation();
+        cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
         tavily_hikari::emit_low_memory_protection_decision(
             "admin_read",
             tavily_hikari::PerfLogScope {

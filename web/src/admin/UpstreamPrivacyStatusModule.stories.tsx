@@ -69,6 +69,19 @@ const pendingStatus: UpstreamPrivacyStatus = {
     availableAt: null,
     lastRecoveredAt: null,
   },
+  reconciliationController: {
+    mode: 'compare',
+    activationPeriodCode: null,
+    activationPeriodStart: null,
+    legacyActive: false,
+    pausedReason: null,
+    transitionedAt: 1_783_958_320,
+  },
+  dashboardAlertProjection: {
+    coverage: 'ok',
+    observedAt: 1_783_958_320,
+    staleReason: null,
+  },
   retryBuckets: {
     upstream429: 3,
     localUsageRateLimit: 1,
@@ -197,6 +210,25 @@ const degradedStatus: UpstreamPrivacyStatus = {
       createdAt: 1_783_958_800,
     },
   ],
+}
+
+const activePausedStatus: UpstreamPrivacyStatus = {
+  ...activeStatus,
+  phase: 'active_paused',
+  upstreamPreciseReconciliationEnabled: false,
+  reconciliationController: {
+    mode: 'active_paused',
+    activationPeriodCode: '2026-07-15/S1',
+    activationPeriodStart: 1_783_994_400,
+    legacyActive: false,
+    pausedReason: 'durable_integrity_failed',
+    transitionedAt: 1_783_958_800,
+  },
+  dashboardAlertProjection: {
+    coverage: 'stale',
+    observedAt: 1_783_958_100,
+    staleReason: 'tail_replay_deferred',
+  },
 }
 
 const compareStatus: UpstreamPrivacyStatus = {
@@ -328,6 +360,11 @@ const noAdjustmentStatus: UpstreamPrivacyStatus = {
 
 const projectingStatus: UpstreamPrivacyStatus = {
   ...compareStatus,
+  dashboardAlertProjection: {
+    coverage: 'projecting',
+    observedAt: 1_783_958_120,
+    staleReason: null,
+  },
   reconciliationRunObservation: {
     ...runObservationBase,
     projectionState: 'projecting',
@@ -445,6 +482,12 @@ export const BlockedBySessions: Story = {
 export const Active: Story = {
   args: {
     status: activeStatus,
+  },
+}
+
+export const ActivePaused: Story = {
+  args: {
+    status: activePausedStatus,
   },
 }
 
@@ -586,6 +629,7 @@ export const Gallery: Story = {
         { title: 'Blocked by sessions', status: compareBlockedStatus },
         { title: 'Compare', status: compareStatus },
         { title: 'Active', status: activeStatus },
+        { title: 'Active paused', status: activePausedStatus },
         { title: 'Degraded', status: degradedStatus },
       ].map((scenario) => (
         <section key={scenario.title} style={{ display: 'grid', gap: 12 }}>

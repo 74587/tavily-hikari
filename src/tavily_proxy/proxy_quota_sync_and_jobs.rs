@@ -158,10 +158,6 @@ impl TavilyProxy {
             .key_store
             .upstream_reconciliation_degraded_estimate()
             .await?;
-        let has_degraded_settlements = self
-            .key_store
-            .upstream_reconciliation_degraded_exists()
-            .await?;
         let (
             last_reconciliation_run_at,
             last_shadow_adjustment_at,
@@ -196,6 +192,11 @@ impl TavilyProxy {
             .key_store
             .upstream_reconciliation_run_observation()
             .await?;
+        let reconciliation_controller = self
+            .key_store
+            .upstream_reconciliation_control_state()
+            .await?;
+        let dashboard_alert_projection = self.dashboard_alert_projection_status().await?;
         let (
             reconciliation_last_duration_ms,
             reconciliation_last_attempted,
@@ -207,26 +208,16 @@ impl TavilyProxy {
             .key_store
             .upstream_reconciliation_last_run_stats()
             .await?;
-        let next_epoch_at = if shadow_ready && settings.upstream_precise_reconciliation_enabled && sessions_ready {
-            Some(if stored_epoch > 0 {
-                stored_epoch
-            } else {
-                period.ends_at
-            })
+        let next_epoch_at = if reconciliation_controller.legacy_active
+            && reconciliation_controller.mode == ReconciliationMode::Active
+            && shadow_ready
+            && sessions_ready
+        {
+            Some(if stored_epoch > 0 { stored_epoch } else { period.ends_at })
         } else {
-            None
+            reconciliation_controller.activation_period_start
         };
-        let phase = if has_degraded_settlements {
-            "degraded"
-        } else if !shadow_ready {
-            "configured"
-        } else if !settings.upstream_precise_reconciliation_enabled || !sessions_ready {
-            "compare"
-        } else if next_epoch_at.is_some_and(|epoch| now < epoch) {
-            "pending"
-        } else {
-            "active"
-        };
+        let phase = reconciliation_controller.mode.as_str();
         Ok(UpstreamPrivacyStatus {
             phase: phase.to_string(),
             configured_project_id_mode: settings.upstream_project_id_mode,
@@ -288,6 +279,20 @@ impl TavilyProxy {
                 last_recovered_at: reconciliation_local_last_recovered_at,
             },
             reconciliation_run_observation,
+            reconciliation_controller: ReconciliationControllerStatus {
+                mode: reconciliation_controller.mode.as_str().to_string(),
+                activation_period_code: reconciliation_controller.activation_period_code,
+                activation_period_start: reconciliation_controller.activation_period_start,
+                legacy_active: reconciliation_controller.legacy_active,
+                paused_reason: reconciliation_controller.paused_reason,
+                transitioned_at: (reconciliation_controller.transitioned_at > 0)
+                    .then_some(reconciliation_controller.transitioned_at),
+            },
+            dashboard_alert_projection: DashboardAlertProjectionStatus {
+                coverage: dashboard_alert_projection.coverage,
+                observed_at: dashboard_alert_projection.observed_at,
+                stale_reason: dashboard_alert_projection.stale_reason,
+            },
             retry_buckets,
             current_period_bound_users_by_key,
             current_period_pending_project_ids_by_key,
@@ -1011,7 +1016,9 @@ impl TavilyProxy {
             );
             return Ok(ClaimedReconciliationRunOutcome::StaleClaim);
         }
-        if !run_admission_state.shadow_ready {
+        if !run_admission_state.shadow_ready
+            || run_admission_state.mode == ReconciliationMode::ActivePaused
+        {
             tracing::debug!(
                 component = "reconciliation",
                 event = "run_started",
@@ -1026,7 +1033,7 @@ impl TavilyProxy {
                 .record_upstream_reconciliation_engine_observation(
                     ReconciliationRunObservationWrite {
                         claimed_job,
-                        mode: "disabled",
+                        mode: run_admission_state.mode.as_str(),
                         hydrate_ms: 0,
                         first_remote_ms: None,
                         remote_ms: 0,
@@ -1220,14 +1227,7 @@ impl TavilyProxy {
         let work_generation_by_candidate = candidate_batch.work_generation_by_candidate;
         let candidates = candidate_batch.candidates;
         let candidate_count = candidates.len() as i64;
-        let run_mode = if candidates
-            .iter()
-            .any(|candidate| candidate.settlement_mode == "actual")
-        {
-            "active"
-        } else {
-            "compare"
-        };
+        let run_mode = run_admission_state.mode.as_str();
         let candidate_keys = candidates
             .iter()
             .map(|candidate| (candidate.token_id.clone(), candidate.period_code.clone()))

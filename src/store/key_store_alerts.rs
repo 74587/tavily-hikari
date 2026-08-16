@@ -9,7 +9,7 @@ struct AlertEventFilters<'a> {
     request_kinds: &'a [String],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct AlertEventProjectionRow {
     source_kind: String,
     source_id: String,
@@ -822,45 +822,6 @@ impl KeyStore {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    pub(crate) async fn fetch_recent_alerts_summary_token(
-        &self,
-        window_hours: i64,
-    ) -> Result<[i64; 4], ProxyError> {
-        let clamped_window_hours = window_hours.clamp(1, 24 * 30);
-        let since = self
-            .backend_time
-            .now_ts()
-            .saturating_sub(clamped_window_hours.saturating_mul(3600));
-        let filters = AlertEventFilters {
-            alert_type: None,
-            since: Some(since),
-            until: None,
-            user_id: None,
-            token_id: None,
-            key_id: None,
-            request_kinds: &[],
-        };
-        let mut query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut query, filters);
-        query.push(
-            r#"
-            SELECT
-                COALESCE(COUNT(*), 0) AS row_count,
-                COALESCE(MAX(occurred_at), 0) AS max_occurred_at,
-                COALESCE(SUM(occurred_at), 0) AS occurred_at_sum,
-                COALESCE(SUM(COALESCE(request_log_id, 0) + COALESCE(job_id, 0) + LENGTH(COALESCE(row_sort_id, ''))), 0) AS identity_sum
-            FROM alerts
-            "#,
-        );
-        let row = query.build().fetch_one(&self.pool).await?;
-        Ok([
-            row.try_get("row_count")?,
-            row.try_get("max_occurred_at")?,
-            row.try_get("occurred_at_sum")?,
-            row.try_get("identity_sum")?,
-        ])
     }
 
     fn summarize_alert_type_count_rows(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<AlertTypeCount> {
@@ -2047,6 +2008,7 @@ impl KeyStore {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn fetch_recent_alerts_summary(
         &self,
         window_hours: i64,

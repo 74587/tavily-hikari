@@ -1045,6 +1045,14 @@ async fn compute_signatures_tracks_recent_alert_summary_changes() {
     .await
     .expect("insert recent alert auth token log");
 
+    for _ in 0..6 {
+        state
+            .proxy
+            .advance_dashboard_alert_projection_slice()
+            .await
+            .expect("advance alert projection after alert write");
+    }
+
     expire_dashboard_overview_freshness_probe(&state).await;
     let _ = compute_signatures(&state)
         .await

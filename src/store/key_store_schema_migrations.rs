@@ -34,6 +34,13 @@ const RECONCILIATION_OUTCOME_REPAIR_VERSION: i64 = 10;
 const RECONCILIATION_OUTCOME_REPAIR_NAME: &str = "reconciliation-shadow-outcome-repair-v1";
 const RECONCILIATION_OUTCOME_REPAIR_CHECKSUM: &str =
     "sha256:0c3d8491c7064ba6a47fce9bb28c6220";
+const RECONCILIATION_CONTROLLER_VERSION: i64 = 11;
+const RECONCILIATION_CONTROLLER_NAME: &str = "reconciliation-activation-controller-v1";
+const RECONCILIATION_CONTROLLER_CHECKSUM: &str =
+    "sha256:dc6ccbc1e746c3be915e576218978879";
+const ALERT_PROJECTION_VERSION: i64 = 12;
+const ALERT_PROJECTION_NAME: &str = "dashboard-alert-projection-v1";
+const ALERT_PROJECTION_CHECKSUM: &str = "sha256:5c781d4f2e85029d5aac2858300d182e";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -680,6 +687,16 @@ impl KeyStore {
                 RECONCILIATION_OUTCOME_REPAIR_NAME,
                 RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
             ),
+            (
+                RECONCILIATION_CONTROLLER_VERSION,
+                RECONCILIATION_CONTROLLER_NAME,
+                RECONCILIATION_CONTROLLER_CHECKSUM,
+            ),
+            (
+                ALERT_PROJECTION_VERSION,
+                ALERT_PROJECTION_NAME,
+                ALERT_PROJECTION_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -766,6 +783,45 @@ impl KeyStore {
         {
             return Err(ProxyError::Other(
                 "schema migration object validation failed at version 9".to_string(),
+            ));
+        }
+        if self
+            .schema_migration_applied(RECONCILIATION_CONTROLLER_VERSION)
+            .await?
+            && (!self
+                .schema_object_exists("main", "upstream_reconciliation_control_state")
+                .await?
+                || !self
+                    .schema_object_exists("main", "upstream_reconciliation_control_transitions")
+                    .await?
+                || !self
+                    .table_column_exists(
+                        "upstream_reconciliation_control_state",
+                        "activation_period_start",
+                    )
+                    .await?)
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 11".to_string(),
+            ));
+        }
+        if self.schema_migration_applied(ALERT_PROJECTION_VERSION).await?
+            && (!self
+                .schema_object_exists("observability", "dashboard_alert_projection_state")
+                .await?
+                || !self
+                    .schema_object_exists("observability", "dashboard_alert_projection_events")
+                    .await?
+                || !self
+                    .schema_named_object_exists(
+                        "observability",
+                        "index",
+                        "idx_dashboard_alert_projection_events_time",
+                    )
+                    .await?)
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 12".to_string(),
             ));
         }
         if self
@@ -1038,6 +1094,129 @@ impl KeyStore {
             RECONCILIATION_OUTCOME_REPAIR_VERSION,
             RECONCILIATION_OUTCOME_REPAIR_NAME,
             RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_reconciliation_controller_migration(&self) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS upstream_reconciliation_control_state (
+                id TEXT PRIMARY KEY NOT NULL CHECK(id = 'local'),
+                mode TEXT NOT NULL DEFAULT 'compare'
+                    CHECK(mode IN ('compare', 'active', 'active_paused')),
+                activation_period_code TEXT,
+                activation_period_start INTEGER,
+                legacy_active INTEGER NOT NULL DEFAULT 0,
+                paused_reason TEXT,
+                transitioned_at INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS upstream_reconciliation_control_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode TEXT NOT NULL CHECK(mode IN ('compare', 'active', 'active_paused')),
+                action TEXT NOT NULL,
+                activation_period_code TEXT,
+                transitioned_at INTEGER NOT NULL,
+                detail TEXT
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_upstream_reconciliation_control_transitions_time
+               ON upstream_reconciliation_control_transitions(transitioned_at, id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        let legacy_enabled = self
+            .get_meta_i64(META_KEY_UPSTREAM_PRECISE_RECONCILIATION_ENABLED_V1)
+            .await?
+            .unwrap_or(0)
+            != 0;
+        let now = self.backend_time.now_ts();
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_control_state
+                    (id, mode, legacy_active, transitioned_at)
+               VALUES ('local', ?, ?, ?)
+               ON CONFLICT(id) DO NOTHING"#,
+        )
+        .bind(if legacy_enabled { "active" } else { "compare" })
+        .bind(i64::from(legacy_enabled))
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"INSERT INTO upstream_reconciliation_control_transitions
+                    (mode, action, activation_period_code, transitioned_at, detail)
+               SELECT mode, 'legacy_adopted', NULL, transitioned_at, NULL
+                 FROM upstream_reconciliation_control_state
+                WHERE id = 'local'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM upstream_reconciliation_control_transitions
+                  )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            RECONCILIATION_CONTROLLER_VERSION,
+            RECONCILIATION_CONTROLLER_NAME,
+            RECONCILIATION_CONTROLLER_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_alert_projection_migration(&self) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS observability.dashboard_alert_projection_state (
+                source_kind TEXT PRIMARY KEY NOT NULL,
+                cursor_occurred_at INTEGER NOT NULL DEFAULT 0,
+                cursor_row_sort_id TEXT NOT NULL DEFAULT '',
+                fence_occurred_at INTEGER,
+                fence_row_sort_id TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
+                phase TEXT NOT NULL DEFAULT 'catching_up'
+                    CHECK(phase IN ('catching_up', 'idle')),
+                observed_at INTEGER,
+                stale_reason TEXT
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS observability.dashboard_alert_projection_events (
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                occurred_at INTEGER NOT NULL,
+                row_sort_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                projected_at INTEGER NOT NULL,
+                PRIMARY KEY(source_kind, source_id)
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS observability.idx_dashboard_alert_projection_events_time
+               ON dashboard_alert_projection_events(occurred_at DESC, row_sort_id DESC)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        for source_kind in ALERT_PROJECTION_SOURCES {
+            sqlx::query(
+                r#"INSERT INTO observability.dashboard_alert_projection_state (source_kind)
+                   VALUES (?) ON CONFLICT(source_kind) DO NOTHING"#,
+            )
+            .bind(source_kind)
+            .execute(&self.pool)
+            .await?;
+        }
+        self.record_schema_migration(
+            ALERT_PROJECTION_VERSION,
+            ALERT_PROJECTION_NAME,
+            ALERT_PROJECTION_CHECKSUM,
         )
         .await
     }
@@ -1412,6 +1591,15 @@ impl KeyStore {
         {
             self.apply_reconciliation_outcome_repair_migration().await?;
         }
+        if !self
+            .schema_migration_applied(RECONCILIATION_CONTROLLER_VERSION)
+            .await?
+        {
+            self.apply_reconciliation_controller_migration().await?;
+        }
+        if !self.schema_migration_applied(ALERT_PROJECTION_VERSION).await? {
+            self.apply_alert_projection_migration().await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1451,6 +1639,8 @@ impl KeyStore {
             RECONCILIATION_OUTCOME_REPAIR_CHECKSUM,
         )
         .await?;
+        self.apply_reconciliation_controller_migration().await?;
+        self.apply_alert_projection_migration().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1458,7 +1648,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 10_i64,
+            migration_count = 12_i64,
         );
         Ok(())
     }

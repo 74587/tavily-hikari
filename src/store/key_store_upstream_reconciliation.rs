@@ -29,6 +29,7 @@ const RECONCILIATION_QUEUE_ESTIMATE_LIMIT: i64 = 64;
 pub(crate) struct UpstreamReconciliationRunAdmissionState {
     pub(crate) claim_current: bool,
     pub(crate) shadow_ready: bool,
+    pub(crate) mode: ReconciliationMode,
     pub(crate) global_backoff_level: i64,
     pub(crate) global_backoff_until: i64,
     pub(crate) local_backoff_level: i64,
@@ -72,10 +73,6 @@ fn upstream_reconciliation_shadow_ready(settings: &SystemSettings) -> bool {
     settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
         && settings.api_rebalance_enabled
         && settings.rebalance_mcp_enabled
-}
-
-fn upstream_reconciliation_precise_cutover_configured(settings: &SystemSettings) -> bool {
-    upstream_reconciliation_shadow_ready(settings) && settings.upstream_precise_reconciliation_enabled
 }
 
 pub(crate) fn classify_reconciliation_retry_reason(reason: Option<&str>) -> &'static str {
@@ -145,10 +142,15 @@ impl KeyStore {
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
             .fetch_all(&mut *conn)
             .await?;
-            Ok((claim_current, rows))
+            let mode: String = sqlx::query_scalar(
+                "SELECT mode FROM upstream_reconciliation_control_state WHERE id = 'local'",
+            )
+            .fetch_one(&mut *conn)
+            .await?;
+            Ok((claim_current, rows, mode))
         }
         .await;
-        let (claim_current, rows) = conn.complete_query(read_result).await?;
+        let (claim_current, rows, mode) = conn.complete_query(read_result).await?;
         let values = rows.into_iter().collect::<std::collections::HashMap<_, _>>();
         let value_i64 = |key: &str| {
             values
@@ -168,6 +170,9 @@ impl KeyStore {
         Ok(UpstreamReconciliationRunAdmissionState {
             claim_current,
             shadow_ready,
+            mode: ReconciliationMode::parse(&mode).ok_or_else(|| {
+                ProxyError::Other("invalid persisted upstream reconciliation mode".to_string())
+            })?,
             global_backoff_level: value_i64(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1),
             global_backoff_until: value_i64(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1),
             local_backoff_level: value_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1),
@@ -351,18 +356,24 @@ impl KeyStore {
         if !upstream_reconciliation_shadow_ready(settings) {
             return Ok(false);
         }
-        if !settings.upstream_precise_reconciliation_enabled {
-            return Ok(true);
+        let state = self.upstream_reconciliation_control_state().await?;
+        match state.mode {
+            ReconciliationMode::Compare | ReconciliationMode::ActivePaused => Ok(true),
+            ReconciliationMode::Active if state.legacy_active => {
+                let now = self.backend_time.now_ts();
+                let active_upstream_mcp_sessions = self.count_active_upstream_mcp_sessions(now).await?;
+                if active_upstream_mcp_sessions > 0 {
+                    return Ok(true);
+                }
+                let ready_after = self
+                    .load_or_initialize_upstream_reconciliation_ready_after(now)
+                    .await?;
+                Ok(now < ready_after)
+            }
+            ReconciliationMode::Active => Ok(state
+                .activation_period_start
+                .is_some_and(|boundary| self.backend_time.now_ts() < boundary)),
         }
-        let now = self.backend_time.now_ts();
-        let active_upstream_mcp_sessions = self.count_active_upstream_mcp_sessions(now).await?;
-        if active_upstream_mcp_sessions > 0 {
-            return Ok(true);
-        }
-        let ready_after = self
-            .load_or_initialize_upstream_reconciliation_ready_after(now)
-            .await?;
-        Ok(now < ready_after)
     }
 
     pub(crate) async fn upstream_reconciliation_runtime_markers(
@@ -554,18 +565,6 @@ impl KeyStore {
         ))
     }
 
-    pub(crate) async fn upstream_reconciliation_degraded_exists(
-        &self,
-    ) -> Result<bool, ProxyError> {
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM upstream_reconciliation_settlements \
-             WHERE status IN ('degraded', 'shadow_degraded') LIMIT 1)",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(ProxyError::Database)
-    }
-
     pub(crate) async fn upstream_reconciliation_local_backoff_state(
         &self,
     ) -> Result<(i64, i64, i64), ProxyError> {
@@ -686,7 +685,9 @@ impl KeyStore {
     pub(crate) async fn upstream_reconciliation_representative_available_at(
         &self,
     ) -> Result<Option<i64>, ProxyError> {
-        if !self.upstream_reconciliation_shadow_ready_for_control().await? {
+        if !self.upstream_reconciliation_shadow_ready_for_control().await?
+            || !self.reconciliation_controller_allows_representative().await?
+        {
             return Ok(None);
         }
         self.upstream_reconciliation_continuation_at().await
@@ -1124,19 +1125,14 @@ impl KeyStore {
         if !upstream_reconciliation_shadow_ready(&settings) {
             return Ok(None);
         }
-        let precise_cutover_ready = if upstream_reconciliation_precise_cutover_configured(&settings)
-        {
-            self.refresh_upstream_reconciliation_epoch().await?.0
-        } else {
-            false
-        };
-        let settlement_mode = if precise_cutover_ready {
-            RECONCILIATION_SETTLEMENT_MODE_ACTUAL
-        } else {
-            RECONCILIATION_SETTLEMENT_MODE_SHADOW
-        };
         let now = self.backend_time.now_ts();
         let period = business_period_for_timestamp(now);
+        let Some(settlement_mode) = self
+            .reconciliation_settlement_mode_for_period(&settings, &period)
+            .await?
+        else {
+            return Ok(None);
+        };
         let project_id = self
             .derive_upstream_project_id(token_id, &period.code)
             .await?;

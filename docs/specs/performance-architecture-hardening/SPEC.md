@@ -191,7 +191,8 @@
 
 - [ ] 运行时与 SQLite 所有权边界已落地。
 - [ ] HA GC 与 reconciliation work 已独立持久化并通过并发回归。
-- [ ] AlertProjection 与 DashboardReadModel 已完成 shadow 和 cutover。
+- [x] AlertProjection 与 DashboardReadModel 已完成 shadow 和 cutover：sidecar cursor/fence 负责
+      alert coverage，AppState 共享 immutable last-good snapshot，HTTP/SSE 不重算 raw alerts。
 - [ ] 所有目标热路径已通过依赖门禁。
 - [ ] 全量质量门禁与生产形状基准已通过。
 

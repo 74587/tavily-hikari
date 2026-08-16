@@ -503,6 +503,9 @@ async fn list_users(
             && system_settings.api_rebalance_enabled
             && system_settings.rebalance_mcp_enabled
             && system_settings.upstream_precise_reconciliation_enabled;
+        // Actual-mode windows must not turn an otherwise settled historical
+        // shadow projection back into a hybrid display. Only unresolved shadow
+        // work requires adding today's live billing usage to the shadow view.
         let has_pending_shadow_projection = projection.is_some_and(|value| {
             value.shadow_observed_window_count > value.shadow_resolved_window_count
         });

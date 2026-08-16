@@ -1,4 +1,17 @@
 impl TavilyProxy {
+    pub async fn advance_dashboard_alert_projection_slice(&self) -> Result<bool, ProxyError> {
+        Ok(matches!(
+            self.key_store.advance_alert_projection_slice().await?,
+            AlertProjectionSliceOutcome::Advanced { rows, .. } if rows > 0
+        ))
+    }
+
+    pub(crate) async fn dashboard_alert_projection_status(
+        &self,
+    ) -> Result<AlertProjectionStatus, ProxyError> {
+        self.key_store.alert_projection_status().await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn alert_events_page(
         &self,
@@ -64,7 +77,7 @@ impl TavilyProxy {
         window_hours: i64,
     ) -> Result<RecentAlertsSummary, ProxyError> {
         self.key_store
-            .fetch_recent_alerts_summary(window_hours)
+            .fetch_projected_recent_alerts_summary(window_hours)
             .await
     }
 }

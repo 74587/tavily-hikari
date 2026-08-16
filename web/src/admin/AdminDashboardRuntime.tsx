@@ -4638,6 +4638,7 @@ function AdminDashboard(): JSX.Element {
             setDashboardRollupIntegrity(data.rollupIntegrity)
             setDashboardLogs(data.recentLogs)
             setDashboardJobs(data.recentJobs)
+            setDashboardRecentAlerts(data.recentAlerts)
             setDashboardOverviewLoaded(true)
           }
           setError(null)

@@ -283,6 +283,7 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
         .await
         .expect("insert maintenance alert");
 
+    let projection_proxy = proxy.clone();
     let admin_password = "alerts-dashboard-default-window-password";
     let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
     let client = Client::builder()
@@ -564,6 +565,13 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
             .and_then(|value| value.as_str()),
         Some("user_request_rate_limited")
     );
+
+    for _ in 0..12 {
+        projection_proxy
+            .advance_dashboard_alert_projection_slice()
+            .await
+            .expect("advance alert projection before dashboard read");
+    }
 
     let overview_resp = client
         .get(format!("http://{}/api/dashboard/overview", admin_addr))

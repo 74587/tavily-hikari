@@ -1856,7 +1856,7 @@ async fn admin_dashboard_sse_snapshot_refreshes_when_quota_totals_change() {
         .id;
 
     let admin_password = "admin-dashboard-quota-password";
-    let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+    let admin_addr = spawn_builtin_keys_admin_server(proxy.clone(), admin_password).await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -1933,6 +1933,7 @@ async fn admin_dashboard_sse_snapshot_refreshes_when_quota_totals_change() {
     .execute(&pool)
     .await
     .expect("update quota totals");
+    proxy.mark_dashboard_read_dirty_for_test().await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     let mut buffer = String::new();

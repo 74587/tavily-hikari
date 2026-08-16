@@ -221,12 +221,6 @@ struct CachedDashboardQuotaChargeSnapshot {
 }
 
 #[derive(Clone, Debug)]
-struct CachedDashboardRecentAlertsSummary {
-    token: [i64; 4],
-    value: RecentAlertsSummary,
-}
-
-#[derive(Clone, Debug)]
 struct CachedDashboardHourlyRequestWindow {
     generated_at: Instant,
     value: DashboardHourlyRequestWindow,
@@ -270,23 +264,6 @@ struct DashboardQuotaChargeCacheState {
 }
 
 impl Default for DashboardQuotaChargeCacheState {
-    fn default() -> Self {
-        Self {
-            cached: None,
-            loading: false,
-            notify: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DashboardRecentAlertsCacheState {
-    cached: Option<CachedDashboardRecentAlertsSummary>,
-    loading: bool,
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl Default for DashboardRecentAlertsCacheState {
     fn default() -> Self {
         Self {
             cached: None,
@@ -591,38 +568,6 @@ impl Drop for DashboardQuotaChargeLoadGuard {
     }
 }
 
-struct DashboardRecentAlertsLoadGuard {
-    state: Arc<Mutex<DashboardRecentAlertsCacheState>>,
-    armed: bool,
-}
-
-impl DashboardRecentAlertsLoadGuard {
-    fn new(state: Arc<Mutex<DashboardRecentAlertsCacheState>>) -> Self {
-        Self { state, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for DashboardRecentAlertsLoadGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-
-        let state = self.state.clone();
-        tokio::spawn(async move {
-            let mut cache = state.lock().await;
-            if cache.loading {
-                cache.loading = false;
-                cache.notify.notify_waiters();
-            }
-        });
-    }
-}
-
 struct DashboardHourlyRequestWindowLoadGuard {
     state: Arc<Mutex<DashboardHourlyRequestWindowCacheState>>,
     armed: bool,
@@ -741,7 +686,6 @@ pub struct TavilyProxy {
     pub(crate) research_request_owner_affinity: Arc<Mutex<TokenAffinityState>>,
     summary_windows_cache: Arc<Mutex<SummaryWindowsCacheState>>,
     dashboard_quota_charge_cache: Arc<Mutex<DashboardQuotaChargeCacheState>>,
-    dashboard_recent_alerts_cache: Arc<Mutex<DashboardRecentAlertsCacheState>>,
     dashboard_hourly_request_window_cache: Arc<Mutex<DashboardHourlyRequestWindowCacheState>>,
     user_rankings_cache: Arc<Mutex<UserRankingsCacheState>>,
     analysis_pressure_cache: Arc<Mutex<AnalysisPressureCacheState>>,

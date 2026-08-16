@@ -29,6 +29,8 @@ function phaseTone(phase: UpstreamPrivacyStatus['phase']): 'neutral' | 'info' | 
   switch (phase) {
     case 'active':
       return 'success'
+    case 'active_paused':
+      return 'error'
     case 'pending':
     case 'compare':
       return 'info'
@@ -220,6 +222,7 @@ export default function UpstreamPrivacyStatusModule({
         pending: strings.phasePending,
         compare: strings.phaseCompare,
         active: strings.phaseActive,
+        active_paused: language === 'zh' ? '精确对账已暂停' : 'Precise reconciliation paused',
         degraded: strings.phaseDegraded,
       } satisfies Record<UpstreamPrivacyStatus['phase'], string>)[status.phase]
     : strings.phaseConfigured
@@ -231,6 +234,9 @@ export default function UpstreamPrivacyStatusModule({
         pending: strings.phasePendingDescription,
         compare: strings.phaseCompareDescription,
         active: strings.phaseActiveDescription,
+        active_paused: language === 'zh'
+          ? '检测到持续性完整性问题，真实账务写入已暂停。再次开启旧开关后才会恢复。'
+          : 'A durable integrity issue paused actual billing. Writing the existing switch true is required to resume.',
         degraded: strings.phaseDegradedDescription,
       } satisfies Record<UpstreamPrivacyStatus['phase'], string>)[status.phase]
     : strings.phaseConfiguredDescription
@@ -503,6 +509,24 @@ export default function UpstreamPrivacyStatusModule({
                   value={reconciliationModeLabel}
                 />
                 <PrivacyStat
+                  label={language === 'zh' ? '对账控制器' : 'Reconciliation controller'}
+                  value={status.reconciliationController?.mode ?? strings.statusMissing}
+                  supportingText={
+                    status.reconciliationController?.activationPeriodStart == null
+                      ? undefined
+                      : `${language === 'zh' ? '账务边界' : 'Billing boundary'} · ${timestampFormatter.format(new Date(status.reconciliationController.activationPeriodStart * 1000))}`
+                  }
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '告警投影覆盖' : 'Alert projection coverage'}
+                  value={status.dashboardAlertProjection?.coverage ?? strings.statusMissing}
+                  supportingText={
+                    status.dashboardAlertProjection?.observedAt == null
+                      ? undefined
+                      : timestampFormatter.format(new Date(status.dashboardAlertProjection.observedAt * 1000))
+                  }
+                />
+                <PrivacyStat
                   label={strings.userAgentEffective}
                   value={formatOptionalValue(status.effectiveMcpUserAgent, strings.statusOmitted)}
                 />
@@ -638,6 +662,10 @@ export default function UpstreamPrivacyStatusModule({
                   value={status.reconciliationObservation.coverage === 'unknown'
                     ? (language === 'zh' ? '未知' : 'Unknown')
                     : `${status.reconciliationObservation.hasEligible ? (language === 'zh' ? '有候选' : 'Eligible') : (language === 'zh' ? '无候选' : 'None')} · ${formatAge(status.reconciliationObservation.oldestCandidateAgeSecs, language)}`}
+                />
+                <PrivacyStat
+                  label={language === 'zh' ? '告警投影状态' : 'Alert projection state'}
+                  value={status.dashboardAlertProjection?.staleReason ?? (status.dashboardAlertProjection?.coverage ?? strings.statusMissing)}
                 />
                 <PrivacyStat
                   label={language === 'zh' ? '本地退避' : 'Local backoff'}

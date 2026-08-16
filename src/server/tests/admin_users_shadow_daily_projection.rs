@@ -1372,7 +1372,10 @@ async fn list_users_keeps_persisted_shadow_projection_confirmed_when_actual_only
         .iter()
         .find(|item| item["userId"].as_str() == Some(user.user_id.as_str()))
         .expect("user row");
-    assert_eq!(user_item["shadowDailyCreditsUsed"].as_i64(), Some(13));
+    // A newly requested active mode remains compare for the current business
+    // period, so the durable local usage and confirmed historical delta are
+    // both shown. The completed shadow window keeps the coverage confirmed.
+    assert_eq!(user_item["shadowDailyCreditsUsed"].as_i64(), Some(18));
     assert_eq!(
         user_item["shadowDailyAvailability"].as_str(),
         Some("confirmed")

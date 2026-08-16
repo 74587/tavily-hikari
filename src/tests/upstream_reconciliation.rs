@@ -294,78 +294,6 @@ async fn shadow_usage_records_even_when_active_upstream_mcp_sessions_block_preci
 }
 
 #[tokio::test]
-async fn shadow_compare_activity_persists_cutover_epoch_when_meta_is_missing() {
-    let db_path = reconciliation_test_db_path();
-    let db_string = db_path.to_string_lossy().to_string();
-    let now = local_ts(2026, 7, 15, 12, 0);
-    let (backend_time, clock) = BackendTime::manual_from_ts(now);
-    let proxy = TavilyProxy::with_options_and_time(
-        vec!["tvly-reconciliation-shadow-compare-epoch"],
-        "http://127.0.0.1:9",
-        &db_string,
-        TavilyProxyOptions::from_database_path(&db_string),
-        backend_time,
-    )
-    .await
-    .expect("create proxy");
-    let mut settings = proxy.get_system_settings().await.expect("load settings");
-    settings.upstream_project_id_mode = UpstreamProjectIdMode::AccessToken;
-    settings.api_rebalance_enabled = true;
-    settings.api_rebalance_percent = 100;
-    settings.rebalance_mcp_enabled = true;
-    settings.rebalance_mcp_session_percent = 100;
-    settings.upstream_precise_reconciliation_enabled = true;
-    proxy
-        .set_system_settings(&settings)
-        .await
-        .expect("save precise settings");
-
-    assert!(
-        proxy
-            .key_store
-            .get_meta_i64("upstream_reconciliation_ready_after_v1")
-            .await
-            .expect("load reconciliation epoch before compare check")
-            .unwrap_or(0)
-            <= 0
-    );
-
-    assert!(
-        proxy
-            .key_store
-            .upstream_reconciliation_shadow_compare_active_with_settings(&settings)
-            .await
-            .expect("compute compare-active state before epoch expires")
-    );
-    let persisted_epoch = proxy
-        .key_store
-        .get_meta_i64("upstream_reconciliation_ready_after_v1")
-        .await
-        .expect("load persisted reconciliation epoch after compare check")
-        .expect("persisted reconciliation epoch");
-    assert_eq!(persisted_epoch, business_period_for_timestamp(now).ends_at);
-
-    clock.set_now_ts(persisted_epoch + 1);
-    assert!(
-        !proxy
-            .key_store
-            .upstream_reconciliation_shadow_compare_active_with_settings(&settings)
-            .await
-            .expect("compute compare-active state after epoch expires")
-    );
-    assert_eq!(
-        proxy
-            .key_store
-            .get_meta_i64("upstream_reconciliation_ready_after_v1")
-            .await
-            .expect("load reconciliation epoch after expiry"),
-        Some(persisted_epoch)
-    );
-
-    let _ = std::fs::remove_file(db_path);
-}
-
-#[tokio::test]
 async fn shadow_reconciliation_keeps_zero_delta_usage_and_updates_runtime_markers() {
     let db_path = reconciliation_test_db_path();
     let db_string = db_path.to_string_lossy().to_string();
@@ -1193,6 +1121,12 @@ async fn reconciliation_rejects_reclaimed_scheduled_job_claim() {
         1
     );
 
+    // This regression owns the stale-claim fence, not lazy maintenance-pool
+    // growth. Prewarm so a concurrent test run cannot turn it into an
+    // admission timing assertion before the fenced claim is inspected.
+    proxy
+        .prewarm_upstream_reconciliation_projection_capacity()
+        .await;
     assert!(matches!(
         proxy
             .run_upstream_reconciliation_once_claimed_outcome(
@@ -1310,6 +1244,12 @@ async fn reconciliation_rejects_reclaimed_claim_after_remote_fetch() {
             .expect("serve reclaim-during-fetch upstream");
     });
 
+    // This test exercises claim fencing after a request has started. Prewarm
+    // the bounded local projection capacity so unrelated lazy-pool admission
+    // does not turn it into a foreground-admission timing test.
+    proxy
+        .prewarm_upstream_reconciliation_projection_capacity()
+        .await;
     let running_proxy = proxy.clone();
     let running = tokio::spawn(async move {
         running_proxy

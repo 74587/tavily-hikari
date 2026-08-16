@@ -15,6 +15,16 @@ their own durable retry state. This prevents a valid zero-delta observation from
 minute-by-minute reconciliation job and prevents a non-429 result from falsely clearing a remote
 rate-limit circuit.
 
+## Activation controller
+
+Treat the existing precise-reconciliation switch as the sole operator action. Persist and replicate
+a controller state rather than recalculating a mode from transient readiness checks: `false` selects
+`compare`; `true` selects `active` immediately and records the next complete business period as the
+actual-billing boundary. Work from earlier periods remains shadow-only and completed observations
+are never replayed. If durable correctness fails, record `active_paused`, clear the legacy switch,
+and require a new true write to resume. This preserves a simple operator action while keeping the
+first actual adjustment behind a stable period boundary.
+
 Historical usage needs a separate lifecycle from live settlement. Mark an empty new database as
 projection-complete during its versioned migration. For an upgraded database with historical rows,
 read one stable `(token_id,key_id,period_code)` keyset page outside the writer, aggregate in memory,

@@ -55,7 +55,8 @@ use super::upstream_support_and_manual_jobs::*;
         .expect("proxy created");
 
         let admin_password = "admin-dashboard-recent-alerts-change-password";
-        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let (admin_addr, state) =
+            spawn_builtin_keys_admin_server_with_state(proxy, admin_password).await;
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -137,6 +138,15 @@ use super::upstream_support_and_manual_jobs::*;
             .execute(&pool)
             .await
             .expect("insert recent alert auth token log");
+
+        for _ in 0..6 {
+            state
+                .proxy
+                .advance_dashboard_alert_projection_slice()
+                .await
+                .expect("advance alert projection after alert write");
+        }
+        expire_dashboard_overview_freshness_probe(&state).await;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut buffer = String::new();

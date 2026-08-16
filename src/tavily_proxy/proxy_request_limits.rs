@@ -1,3 +1,22 @@
+fn dashboard_recent_alerts_projection_token(summary: &RecentAlertsSummary) -> [i64; 4] {
+    let top_group_last_seen_sum = summary
+        .top_groups
+        .iter()
+        .map(|group| group.last_seen)
+        .sum::<i64>();
+    let typed_count_sum = summary
+        .counts_by_type
+        .iter()
+        .map(|item| item.count)
+        .sum::<i64>();
+    [
+        summary.total_events,
+        summary.grouped_count,
+        top_group_last_seen_sum,
+        typed_count_sum,
+    ]
+}
+
 impl TavilyProxy {
     #[doc(hidden)]
     pub(crate) async fn dashboard_quota_charge_snapshot_with_token(
@@ -83,88 +102,9 @@ impl TavilyProxy {
         &self,
         window_hours: i64,
     ) -> Result<RecentAlertsSummary, ProxyError> {
-        let token = self
-            .key_store
-            .fetch_recent_alerts_summary_token(window_hours)
-            .await?;
-        self.dashboard_recent_alerts_summary_for_token(window_hours, token)
+        self.dashboard_recent_alerts_summary_with_token(window_hours)
             .await
-    }
-
-    async fn dashboard_recent_alerts_summary_for_token(
-        &self,
-        window_hours: i64,
-        token: [i64; 4],
-    ) -> Result<RecentAlertsSummary, ProxyError> {
-        loop {
-            let waiter = {
-                let mut cache = self.dashboard_recent_alerts_cache.lock().await;
-                if let Some(cached) = cache.cached.as_ref()
-                    && cached.token == token
-                {
-                    return Ok(cached.value.clone());
-                }
-                if cache.loading {
-                    Some(cache.notify.clone().notified_owned())
-                } else {
-                    cache.loading = true;
-                    None
-                }
-            };
-
-            if let Some(waiter) = waiter {
-                waiter.await;
-                continue;
-            }
-
-            let mut load_guard =
-                DashboardRecentAlertsLoadGuard::new(self.dashboard_recent_alerts_cache.clone());
-            let rebuild_started = Instant::now();
-            let summary = self.key_store.fetch_recent_alerts_summary(window_hours).await;
-            crate::emit_sampled_perf_log(
-                crate::DbLogStatus::Info,
-                "admin_read",
-                "dashboard_overview_phase",
-                rebuild_started.elapsed(),
-                crate::PerfLogScope {
-                    route: Some("/api/dashboard/overview"),
-                    scope: Some("dashboard"),
-                    phase: Some("recent_alerts_rebuild"),
-                    degraded: Some(if summary.is_ok() { "ok" } else { "last_good_or_error" }),
-                    ..Default::default()
-                },
-            );
-            let mut cache = self.dashboard_recent_alerts_cache.lock().await;
-            cache.loading = false;
-            match summary {
-                Ok(mut value) => {
-                    value.coverage = "ok".to_string();
-                    value.stale = false;
-                    value.error = None;
-                    cache.cached = Some(CachedDashboardRecentAlertsSummary {
-                        token,
-                        value: value.clone(),
-                    });
-                    cache.notify.notify_waiters();
-                    load_guard.disarm();
-                    return Ok(value);
-                }
-                Err(err) => {
-                    if let Some(cached) = cache.cached.as_ref() {
-                        let mut stale = cached.value.clone();
-                        stale.coverage = "last_good".to_string();
-                        stale.stale = true;
-                        stale.error = Some(err.to_string());
-                        cache.notify.notify_waiters();
-                        load_guard.disarm();
-                        return Ok(stale);
-                    }
-                    cache.notify.notify_waiters();
-                    load_guard.disarm();
-                    return Err(err);
-                }
-            }
-        }
+            .map(|(summary, _)| summary)
     }
 
     #[doc(hidden)]
@@ -172,14 +112,12 @@ impl TavilyProxy {
         &self,
         window_hours: i64,
     ) -> Result<(RecentAlertsSummary, [i64; 4]), ProxyError> {
-        let token = self
+        let projected_summary = self
             .key_store
-            .fetch_recent_alerts_summary_token(window_hours)
+            .fetch_projected_recent_alerts_summary(window_hours)
             .await?;
-        let summary = self
-            .dashboard_recent_alerts_summary_for_token(window_hours, token)
-            .await?;
-        Ok((summary, token))
+        let token = dashboard_recent_alerts_projection_token(&projected_summary);
+        Ok((projected_summary, token))
     }
 
     pub async fn dashboard_quota_charge_token(
@@ -202,8 +140,9 @@ impl TavilyProxy {
         window_hours: i64,
     ) -> Result<[i64; 4], ProxyError> {
         self.key_store
-            .fetch_recent_alerts_summary_token(window_hours)
+            .fetch_projected_recent_alerts_summary(window_hours)
             .await
+            .map(|summary| dashboard_recent_alerts_projection_token(&summary))
     }
 
     async fn user_rankings_snapshot_internal(
@@ -300,6 +239,15 @@ impl TavilyProxy {
         self.user_rankings_snapshot_with_stale_flag()
             .await
             .map(|(snapshot, _stale)| snapshot)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub async fn mark_dashboard_read_dirty_for_test(&self) {
+        self.key_store
+            .request_stats_coalescer
+            .mark_dashboard_read_dirty()
+            .await;
     }
 
     #[doc(hidden)]
