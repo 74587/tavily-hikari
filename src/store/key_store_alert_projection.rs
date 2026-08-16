@@ -512,43 +512,44 @@ impl KeyStore {
             (fence.0, fence.1.as_str())
                 > (recent.cursor_occurred_at, recent.cursor_row_sort_id.as_str())
         });
-        // Once every tail source is idle, inspect the other two bounded
-        // source watermarks before declaring the tail idle. This preserves
-        // prompt discovery of a newly arrived alert without mutating a cursor
-        // just to rotate an in-memory scheduler clock.
-        if recent.phase == "idle" && !recent_has_debt {
-            for source_kind in ALERT_PROJECTION_SOURCES {
-                if source_kind == recent.source_kind {
-                    continue;
+        // A catching-up source must not hide a newly arrived alert from an
+        // otherwise idle source. Probe the other two bounded watermarks every
+        // slice and let newly eligible tail work preempt historical backlog.
+        // This advances a cursor only when there is actual source work.
+        for source_kind in ALERT_PROJECTION_SOURCES {
+            if source_kind == recent.source_kind {
+                continue;
+            }
+            let Some(candidate) = self
+                .alert_projection_source_state_for_kind(
+                    AlertProjectionLane::RecentTail,
+                    source_kind,
+                )
+                .await?
+            else {
+                continue;
+            };
+            if candidate.phase != "idle" {
+                continue;
+            }
+            let candidate_fence = match (
+                candidate.fence_occurred_at,
+                candidate.fence_row_sort_id.as_deref(),
+            ) {
+                (Some(occurred_at), Some(row_sort_id)) => {
+                    Some((occurred_at, row_sort_id.to_string()))
                 }
-                let Some(candidate) = self
-                    .alert_projection_source_state_for_kind(
-                        AlertProjectionLane::RecentTail,
-                        source_kind,
-                    )
-                    .await?
-                else {
-                    continue;
-                };
-                let candidate_fence = match (
-                    candidate.fence_occurred_at,
-                    candidate.fence_row_sort_id.as_deref(),
-                ) {
-                    (Some(occurred_at), Some(row_sort_id)) => {
-                        Some((occurred_at, row_sort_id.to_string()))
-                    }
-                    _ => self.alert_projection_source_fence(&candidate.source_kind).await?,
-                };
-                let candidate_has_debt = candidate_fence.as_ref().is_some_and(|fence| {
-                    (fence.0, fence.1.as_str())
-                        > (candidate.cursor_occurred_at, candidate.cursor_row_sort_id.as_str())
-                });
-                if candidate_has_debt {
-                    recent = candidate;
-                    recent_fence = candidate_fence;
-                    recent_has_debt = true;
-                    break;
-                }
+                _ => self.alert_projection_source_fence(&candidate.source_kind).await?,
+            };
+            let candidate_has_debt = candidate_fence.as_ref().is_some_and(|fence| {
+                (fence.0, fence.1.as_str())
+                    > (candidate.cursor_occurred_at, candidate.cursor_row_sort_id.as_str())
+            });
+            if candidate_has_debt {
+                recent = candidate;
+                recent_fence = candidate_fence;
+                recent_has_debt = true;
+                break;
             }
         }
         // The durable history lane owns catch-up whenever the selected recent

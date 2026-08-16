@@ -49,7 +49,7 @@ const ALERT_PROJECTION_RECENT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 const ALERT_PROJECTION_ADMIN_HISTORY_VERSION: i64 = 14;
 const ALERT_PROJECTION_ADMIN_HISTORY_NAME: &str = "dashboard-alert-projection-admin-history-v1";
 const ALERT_PROJECTION_ADMIN_HISTORY_CHECKSUM: &str =
-    "sha256:1c3d20a69a03ae7f7e8b60cacf9eb5e3";
+    "sha256:ff6f5901c3a603feac18afbbb04a1cdf";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {

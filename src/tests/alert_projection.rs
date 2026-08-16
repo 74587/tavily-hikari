@@ -520,6 +520,86 @@ async fn alert_projection_admin_history_migration_preserves_sidecar_and_restarts
 }
 
 #[tokio::test]
+async fn alert_projection_preempts_backlog_for_a_new_idle_source() {
+    let db_path = temp_db_path("alert-projection-tail-source-fairness");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_575_050;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-tail-source-fairness".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    advance_alert_projection_until_full_coverage(&proxy).await;
+    for index in 0..26 {
+        insert_projected_rate_limit_alert(
+            &proxy,
+            &format!("projection-fairness-token-{index}"),
+            now,
+        )
+        .await;
+    }
+    let first = proxy
+        .key_store
+        .advance_alert_projection_slice()
+        .await
+        .expect("start auth-token backlog");
+    assert!(matches!(
+        first,
+        AlertProjectionSliceOutcome::Advanced { rows: 25, .. }
+    ));
+    sqlx::query(
+        r#"INSERT INTO scheduled_jobs
+                (job_type, trigger_source, status, attempt, message, queued_at, started_at, finished_at)
+           VALUES ('projection_fairness', 'scheduler', 'failed', 1, 'fresh failure', ?, ?, ?)"#,
+    )
+    .bind(now + 1)
+    .bind(now + 1)
+    .bind(now + 1)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert a fresh failed job alert");
+
+    let second = proxy
+        .key_store
+        .advance_alert_projection_slice()
+        .await
+        .expect("project fresh scheduled-job alert before continuing backlog");
+    assert!(matches!(
+        second,
+        AlertProjectionSliceOutcome::Advanced { rows: 1, .. }
+    ));
+    let (scheduled_rows, auth_phase): (i64, String) = sqlx::query_as(
+        "SELECT \
+           (SELECT COUNT(*) FROM observability.dashboard_alert_projection_events \
+             WHERE source_kind = 'scheduled_job'), \
+           (SELECT phase FROM observability.dashboard_alert_projection_state \
+             WHERE source_kind = 'auth_token_log')",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("verify idle-source preemption");
+    assert_eq!(
+        scheduled_rows, 1,
+        "fresh scheduled-job alert must be projected"
+    );
+    assert_eq!(
+        auth_phase, "catching_up",
+        "the original backlog remains resumable"
+    );
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn alert_projection_idle_probe_does_not_persist_empty_cursors() {
     let db_path = temp_db_path("alert-projection-idle-no-write");
     let db_string = db_path.to_string_lossy().to_string();
