@@ -1354,7 +1354,11 @@ async fn build_dashboard_overview_payload(
     let (recent_alerts, recent_alerts_token) = state
         .proxy
         .dashboard_recent_alerts_summary_for_cold_start_with_token(24)
-        .await?;
+        .await
+        .unwrap_or_else(|_| {
+            let summary = tavily_hikari::RecentAlertsSummary::default();
+            (summary, [0; 4])
+        });
 
     let hourly_window_anchor = dashboard_hourly_window_anchor(now_ts);
     let recent_job_signatures = recent_jobs
