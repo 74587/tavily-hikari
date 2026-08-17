@@ -232,62 +232,37 @@
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
-- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery`
-- scenario: local-pressure and upstream-429 states
-- requested_viewport: `1440x900`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Observed`
+- scenario: compare-mode observed terminal with alert projection coverage
+- requested_viewport: `desktop`
 - viewport_strategy: `storybook-viewport`
-- capture_scope: `element`
+- capture_scope: `browser-viewport`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Shows independent local-pressure and upstream-429 outcomes in the current
-  reconciliation status surface.
+- evidence_note: Current `b664b3bf` source confirms compare-mode observation does not present as
+  billing settlement and exposes alert projection coverage.
 - submission_gate: `approved`
 
 PR: include
 
-![Reconciliation local pressure and upstream 429](./assets/reconciliation-engine-pressure-desktop.png)
+![Observed reconciliation state and alert projection coverage](./assets/current/dashboard-alert-projection-last-good-b664b3bf-desktop.png)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
-- story_id_or_title: `Admin/Modules/SystemStatusModule/Gallery`
-- scenario: projecting, observed, and recovered terminal progression
-- requested_viewport: `1440x900`
-- viewport_strategy: `storybook-viewport`
-- capture_scope: `element`
-- margin_policy: `trim_only`
-- evidence_surface: `page`
-- evidence_note: Separately proves projection progress, compare-mode observed terminal semantics,
-  and recovered status on the final UI source SHA.
-- submission_gate: `approved`
-
-PR: include
-
-![Reconciliation projection in progress](./assets/reconciliation-engine-projecting-desktop.png)
-
-PR: include
-
-![Reconciliation observed terminal](./assets/reconciliation-engine-observed-desktop.png)
-
-PR: include
-
-![Reconciliation recovered state](./assets/reconciliation-engine-recovered-desktop.png)
-
-- source_type: `storybook_canvas`
-- target_program: `mock-only`
-- story_id_or_title: `Admin/Modules/SystemStatusModule/MobileStateGallery`
-- scenario: observed terminal responsive layout
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Mobile393x852`
+- scenario: responsive reconciliation and alert projection status
 - requested_viewport: `393x852`
 - viewport_strategy: `storybook-viewport`
-- capture_scope: `element`
+- capture_scope: `browser-viewport`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Verifies the observed terminal diagnostics remain readable at the required mobile
-  viewport without changing the public response contract.
+- evidence_note: Current `b664b3bf` source confirms the status module remains readable in the
+  required mobile viewport.
 - submission_gate: `approved`
 
 PR: include
 
-![Reconciliation observed terminal mobile](./assets/reconciliation-engine-observed-mobile.png)
+![Mobile reconciliation status](./assets/current/dashboard-alert-projection-last-good-b664b3bf-mobile.png)
 
 ## Related PRs
 

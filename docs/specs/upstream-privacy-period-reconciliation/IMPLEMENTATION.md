@@ -48,7 +48,7 @@
 
 ## Remaining Gaps
 
-- 待补当前最终 SHA 的视觉证据与 owner-facing 截图归档。
+- 101 双库快照对比仍受共享 testbox 可用空间限制；本地与 Storybook 门禁已完成。
 
 ## Related Changes
 
