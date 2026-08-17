@@ -148,17 +148,6 @@ use super::upstream_support_and_manual_jobs::*;
         }
         let projection_pool = connect_sqlite_test_pool(&db_str).await;
         sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS observability.dashboard_alert_projection_recent_summaries (
-                window_hours INTEGER PRIMARY KEY NOT NULL,
-                source_generation INTEGER NOT NULL,
-                computed_at INTEGER NOT NULL,
-                summary_json TEXT NOT NULL
-            )"#,
-        )
-        .execute(&projection_pool)
-        .await
-        .expect("ensure materialized alert summary table");
-        sqlx::query(
             "UPDATE observability.dashboard_alert_projection_recent_summaries SET computed_at = ? WHERE window_hours = 24",
         )
         .bind(Utc::now().timestamp() - 61)

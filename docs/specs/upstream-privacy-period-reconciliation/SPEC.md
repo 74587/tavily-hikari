@@ -239,13 +239,13 @@
 - capture_scope: `browser-viewport`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Current `b664b3bf` source confirms compare-mode observation does not present as
+- evidence_note: Current `135376b4` source confirms compare-mode observation does not present as
   billing settlement and exposes alert projection coverage.
 - submission_gate: `approved`
 
 PR: include
 
-![Observed reconciliation state and alert projection coverage](./assets/current/dashboard-alert-projection-last-good-b664b3bf-desktop.png)
+![Observed reconciliation state and alert projection coverage](./assets/current/dashboard-alert-projection-last-good-135376b4-desktop.png)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
@@ -256,13 +256,13 @@ PR: include
 - capture_scope: `browser-viewport`
 - margin_policy: `trim_only`
 - evidence_surface: `page`
-- evidence_note: Current `b664b3bf` source confirms the status module remains readable in the
+- evidence_note: Current `135376b4` source confirms the status module remains readable in the
   required mobile viewport.
 - submission_gate: `approved`
 
 PR: include
 
-![Mobile reconciliation status](./assets/current/dashboard-alert-projection-last-good-b664b3bf-mobile.png)
+![Mobile reconciliation status](./assets/current/dashboard-alert-projection-last-good-135376b4-mobile.png)
 
 ## Related PRs
 
