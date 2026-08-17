@@ -127,6 +127,30 @@ async fn advance_alert_projection_until_full_coverage(proxy: &TavilyProxy) {
     );
 }
 
+async fn refresh_projected_recent_alerts_until_fresh(proxy: &TavilyProxy) -> RecentAlertsSummary {
+    let mut last_summary = None;
+    for _ in 0..12 {
+        proxy
+            .key_store
+            .refresh_dashboard_alert_projection_summary()
+            .await
+            .expect("refresh materialized recent-alert summary");
+        let summary = proxy
+            .recent_alerts_summary(24)
+            .await
+            .expect("read materialized recent-alert summary");
+        if !summary.stale {
+            return summary;
+        }
+        last_summary = Some(summary);
+        // Bulk admission may legitimately defer one materialization attempt.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "materialized recent-alert summary remained stale after bounded retries: {last_summary:?}"
+    );
+}
+
 #[tokio::test]
 async fn alert_projection_cursor_replays_tail_without_duplicates() {
     let db_path = temp_db_path("alert-projection-tail");
@@ -147,14 +171,10 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
     advance_alert_projection_until(&proxy, 1).await;
     clock.set_now_ts(now + 60);
     proxy
-        .key_store
-        .refresh_dashboard_alert_projection_summary()
+        .refresh_dashboard_alert_projection_observation()
         .await
-        .expect("refresh initial summary after the throttle window");
-    let initial = proxy
-        .recent_alerts_summary(24)
-        .await
-        .expect("read derived alert summary");
+        .expect("refresh initial projection observation before materializing the summary");
+    let initial = refresh_projected_recent_alerts_until_fresh(&proxy).await;
     assert_eq!(initial.total_events, 1);
     assert_eq!(initial.coverage, "ok");
 
@@ -176,15 +196,7 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
         .refresh_dashboard_alert_projection_observation()
         .await
         .expect("refresh projection observation before materializing the summary");
-    resumed
-        .key_store
-        .refresh_dashboard_alert_projection_summary()
-        .await
-        .expect("refresh summary after the throttle window");
-    let replayed = resumed
-        .recent_alerts_summary(24)
-        .await
-        .expect("read tail-replayed alert summary");
+    let replayed = refresh_projected_recent_alerts_until_fresh(&resumed).await;
     assert_eq!(replayed.total_events, 2);
     assert!(
         !replayed.stale,
