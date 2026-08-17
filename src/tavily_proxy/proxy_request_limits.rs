@@ -116,12 +116,6 @@ impl TavilyProxy {
             .key_store
             .fetch_projected_recent_alerts_summary(window_hours)
             .await?;
-        if projected_summary.stale {
-            return Err(ProxyError::Other(
-                "dashboard alert projection is not complete for the requested recent window"
-                    .to_string(),
-            ));
-        }
         let token = dashboard_recent_alerts_projection_token(&projected_summary);
         Ok((projected_summary, token))
     }

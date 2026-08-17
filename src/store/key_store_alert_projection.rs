@@ -864,15 +864,16 @@ impl KeyStore {
         };
         let window_hours = ALERT_PROJECTION_DASHBOARD_WINDOW_HOURS;
         let now = self.backend_time.now_ts();
-        if let Some((_cached_generation, computed_at)) = self
+        let status = self.alert_projection_status().await?;
+        let source_generation = self.alert_projection_recent_generation().await?;
+        if let Some((cached_generation, computed_at)) = self
             .materialized_projected_recent_alerts_summary_metadata(window_hours)
             .await?
             && now.saturating_sub(computed_at) < ALERT_PROJECTION_SUMMARY_REFRESH_SECS
+            && !(status.recent_coverage == "ok" && cached_generation != source_generation)
         {
             return Ok(false);
         }
-        let source_generation = self.alert_projection_recent_generation().await?;
-        let status = self.alert_projection_status().await?;
         let summary = self
             .compute_projected_recent_alerts_summary(window_hours, &status)
             .await?;
