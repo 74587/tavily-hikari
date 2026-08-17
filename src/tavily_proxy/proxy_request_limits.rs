@@ -116,6 +116,29 @@ impl TavilyProxy {
             .key_store
             .fetch_projected_recent_alerts_summary(window_hours)
             .await?;
+        if projected_summary.stale {
+            return Err(ProxyError::Other(
+                "dashboard alert projection is not complete for the requested recent window"
+                    .to_string(),
+            ));
+        }
+        let token = dashboard_recent_alerts_projection_token(&projected_summary);
+        Ok((projected_summary, token))
+    }
+
+    /// Reads the materialized alert token used by Dashboard freshness checks.
+    /// A stale projection intentionally remains readable here: the caller only
+    /// compares it with the already-published snapshot and never exposes it as
+    /// a replacement Dashboard payload.
+    #[doc(hidden)]
+    pub async fn dashboard_recent_alerts_freshness_with_token(
+        &self,
+        window_hours: i64,
+    ) -> Result<(RecentAlertsSummary, [i64; 4]), ProxyError> {
+        let projected_summary = self
+            .key_store
+            .fetch_projected_recent_alerts_summary(window_hours)
+            .await?;
         let token = dashboard_recent_alerts_projection_token(&projected_summary);
         Ok((projected_summary, token))
     }

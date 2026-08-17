@@ -885,6 +885,50 @@ struct DashboardOverviewSnapshot {
     freshness: Arc<DashboardOverviewFreshness>,
 }
 
+struct DashboardRecentAlertsSnapshotFields {
+    view: DashboardRecentAlertsView,
+    token: [i64; 4],
+    total_events: i64,
+    grouped_count: i64,
+    counts: Vec<(String, i64)>,
+    top_groups: Vec<(String, i64, i64)>,
+}
+
+impl DashboardRecentAlertsSnapshotFields {
+    fn from_summary(summary: tavily_hikari::RecentAlertsSummary, token: [i64; 4]) -> Self {
+        let counts = summary
+            .counts_by_type
+            .iter()
+            .map(|item| (item.alert_type.clone(), item.count))
+            .collect();
+        let top_groups = summary
+            .top_groups
+            .iter()
+            .map(|group| (group.id.clone(), group.count, group.last_seen))
+            .collect();
+        Self {
+            total_events: summary.total_events,
+            grouped_count: summary.grouped_count,
+            view: DashboardRecentAlertsView::from(summary),
+            token,
+            counts,
+            top_groups,
+        }
+    }
+
+    fn from_last_good(snapshot: &DashboardOverviewSnapshot) -> Self {
+        let freshness = snapshot.freshness.as_ref();
+        Self {
+            view: snapshot.payload.recent_alerts.clone(),
+            token: freshness.recent_alerts_token,
+            total_events: freshness.recent_alerts_total_events,
+            grouped_count: freshness.recent_alerts_grouped_count,
+            counts: freshness.recent_alerts_counts.clone(),
+            top_groups: freshness.recent_alerts_top_groups.clone(),
+        }
+    }
+}
+
 struct DashboardOverviewLoadGuard {
     state: Arc<Mutex<DashboardOverviewCacheState>>,
     generation: u64,
@@ -1311,6 +1355,7 @@ async fn sse_public(
 
 async fn build_dashboard_overview_payload(
     state: &Arc<AppState>,
+    last_good: Option<&DashboardOverviewSnapshot>,
 ) -> Result<DashboardOverviewSnapshot, ProxyError> {
     #[cfg(test)]
     {
@@ -1386,35 +1431,33 @@ async fn build_dashboard_overview_payload(
         .list_recent_jobs(DASHBOARD_RECENT_JOBS_LIMIT)
         .await
         .unwrap_or_default();
-    let (recent_alerts, recent_alerts_token) = state
-        .proxy
-        .dashboard_recent_alerts_summary_for_cold_start_with_token(24)
-        .await
-        .unwrap_or_else(|_| {
-            let summary = stale_dashboard_recent_alerts_summary(
-                24,
-                "alert_projection_unavailable",
-            );
-            (summary, [0; 4])
-        });
+    let recent_alerts = match state.proxy.dashboard_recent_alerts_summary_with_token(24).await {
+        Ok((summary, token)) => DashboardRecentAlertsSnapshotFields::from_summary(summary, token),
+        Err(_) => {
+            if let Some(last_good) = last_good {
+                DashboardRecentAlertsSnapshotFields::from_last_good(last_good)
+            } else {
+                let (summary, token) = state
+                    .proxy
+                    .dashboard_recent_alerts_summary_for_cold_start_with_token(24)
+                    .await
+                    .unwrap_or_else(|_| {
+                        let summary = stale_dashboard_recent_alerts_summary(
+                            24,
+                            "alert_projection_unavailable",
+                        );
+                        (summary, [0; 4])
+                    });
+                DashboardRecentAlertsSnapshotFields::from_summary(summary, token)
+            }
+        }
+    };
 
     let hourly_window_anchor = dashboard_hourly_window_anchor(now_ts);
     let recent_job_signatures = recent_jobs
         .iter()
         .map(|job| (job.id, job.status.clone(), job.finished_at))
         .collect::<Vec<_>>();
-    let recent_alert_counts = recent_alerts
-        .counts_by_type
-        .iter()
-        .map(|item| (item.alert_type.clone(), item.count))
-        .collect::<Vec<_>>();
-    let recent_alert_top_groups = recent_alerts
-        .top_groups
-        .iter()
-        .map(|group| (group.id.clone(), group.count, group.last_seen))
-        .collect::<Vec<_>>();
-    let recent_alerts_view = DashboardRecentAlertsView::from(recent_alerts.clone());
-
     let payload = DashboardOverviewPayload {
             summary: summary.clone().into(),
             summary_windows: SummaryWindowsView::from(summary_windows.clone()),
@@ -1439,7 +1482,7 @@ async fn build_dashboard_overview_payload(
             exhausted_keys: exhausted_keys.into_iter().map(ApiKeyView::from_list).collect(),
             recent_logs,
             recent_jobs: recent_jobs.into_iter().map(JobLogView::from).collect(),
-            recent_alerts: recent_alerts_view,
+            recent_alerts: recent_alerts.view.clone(),
         };
     let http_json = serde_json::to_vec(&payload)
         .map(Bytes::from)
@@ -1499,11 +1542,11 @@ async fn build_dashboard_overview_payload(
             recent_request_logs,
             trend_request_logs,
             recent_jobs: recent_job_signatures,
-            recent_alerts_token,
+            recent_alerts_token: recent_alerts.token,
             recent_alerts_total_events: recent_alerts.total_events,
             recent_alerts_grouped_count: recent_alerts.grouped_count,
-            recent_alerts_counts: recent_alert_counts,
-            recent_alerts_top_groups: recent_alert_top_groups,
+            recent_alerts_counts: recent_alerts.counts,
+            recent_alerts_top_groups: recent_alerts.top_groups,
             request_log_retention_days,
             hourly_window_anchor,
             retention_since,
@@ -1683,7 +1726,7 @@ async fn compute_dashboard_overview_freshness(
     // duplicate work on the dashboard hot path.
     let (recent_alerts, recent_alerts_token) = state
         .proxy
-        .dashboard_recent_alerts_summary_with_token(24)
+        .dashboard_recent_alerts_freshness_with_token(24)
         .await?;
     Ok(DashboardOverviewFreshness {
         summary: [
@@ -2049,7 +2092,13 @@ async fn refresh_dashboard_overview_snapshot(
     }
 
     let payload_started = Instant::now();
-    let result = build_dashboard_overview_payload(state).await.map(Arc::new);
+    let last_good_alerts = {
+        let cache = cache_handle.lock().await;
+        cache.cached.as_ref().map(|cached| cached.snapshot.clone())
+    };
+    let result = build_dashboard_overview_payload(state, last_good_alerts.as_deref())
+        .await
+        .map(Arc::new);
     tavily_hikari::emit_sampled_perf_log(
         tavily_hikari::DbLogStatus::Info,
         "admin_read",
