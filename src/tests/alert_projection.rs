@@ -48,17 +48,14 @@ async fn insert_projected_rate_limit_alert(proxy: &TavilyProxy, token_id: &str, 
 async fn advance_alert_projection_until(proxy: &TavilyProxy, projected_events: i64) {
     let mut outcomes = Vec::new();
     for _ in 0..12 {
-        let outcome = proxy
-            .key_store
-            .advance_alert_projection_slice()
+        let dashboard_dirty = proxy
+            .advance_dashboard_alert_projection_slice()
             .await
             .expect("advance alert projection slice");
-        outcomes.push(format!("{outcome:?}"));
-        if matches!(outcome, AlertProjectionSliceOutcome::Deferred { .. }) {
-            // Production retries this background slice on a later scheduler wake.
-            // Yielding here prevents a test-only tight loop from repeatedly
-            // observing the same lazy-pool transition before returned handles
-            // become idle.
+        outcomes.push(format!("dashboard_dirty={dashboard_dirty}"));
+        if !dashboard_dirty {
+            // Production retries a deferred slice on a later scheduler wake.
+            // Keep this helper from spinning against a lazy pool in tests.
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let summary = proxy
@@ -79,18 +76,28 @@ async fn advance_alert_projection_until(proxy: &TavilyProxy, projected_events: i
     );
 }
 
-async fn advance_alert_projection_until_full_coverage(proxy: &TavilyProxy) {
-    let mut outcomes = Vec::new();
-    for _ in 0..24 {
+async fn advance_alert_projection_slice_until_admitted(
+    proxy: &TavilyProxy,
+) -> AlertProjectionSliceOutcome {
+    for _ in 0..12 {
         let outcome = proxy
             .key_store
             .advance_alert_projection_slice()
             .await
-            .expect("advance alert projection history slice");
-        outcomes.push(format!("{outcome:?}"));
-        if matches!(outcome, AlertProjectionSliceOutcome::Deferred { .. }) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            .expect("advance alert projection slice");
+        if !matches!(outcome, AlertProjectionSliceOutcome::Deferred { .. }) {
+            return outcome;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("alert projection remained admission-deferred");
+}
+
+async fn advance_alert_projection_until_full_coverage(proxy: &TavilyProxy) {
+    let mut outcomes = Vec::new();
+    for _ in 0..24 {
+        let outcome = advance_alert_projection_slice_until_admitted(proxy).await;
+        outcomes.push(format!("{outcome:?}"));
         let status = proxy
             .dashboard_alert_projection_status()
             .await
@@ -155,6 +162,65 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
     assert!(!replayed.stale);
 
     drop(resumed);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_materializes_dashboard_summary_before_dashboard_reads() {
+    let db_path = temp_db_path("alert-projection-materialized-summary");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_500_050;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-materialized-summary".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(&proxy, "projection-summary-token", now).await;
+    for _ in 0..6 {
+        let outcome = proxy
+            .key_store
+            .advance_alert_projection_slice()
+            .await
+            .expect("advance exact-boundary projection slice");
+        if matches!(outcome, AlertProjectionSliceOutcome::Deferred { .. }) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    proxy
+        .key_store
+        .refresh_dashboard_alert_projection_summary()
+        .await
+        .expect("refresh materialized summary");
+    let cached_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_recent_summaries WHERE window_hours = 24",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read materialized summary row");
+    assert_eq!(cached_rows, 1);
+
+    // Dashboard reads must not rebuild the alert CTE. The source table is not
+    // needed once the tail is idle and the summary has been materialized.
+    sqlx::query("DROP TABLE auth_token_logs")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove raw alert source after projection is idle");
+    let summary = proxy
+        .dashboard_recent_alerts_summary(24)
+        .await
+        .expect("read materialized dashboard summary");
+    assert_eq!(summary.total_events, 1);
+    assert_eq!(summary.coverage, "ok");
+
+    drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -627,6 +693,94 @@ async fn alert_projection_history_fence_repair_replays_old_v14_gap() {
 }
 
 #[tokio::test]
+async fn alert_projection_exact_tail_boundary_belongs_to_recent_lane() {
+    let db_path = temp_db_path("alert-projection-exact-tail-boundary");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now: i64 = 1_752_575_075;
+    let tail_boundary = now.saturating_sub(30 * 24 * 60 * 60);
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-exact-tail-boundary".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(
+        &proxy,
+        "projection-exact-tail-boundary-token",
+        tail_boundary,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_state \
+         SET cursor_occurred_at = ?, cursor_row_sort_id = '', phase = 'idle', observed_at = ?",
+    )
+    .bind(tail_boundary)
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("simulate an old recent tail boundary");
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_history_state \
+         SET cursor_occurred_at = 0, cursor_row_sort_id = '', \
+             fence_occurred_at = ?, fence_row_sort_id = '', phase = 'catching_up'",
+    )
+    .bind(tail_boundary)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("simulate the old exact-second history fence");
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 17")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("simulate upgrade before exact-boundary repair");
+
+    proxy
+        .key_store
+        .prepare_versioned_schema()
+        .await
+        .expect("repair exact-second boundary ownership");
+    let repaired_fences: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_history_state \
+         WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' \
+           AND fence_occurred_at = ? AND fence_row_sort_id = '' \
+           AND phase = 'catching_up'",
+    )
+    .bind(tail_boundary.saturating_sub(1))
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read repaired history fence");
+    assert_eq!(repaired_fences, 3);
+
+    for _ in 0..6 {
+        let outcome = proxy
+            .key_store
+            .advance_alert_projection_slice()
+            .await
+            .expect("advance exact-boundary projection slice");
+        if matches!(outcome, AlertProjectionSliceOutcome::Deferred { .. }) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    let boundary_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_events \
+         WHERE source_kind = 'auth_token_log'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read exact-boundary recent-tail event");
+    assert_eq!(boundary_events, 1);
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn alert_projection_preempts_backlog_for_a_new_idle_source() {
     let db_path = temp_db_path("alert-projection-tail-source-fairness");
     let db_string = db_path.to_string_lossy().to_string();
@@ -651,11 +805,7 @@ async fn alert_projection_preempts_backlog_for_a_new_idle_source() {
         )
         .await;
     }
-    let first = proxy
-        .key_store
-        .advance_alert_projection_slice()
-        .await
-        .expect("start auth-token backlog");
+    let first = advance_alert_projection_slice_until_admitted(&proxy).await;
     assert!(matches!(
         first,
         AlertProjectionSliceOutcome::Advanced { rows: 25, .. }
@@ -672,11 +822,7 @@ async fn alert_projection_preempts_backlog_for_a_new_idle_source() {
     .await
     .expect("insert a fresh failed job alert");
 
-    let second = proxy
-        .key_store
-        .advance_alert_projection_slice()
-        .await
-        .expect("project fresh scheduled-job alert before continuing backlog");
+    let second = advance_alert_projection_slice_until_admitted(&proxy).await;
     assert!(matches!(
         second,
         AlertProjectionSliceOutcome::Advanced { rows: 1, .. }
@@ -733,11 +879,7 @@ async fn alert_projection_idle_probe_does_not_persist_empty_cursors() {
     .expect("read cursor generations before idle probe")
     .into_iter()
     .sum();
-    let outcome = proxy
-        .key_store
-        .advance_alert_projection_slice()
-        .await
-        .expect("run empty alert projection probe");
+    let outcome = advance_alert_projection_slice_until_admitted(&proxy).await;
     assert_eq!(outcome, AlertProjectionSliceOutcome::Idle);
     let after: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT SUM(generation) FROM observability.dashboard_alert_projection_state \

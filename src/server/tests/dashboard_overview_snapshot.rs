@@ -12,6 +12,23 @@ async fn load_dashboard_overview_after_background_refresh(
     wait_for_dashboard_overview_refresh(state).await
 }
 
+#[test]
+fn dashboard_alert_dirty_generation_survives_an_older_refresh_completion() {
+    let mut cache = DashboardOverviewCacheState {
+        alert_projection_generation: 1,
+        ..Default::default()
+    };
+
+    // The projection advances after a loader captured generation 1 but before
+    // that loader can publish. Its completion must not erase generation 2.
+    cache.alert_projection_generation = 2;
+    acknowledge_dashboard_alert_projection_generation(&mut cache, 1);
+    assert_eq!(cache.built_alert_projection_generation, None);
+
+    acknowledge_dashboard_alert_projection_generation(&mut cache, 2);
+    assert_eq!(cache.built_alert_projection_generation, Some(2));
+}
+
 #[tokio::test]
 async fn compute_signatures_reuses_dashboard_boundary_contract() {
     let db_path = temp_db_path("summary-signatures-dashboard-boundaries");
@@ -406,7 +423,7 @@ async fn dashboard_pressure_returns_last_good_without_refresh() {
         cache.loading_started_at = Some(tokio::time::Instant::now());
         cache.loading_generation
     };
-    let initial = refresh_dashboard_overview_snapshot(&state, cache_handle, generation)
+    let initial = refresh_dashboard_overview_snapshot(&state, cache_handle, generation, 0)
         .await
         .expect("build an initial last-good overview snapshot for pressure containment");
     reset_dashboard_overview_build_count(&state).await;

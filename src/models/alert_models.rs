@@ -1,4 +1,5 @@
 use super::TokenRequestKind;
+use serde::{Deserialize, Serialize};
 
 pub const ALERT_TYPE_UPSTREAM_RATE_LIMITED_429: &str = "upstream_rate_limited_429";
 pub const ALERT_TYPE_UPSTREAM_USAGE_LIMIT_432: &str = "upstream_usage_limit_432";
@@ -48,20 +49,20 @@ pub fn default_alert_type_counts() -> Vec<AlertTypeCount> {
     .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertEntityRef {
     pub id: String,
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertUserRef {
     pub user_id: String,
     pub display_name: Option<String>,
     pub username: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertRequestRef {
     pub id: i64,
     pub method: String,
@@ -69,13 +70,13 @@ pub struct AlertRequestRef {
     pub query: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertSourceRef {
     pub kind: String,
     pub id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertJobRef {
     pub id: i64,
     pub job_type: String,
@@ -88,7 +89,7 @@ pub struct AlertJobRef {
     pub finished_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AlertSemanticWindowKind {
     RequestRate,
     RollingHour,
@@ -107,7 +108,7 @@ impl AlertSemanticWindowKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertSemanticWindow {
     pub kind: AlertSemanticWindowKind,
     pub window_minutes: Option<i64>,
@@ -116,7 +117,7 @@ pub struct AlertSemanticWindow {
     pub window_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertEventRecord {
     pub id: String,
     pub alert_type: String,
@@ -142,7 +143,7 @@ pub struct AlertEventRecord {
     pub semantic_window: Option<AlertSemanticWindow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PaginatedAlertEvents {
     pub items: Vec<AlertEventRecord>,
     pub total: i64,
@@ -150,7 +151,7 @@ pub struct PaginatedAlertEvents {
     pub per_page: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertGroupRecord {
     pub id: String,
     pub alert_type: String,
@@ -178,7 +179,7 @@ pub struct AlertGroupRecord {
     pub child_events: Vec<AlertEventRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PaginatedAlertGroups {
     pub items: Vec<AlertGroupRecord>,
     pub total: i64,
@@ -186,7 +187,7 @@ pub struct PaginatedAlertGroups {
     pub per_page: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AlertTypeCount {
     pub alert_type: String,
     pub count: i64,

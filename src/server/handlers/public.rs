@@ -931,6 +931,8 @@ async fn reset_dashboard_overview_build_count(state: &Arc<AppState>) {
     cache.build_count = 0;
     cache.freshness_probe_count = 0;
     cache.built_request_stats_generation = None;
+    cache.alert_projection_generation = 0;
+    cache.built_alert_projection_generation = None;
     cache.last_refresh_requested_at = None;
     cache.last_freshness_probe_at = None;
 }
@@ -963,7 +965,17 @@ async fn expire_dashboard_overview_freshness_probe(state: &Arc<AppState>) {
 async fn mark_dashboard_overview_alert_projection_dirty(state: &AppState) {
     let cache_handle = dashboard_overview_cache_for_state(state);
     let mut cache = cache_handle.lock().await;
+    cache.alert_projection_generation = cache.alert_projection_generation.wrapping_add(1);
     cache.last_freshness_probe_at = None;
+}
+
+fn acknowledge_dashboard_alert_projection_generation(
+    cache: &mut DashboardOverviewCacheState,
+    expected_generation: u64,
+) {
+    if cache.alert_projection_generation == expected_generation {
+        cache.built_alert_projection_generation = Some(expected_generation);
+    }
 }
 
 #[cfg(test)]
@@ -1727,10 +1739,12 @@ async fn load_dashboard_overview_snapshot(
             let has_cached = cache.cached.is_some();
             let generation_dirty = request_stats_generation.is_some()
                 && request_stats_generation != cache.built_request_stats_generation;
+            let alert_projection_dirty = cache.alert_projection_generation
+                != cache.built_alert_projection_generation.unwrap_or_default();
             let safety_probe_due = cache.last_freshness_probe_at.is_none_or(|last_probe| {
                 last_probe.elapsed() >= DASHBOARD_OVERVIEW_SAFETY_PROBE_INTERVAL
             });
-            let dirty_refresh_due = generation_dirty
+            let dirty_refresh_due = (generation_dirty || alert_projection_dirty)
                 && cache.last_refresh_requested_at.is_none_or(|last_refresh| {
                     last_refresh.elapsed() >= DASHBOARD_OVERVIEW_MIN_REFRESH_INTERVAL
                 });
@@ -1774,6 +1788,7 @@ async fn load_dashboard_overview_snapshot(
                     cache.last_refresh_requested_at = Some(tokio::time::Instant::now());
                     DashboardOverviewLoadAction::Refresh {
                         generation: cache.loading_generation,
+                        alert_projection_generation: cache.alert_projection_generation,
                         last_good,
                         cold_waiter: Some(cache.notify.clone().notified_owned()),
                     }
@@ -1801,6 +1816,7 @@ async fn load_dashboard_overview_snapshot(
         }
         DashboardOverviewLoadAction::Refresh {
             generation,
+            alert_projection_generation,
             last_good,
             cold_waiter,
         } => {
@@ -1811,6 +1827,7 @@ async fn load_dashboard_overview_snapshot(
                         &refresh_state,
                         cache_handle,
                         generation,
+                        alert_projection_generation,
                     )
                     .await;
                 });
@@ -1823,6 +1840,7 @@ async fn load_dashboard_overview_snapshot(
                         &refresh_state,
                         refresh_cache,
                         generation,
+                        alert_projection_generation,
                     )
                     .await;
                 });
@@ -1878,6 +1896,7 @@ enum DashboardOverviewLoadAction {
     Wait(tokio::sync::futures::OwnedNotified),
     Refresh {
         generation: u64,
+        alert_projection_generation: u64,
         last_good: Option<Arc<DashboardOverviewSnapshot>>,
         cold_waiter: Option<tokio::sync::futures::OwnedNotified>,
     },
@@ -1906,6 +1925,7 @@ async fn refresh_dashboard_overview_snapshot(
     state: &Arc<AppState>,
     cache_handle: Arc<Mutex<DashboardOverviewCacheState>>,
     load_generation: u64,
+    expected_alert_projection_generation: u64,
 ) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
     let perf = tavily_hikari::RuntimePerfScope::start();
     let mut load_guard = DashboardOverviewLoadGuard::new(cache_handle.clone(), load_generation);
@@ -1952,6 +1972,10 @@ async fn refresh_dashboard_overview_snapshot(
         if cache.loading_generation == load_generation {
             cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
             cache.built_request_stats_generation = state.proxy.dashboard_read_generation();
+            acknowledge_dashboard_alert_projection_generation(
+                &mut cache,
+                expected_alert_projection_generation,
+            );
             if let Some(cached) = cache.cached.as_ref()
                 && cached.freshness.as_ref() == &freshness
             {
@@ -2028,6 +2052,10 @@ async fn refresh_dashboard_overview_snapshot(
             freshness: snapshot.freshness.clone(),
         });
         cache.built_request_stats_generation = state.proxy.dashboard_read_generation();
+        acknowledge_dashboard_alert_projection_generation(
+            &mut cache,
+            expected_alert_projection_generation,
+        );
         cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
         tavily_hikari::emit_low_memory_protection_decision(
             "admin_read",

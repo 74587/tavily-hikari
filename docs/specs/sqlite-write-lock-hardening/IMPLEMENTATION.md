@@ -21,7 +21,9 @@
 - Dashboard reads no longer make raw alert aggregation part of the HTTP/SSE path. The AppState-owned
   read model returns its immutable last-good snapshot under pressure, while a bounded
   observability-sidecar AlertProjection advances source cursors and a fence/tail replay in the
-  background. Overview-visible durable writes advance the same shared dirty generation as request
+  background. The projection worker materializes a bounded recent-summary record for each source
+  generation, so Dashboard reads consume the record and coverage rather than running a sidecar
+  aggregate. Overview-visible durable writes advance the same shared dirty generation as request
   statistics, so the ten-second rebuild cadence does not depend on the sixty-second safety probe.
   The projection keeps a recent Dashboard tail and a separate historical administrator lane: tail
   coverage must be complete before replacing last-good Dashboard data, while history may continue

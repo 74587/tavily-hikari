@@ -93,7 +93,8 @@
   仅在 complete history coverage 为 `ok` 时读取 observability sidecar。任一 cursor 追赶、stale 或
   rolling upgrade 期间保守回退既有原始查询，不能把未投影历史表示为空。
 - 历史 lane 的 fence 必须与 recent tail 的起点同秒衔接：tail 拥有起点秒内的记录，history 包含严格更早
-  的记录，不能以时间戳减一替代复合 cursor。空闲 source probe 不得写 cursor/generation；覆盖观察只能由
+  的记录，运行时始终使用复合 cursor；仅 v17 对旧的“同秒 + 空 id”历史 fence 做一次性上一秒迁移，
+  以恢复该低 sentinel 的边界所有权。空闲 source probe 不得写 cursor/generation；覆盖观察只能由
   独立低频 heartbeat 更新。Dashboard summary 只允许从 sidecar 执行时间窗固定、结果有界的 SQL 聚合，禁止
   把整窗 `payload_json` 拉回进程后再分组。
 - 已应用的 projection migration 不得原地修改 checksum。若发现历史 cursor/fence 边界缺口，后续加法

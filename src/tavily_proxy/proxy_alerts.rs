@@ -11,8 +11,20 @@ impl TavilyProxy {
         match self.advance_dashboard_alert_projection_slice_outcome().await? {
             AlertProjectionSliceOutcome::Advanced {
                 dashboard_dirty, ..
-            } => Ok((dashboard_dirty, false)),
-            AlertProjectionSliceOutcome::Idle => Ok((false, true)),
+            } => {
+                if dashboard_dirty {
+                    self.key_store
+                        .refresh_dashboard_alert_projection_summary()
+                        .await?;
+                }
+                Ok((dashboard_dirty, false))
+            }
+            AlertProjectionSliceOutcome::Idle => {
+                self.key_store
+                    .refresh_dashboard_alert_projection_summary()
+                    .await?;
+                Ok((false, true))
+            }
             AlertProjectionSliceOutcome::Deferred { .. } => Ok((false, false)),
         }
     }
@@ -22,13 +34,20 @@ impl TavilyProxy {
     }
 
     pub async fn advance_dashboard_alert_projection_slice(&self) -> Result<bool, ProxyError> {
-        Ok(matches!(
-            self.advance_dashboard_alert_projection_slice_outcome().await?,
+        let outcome = self.advance_dashboard_alert_projection_slice_outcome().await?;
+        let dashboard_dirty = matches!(
+            outcome,
             AlertProjectionSliceOutcome::Advanced {
                 dashboard_dirty: true,
                 ..
             }
-        ))
+        );
+        if dashboard_dirty {
+            self.key_store
+                .refresh_dashboard_alert_projection_summary()
+                .await?;
+        }
+        Ok(dashboard_dirty)
     }
 
     pub(crate) async fn dashboard_alert_projection_status(

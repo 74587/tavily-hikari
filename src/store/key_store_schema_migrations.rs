@@ -55,6 +55,14 @@ const ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_NAME: &str =
     "dashboard-alert-projection-admin-history-fence-repair-v1";
 const ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_CHECKSUM: &str =
     "sha256:8ef5bf8e2b29acd27096657ad0d3d97e";
+const ALERT_PROJECTION_SUMMARY_VERSION: i64 = 16;
+const ALERT_PROJECTION_SUMMARY_NAME: &str = "dashboard-alert-projection-summary-v1";
+const ALERT_PROJECTION_SUMMARY_CHECKSUM: &str = "sha256:b7f45f0e7e5388f9b1f6b0fa75b9c4e1";
+const ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_VERSION: i64 = 17;
+const ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_NAME: &str =
+    "dashboard-alert-projection-exact-boundary-repair-v1";
+const ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_CHECKSUM: &str =
+    "sha256:4f1246b9e907ed2bc4ce4cda5a66fb83";
 const NEW_DATABASE_BOOTSTRAP_MARKER: &str = "tavily-hikari-schema-bootstrap-v1";
 
 impl KeyStore {
@@ -726,6 +734,16 @@ impl KeyStore {
                 ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_NAME,
                 ALERT_PROJECTION_ADMIN_HISTORY_FENCE_REPAIR_CHECKSUM,
             ),
+            (
+                ALERT_PROJECTION_SUMMARY_VERSION,
+                ALERT_PROJECTION_SUMMARY_NAME,
+                ALERT_PROJECTION_SUMMARY_CHECKSUM,
+            ),
+            (
+                ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_VERSION,
+                ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_NAME,
+                ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_CHECKSUM,
+            ),
         ];
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
@@ -862,6 +880,20 @@ impl KeyStore {
         {
             return Err(ProxyError::Other(
                 "schema migration object validation failed at version 14".to_string(),
+            ));
+        }
+        if self
+            .schema_migration_applied(ALERT_PROJECTION_SUMMARY_VERSION)
+            .await?
+            && !self
+                .schema_object_exists(
+                    "observability",
+                    "dashboard_alert_projection_recent_summaries",
+                )
+                .await?
+        {
+            return Err(ProxyError::Other(
+                "schema migration object validation failed at version 16".to_string(),
             ));
         }
         if self
@@ -1373,6 +1405,66 @@ impl KeyStore {
         .await
     }
 
+    async fn apply_alert_projection_summary_migration(&self) -> Result<(), ProxyError> {
+        // Recent-alert summaries are derived, bounded Dashboard read-model data.
+        // The projection worker fills the table after startup; migration never
+        // scans alert sources or performs a sidecar backfill.
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS observability.dashboard_alert_projection_recent_summaries (
+                window_hours INTEGER PRIMARY KEY NOT NULL,
+                source_generation INTEGER NOT NULL,
+                computed_at INTEGER NOT NULL,
+                summary_json TEXT NOT NULL
+            )"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            ALERT_PROJECTION_SUMMARY_VERSION,
+            ALERT_PROJECTION_SUMMARY_NAME,
+            ALERT_PROJECTION_SUMMARY_CHECKSUM,
+        )
+        .await
+    }
+
+    async fn apply_alert_projection_exact_boundary_repair_migration(
+        &self,
+    ) -> Result<(), ProxyError> {
+        // The recent tail owns all source ids at its cursor second because the
+        // tail cursor is the low sentinel. History must therefore stop at the
+        // previous second; a fence at the cursor second with an empty id loses
+        // the exact-boundary ids from both lanes.
+        sqlx::query(
+            r#"UPDATE observability.dashboard_alert_projection_history_state AS history
+                   SET cursor_occurred_at = 0,
+                       cursor_row_sort_id = '',
+                       fence_occurred_at = CASE
+                           WHEN tail.cursor_occurred_at > 0
+                               THEN tail.cursor_occurred_at - 1
+                           ELSE NULL
+                       END,
+                       fence_row_sort_id = CASE
+                           WHEN tail.cursor_occurred_at > 0 THEN ''
+                           ELSE NULL
+                       END,
+                       generation = history.generation + 1,
+                       phase = CASE
+                           WHEN tail.cursor_occurred_at > 0 THEN 'catching_up'
+                           ELSE 'idle'
+                       END
+                  FROM observability.dashboard_alert_projection_state AS tail
+                 WHERE tail.source_kind = history.source_kind"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        self.record_schema_migration(
+            ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_VERSION,
+            ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_NAME,
+            ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_CHECKSUM,
+        )
+        .await
+    }
+
     async fn apply_reconciliation_work_migration(&self) -> Result<(), ProxyError> {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS upstream_reconciliation_work (
@@ -1771,6 +1863,19 @@ impl KeyStore {
             self.apply_alert_projection_admin_history_fence_repair_migration()
                 .await?;
         }
+        if !self
+            .schema_migration_applied(ALERT_PROJECTION_SUMMARY_VERSION)
+            .await?
+        {
+            self.apply_alert_projection_summary_migration().await?;
+        }
+        if !self
+            .schema_migration_applied(ALERT_PROJECTION_EXACT_BOUNDARY_REPAIR_VERSION)
+            .await?
+        {
+            self.apply_alert_projection_exact_boundary_repair_migration()
+                .await?;
+        }
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -1816,6 +1921,9 @@ impl KeyStore {
         self.apply_alert_projection_admin_history_migration().await?;
         self.apply_alert_projection_admin_history_fence_repair_migration()
             .await?;
+        self.apply_alert_projection_summary_migration().await?;
+        self.apply_alert_projection_exact_boundary_repair_migration()
+            .await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -1823,7 +1931,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 15_i64,
+            migration_count = 17_i64,
         );
         Ok(())
     }
