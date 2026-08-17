@@ -833,10 +833,12 @@ impl KeyStore {
     ) -> Result<RecentAlertsSummary, ProxyError> {
         let clamped_window_hours = window_hours.clamp(1, 24 * 30);
         let status = self.alert_projection_status().await?;
-        let source_generation = self.alert_projection_recent_generation().await?;
-        if let Some((cached_generation, summary)) = self
-            .load_materialized_projected_recent_alerts_summary(clamped_window_hours)
-            .await?
+        let (source_generation, materialized_summary) = self
+            .load_materialized_projected_recent_alerts_summary_with_generation(
+                clamped_window_hours,
+            )
+            .await?;
+        if let Some((cached_generation, summary)) = materialized_summary
         {
             return Ok(Self::apply_alert_projection_status(
                 summary,
@@ -915,24 +917,33 @@ impl KeyStore {
         conn.complete_query(result).await
     }
 
-    async fn load_materialized_projected_recent_alerts_summary(
+    async fn load_materialized_projected_recent_alerts_summary_with_generation(
         &self,
         window_hours: i64,
-    ) -> Result<Option<(i64, RecentAlertsSummary)>, ProxyError> {
-        let mut conn = self
+    ) -> Result<(i64, Option<(i64, RecentAlertsSummary)>), ProxyError> {
+        let mut snapshot = self
             .sqlite_runtime
-            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .begin_read_snapshot(SqliteOperation::AlertProjection)
             .await?;
-        let result = sqlx::query_as::<_, (i64, String)>(
-            r#"SELECT source_generation, summary_json
-                 FROM observability.dashboard_alert_projection_recent_summaries
-                WHERE window_hours = ?"#,
-        )
-        .bind(window_hours)
-        .fetch_optional(&mut *conn)
+        let result = async {
+            let source_generation = sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(SUM(generation), 0) FROM observability.dashboard_alert_projection_state",
+            )
+            .fetch_one(&mut *snapshot)
+            .await?;
+            let payload = sqlx::query_as::<_, (i64, String)>(
+                r#"SELECT source_generation, summary_json
+                     FROM observability.dashboard_alert_projection_recent_summaries
+                    WHERE window_hours = ?"#,
+            )
+            .bind(window_hours)
+            .fetch_optional(&mut *snapshot)
+            .await?;
+            Ok::<_, sqlx::Error>((source_generation, payload))
+        }
         .await;
-        let payload = conn.complete_query(result).await?;
-        payload
+        let (source_generation, payload) = snapshot.complete_query(result).await?;
+        let summary = payload
             .map(|(source_generation, payload)| {
                 serde_json::from_str(&payload).map_err(|err| {
                     ProxyError::Other(format!(
@@ -940,7 +951,8 @@ impl KeyStore {
                     ))
                 }).map(|summary| (source_generation, summary))
             })
-            .transpose()
+            .transpose()?;
+        Ok((source_generation, summary))
     }
 
     async fn persist_materialized_projected_recent_alerts_summary(

@@ -1341,6 +1341,42 @@ impl Drop for SqliteOperationConnection {
 }
 
 impl SqliteReadSnapshot {
+    pub(crate) async fn complete_query<T>(
+        mut self,
+        query_result: Result<T, sqlx::Error>,
+    ) -> Result<T, ProxyError> {
+        let rollback_result = sqlx::query("ROLLBACK").execute(&mut *self).await;
+        match (query_result, rollback_result) {
+            (Ok(value), Ok(_)) => {
+                drop(self.conn.take().expect("SQLite read snapshot connection"));
+                self.runtime.record_success(
+                    self.operation,
+                    self.pool_wait,
+                    self.begin_wait,
+                    self.started_at.elapsed(),
+                    0,
+                );
+                Ok(value)
+            }
+            (Err(query_err), _) => {
+                let conn = self.conn.take().expect("SQLite read snapshot connection");
+                conn.detach().close().await.ok();
+                let err = ProxyError::Database(query_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, self.begin_wait, &err);
+                Err(err)
+            }
+            (Ok(_), Err(rollback_err)) => {
+                let conn = self.conn.take().expect("SQLite read snapshot connection");
+                conn.detach().close().await.ok();
+                let err = ProxyError::Database(rollback_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, self.begin_wait, &err);
+                Err(err)
+            }
+        }
+    }
+
     pub(crate) async fn close(mut self) -> Result<(), ProxyError> {
         let result = sqlx::query("ROLLBACK").execute(&mut *self).await;
         match result {
