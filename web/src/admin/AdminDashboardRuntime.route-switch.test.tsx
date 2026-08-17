@@ -6,6 +6,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import { installDemoRuntime } from '../api/demo'
+import { fetchDashboardOverview, type DashboardSnapshotEvent } from '../api/runtime'
 import { TooltipProvider } from '../components/ui/tooltip'
 import { LanguageProvider } from '../i18n'
 import { ThemeProvider } from '../theme'
@@ -63,6 +64,48 @@ const originalCancelAnimationFrame = window.cancelAnimationFrame
 const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
 
 let consoleErrors: string[] = []
+
+class ControlledEventSource {
+  static instances: ControlledEventSource[] = []
+
+  readonly url: string
+  readonly withCredentials = false
+  onopen: ((this: EventSource, event: Event) => unknown) | null = null
+  onerror: ((this: EventSource, event: Event) => unknown) | null = null
+  private readonly listeners = new Map<string, Set<EventListenerOrEventListenerObject>>()
+
+  constructor(url: string | URL) {
+    this.url = String(url)
+    ControlledEventSource.instances.push(this)
+    queueMicrotask(() => this.onopen?.call(this as unknown as EventSource, new Event('open')))
+  }
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
+    if (!listener) return
+    const listeners = this.listeners.get(type) ?? new Set<EventListenerOrEventListenerObject>()
+    listeners.add(listener)
+    this.listeners.set(type, listeners)
+  }
+
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
+    if (listener) this.listeners.get(type)?.delete(listener)
+  }
+
+  close(): void {
+    this.listeners.clear()
+  }
+
+  emitSnapshot(payload: DashboardSnapshotEvent): void {
+    const event = new MessageEvent('snapshot', { data: JSON.stringify(payload) })
+    for (const listener of this.listeners.get('snapshot') ?? []) {
+      if (typeof listener === 'function') {
+        listener.call(this as unknown as EventSource, event)
+      } else {
+        listener.handleEvent(event)
+      }
+    }
+  }
+}
 
 const routeSwitchCases: RouteSwitchCase[] = [
   {
@@ -320,10 +363,20 @@ async function navigateTo(path: string): Promise<void> {
   await flushUi(180)
 }
 
-async function mountAdminDashboard(initialPath: string): Promise<{ container: HTMLDivElement; root: Root }> {
+async function mountAdminDashboard(
+  initialPath: string,
+  eventSource?: typeof EventSource,
+): Promise<{ container: HTMLDivElement; root: Root }> {
   window.localStorage.setItem(DEMO_STORAGE_KEY, 'true')
   window.history.replaceState(null, '', withDemoMode(initialPath))
   installDemoRuntime()
+  if (eventSource) {
+    Object.defineProperty(window, 'EventSource', {
+      configurable: true,
+      writable: true,
+      value: eventSource,
+    })
+  }
 
   const container = document.createElement('div')
   container.style.width = '1440px'
@@ -357,6 +410,7 @@ beforeEach(() => {
   installMatchMediaMock()
   installAnimationFrameMock()
   HTMLElement.prototype.scrollIntoView = () => undefined
+  ControlledEventSource.instances = []
 })
 
 afterEach(async () => {
@@ -394,4 +448,54 @@ describe('AdminDashboard route switches', () => {
       }
     })
   }
+
+  it('updates dashboard recent alerts from the shared SSE snapshot', async () => {
+    const { container, root } = await mountAdminDashboard(
+      '/admin/dashboard',
+      ControlledEventSource as unknown as typeof EventSource,
+    )
+
+    try {
+      await waitForRouteRendered(container, { text: 'Dashboard' })
+      await flushUi(300)
+      const eventSource = ControlledEventSource.instances
+        .filter((source) => source.url === '/api/events')
+        .at(-1)
+      expect(eventSource).toBeDefined()
+      const overview = await fetchDashboardOverview()
+      const firstGroup = overview.recentAlerts.topGroups[0]
+      expect(firstGroup).toBeDefined()
+      const marker = 'SSE alert projection marker'
+      await act(async () => {
+        eventSource?.emitSnapshot({
+          ...overview,
+          keys: overview.exhaustedKeys,
+          logs: overview.recentLogs,
+          recentAlerts: {
+            ...overview.recentAlerts,
+            totalEvents: Math.max(1, overview.recentAlerts.totalEvents),
+            groupedCount: 1,
+            groupedCountWindows: overview.recentAlerts.groupedCountWindows.map((item) => ({
+              ...item,
+              groupedCount: 1,
+            })),
+            topGroups: [
+              {
+                ...firstGroup!,
+                subjectLabel: marker,
+                latestEvent: { ...firstGroup!.latestEvent, summary: marker },
+              },
+            ],
+          },
+        })
+        await Promise.resolve()
+      })
+      await flushUi(80)
+      expect(container.textContent).toContain(marker)
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+    }
+  })
 })

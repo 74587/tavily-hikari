@@ -16,7 +16,9 @@
 - `accessToken` 模式已接入 `HMAC-SHA256(secret, "v1" + token_id + period_code)`，业务窗口按服务器本地时区 `S1=00-11`、`S2=11-22`、`S3=22-24` 切分。
 - 已落地完整窗口对账、Research 终态等待、24 小时 degraded 兜底、signed reconciliation adjustment 账本，以及对小时/日/月额度的归属修正。
 - compare-only 的 `/api/users` / `/admin/users` / `/admin/users/usage` 已统一为 hybrid shadow 语义：始终返回 `当前本地 24h + 已确认 shadow delta`；相等 delta 不再折叠成空值，未完全对账时明确标记为 `projected` 并提示“含未对账估算”。
-- shadow compare 与 precise cutover 已拆成两套门禁：即使遗留 `upstream_mcp` session 尚未排空，只要三项静态条件满足，shadow compare 仍会持续产数；precise 仍要求活跃异常 session 清零并等待下一完整窗口。
+- `ReconciliationController` 将既有 precise-reconciliation 开关映射为可复制的 `compare`、
+  `active` 或 `active_paused` 状态。写 true 立即记录下一完整业务窗口为 billing boundary；边界前
+  继续 shadow，历史 observed 不重放。integrity pause 清除旧开关并要求一次新的 true 写入恢复。
 - 管理端已新增系统设置中的 warning 入口、`/admin/system-settings/status` 系统状态页中的活跃 `upstream_mcp` session 统计卡，以及隐藏路由 `/admin/system-settings/mcp-session-bindings` 的查询/释放管理面。
 - 系统状态主相位已纠偏：shadow 已产数但 precise 被旧 session 阻塞时，显示“仅对比”，不再显示“排空旧会话中”。
 - reconciliation 运行时已补充 `lastReconciliationRunAt`、`lastShadowAdjustmentAt`、`lastReconciliationEnqueueErrorAt` 三个全局摘要字段，并为 enqueue reuse / exhaustion、run started / completed、shadow adjustment written 输出结构化日志信号。
@@ -46,7 +48,7 @@
 
 ## Remaining Gaps
 
-- 待补当前最终 SHA 的视觉证据与 owner-facing 截图归档。
+- 101 双库快照对比仍受共享 testbox 可用空间限制；本地与 Storybook 门禁已完成。
 
 ## Related Changes
 

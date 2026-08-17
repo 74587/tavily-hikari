@@ -339,7 +339,7 @@ impl KeyStore {
         // CI can spend a few scheduler quanta opening the test database. Keep
         // the production 50ms slice unchanged while giving this deterministic
         // contract test enough bounded time to observe one finite slice.
-        const TEST_SLICE_BUDGET: Duration = Duration::from_millis(250);
+        const TEST_SLICE_BUDGET: Duration = Duration::from_secs(1);
         self.flush_request_stats_writes_with_wait_policy(
             TEST_SLICE_BUDGET,
             Some(self.backend_time.instant_now() + TEST_SLICE_BUDGET),

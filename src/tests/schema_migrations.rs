@@ -28,7 +28,10 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .fetch_all(&pool)
             .await
             .expect("read migration ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    );
     let projection_state: (i64, i64, i64) = sqlx::query_as(
         "SELECT batch_size, scanned_rows, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
     )
@@ -45,6 +48,41 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
     assert_eq!(
         projection_complete, 1,
         "a new empty database must not schedule historical reconciliation projection"
+    );
+    let controller: (String, i64) = sqlx::query_as(
+        "SELECT mode, legacy_active FROM upstream_reconciliation_control_state WHERE id = 'local'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read fresh reconciliation controller");
+    assert_eq!(controller, ("compare".to_string(), 0));
+    let projection_sources: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM observability.dashboard_alert_projection_state")
+            .fetch_one(&pool)
+            .await
+            .expect("read fresh alert projection sources");
+    assert_eq!(projection_sources, 3);
+    let recent_tail_sources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_state \
+         WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read fresh full-history alert projection cursors");
+    assert_eq!(
+        recent_tail_sources, 0,
+        "the Dashboard tail starts at its bounded recent cursor"
+    );
+    let full_history_cursor_sources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_history_state \
+         WHERE cursor_occurred_at = 0 AND cursor_row_sort_id = '' AND phase = 'catching_up'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read fresh full-history alert projection cursors");
+    assert_eq!(
+        full_history_cursor_sources, 3,
+        "the administrator sidecar starts from a durable full-history cursor without startup scans"
     );
     sqlx::query("UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 2")
         .execute(&pool)
@@ -82,11 +120,13 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
         "DROP TRIGGER trg_upstream_reconciliation_work_failure_reset_update",
         "DROP TABLE upstream_reconciliation_projection_state",
         "DROP TABLE upstream_reconciliation_run_observation",
+        "DROP TABLE upstream_reconciliation_control_transitions",
+        "DROP TABLE upstream_reconciliation_control_state",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN transport_failure_streak",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN transport_retry_at",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_failure_streak",
         "ALTER TABLE upstream_reconciliation_work DROP COLUMN semantic_retry_at",
-        "DELETE FROM schema_migrations WHERE version IN (9, 10)",
+        "DELETE FROM schema_migrations WHERE version IN (9, 10, 11, 12, 13)",
     ] {
         sqlx::query(statement)
             .execute(&proxy.key_store.pool)
@@ -143,6 +183,11 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
         )
         .await
         .expect("mark legacy projection incomplete");
+    proxy
+        .key_store
+        .set_meta_i64(META_KEY_UPSTREAM_PRECISE_RECONCILIATION_ENABLED_V1, 1)
+        .await
+        .expect("preserve legacy active setting for controller adoption");
 
     assert!(
         !proxy
@@ -159,6 +204,13 @@ async fn reconciliation_engine_state_migration_resumes_an_incomplete_legacy_proj
     .await
     .expect("read migrated stable projection cursor");
     assert_eq!(state, (String::new(), String::new(), String::new(), 0));
+    let controller: (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT mode, legacy_active, activation_period_code FROM upstream_reconciliation_control_state WHERE id = 'local'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("adopt legacy active reconciliation controller");
+    assert_eq!(controller, ("active".to_string(), 1, None));
     let recorded_v9_checksum: String =
         sqlx::query_scalar("SELECT checksum FROM schema_migrations WHERE version = 9")
             .fetch_one(&proxy.key_store.pool)
@@ -756,7 +808,10 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .fetch_all(&proxy.key_store.pool)
             .await
             .expect("read adopted ledger");
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    );
 
     drop(proxy);
     let _ = std::fs::remove_file(&db_path);

@@ -118,8 +118,23 @@ export interface ReconciliationRunObservation {
   observedAt: number | null
 }
 
+export interface ReconciliationControllerStatus {
+  mode: 'compare' | 'active' | 'active_paused' | string
+  activationPeriodCode: string | null
+  activationPeriodStart: number | null
+  legacyActive: boolean
+  pausedReason: string | null
+  transitionedAt: number | null
+}
+
+export interface DashboardAlertProjectionStatus {
+  coverage: string
+  observedAt: number | null
+  staleReason: string | null
+}
+
 export interface UpstreamPrivacyStatus {
-  phase: 'configured' | 'draining' | 'pending' | 'compare' | 'active' | 'degraded'
+  phase: 'configured' | 'draining' | 'pending' | 'compare' | 'active' | 'active_paused' | 'degraded'
   configuredProjectIdMode: UpstreamProjectIdMode
   effectiveProjectIdMode: UpstreamProjectIdMode
   fixedProjectIdConfigured: boolean
@@ -156,6 +171,8 @@ export interface UpstreamPrivacyStatus {
   reconciliationObservation: ReconciliationObservation
   reconciliationLocalBackoff: ReconciliationLocalBackoff
   reconciliationRunObservation?: ReconciliationRunObservation
+  reconciliationController?: ReconciliationControllerStatus
+  dashboardAlertProjection?: DashboardAlertProjectionStatus
   retryBuckets: UpstreamReconciliationRetryBuckets
   currentPeriodBoundUsersByKey: UpstreamKeyActivityPoint[]
   currentPeriodPendingProjectIdsByKey: UpstreamKeyActivityPoint[]

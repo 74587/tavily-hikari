@@ -919,6 +919,7 @@ export interface AdminTranslationsShape {
       statusConfigured: string
       statusActive: string
       statusCompareOnly: string
+      statusPaused: string
       statusMissing: string
       statusOmitted: string
       reconciliationMode: string

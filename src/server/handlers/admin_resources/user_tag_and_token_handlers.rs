@@ -503,6 +503,9 @@ async fn list_users(
             && system_settings.api_rebalance_enabled
             && system_settings.rebalance_mcp_enabled
             && system_settings.upstream_precise_reconciliation_enabled;
+        // Actual-mode windows must not turn an otherwise settled historical
+        // shadow projection back into a hybrid display. Only unresolved shadow
+        // work requires adding today's live billing usage to the shadow view.
         let has_pending_shadow_projection = projection.is_some_and(|value| {
             value.shadow_observed_window_count > value.shadow_resolved_window_count
         });
@@ -532,9 +535,16 @@ async fn list_users(
                     .unwrap_or_default()
             });
             let shadow_daily_availability = if show_hybrid_shadow_projection {
+                // During the activation boundary the current actual-only work
+                // is intentionally not part of the historical shadow proof.
+                // Its unresolved state must not downgrade an already settled
+                // shadow window from confirmed to projected.
                 if projection.is_some_and(|value| {
-                    value.observed_window_count > 0
-                        && value.observed_window_count == value.resolved_window_count
+                    (value.observed_window_count > 0
+                        && value.observed_window_count == value.resolved_window_count)
+                        || (value.shadow_observed_window_count > 0
+                            && value.shadow_observed_window_count
+                                == value.shadow_resolved_window_count)
                 }) || (projection.is_none() && row.summary.daily_credits_used == 0)
                 {
                     Some(AdminUserShadowDailyAvailability::Confirmed)

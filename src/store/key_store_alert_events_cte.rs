@@ -1,4 +1,27 @@
 impl KeyStore {
+    fn push_alert_projection_source_selection<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        selected_source: Option<(&str, &'a [String])>,
+        branch_source: &str,
+        source_id_expr: &str,
+    ) {
+        let Some((source_kind, source_ids)) = selected_source else {
+            return;
+        };
+        if source_kind != branch_source || source_ids.is_empty() {
+            query.push(" AND 1 = 0");
+            return;
+        }
+        query.push(" AND ").push(source_id_expr).push(" IN (");
+        {
+            let mut separated = query.separated(", ");
+            for source_id in source_ids {
+                separated.push_bind(source_id);
+            }
+        }
+        query.push(")");
+    }
+
     fn alert_subject_kind_sql(alias: &str) -> String {
         format!(
             "CASE \
@@ -153,6 +176,30 @@ impl KeyStore {
         query: &mut QueryBuilder<'a, Sqlite>,
         filters: AlertEventFilters<'a>,
     ) {
+        Self::push_alert_events_cte_for_selected_source(query, filters, None);
+    }
+
+    // Projection first obtains a small source-key page through an indexed
+    // watermark seek. Restricting this CTE to those keys keeps its joins from
+    // becoming a full source-table scan during catch-up.
+    fn push_alert_events_cte_for_projection_source_keys<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+        source_kind: &'a str,
+        source_ids: &'a [String],
+    ) {
+        Self::push_alert_events_cte_for_selected_source(
+            query,
+            filters,
+            Some((source_kind, source_ids)),
+        );
+    }
+
+    fn push_alert_events_cte_for_selected_source<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+        selected_source: Option<(&'a str, &'a [String])>,
+    ) {
         let effective_request_kind_sql = token_log_request_kind_key_sql(
             "COALESCE(rl.path, atl.path)",
             "COALESCE(atl.request_kind_key, rl.request_kind_key)",
@@ -237,6 +284,12 @@ impl KeyStore {
             filters,
             "COALESCE(atl.api_key_id, rl.api_key_id)",
         );
+        Self::push_alert_projection_source_selection(
+            query,
+            selected_source,
+            ALERT_SOURCE_AUTH_TOKEN_LOG,
+            "CAST(atl.id AS TEXT)",
+        );
 
         query.push(
             r#"
@@ -301,6 +354,12 @@ impl KeyStore {
             "#
         ));
         Self::push_maintenance_alert_filters(query, filters, ALERT_TYPE_UPSTREAM_KEY_BLOCKED);
+        Self::push_alert_projection_source_selection(
+            query,
+            selected_source,
+            ALERT_SOURCE_API_KEY_MAINTENANCE_RECORD,
+            "m.id",
+        );
         query.push(
             r#"
             UNION ALL
@@ -366,6 +425,12 @@ impl KeyStore {
             "#
         ));
         Self::push_maintenance_alert_filters(query, filters, ALERT_TYPE_API_KEY_EXHAUSTED);
+        Self::push_alert_projection_source_selection(
+            query,
+            selected_source,
+            ALERT_SOURCE_API_KEY_MAINTENANCE_RECORD,
+            "m.id",
+        );
         query.push(
             r#"
             UNION ALL
@@ -412,6 +477,87 @@ impl KeyStore {
             "#,
         );
         Self::push_job_alert_filters(query, filters);
+        Self::push_alert_projection_source_selection(
+            query,
+            selected_source,
+            ALERT_SOURCE_SCHEDULED_JOB,
+            "CAST(j.id AS TEXT)",
+        );
+        query.push(")");
+    }
+
+    // The read model stores the normalized source row as JSON. It deliberately
+    // has the same column contract as the raw CTE above so callers can retain
+    // grouping and pagination behavior while avoiding joins and scans of the
+    // live log tables once the projection has complete coverage.
+    fn push_projected_alert_events_cte<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+    ) {
+        query.push(
+            r#"WITH alerts AS (
+                SELECT source_kind,
+                       source_id,
+                       row_sort_id,
+                       COALESCE(json_extract(payload_json, '$.alert_type'), '') AS alert_type,
+                       occurred_at,
+                       json_extract(payload_json, '$.token_id') AS token_id,
+                       json_extract(payload_json, '$.key_id') AS key_id,
+                       json_extract(payload_json, '$.request_log_id') AS request_log_id,
+                       json_extract(payload_json, '$.method') AS method,
+                       json_extract(payload_json, '$.path') AS path,
+                       json_extract(payload_json, '$.query') AS query,
+                       json_extract(payload_json, '$.request_kind_key') AS request_kind_key,
+                       json_extract(payload_json, '$.request_kind_label') AS request_kind_label,
+                       json_extract(payload_json, '$.request_kind_detail') AS request_kind_detail,
+                       json_extract(payload_json, '$.result_status') AS result_status,
+                       json_extract(payload_json, '$.failure_kind') AS failure_kind,
+                       json_extract(payload_json, '$.error_message') AS error_message,
+                       json_extract(payload_json, '$.counts_business_quota') AS counts_business_quota,
+                       json_extract(payload_json, '$.user_id') AS user_id,
+                       json_extract(payload_json, '$.user_display_name') AS user_display_name,
+                       json_extract(payload_json, '$.user_username') AS user_username,
+                       json_extract(payload_json, '$.reason_code') AS reason_code,
+                       json_extract(payload_json, '$.reason_summary') AS reason_summary,
+                       json_extract(payload_json, '$.reason_detail') AS reason_detail,
+                       json_extract(payload_json, '$.job_id') AS job_id,
+                       json_extract(payload_json, '$.job_type') AS job_type,
+                       json_extract(payload_json, '$.job_trigger_source') AS job_trigger_source,
+                       json_extract(payload_json, '$.job_status') AS job_status,
+                       json_extract(payload_json, '$.job_attempt') AS job_attempt,
+                       json_extract(payload_json, '$.job_message') AS job_message,
+                       json_extract(payload_json, '$.job_queued_at') AS job_queued_at,
+                       json_extract(payload_json, '$.job_started_at') AS job_started_at,
+                       json_extract(payload_json, '$.job_finished_at') AS job_finished_at
+                  FROM observability.dashboard_alert_projection_events
+                 WHERE 1 = 1"#,
+        );
+        if let Some(alert_type) = filters.alert_type {
+            query
+                .push(" AND json_extract(payload_json, '$.alert_type') = ")
+                .push_bind(alert_type);
+        }
+        if let Some(since) = filters.since {
+            query.push(" AND occurred_at >= ").push_bind(since);
+        }
+        if let Some(until) = filters.until {
+            query.push(" AND occurred_at <= ").push_bind(until);
+        }
+        if let Some(user_id) = filters.user_id {
+            query
+                .push(" AND json_extract(payload_json, '$.user_id') = ")
+                .push_bind(user_id);
+        }
+        if let Some(token_id) = filters.token_id {
+            query
+                .push(" AND json_extract(payload_json, '$.token_id') = ")
+                .push_bind(token_id);
+        }
+        if let Some(key_id) = filters.key_id {
+            query
+                .push(" AND json_extract(payload_json, '$.key_id') = ")
+                .push_bind(key_id);
+        }
         query.push(")");
     }
 }

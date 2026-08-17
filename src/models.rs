@@ -1237,13 +1237,13 @@ pub struct AlertCatalog {
     pub keys: Vec<AlertFacetOption>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecentAlertsGroupedWindowCount {
     pub window_hours: i64,
     pub grouped_count: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecentAlertsSummary {
     pub window_hours: i64,
     pub total_events: i64,
@@ -2029,7 +2029,7 @@ pub struct OAuthLoginStatePayload {
     pub bind_token_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenRequestKind {
     pub key: String,
     pub label: String,

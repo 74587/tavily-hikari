@@ -101,6 +101,29 @@ reads:
   disabled-token or recent-job reads fail, keep the core overview payload serving and let the
   optional slice surface `error`/empty coverage semantics on the next snapshot rather than timing
   out the whole admin page.
+- Put the Dashboard overview behind one AppState-owned immutable read model. A dirty generation may
+  request one shared rebuild every ten seconds and a bounded sixty-second probe catches missed
+  invalidations; an HTTP or SSE request under pressure returns the last-good snapshot with explicit
+  stale coverage instead of recomputing freshness.
+- Keep dashboard alert summaries out of the raw CTE hot path. Persist a sidecar projection using a
+  stable source cursor plus fence/tail replay, with an independent recent Dashboard tail and
+  historical administrator lane. The projection worker materializes a bounded recent-summary record
+  at most once per sixty-second window; a newer source generation marks that record stale until the
+  next refresh. HTTP and SSE read that record plus coverage only. The read model consumes only
+  complete recent coverage and retains last-good data while its tail catches up;
+  Events/Groups wait for complete historical coverage. Expose coverage, observation time, and stale
+  reason rather than issuing an exact event count on every admin status read.
+- A derived alert projection must be a lower-priority maintenance writer. The Dashboard may consume
+  only its bounded recent window, while administrator Events/Groups switch to the sidecar only after
+  a stable cursor has replayed complete source history and reports explicit `ok` coverage. Keep
+  writes in small replayable slices, convert transient SQLite contention into a typed defer, and
+  leave the first post-start bulk window to recovery work with a durable SLO such as HA GC. During a
+  full-history catch-up, keep administrator reads on the established source query rather than
+  presenting incomplete sidecar coverage as an empty result.
+- Treat an empty source fence as an idle result, not as a successful projection slice. Do not bump
+  a durable cursor or generation merely to keep a scheduler loop moving. Refresh observation on a
+  separate low-frequency cadence, and keep Dashboard summary work in SQLite with fixed windows,
+  scalar counts, and a bounded top-group page rather than deserializing every projected payload.
 - Guard shared admin snapshot loaders with both a drop-time reset and a stale-loading takeover
   window. A cancelled or wedged request must not leave `loading=true` forever and make every later
   request wait on a `Notify` that will never fire.

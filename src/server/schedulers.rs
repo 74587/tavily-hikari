@@ -65,13 +65,20 @@ const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_JOB_TYPE: &str =
 const DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE: &str = "dashboard_rollup_integrity";
 const DASHBOARD_ROLLUP_INTEGRITY_FAILURE_BACKOFF_SECS: i64 = 60;
 const DASHBOARD_ROLLUP_INTEGRITY_WATCHDOG_SECS: u64 = 60;
+const DASHBOARD_ALERT_PROJECTION_INTERVAL_SECS: u64 = 10;
+const DASHBOARD_ALERT_PROJECTION_IDLE_INTERVAL_SECS: u64 = 20;
+const DASHBOARD_ALERT_PROJECTION_IDLE_OBSERVATION_SECS: i64 = 60;
+// HA GC has a durable recovery deadline and cannot make progress once the
+// foreground load starts. The dashboard projection is derived state, so let
+// HA establish its first fair continuation before it competes for the sole
+// maintenance bulk permit after startup or a rolling restart.
+const DASHBOARD_ALERT_PROJECTION_INITIAL_DELAY_SECS: u64 = 30;
 const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
 static SCHEDULED_JOB_QUEUE_WAIT_WARN_WINDOWS: OnceLock<StdMutex<HashMap<String, Instant>>> =
     OnceLock::new();
-
 fn should_warn_scheduled_job_queue_wait(job_type: &str) -> bool {
     let now = Instant::now();
     let windows = SCHEDULED_JOB_QUEUE_WAIT_WARN_WINDOWS.get_or_init(|| StdMutex::new(HashMap::new()));
@@ -519,7 +526,7 @@ fn spawn_dashboard_rollup_integrity_scheduler(state: Arc<AppState>) {
         }
     });
 }
-
+include!("schedulers_dashboard_alert_projection.rs");
 async fn finish_dashboard_rollup_integrity_and_enqueue(
     state: &AppState,
     job_id: i64,

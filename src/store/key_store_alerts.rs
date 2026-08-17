@@ -9,7 +9,13 @@ struct AlertEventFilters<'a> {
     request_kinds: &'a [String],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy)]
+enum AlertReadSource {
+    Raw,
+    Projected,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct AlertEventProjectionRow {
     source_kind: String,
     source_id: String,
@@ -824,45 +830,6 @@ impl KeyStore {
         Ok(())
     }
 
-    pub(crate) async fn fetch_recent_alerts_summary_token(
-        &self,
-        window_hours: i64,
-    ) -> Result<[i64; 4], ProxyError> {
-        let clamped_window_hours = window_hours.clamp(1, 24 * 30);
-        let since = self
-            .backend_time
-            .now_ts()
-            .saturating_sub(clamped_window_hours.saturating_mul(3600));
-        let filters = AlertEventFilters {
-            alert_type: None,
-            since: Some(since),
-            until: None,
-            user_id: None,
-            token_id: None,
-            key_id: None,
-            request_kinds: &[],
-        };
-        let mut query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut query, filters);
-        query.push(
-            r#"
-            SELECT
-                COALESCE(COUNT(*), 0) AS row_count,
-                COALESCE(MAX(occurred_at), 0) AS max_occurred_at,
-                COALESCE(SUM(occurred_at), 0) AS occurred_at_sum,
-                COALESCE(SUM(COALESCE(request_log_id, 0) + COALESCE(job_id, 0) + LENGTH(COALESCE(row_sort_id, ''))), 0) AS identity_sum
-            FROM alerts
-            "#,
-        );
-        let row = query.build().fetch_one(&self.pool).await?;
-        Ok([
-            row.try_get("row_count")?,
-            row.try_get("max_occurred_at")?,
-            row.try_get("occurred_at_sum")?,
-            row.try_get("identity_sum")?,
-        ])
-    }
-
     fn summarize_alert_type_count_rows(rows: Vec<sqlx::sqlite::SqliteRow>) -> Vec<AlertTypeCount> {
         let mut counts = default_alert_type_counts();
         let mut index_by_type = HashMap::new();
@@ -881,6 +848,113 @@ impl KeyStore {
             }
         }
         counts
+    }
+
+    fn push_alert_events_for_source_cte<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+        source: AlertReadSource,
+    ) {
+        match source {
+            AlertReadSource::Raw => Self::push_alert_events_cte(query, filters),
+            AlertReadSource::Projected => Self::push_projected_alert_events_cte(query, filters),
+        }
+    }
+
+    async fn alert_projection_is_complete(&self) -> Result<bool, ProxyError> {
+        let status = self.alert_projection_status().await?;
+        Ok(status.coverage == "ok" && status.stale_reason.is_none())
+    }
+
+    async fn fetch_alert_query_rows(
+        &self,
+        mut query: QueryBuilder<'_, Sqlite>,
+        source: AlertReadSource,
+    ) -> Result<Vec<sqlx::sqlite::SqliteRow>, ProxyError> {
+        match source {
+            AlertReadSource::Raw => Ok(query.build().fetch_all(&self.pool).await?),
+            AlertReadSource::Projected => {
+                let mut conn = self
+                    .sqlite_runtime
+                    .acquire_operation_connection(SqliteOperation::AlertProjection)
+                    .await?;
+                let result = query.build().fetch_all(&mut *conn).await;
+                Ok(conn.complete_query(result).await?)
+            }
+        }
+    }
+
+    async fn fetch_projected_alert_events_page(
+        &self,
+        filters: AlertEventFilters<'_>,
+        page: i64,
+        per_page: i64,
+    ) -> Result<PaginatedAlertEvents, ProxyError> {
+        let started = Instant::now();
+        let page = page.max(1);
+        let per_page = per_page.clamp(1, 100);
+        let offset = (page - 1) * per_page;
+
+        let mut count_query = QueryBuilder::new("");
+        Self::push_projected_alert_events_cte(&mut count_query, filters);
+        count_query.push(" SELECT COUNT(*) FROM alerts WHERE 1 = 1");
+        Self::push_alert_request_kind_filter(
+            &mut count_query,
+            "COALESCE(NULLIF(TRIM(request_kind_key), ''), 'unknown')",
+            filters.request_kinds,
+        );
+        let mut count_conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let count_result = count_query.build_query_scalar().fetch_one(&mut *count_conn).await;
+        let total = count_conn.complete_query(count_result).await?;
+
+        let mut query = QueryBuilder::new("");
+        Self::push_projected_alert_events_cte(&mut query, filters);
+        query.push(" SELECT * FROM alerts WHERE 1 = 1");
+        Self::push_alert_request_kind_filter(
+            &mut query,
+            "COALESCE(NULLIF(TRIM(request_kind_key), ''), 'unknown')",
+            filters.request_kinds,
+        );
+        query.push(" ORDER BY occurred_at DESC, row_sort_id DESC LIMIT ");
+        query.push_bind(per_page);
+        query.push(" OFFSET ");
+        query.push_bind(offset);
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let result = query.build().fetch_all(&mut *conn).await;
+        let rows = conn.complete_query(result).await?;
+        let items = rows
+            .into_iter()
+            .map(Self::decode_alert_event_projection_row)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(Self::build_alert_event_from_projection)
+            .collect::<Vec<_>>();
+        emit_perf_log(
+            DbLogStatus::Info,
+            "admin_read",
+            "alerts_projection_sidecar",
+            started.elapsed(),
+            PerfLogScope {
+                route: Some("/api/alerts/events"),
+                scope: Some("alerts"),
+                phase: Some("projection_sidecar"),
+                page_size: Some(per_page),
+                row_count: Some(items.len()),
+                ..Default::default()
+            },
+        );
+        Ok(PaginatedAlertEvents {
+            items,
+            total,
+            page,
+            per_page,
+        })
     }
 
     async fn fetch_alert_event_projection_page(
@@ -957,12 +1031,27 @@ impl KeyStore {
         query: &mut QueryBuilder<'a, Sqlite>,
         filters: AlertEventFilters<'a>,
     ) {
+        Self::push_alert_events_cte(query, filters);
+        Self::push_alert_grouping_cte_tail(query, filters);
+    }
+
+    fn push_projected_alert_groups_cte<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+    ) {
+        Self::push_projected_alert_events_cte(query, filters);
+        Self::push_alert_grouping_cte_tail(query, filters);
+    }
+
+    fn push_alert_grouping_cte_tail<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+    ) {
         let subject_kind_sql = Self::alert_subject_kind_sql("alerts");
         let subject_id_sql = Self::alert_subject_id_sql("alerts");
         let request_kind_sql = Self::alert_group_request_kind_sql("alerts");
         let request_rate_minutes = request_rate_limit_window_minutes();
         let request_rate_seconds = request_rate_minutes * 60;
-        Self::push_alert_events_cte(query, filters);
         query.push(format!(
             r#",
             classified_alerts AS (
@@ -1384,112 +1473,6 @@ impl KeyStore {
         ));
     }
 
-    fn decode_alert_group_projection_row(
-        row: &sqlx::sqlite::SqliteRow,
-    ) -> Result<AlertGroupProjectionRow, sqlx::Error> {
-        Ok(AlertGroupProjectionRow {
-            grouping_kind: row.try_get("grouping_kind")?,
-            row_sort_id: row.try_get("row_sort_id")?,
-            alert_type: row.try_get("alert_type")?,
-            subject_kind: row.try_get("subject_kind")?,
-            subject_id: row.try_get("subject_id")?,
-            count: row.try_get("total_count")?,
-            first_seen: row.try_get("first_seen")?,
-            last_seen: row.try_get("last_seen")?,
-            semantic_window_kind: row.try_get("semantic_window_kind")?,
-            semantic_window_minutes: row.try_get("semantic_window_minutes")?,
-            semantic_window_start: row.try_get("semantic_window_start")?,
-            semantic_window_end: row.try_get("semantic_window_end")?,
-            child_count: row.try_get("child_count")?,
-        })
-    }
-
-    async fn fetch_group_latest_events_by_projection(
-        &self,
-        filters: AlertEventFilters<'_>,
-        groups: &[AlertGroupProjectionRow],
-    ) -> Result<HashMap<String, AlertEventRecord>, ProxyError> {
-        if groups.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let mut query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut query, filters);
-        query.push(" SELECT * FROM alerts WHERE row_sort_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for group in groups {
-                separated.push_bind(group.row_sort_id.as_str());
-            }
-        }
-        query.push(")");
-
-        let rows = query.build().fetch_all(&self.pool).await?;
-        let mut events_by_row_sort_id = HashMap::new();
-        for row in rows {
-            let decoded = Self::decode_alert_event_projection_row(row)?;
-            let row_sort_id = decoded.row_sort_id.clone();
-            if let Some(event) = Self::build_alert_event_from_projection(decoded) {
-                events_by_row_sort_id.insert(row_sort_id, event);
-            }
-        }
-        Ok(events_by_row_sort_id)
-    }
-
-    fn build_alert_group_records(
-        groups: Vec<AlertGroupProjectionRow>,
-        latest_events_by_row_sort_id: HashMap<String, AlertEventRecord>,
-    ) -> Vec<AlertGroupRecord> {
-        groups
-            .into_iter()
-            .filter_map(|group| {
-                let latest_event = latest_events_by_row_sort_id.get(&group.row_sort_id)?.clone();
-                let semantic_window_kind = latest_event
-                    .semantic_window
-                    .as_ref()
-                    .map(|value| value.kind.as_str().to_string())
-                    .or_else(|| group.semantic_window_kind.clone());
-                let semantic_window_minutes = latest_event
-                    .semantic_window
-                    .as_ref()
-                    .and_then(|value| value.window_minutes)
-                    .or(group.semantic_window_minutes);
-                Some(AlertGroupRecord {
-                    id: if group.grouping_kind == "mother" {
-                        semantic_mother_id_from_child(&latest_event, 0)
-                    } else {
-                        alert_group_id(&latest_event)
-                    },
-                    alert_type: group.alert_type,
-                    subject_kind: group.subject_kind,
-                    subject_id: group.subject_id,
-                    subject_label: latest_event.subject_label.clone(),
-                    user: latest_event.user.clone(),
-                    token: latest_event.token.clone(),
-                    key: latest_event.key.clone(),
-                    job: latest_event.job.clone(),
-                    request_kind: (group.grouping_kind == "compat")
-                        .then(|| latest_event.request_kind.clone())
-                        .flatten(),
-                    count: group.count,
-                    first_seen: group.first_seen,
-                    last_seen: group.last_seen,
-                    latest_event,
-                    grouping_kind: group.grouping_kind,
-                    semantic_window_kind,
-                    semantic_window_minutes,
-                    semantic_window_start: group.semantic_window_start,
-                    semantic_window_end: group.semantic_window_end,
-                    semantic_window_key: None,
-                    child_count: group.child_count,
-                    event_count: group.count,
-                    children: Vec::new(),
-                    child_events: Vec::new(),
-                })
-            })
-            .collect()
-    }
-
     async fn fetch_alert_group_projection_page(
         &self,
         filters: AlertEventFilters<'_>,
@@ -1520,8 +1503,9 @@ impl KeyStore {
             .iter()
             .map(Self::decode_alert_group_projection_row)
             .collect::<Result<Vec<_>, _>>()?;
-        let latest_events_by_row_sort_id =
-            self.fetch_group_latest_events_by_projection(filters, &groups).await?;
+        let latest_events_by_row_sort_id = self
+            .fetch_group_latest_events(filters, &groups, AlertReadSource::Raw)
+            .await?;
         let items = Self::build_alert_group_records(groups, latest_events_by_row_sort_id);
         emit_perf_log(
             DbLogStatus::Info,
@@ -1541,10 +1525,87 @@ impl KeyStore {
         Ok((items, total))
     }
 
+    async fn fetch_projected_alert_group_page(
+        &self,
+        filters: AlertEventFilters<'_>,
+        page: i64,
+        per_page: i64,
+    ) -> Result<(Vec<AlertGroupRecord>, i64), ProxyError> {
+        let started = Instant::now();
+        let page = page.max(1);
+        let per_page = per_page.clamp(1, 100);
+        let offset = (page - 1) * per_page;
+
+        let mut count_query = QueryBuilder::new("");
+        Self::push_projected_alert_groups_cte(&mut count_query, filters);
+        count_query.push(" SELECT COUNT(*) FROM grouped_alerts");
+        let mut count_conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let count_result = count_query.build_query_scalar().fetch_one(&mut *count_conn).await;
+        let total = count_conn.complete_query(count_result).await?;
+
+        let mut query = QueryBuilder::new("");
+        Self::push_projected_alert_groups_cte(&mut query, filters);
+        query.push(" SELECT * FROM grouped_alerts");
+        query.push(
+            " ORDER BY last_seen DESC, total_count DESC, alert_type DESC, row_sort_id DESC LIMIT ",
+        );
+        query.push_bind(per_page);
+        query.push(" OFFSET ");
+        query.push_bind(offset);
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let result = query.build().fetch_all(&mut *conn).await;
+        let rows = conn.complete_query(result).await?;
+        let groups = rows
+            .iter()
+            .map(Self::decode_alert_group_projection_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let latest_events_by_row_sort_id = self
+            .fetch_group_latest_events(filters, &groups, AlertReadSource::Projected)
+            .await?;
+        let items = Self::build_alert_group_records(groups, latest_events_by_row_sort_id);
+        emit_perf_log(
+            DbLogStatus::Info,
+            "admin_read",
+            "alerts_grouping_sidecar",
+            started.elapsed(),
+            PerfLogScope {
+                route: Some("/api/alerts/groups"),
+                scope: Some("alerts"),
+                phase: Some("projection_sidecar"),
+                page_size: Some(per_page),
+                row_count: Some(items.len()),
+                ..Default::default()
+            },
+        );
+        Ok((items, total))
+    }
+
+    async fn fetch_projected_alert_group_count(
+        &self,
+        filters: AlertEventFilters<'_>,
+    ) -> Result<i64, ProxyError> {
+        let mut query = QueryBuilder::new("");
+        Self::push_projected_alert_groups_cte(&mut query, filters);
+        query.push(" SELECT COUNT(*) FROM grouped_alerts");
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let result = query.build_query_scalar().fetch_one(&mut *conn).await;
+        conn.complete_query(result).await
+    }
+
     async fn populate_selected_mother_groups(
         &self,
         filters: AlertEventFilters<'_>,
         groups: Vec<AlertGroupRecord>,
+        source: AlertReadSource,
     ) -> Result<Vec<AlertGroupRecord>, ProxyError> {
         if groups.is_empty() {
             return Ok(groups);
@@ -1581,7 +1642,7 @@ impl KeyStore {
         let mut query = QueryBuilder::new("");
         let subject_kind_sql = Self::alert_subject_kind_sql("alerts");
         let subject_id_sql = Self::alert_subject_id_sql("alerts");
-        Self::push_alert_events_cte(&mut query, filters);
+        Self::push_alert_events_for_source_cte(&mut query, filters, source);
         query.push(" SELECT * FROM alerts WHERE 1 = 1");
         Self::push_alert_request_kind_filter(
             &mut query,
@@ -1618,7 +1679,7 @@ impl KeyStore {
         query.push(")");
         query.push(" ORDER BY occurred_at DESC, row_sort_id DESC");
 
-        let rows = query.build().fetch_all(&self.pool).await?;
+        let rows = self.fetch_alert_query_rows(query, source).await?;
         let all_events = rows
             .into_iter()
             .map(Self::decode_alert_event_projection_row)
@@ -1848,20 +1909,21 @@ impl KeyStore {
         page: i64,
         per_page: i64,
     ) -> Result<PaginatedAlertEvents, ProxyError> {
-        self.fetch_alert_event_projection_page(
-            AlertEventFilters {
-                alert_type,
-                since,
-                until,
-                user_id,
-                token_id,
-                key_id,
-                request_kinds,
-            },
-            page,
-            per_page,
-        )
-        .await
+        let filters = AlertEventFilters {
+            alert_type,
+            since,
+            until,
+            user_id,
+            token_id,
+            key_id,
+            request_kinds,
+        };
+        if self.alert_projection_is_complete().await? {
+            return self
+                .fetch_projected_alert_events_page(filters, page, per_page)
+                .await;
+        }
+        self.fetch_alert_event_projection_page(filters, page, per_page).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1888,9 +1950,23 @@ impl KeyStore {
             key_id,
             request_kinds,
         };
-        let (page_items, total) =
-            self.fetch_alert_group_projection_page(filters, page, per_page).await?;
-        let items = self.populate_selected_mother_groups(filters, page_items).await?;
+        let source = if self.alert_projection_is_complete().await? {
+            AlertReadSource::Projected
+        } else {
+            AlertReadSource::Raw
+        };
+        let (page_items, total) = match source {
+            AlertReadSource::Raw => {
+                self.fetch_alert_group_projection_page(filters, page, per_page).await?
+            }
+            AlertReadSource::Projected => {
+                self.fetch_projected_alert_group_page(filters, page, per_page)
+                    .await?
+            }
+        };
+        let items = self
+            .populate_selected_mother_groups(filters, page_items, source)
+            .await?;
         Ok(PaginatedAlertGroups {
             items,
             total,
@@ -1909,8 +1985,13 @@ impl KeyStore {
             key_id: None,
             request_kinds: &[],
         };
+        let source = if self.alert_projection_is_complete().await? {
+            AlertReadSource::Projected
+        } else {
+            AlertReadSource::Raw
+        };
         let mut request_kind_query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut request_kind_query, filters);
+        Self::push_alert_events_for_source_cte(&mut request_kind_query, filters, source);
         request_kind_query.push(
             " SELECT \
                 request_kind_key, \
@@ -1922,7 +2003,7 @@ impl KeyStore {
               GROUP BY request_kind_key \
               ORDER BY count DESC, request_kind_label ASC, request_kind_key ASC",
         );
-        let request_kind_rows = request_kind_query.build().fetch_all(&self.pool).await?;
+        let request_kind_rows = self.fetch_alert_query_rows(request_kind_query, source).await?;
         let request_kind_options = request_kind_rows
             .into_iter()
             .map(|row| -> Result<TokenRequestKindOption, sqlx::Error> {
@@ -1942,7 +2023,7 @@ impl KeyStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut users_query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut users_query, filters);
+        Self::push_alert_events_for_source_cte(&mut users_query, filters, source);
         users_query.push(
             " SELECT \
                 user_id AS value, \
@@ -1953,9 +2034,8 @@ impl KeyStore {
               GROUP BY user_id, label \
               ORDER BY count DESC, label ASC, value ASC",
         );
-        let users = users_query
-            .build()
-            .fetch_all(&self.pool)
+        let users = self
+            .fetch_alert_query_rows(users_query, source)
             .await?
             .into_iter()
             .map(|row| -> Result<AlertFacetOption, sqlx::Error> {
@@ -1968,7 +2048,7 @@ impl KeyStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut tokens_query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut tokens_query, filters);
+        Self::push_alert_events_for_source_cte(&mut tokens_query, filters, source);
         tokens_query.push(
             " SELECT \
                 token_id AS value, \
@@ -1979,9 +2059,8 @@ impl KeyStore {
               GROUP BY token_id \
               ORDER BY count DESC, label ASC, value ASC",
         );
-        let tokens = tokens_query
-            .build()
-            .fetch_all(&self.pool)
+        let tokens = self
+            .fetch_alert_query_rows(tokens_query, source)
             .await?
             .into_iter()
             .map(|row| -> Result<AlertFacetOption, sqlx::Error> {
@@ -1994,7 +2073,7 @@ impl KeyStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut keys_query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut keys_query, filters);
+        Self::push_alert_events_for_source_cte(&mut keys_query, filters, source);
         keys_query.push(
             " SELECT \
                 key_id AS value, \
@@ -2005,9 +2084,8 @@ impl KeyStore {
               GROUP BY key_id \
               ORDER BY count DESC, label ASC, value ASC",
         );
-        let keys = keys_query
-            .build()
-            .fetch_all(&self.pool)
+        let keys = self
+            .fetch_alert_query_rows(keys_query, source)
             .await?
             .into_iter()
             .map(|row| -> Result<AlertFacetOption, sqlx::Error> {
@@ -2020,7 +2098,7 @@ impl KeyStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut types_query = QueryBuilder::new("");
-        Self::push_alert_events_cte(&mut types_query, filters);
+        Self::push_alert_events_for_source_cte(&mut types_query, filters, source);
         types_query.push(
             " SELECT alert_type, COUNT(*) AS count \
               FROM alerts \
@@ -2028,7 +2106,7 @@ impl KeyStore {
               GROUP BY alert_type",
         );
         let types = Self::summarize_alert_type_count_rows(
-            types_query.build().fetch_all(&self.pool).await?,
+            self.fetch_alert_query_rows(types_query, source).await?,
         )
         .into_iter()
         .map(|value| LogFacetOption {
@@ -2047,6 +2125,7 @@ impl KeyStore {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn fetch_recent_alerts_summary(
         &self,
         window_hours: i64,

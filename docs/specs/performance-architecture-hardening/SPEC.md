@@ -88,7 +88,20 @@
   is maintained by triggers. A completed lifecycle must not requeue a completed no-adjustment
   work generation; pre-trigger usage updates still reopen their generation, and equal
   usage/settlement timestamps remain conservatively reopenable because they have second precision.
-- 告警读取全部来自可重建 `AlertProjection`；Dashboard HTTP/SSE 只消费共享 read model。
+- 告警读取全部来自可重建 `AlertProjection`。recent tail 与管理员历史使用独立 cursor/fence：Dashboard
+  HTTP/SSE 只消费 `recent_coverage=ok` 的共享 read model，否则保留 last-good；管理员 Events/Groups
+  仅在 complete history coverage 为 `ok` 时读取 observability sidecar。任一 cursor 追赶、stale 或
+  rolling upgrade 期间保守回退既有原始查询，不能把未投影历史表示为空。
+- Dashboard 的 recent alert summary 只由 projection worker 在独立的 60 秒窗口内物化。若 source
+  generation 在窗口内前进，已有 summary 必须标记 stale，Dashboard HTTP/SSE 继续服务 last-good，而非
+  在读取路径执行 sidecar 聚合。
+- 历史 lane 的 fence 必须与 recent tail 的起点同秒衔接：tail 拥有起点秒内的记录，history 包含严格更早
+  的记录，运行时始终使用复合 cursor；仅 v17 对旧的“同秒 + 空 id”历史 fence 做一次性上一秒迁移，
+  以恢复该低 sentinel 的边界所有权。空闲 source probe 不得写 cursor/generation；覆盖观察只能由
+  独立低频 heartbeat 更新。Dashboard summary 只允许从 sidecar 执行时间窗固定、结果有界的 SQL 聚合，禁止
+  把整窗 `payload_json` 拉回进程后再分组。
+- 已应用的 projection migration 不得原地修改 checksum。若发现历史 cursor/fence 边界缺口，后续加法
+  migration 只能重置可重建的 history lane，由后台小片幂等重放；recent tail、原始事件与账务真相保持不变。
 - 普通管理员 HA GET 只读取 peer observation cache；危险 HA 操作继续 live probe。
 - 每个节点通过内部 HA probe 报告 `writable_tenure_v1` capability。planned cutover、finalize 和普通
   promote 必须实时探测全部已配置节点；任一节点 capability 缺失、unknown 或不可达时 fail closed。
@@ -191,7 +204,8 @@
 
 - [ ] 运行时与 SQLite 所有权边界已落地。
 - [ ] HA GC 与 reconciliation work 已独立持久化并通过并发回归。
-- [ ] AlertProjection 与 DashboardReadModel 已完成 shadow 和 cutover。
+- [x] AlertProjection 与 DashboardReadModel 已完成 shadow 和 cutover：sidecar cursor/fence 负责
+      alert coverage，AppState 共享 immutable last-good snapshot，HTTP/SSE 不重算 raw alerts。
 - [ ] 所有目标热路径已通过依赖门禁。
 - [ ] 全量质量门禁与生产形状基准已通过。
 

@@ -70,11 +70,20 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('"terminalDelta": reconciliation_after["terminal"]', COMPARISON)
         self.assertIn('"reconciliationProjectionDiscarded"', COMPARISON)
         self.assertIn('candidate reconciliation produced no terminal outcome', COMPARISON)
+        self.assertIn('candidate did not complete the deterministic shadow reconciliation fixture', COMPARISON)
         self.assertIn('projection transaction p95 is not proven below 100ms', COMPARISON)
         self.assertIn('candidate billing truth differs', COMPARISON)
         self.assertIn("prepare_reconciliation_fixture", COMPARISON)
         self.assertIn("completed_generation < work_generation", COMPARISON)
         self.assertIn("upstream_reconciliation_backoff_until_v1", COMPARISON)
+        self.assertIn("snapshot forward-proxy transport isolation failed", COMPARISON)
+        self.assertIn("subscription_urls_json = '[]'", COMPARISON)
+        self.assertIn("egress_socks5_enabled = 0", COMPARISON)
+        self.assertIn("testbox-reconciliation-shadow-token", COMPARISON)
+        self.assertIn("testbox-reconciliation-shadow-period", COMPARISON)
+        self.assertIn("snapshot reconciliation fixture preparation failed", COMPARISON)
+        self.assertIn("upstream_reconciliation_control_state", COMPARISON)
+        self.assertIn("the persisted legacy switch above produces compare mode", COMPARISON)
 
 
 if __name__ == "__main__":

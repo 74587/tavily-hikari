@@ -447,6 +447,12 @@ impl TavilyProxy {
         self.key_store.subscribe_dashboard_sse()
     }
 
+    pub fn dashboard_read_generation(&self) -> Option<u64> {
+        self.key_store
+            .request_stats_coalescer
+            .try_request_stats_version()
+    }
+
     pub async fn gc_ha_outbox_online_with_foreground_rps(
         &self,
         foreground_rps: i64,

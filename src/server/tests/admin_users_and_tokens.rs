@@ -55,7 +55,8 @@ use super::upstream_support_and_manual_jobs::*;
         .expect("proxy created");
 
         let admin_password = "admin-dashboard-recent-alerts-change-password";
-        let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+        let (admin_addr, state) =
+            spawn_builtin_keys_admin_server_with_state(proxy, admin_password).await;
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -137,6 +138,29 @@ use super::upstream_support_and_manual_jobs::*;
             .execute(&pool)
             .await
             .expect("insert recent alert auth token log");
+
+        for _ in 0..6 {
+            state
+                .proxy
+                .advance_dashboard_alert_projection_slice()
+                .await
+                .expect("advance alert projection after alert write");
+        }
+        let projection_pool = connect_sqlite_test_pool(&db_str).await;
+        sqlx::query(
+            "UPDATE observability.dashboard_alert_projection_recent_summaries SET computed_at = ? WHERE window_hours = 24",
+        )
+        .bind(Utc::now().timestamp() - 61)
+        .execute(&projection_pool)
+        .await
+        .expect("expire materialized alert summary refresh window");
+        state
+            .proxy
+            .advance_dashboard_alert_projection_scheduler_step()
+            .await
+            .expect("refresh alert projection after its rate-limit window");
+        projection_pool.close().await;
+        expire_dashboard_overview_freshness_probe(&state).await;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut buffer = String::new();

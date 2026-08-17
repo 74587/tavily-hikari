@@ -52,6 +52,7 @@ pub(crate) struct SqliteMaintenanceRunLease {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SqliteOperation {
+    AlertProjection,
     BillingLedgerAuditRead,
     DashboardIntegrityWrite,
     ForegroundJobTrigger,
@@ -69,6 +70,7 @@ pub(crate) enum SqliteOperation {
 impl SqliteOperation {
     fn as_str(self) -> &'static str {
         match self {
+            Self::AlertProjection => "alert_projection",
             Self::BillingLedgerAuditRead => "billing_ledger_audit_read",
             Self::DashboardIntegrityWrite => "dashboard_integrity_write",
             Self::ForegroundJobTrigger => "foreground_job_trigger",
@@ -91,7 +93,8 @@ impl SqliteOperation {
                 "maintenance_read"
             }
             Self::ScheduledJobControl | Self::HaOutboxGcWatchdog => "maintenance_control",
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
             | Self::HaOutboxGc
             | Self::RequestLogsGc
             | Self::RequestStatsFlush
@@ -102,7 +105,8 @@ impl SqliteOperation {
 
     fn acquire_budget(self) -> Duration {
         match self {
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
             | Self::ScheduledJobControl
             | Self::HaOutboxGcWatchdog => Duration::from_millis(100),
             Self::ForegroundJobTrigger => Duration::from_millis(250),
@@ -117,7 +121,8 @@ impl SqliteOperation {
 
     fn begin_budget(self) -> Duration {
         match self {
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
             | Self::RequestStatsFlush
             | Self::ScheduledJobControl
             | Self::HaOutboxGcWatchdog => Duration::from_millis(100),
@@ -136,7 +141,9 @@ impl SqliteOperation {
             // cooperative run budget expires. A connection-local timeout
             // returns writer contention as a typed defer without cancelling
             // a future that still owns the physical connection.
-            Self::DashboardIntegrityWrite | Self::ReconciliationProjection => Some(100),
+            Self::AlertProjection
+            | Self::DashboardIntegrityWrite
+            | Self::ReconciliationProjection => Some(100),
             _ => None,
         }
     }
@@ -144,7 +151,8 @@ impl SqliteOperation {
     fn is_maintenance_bulk(self) -> bool {
         matches!(
             self,
-            Self::DashboardIntegrityWrite
+            Self::AlertProjection
+                | Self::DashboardIntegrityWrite
                 | Self::HaOutboxGc
                 | Self::RequestLogsGc
                 | Self::RequestStatsFlush
@@ -550,7 +558,7 @@ impl SqliteRuntime {
             .map(|permit| SqliteMaintenanceRunLease { _permit: permit })
     }
 
-    pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
+    pub(crate) async fn prewarm_maintenance_bulk_capacity(&self) {
         if self.has_foreground_pool_capacity()
             || self.inner.pool.size() >= self.inner.maximum_connections
             || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
@@ -577,6 +585,10 @@ impl SqliteRuntime {
         {
             tokio::task::yield_now().await;
         }
+    }
+
+    pub(crate) async fn prewarm_reconciliation_projection_capacity(&self) {
+        self.prewarm_maintenance_bulk_capacity().await;
     }
 
     pub(crate) fn maintenance_bulk_continue_reason(&self) -> Option<SqliteAdmissionDeferReason> {
@@ -737,6 +749,15 @@ impl SqliteRuntime {
         operation: SqliteOperation,
     ) -> Result<SqliteReadSnapshot, ProxyError> {
         let (conn, pool_wait) = self.acquire_pool_connection(operation).await?;
+        let (conn, restore_busy_timeout) =
+            match configure_operation_connection(conn, operation).await {
+                Ok(configured) => configured,
+                Err(err) => {
+                    let err = ProxyError::Database(err);
+                    self.record_error(operation, pool_wait, Duration::ZERO, &err);
+                    return Err(err);
+                }
+            };
         let begin_started = Instant::now();
         let mut snapshot = SqliteReadSnapshot {
             conn: Some(conn),
@@ -745,16 +766,35 @@ impl SqliteRuntime {
             pool_wait,
             begin_wait: Duration::ZERO,
             started_at: Instant::now(),
+            restore_busy_timeout,
         };
-        if let Err(err) = sqlx::query("BEGIN").execute(&mut *snapshot).await {
-            let conn = snapshot
-                .conn
-                .take()
-                .expect("SQLite read snapshot connection");
-            conn.detach().close().await.ok();
-            let err = ProxyError::Database(err);
-            self.record_error(operation, pool_wait, begin_started.elapsed(), &err);
-            return Err(err);
+        match tokio::time::timeout(
+            operation.begin_budget(),
+            sqlx::query("BEGIN").execute(&mut *snapshot),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                let conn = snapshot
+                    .conn
+                    .take()
+                    .expect("SQLite read snapshot connection");
+                conn.detach().close().await.ok();
+                let err = ProxyError::Database(err);
+                self.record_error(operation, pool_wait, begin_started.elapsed(), &err);
+                return Err(err);
+            }
+            Err(_) => {
+                let conn = snapshot
+                    .conn
+                    .take()
+                    .expect("SQLite read snapshot connection");
+                conn.detach().close().await.ok();
+                let err = ProxyError::Database(sqlx::Error::PoolTimedOut);
+                self.record_error(operation, pool_wait, begin_started.elapsed(), &err);
+                return Err(err);
+            }
         }
         snapshot.begin_wait = begin_started.elapsed();
         snapshot.started_at = Instant::now();
@@ -1131,6 +1171,7 @@ pub(crate) struct SqliteReadSnapshot {
     pool_wait: Duration,
     begin_wait: Duration,
     started_at: Instant,
+    restore_busy_timeout: bool,
 }
 
 #[derive(Debug)]
@@ -1329,11 +1370,71 @@ impl Drop for SqliteOperationConnection {
 }
 
 impl SqliteReadSnapshot {
+    pub(crate) async fn complete_query<T>(
+        mut self,
+        query_result: Result<T, sqlx::Error>,
+    ) -> Result<T, ProxyError> {
+        let rollback_result = sqlx::query("ROLLBACK").execute(&mut *self).await;
+        match (query_result, rollback_result) {
+            (Ok(value), Ok(_)) => {
+                let conn = self.conn.take().expect("SQLite read snapshot connection");
+                if let Err(restore_err) =
+                    restore_operation_connection(conn, self.restore_busy_timeout).await
+                {
+                    let err = ProxyError::Database(restore_err);
+                    self.runtime.record_error(
+                        self.operation,
+                        self.pool_wait,
+                        self.begin_wait,
+                        &err,
+                    );
+                    return Err(err);
+                }
+                self.runtime.record_success(
+                    self.operation,
+                    self.pool_wait,
+                    self.begin_wait,
+                    self.started_at.elapsed(),
+                    0,
+                );
+                Ok(value)
+            }
+            (Err(query_err), _) => {
+                let conn = self.conn.take().expect("SQLite read snapshot connection");
+                conn.detach().close().await.ok();
+                let err = ProxyError::Database(query_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, self.begin_wait, &err);
+                Err(err)
+            }
+            (Ok(_), Err(rollback_err)) => {
+                let conn = self.conn.take().expect("SQLite read snapshot connection");
+                conn.detach().close().await.ok();
+                let err = ProxyError::Database(rollback_err);
+                self.runtime
+                    .record_error(self.operation, self.pool_wait, self.begin_wait, &err);
+                Err(err)
+            }
+        }
+    }
+
     pub(crate) async fn close(mut self) -> Result<(), ProxyError> {
         let result = sqlx::query("ROLLBACK").execute(&mut *self).await;
         match result {
             Ok(_) => {
-                drop(self.conn.take().expect("SQLite read snapshot connection"));
+                let conn = self.conn.take().expect("SQLite read snapshot connection");
+                if let Err(restore_err) =
+                    restore_operation_connection(conn, self.restore_busy_timeout).await
+                {
+                    let err = ProxyError::Database(restore_err);
+                    self.runtime.record_error(
+                        self.operation,
+                        self.pool_wait,
+                        self.begin_wait,
+                        &err,
+                    );
+                    return Err(err);
+                }
                 self.runtime.record_success(
                     self.operation,
                     self.pool_wait,
@@ -2031,6 +2132,33 @@ mod tests {
             .acquire()
             .await
             .expect("pooled connection after projection");
+        let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read restored busy timeout");
+        assert_eq!(busy_timeout_ms, DEFAULT_BUSY_TIMEOUT_MS);
+    }
+
+    #[tokio::test]
+    async fn alert_projection_read_snapshot_uses_and_restores_short_busy_timeout() {
+        let runtime = single_connection_runtime().await;
+        let mut snapshot = runtime
+            .begin_read_snapshot(SqliteOperation::AlertProjection)
+            .await
+            .expect("alert projection read snapshot");
+        let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(&mut *snapshot)
+            .await
+            .expect("read alert projection busy timeout");
+        assert_eq!(busy_timeout_ms, 100);
+        snapshot.close().await.expect("close read snapshot");
+
+        let mut conn = runtime
+            .inner
+            .pool
+            .acquire()
+            .await
+            .expect("pooled connection after alert projection snapshot");
         let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
             .fetch_one(&mut *conn)
             .await

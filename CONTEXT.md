@@ -31,9 +31,15 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 
 ## Reconciliation Terms
 
-- `reconciliation mode`: the durable-work policy selected for a run. `disabled` preserves work but
-  does not schedule a representative, `compare` observes upstream differences without changing
-  billing truth, and `active` applies the existing billing settlement rules.
+- `reconciliation controller`: the replicated control-plane state selected exclusively by the
+  existing precise-reconciliation switch. `false` selects `compare`; writing `true` selects
+  `active` immediately and records the next full business period as the billing boundary. A
+  durable integrity failure selects `active_paused`, clears the legacy switch, and requires a new
+  `true` write before actual billing can resume.
+- `reconciliation mode`: the controller-derived durable-work policy selected for a run. `compare`
+  observes upstream differences without changing billing truth; `active` applies the existing
+  billing settlement rules only to work at or after its activation boundary; `active_paused`
+  preserves work without scheduling a representative.
 - `projection slice`: one resumable, claim-fenced historical-usage page. Its bounded read happens
   outside the write transaction; work merge and the stable keyset cursor advance commit atomically.
 - `terminal outcome`: a current work generation that needs no retry. Active non-zero differences
@@ -44,6 +50,22 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 - `retryable outcome`: `upstream_429`, `transport_failure`, `semantic_failure`, or
   `local_pressure`. It preserves the current work generation and its independent retry state until
   a later terminal outcome.
+
+## Dashboard Read Terms
+
+- `DashboardReadModel`: the single AppState-owned immutable last-good overview snapshot. A dirty
+  generation may request one shared rebuild every ten seconds; a sixty-second bounded safety probe
+  catches missed invalidations. Requests under SQLite pressure return last-good coverage rather
+  than starting an independent rebuild.
+- `AlertProjection`: an observability-sidecar projection with separate stable cursor/fence lanes:
+  the recent tail serves Dashboard and the historical lane serves administrator Events and Groups.
+  Dashboard accepts a recent summary only at `recent_coverage=ok`; otherwise the read model retains
+  last-good data. Administrator reads use the sidecar only at complete history coverage; while it
+  catches up or is stale, they retain the established source query so incomplete history is never
+  shown as empty.
+- `idle alert probe`: a source-fence check that finds no work. It is not projection progress: it
+  never advances a cursor or generation, and a separate low-frequency observation heartbeat keeps
+  recent-tail coverage explicit.
 
 ## HA Terms
 

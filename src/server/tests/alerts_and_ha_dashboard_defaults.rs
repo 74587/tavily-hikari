@@ -281,10 +281,12 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
         .bind(now - 30)
         .execute(&pool)
         .await
-        .expect("insert maintenance alert");
+    .expect("insert maintenance alert");
 
+    let projection_proxy = proxy.clone();
     let admin_password = "alerts-dashboard-default-window-password";
-    let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+    let (admin_addr, dashboard_state) =
+        spawn_builtin_keys_admin_server_with_state(proxy, admin_password).await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -565,6 +567,27 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
         Some("user_request_rate_limited")
     );
 
+    for _ in 0..48 {
+        projection_proxy
+            .advance_dashboard_alert_projection_scheduler_step()
+            .await
+            .expect("advance alert projection before dashboard read");
+        let projected = projection_proxy
+            .recent_alerts_summary(24)
+            .await
+            .expect("read projected summary");
+        if !projected.stale && projected.total_events == 5 {
+            break;
+        }
+    }
+    let projected = projection_proxy
+        .recent_alerts_summary(24)
+        .await
+        .expect("read projected summary");
+    assert!(!projected.stale, "projected summary is still stale: {projected:?}");
+    assert_eq!(projected.total_events, 5);
+    *dashboard_state.dashboard_overview_cache.lock().await =
+        DashboardOverviewCacheState::default();
     let overview_resp = client
         .get(format!("http://{}/api/dashboard/overview", admin_addr))
         .header(reqwest::header::COOKIE, &admin_cookie)
@@ -706,6 +729,26 @@ async fn alerts_and_dashboard_recent_alerts_include_api_key_exhausted_and_job_fa
     .execute(&pool)
     .await
     .expect("insert failed scheduled job");
+
+    for _ in 0..8 {
+        proxy
+            .advance_dashboard_alert_projection_slice()
+            .await
+            .expect("advance projected recent alerts before Dashboard read");
+        let summary = proxy
+            .recent_alerts_summary(24)
+            .await
+            .expect("read projected recent alerts");
+        if !summary.stale && summary.total_events == 2 {
+            break;
+        }
+    }
+    let projected_summary = proxy
+        .recent_alerts_summary(24)
+        .await
+        .expect("read final projected recent alerts");
+    assert_eq!(projected_summary.total_events, 2);
+    assert!(!projected_summary.stale);
 
     let admin_password = "alerts-dashboard-api-key-exhausted-job-failed-password";
     let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;

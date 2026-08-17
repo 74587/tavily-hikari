@@ -2150,6 +2150,7 @@ impl KeyStore {
         .bind(key_id)
         .execute(&self.pool)
         .await?;
+        self.request_stats_coalescer.mark_dashboard_read_dirty().await;
         Ok(())
     }
 
@@ -2192,6 +2193,7 @@ impl KeyStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        self.request_stats_coalescer.mark_dashboard_read_dirty().await;
         Ok(())
     }
 

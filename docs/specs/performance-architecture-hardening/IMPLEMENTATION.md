@@ -55,7 +55,12 @@
 
 - `SqliteRuntime` 的首个 containment slice 已进入交付：取消安全 read/immediate guard、读路径禁止
   request-stats flush、事务源码门禁与低频 workload 归因。
-- DashboardReadModel、AlertProjection、完整 MaintenanceRuntime 与 HA writable-tenure 生命周期仍是后续架构工作，未在本变更中伪装为已完成。
+- `DashboardReadModel` 由 AppState 唯一持有 last-good snapshot、dirty generation 和 singleflight
+  builder；warm HTTP/SSE 在压力下返回 explicit stale coverage，dirty rebuild 最快十秒一次并以
+  六十秒 probe 补漏。`AlertProjection` 将 raw alert CTE 从 Dashboard 热路径移到 observability
+  sidecar 的稳定 cursor/fence slice：recent tail 完整后才更新 Dashboard，而独立 history lane 追赶
+  管理员 Events/Groups。完整
+  MaintenanceRuntime 与 HA writable-tenure 生命周期仍是后续架构工作。
 - 101 双库只读快照上的 baseline/candidate production-shape 对比、全量质量门禁和 aggregate PR review
   是交付前硬门禁。
 

@@ -2329,7 +2329,19 @@ pub(super) fn hash_admin_password_for_test(password: &str) -> String {
         .to_string()
 }
 
-pub(super) async fn spawn_builtin_keys_admin_server(proxy: TavilyProxy, password: &str) -> SocketAddr {
+pub(super) async fn spawn_builtin_keys_admin_server(
+    proxy: TavilyProxy,
+    password: &str,
+) -> SocketAddr {
+    spawn_builtin_keys_admin_server_with_state(proxy, password)
+        .await
+        .0
+}
+
+pub(super) async fn spawn_builtin_keys_admin_server_with_state(
+    proxy: TavilyProxy,
+    password: &str,
+) -> (SocketAddr, Arc<AppState>) {
     let password_hash = hash_admin_password_for_test(password);
     let state = Arc::new(AppState {
         proxy,
@@ -2377,7 +2389,7 @@ pub(super) async fn spawn_builtin_keys_admin_server(proxy: TavilyProxy, password
         .route("/api/tokens/:id/logs/list", get(get_token_logs_list))
         .route("/api/tokens/:id/logs/catalog", get(get_token_logs_catalog))
         .route("/api/keys/batch", post(create_api_keys_batch))
-        .with_state(state);
+        .with_state(state.clone());
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2386,7 +2398,7 @@ pub(super) async fn spawn_builtin_keys_admin_server(proxy: TavilyProxy, password
             .await
             .unwrap();
     });
-    addr
+    (addr, state)
 }
 
 pub(super) fn linuxdo_oauth_options_for_test() -> LinuxDoOAuthOptions {

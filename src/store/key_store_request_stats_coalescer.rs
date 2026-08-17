@@ -561,6 +561,15 @@ impl RequestStatsCoalescer {
             .map(|state| state.request_stats_version)
     }
 
+    /// Mark a durable dashboard dependency dirty without adding synthetic request statistics.
+    ///
+    /// The dashboard read model uses the same monotonically increasing generation as the
+    /// coalescer because both types of changes must invalidate one immutable snapshot.
+    pub(crate) async fn mark_dashboard_read_dirty(&self) {
+        let mut state = self.state.lock().await;
+        Self::bump_request_stats_version(&mut state);
+    }
+
     #[cfg(test)]
     pub(crate) async fn install_post_flush_pause(&self) -> RequestStatsPostFlushPause {
         let pause = new_request_stats_test_pause();

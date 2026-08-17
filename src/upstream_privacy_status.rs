@@ -88,6 +88,25 @@ pub struct ReconciliationRunObservation {
     pub observed_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReconciliationControllerStatus {
+    pub mode: String,
+    pub activation_period_code: Option<String>,
+    pub activation_period_start: Option<i64>,
+    pub legacy_active: bool,
+    pub paused_reason: Option<String>,
+    pub transitioned_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DashboardAlertProjectionStatus {
+    pub coverage: String,
+    pub observed_at: Option<i64>,
+    pub stale_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamPrivacyStatus {
@@ -135,6 +154,10 @@ pub struct UpstreamPrivacyStatus {
     pub reconciliation_local_backoff: ReconciliationLocalBackoff,
     #[serde(default)]
     pub reconciliation_run_observation: ReconciliationRunObservation,
+    #[serde(default)]
+    pub reconciliation_controller: ReconciliationControllerStatus,
+    #[serde(default)]
+    pub dashboard_alert_projection: DashboardAlertProjectionStatus,
     pub retry_buckets: UpstreamReconciliationRetryBuckets,
     pub current_period_bound_users_by_key: Vec<UpstreamKeyActivityPoint>,
     pub current_period_pending_project_ids_by_key: Vec<UpstreamKeyActivityPoint>,

@@ -49,6 +49,18 @@
 - Reconciliation run observation reports mode, projection phase/scanned rows/batch/transaction p95,
   hydrate/first-remote/remote/finalization/research timing, typed outcome counts, continuation reason,
   and next retry. Stable cursor values, token/key identifiers, SQL, and request content remain private.
+- Dashboard read-model invalidation is a durable business-write signal, not only a request-statistics
+  signal. A successful quota or other overview-visible write advances the shared dirty generation;
+  the read model coalesces dirty rebuilds to at most once per ten seconds and uses a sixty-second
+  safety probe only to catch a missed signal.
+- AlertProjection cursor/fence work is background-only. Its recent Dashboard tail and historical
+  administrator lane report distinct coverage. Dashboard HTTP and SSE consume the immutable
+  last-good snapshot only after recent coverage is `ok`; an incomplete or expired recent observation
+  is reported as `stale` with an explicit reason instead of being presented as a healthy refresh.
+- An idle alert probe is a no-work result, not a progress write. It leaves durable cursor/generation
+  state unchanged; a separately throttled observation heartbeat maintains recent-tail liveness.
+  Sidecar Dashboard aggregation returns only scalar counts and the bounded top-group page, never an
+  unbounded payload collection.
 - 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。
@@ -110,8 +122,8 @@
   - `component=admin_read event=request_logs_list_completed`
   - `component=admin_read event=token_logs_catalog_completed`
   - `component=admin_read event=token_logs_list_completed`
-  - `component=admin_read event=/api/alerts/events phase=alerts_projection`
-  - `component=admin_read event=/api/alerts/groups phase=alerts_grouping`
+  - `component=admin_read event=/api/alerts/events phase=projection_sidecar|alerts_projection`
+  - `component=admin_read event=/api/alerts/groups phase=projection_sidecar|alerts_grouping`
   - `component=admin_read event=low_memory_protection_decision`
 - Forward proxy / xray startup:
   - `component=forward_proxy event=startup_runtime_begin`
