@@ -82,8 +82,8 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn("testbox-reconciliation-shadow-token", COMPARISON)
         self.assertIn("testbox-reconciliation-shadow-period", COMPARISON)
         self.assertIn("snapshot reconciliation fixture preparation failed", COMPARISON)
-        self.assertIn("prepare_reconciliation_runtime_fixture", COMPARISON)
-        self.assertIn("runtime reconciliation fixture preparation failed", COMPARISON)
+        self.assertIn("upstream_reconciliation_control_state", COMPARISON)
+        self.assertIn("the persisted legacy switch above produces compare mode", COMPARISON)
 
 
 if __name__ == "__main__":

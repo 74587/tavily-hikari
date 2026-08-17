@@ -303,6 +303,24 @@ ON CONFLICT(token_id, key_id, period_code) DO UPDATE SET
   updated_at = excluded.updated_at;
 SQL
 
+  # Older baselines predate the controller table. When the copied schema
+  # already has it, reset its clone-only state before app startup; otherwise
+  # the persisted legacy switch above produces compare mode during migration.
+  if [[ "$(sqlite3 "$database_path" "
+    SELECT EXISTS(
+      SELECT 1 FROM sqlite_master
+       WHERE type = 'table' AND name = 'upstream_reconciliation_control_state'
+    );
+  ")" == "1" ]]; then
+    sqlite3 "$database_path" <<'SQL'
+UPDATE upstream_reconciliation_control_state
+   SET mode = 'compare', activation_period_code = NULL,
+       activation_period_start = NULL, legacy_active = 0,
+       paused_reason = NULL, transitioned_at = unixepoch()
+ WHERE id = 'local';
+SQL
+  fi
+
   local transport_isolated
   transport_isolated="$(sqlite3 "$database_path" "
     SELECT CASE WHEN COUNT(*) = 1
@@ -336,47 +354,6 @@ SQL
   ")"
   [[ "$reconciliation_fixture_ready" == "1" ]] || {
     echo "snapshot reconciliation fixture preparation failed" >&2
-    exit 3
-  }
-}
-
-prepare_reconciliation_runtime_fixture() {
-  local database_path="$1"
-  sqlite3 "$database_path" <<'SQL'
--- The controller table is created by the application migration. Set its
--- clone-only state after readiness so baseline revisions without that table
--- can still exercise the same compare-mode fixture.
-UPDATE upstream_reconciliation_control_state
-   SET mode = 'compare', activation_period_code = NULL,
-       activation_period_start = NULL, legacy_active = 0,
-       paused_reason = NULL, transitioned_at = unixepoch()
- WHERE id = 'local';
-UPDATE scheduled_jobs
-   SET available_at = 0
- WHERE job_type = 'upstream_reconciliation'
-   AND status = 'queued';
-SQL
-  local reconciliation_fixture_ready
-  reconciliation_fixture_ready="$(sqlite3 "$database_path" "
-    SELECT CASE WHEN EXISTS (
-      SELECT 1
-        FROM upstream_reconciliation_usage AS usage
-        JOIN upstream_reconciliation_work AS work
-          ON work.token_id = usage.token_id
-         AND work.period_code = usage.period_code
-       WHERE usage.token_id = 'testbox-reconciliation-shadow-token'
-         AND usage.period_code = 'testbox-reconciliation-shadow-period'
-         AND usage.key_id = (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key')
-         AND usage.settlement_mode = 'shadow'
-         AND work.completed_generation < work.work_generation
-    )
-      AND EXISTS (
-        SELECT 1 FROM upstream_reconciliation_control_state
-         WHERE id = 'local' AND mode = 'compare' AND legacy_active = 0
-      ) THEN 1 ELSE 0 END;
-  ")"
-  [[ "$reconciliation_fixture_ready" == "1" ]] || {
-    echo "runtime reconciliation fixture preparation failed" >&2
     exit 3
   }
 }
@@ -517,7 +494,6 @@ run_variant() {
   compose build app
   compose up -d app upstream
   wait_for_dashboard_readiness "$artifact_dir"
-  prepare_reconciliation_runtime_fixture "$variant_dir/tavily_proxy.db"
   capture_ha_gc_state "$variant_dir/tavily_proxy.db" "$artifact_dir/ha_gc_before.tsv"
   capture_reconciliation_state "$variant_dir/tavily_proxy.db" "$artifact_dir/reconciliation_before.tsv"
   sample_memory "$artifact_dir/memory_samples.txt" &
