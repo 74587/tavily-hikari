@@ -92,6 +92,9 @@
   HTTP/SSE 只消费 `recent_coverage=ok` 的共享 read model，否则保留 last-good；管理员 Events/Groups
   仅在 complete history coverage 为 `ok` 时读取 observability sidecar。任一 cursor 追赶、stale 或
   rolling upgrade 期间保守回退既有原始查询，不能把未投影历史表示为空。
+- Dashboard 的 recent alert summary 只由 projection worker 在独立的 60 秒窗口内物化。若 source
+  generation 在窗口内前进，已有 summary 必须标记 stale，Dashboard HTTP/SSE 继续服务 last-good，而非
+  在读取路径执行 sidecar 聚合。
 - 历史 lane 的 fence 必须与 recent tail 的起点同秒衔接：tail 拥有起点秒内的记录，history 包含严格更早
   的记录，运行时始终使用复合 cursor；仅 v17 对旧的“同秒 + 空 id”历史 fence 做一次性上一秒迁移，
   以恢复该低 sentinel 的边界所有权。空闲 source probe 不得写 cursor/generation；覆盖观察只能由

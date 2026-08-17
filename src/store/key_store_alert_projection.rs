@@ -833,28 +833,24 @@ impl KeyStore {
     ) -> Result<RecentAlertsSummary, ProxyError> {
         let clamped_window_hours = window_hours.clamp(1, 24 * 30);
         let status = self.alert_projection_status().await?;
-        if let Some(summary) = self
+        let source_generation = self.alert_projection_recent_generation().await?;
+        if let Some((cached_generation, summary)) = self
             .load_materialized_projected_recent_alerts_summary(clamped_window_hours)
             .await?
         {
-            return Ok(Self::apply_alert_projection_status(summary, &status));
+            return Ok(Self::apply_alert_projection_status(
+                summary,
+                &status,
+                cached_generation != source_generation,
+            ));
         }
-        // A process with no materialized sidecar snapshot may need one cold
-        // calculation. Normal Dashboard and SSE reads never take this branch:
-        // the projection worker owns the bounded periodic refresh below.
-        let summary = self
-            .compute_projected_recent_alerts_summary(clamped_window_hours, &status)
-            .await?;
-        if summary.total_events > 0 {
-            let source_generation = self.alert_projection_recent_generation().await?;
-            self.persist_materialized_projected_recent_alerts_summary(
-                clamped_window_hours,
-                source_generation,
-                &summary,
-            )
-            .await?;
-        }
-        Ok(summary)
+        // Dashboard and SSE reads own no aggregation work. Until the worker
+        // materializes its first snapshot, callers receive an explicit stale
+        // value rather than rebuilding the alert projection CTE themselves.
+        Ok(Self::unavailable_projected_recent_alerts_summary(
+            clamped_window_hours,
+            &status,
+        ))
     }
 
     pub(crate) async fn refresh_dashboard_alert_projection_summary(&self) -> Result<bool, ProxyError> {
@@ -866,15 +862,14 @@ impl KeyStore {
         };
         let window_hours = ALERT_PROJECTION_DASHBOARD_WINDOW_HOURS;
         let now = self.backend_time.now_ts();
-        let source_generation = self.alert_projection_recent_generation().await?;
-        if let Some((cached_generation, computed_at)) = self
+        if let Some((_cached_generation, computed_at)) = self
             .materialized_projected_recent_alerts_summary_metadata(window_hours)
             .await?
-            && cached_generation == source_generation
             && now.saturating_sub(computed_at) < ALERT_PROJECTION_SUMMARY_REFRESH_SECS
         {
             return Ok(false);
         }
+        let source_generation = self.alert_projection_recent_generation().await?;
         let status = self.alert_projection_status().await?;
         let summary = self
             .compute_projected_recent_alerts_summary(window_hours, &status)
@@ -923,13 +918,13 @@ impl KeyStore {
     async fn load_materialized_projected_recent_alerts_summary(
         &self,
         window_hours: i64,
-    ) -> Result<Option<RecentAlertsSummary>, ProxyError> {
+    ) -> Result<Option<(i64, RecentAlertsSummary)>, ProxyError> {
         let mut conn = self
             .sqlite_runtime
             .acquire_operation_connection(SqliteOperation::AlertProjection)
             .await?;
-        let result = sqlx::query_scalar::<_, String>(
-            r#"SELECT summary_json
+        let result = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT source_generation, summary_json
                  FROM observability.dashboard_alert_projection_recent_summaries
                 WHERE window_hours = ?"#,
         )
@@ -938,12 +933,12 @@ impl KeyStore {
         .await;
         let payload = conn.complete_query(result).await?;
         payload
-            .map(|payload| {
+            .map(|(source_generation, payload)| {
                 serde_json::from_str(&payload).map_err(|err| {
                     ProxyError::Other(format!(
                         "deserialize materialized recent alert summary: {err}"
                     ))
-                })
+                }).map(|summary| (source_generation, summary))
             })
             .transpose()
     }
@@ -986,13 +981,35 @@ impl KeyStore {
     fn apply_alert_projection_status(
         mut summary: RecentAlertsSummary,
         status: &AlertProjectionStatus,
+        materialization_stale: bool,
     ) -> RecentAlertsSummary {
-        summary.coverage = status.recent_coverage.clone();
-        summary.stale = status.recent_coverage != "ok" || status.stale_reason.is_some();
-        summary.error = status.stale_reason.clone().or_else(|| {
-            (status.recent_coverage != "ok").then(|| "projection_catching_up".to_string())
-        });
+        summary.coverage = if status.recent_coverage == "projecting" {
+            "projecting".to_string()
+        } else if status.recent_coverage == "ok" && !materialization_stale {
+            "ok".to_string()
+        } else {
+            "stale".to_string()
+        };
+        summary.stale = summary.coverage != "ok" || status.stale_reason.is_some();
+        summary.error = status
+            .stale_reason
+            .clone()
+            .or_else(|| {
+                (status.recent_coverage != "ok").then(|| "projection_catching_up".to_string())
+            })
+            .or_else(|| materialization_stale.then(|| "summary_refresh_pending".to_string()));
         summary
+    }
+
+    fn unavailable_projected_recent_alerts_summary(
+        window_hours: i64,
+        status: &AlertProjectionStatus,
+    ) -> RecentAlertsSummary {
+        let summary = RecentAlertsSummary {
+            window_hours,
+            ..Default::default()
+        };
+        Self::apply_alert_projection_status(summary, status, true)
     }
 
     async fn compute_projected_recent_alerts_summary(

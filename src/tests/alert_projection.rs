@@ -58,21 +58,32 @@ async fn advance_alert_projection_until(proxy: &TavilyProxy, projected_events: i
             // Keep this helper from spinning against a lazy pool in tests.
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let summary = proxy
-            .recent_alerts_summary(24)
+        let status = proxy
+            .dashboard_alert_projection_status()
             .await
-            .expect("read derived alert summary");
-        if summary.total_events == projected_events && summary.coverage == "ok" {
+            .expect("read projection coverage");
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM observability.dashboard_alert_projection_events",
+        )
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("count projected alert events");
+        if event_count == projected_events && status.coverage == "ok" {
             return;
         }
     }
-    let summary = proxy
-        .recent_alerts_summary(24)
+    let status = proxy
+        .dashboard_alert_projection_status()
         .await
-        .expect("read final derived alert summary");
+        .expect("read final projection coverage");
+    let event_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM observability.dashboard_alert_projection_events")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count final projected alert events");
     panic!(
-        "alert projection did not converge: expected {projected_events} events, got {} ({}) after {outcomes:?}",
-        summary.total_events, summary.coverage,
+        "alert projection did not converge: expected {projected_events} events, got {event_count} ({}) after {outcomes:?}",
+        status.coverage,
     );
 }
 
@@ -121,7 +132,7 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
     let db_path = temp_db_path("alert-projection-tail");
     let db_string = db_path.to_string_lossy().to_string();
     let now = 1_752_500_000;
-    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
     let proxy = TavilyProxy::with_options_and_time(
         vec!["tvly-alert-projection-tail".to_string()],
         DEFAULT_UPSTREAM,
@@ -134,6 +145,12 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
 
     insert_projected_rate_limit_alert(&proxy, "projection-token-a", now).await;
     advance_alert_projection_until(&proxy, 1).await;
+    clock.set_now_ts(now + 60);
+    proxy
+        .key_store
+        .refresh_dashboard_alert_projection_summary()
+        .await
+        .expect("refresh initial summary after the throttle window");
     let initial = proxy
         .recent_alerts_summary(24)
         .await
@@ -142,7 +159,7 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
     assert_eq!(initial.coverage, "ok");
 
     drop(proxy);
-    let (resumed_time, _) = BackendTime::manual_from_ts(now + 1);
+    let (resumed_time, resumed_clock) = BackendTime::manual_from_ts(now + 61);
     let resumed = TavilyProxy::with_options_and_time(
         vec!["tvly-alert-projection-tail".to_string()],
         DEFAULT_UPSTREAM,
@@ -152,16 +169,149 @@ async fn alert_projection_cursor_replays_tail_without_duplicates() {
     )
     .await
     .expect("reopen proxy with projected alert cursor");
-    insert_projected_rate_limit_alert(&resumed, "projection-token-b", now + 1).await;
+    insert_projected_rate_limit_alert(&resumed, "projection-token-b", now + 61).await;
     advance_alert_projection_until(&resumed, 2).await;
+    resumed_clock.set_now_ts(now + 121);
+    resumed
+        .refresh_dashboard_alert_projection_observation()
+        .await
+        .expect("refresh projection observation before materializing the summary");
+    resumed
+        .key_store
+        .refresh_dashboard_alert_projection_summary()
+        .await
+        .expect("refresh summary after the throttle window");
     let replayed = resumed
         .recent_alerts_summary(24)
         .await
         .expect("read tail-replayed alert summary");
     assert_eq!(replayed.total_events, 2);
-    assert!(!replayed.stale);
+    assert!(
+        !replayed.stale,
+        "replayed summary must be fresh: {replayed:?}"
+    );
 
     drop(resumed);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_materializes_empty_dashboard_summary_without_read_side_aggregation() {
+    let db_path = temp_db_path("alert-projection-materialized-empty-summary");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_500_025;
+    let (backend_time, _) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-materialized-empty-summary".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    advance_alert_projection_until_full_coverage(&proxy).await;
+    assert!(
+        proxy
+            .key_store
+            .refresh_dashboard_alert_projection_summary()
+            .await
+            .expect("materialize empty dashboard summary")
+    );
+    let cached_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.dashboard_alert_projection_recent_summaries WHERE window_hours = 24",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read empty materialized summary row");
+    assert_eq!(cached_rows, 1);
+
+    // A missing raw source must not cause Dashboard reads to rebuild the CTE.
+    sqlx::query("DROP TABLE auth_token_logs")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove unused raw alert source");
+    let summary = proxy
+        .dashboard_recent_alerts_summary(24)
+        .await
+        .expect("read empty materialized dashboard summary");
+    assert_eq!(summary.total_events, 0);
+    assert_eq!(summary.coverage, "ok");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn alert_projection_summary_refresh_is_rate_limited_across_generation_changes() {
+    let db_path = temp_db_path("alert-projection-summary-generation-throttle");
+    let db_string = db_path.to_string_lossy().to_string();
+    let now = 1_752_500_040;
+    let (backend_time, clock) = BackendTime::manual_from_ts(now);
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-alert-projection-summary-generation-throttle".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+
+    insert_projected_rate_limit_alert(&proxy, "projection-throttle-first", now).await;
+    advance_alert_projection_until(&proxy, 1).await;
+    let first_computed_at: i64 = sqlx::query_scalar(
+        "SELECT computed_at FROM observability.dashboard_alert_projection_recent_summaries WHERE window_hours = 24",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read initial summary timestamp");
+
+    insert_projected_rate_limit_alert(&proxy, "projection-throttle-second", now + 1).await;
+    advance_alert_projection_until(&proxy, 2).await;
+    assert!(
+        !proxy
+            .key_store
+            .refresh_dashboard_alert_projection_summary()
+            .await
+            .expect("do not refresh again inside the fixed window")
+    );
+    let computed_at: i64 = sqlx::query_scalar(
+        "SELECT computed_at FROM observability.dashboard_alert_projection_recent_summaries WHERE window_hours = 24",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read throttled summary timestamp");
+    assert_eq!(computed_at, first_computed_at);
+    let stale = proxy
+        .recent_alerts_summary(24)
+        .await
+        .expect("read stale materialized summary");
+    assert!(stale.stale);
+    assert_eq!(stale.coverage, "stale");
+    assert_eq!(stale.error.as_deref(), Some("summary_refresh_pending"));
+
+    clock.set_now_ts(now + 60);
+    assert!(
+        proxy
+            .key_store
+            .refresh_dashboard_alert_projection_summary()
+            .await
+            .expect("refresh stale summary after the fixed window")
+    );
+    let refreshed = proxy
+        .dashboard_recent_alerts_summary(24)
+        .await
+        .expect("read refreshed dashboard summary");
+    assert_eq!(refreshed.total_events, 2);
+    assert!(!refreshed.stale);
+
+    drop(proxy);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -328,11 +478,16 @@ async fn alert_projection_keeps_dashboard_tail_complete_while_history_catches_up
             .dashboard_alert_projection_status()
             .await
             .expect("read projection status");
-        let recent = proxy
-            .recent_alerts_summary(24)
-            .await
-            .expect("read recent projected alert summary");
         if status.recent_coverage == "ok" && status.coverage == "projecting" {
+            proxy
+                .key_store
+                .refresh_dashboard_alert_projection_summary()
+                .await
+                .expect("materialize Dashboard tail summary");
+            let recent = proxy
+                .recent_alerts_summary(24)
+                .await
+                .expect("read materialized recent projected alert summary");
             assert_eq!(recent.total_events, 1);
             assert!(!recent.stale);
             break;
@@ -480,6 +635,11 @@ async fn alert_projection_recent_summary_does_not_silently_truncate_events() {
     .execute(&proxy.key_store.pool)
     .await
     .expect("mark Dashboard tail complete");
+    proxy
+        .key_store
+        .refresh_dashboard_alert_projection_summary()
+        .await
+        .expect("materialize exact derived summary");
 
     let summary = proxy
         .dashboard_recent_alerts_summary(24)

@@ -978,6 +978,29 @@ fn acknowledge_dashboard_alert_projection_generation(
     }
 }
 
+fn acknowledge_dashboard_request_stats_generation(
+    cache: &mut DashboardOverviewCacheState,
+    expected_generation: Option<u64>,
+    current_generation: Option<u64>,
+) {
+    if expected_generation == current_generation {
+        cache.built_request_stats_generation = current_generation;
+    }
+}
+
+fn stale_dashboard_recent_alerts_summary(
+    window_hours: i64,
+    reason: &'static str,
+) -> tavily_hikari::RecentAlertsSummary {
+    tavily_hikari::RecentAlertsSummary {
+        window_hours,
+        coverage: "stale".to_string(),
+        stale: true,
+        error: Some(reason.to_string()),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 async fn wait_for_dashboard_overview_refresh(
     state: &Arc<AppState>,
@@ -1368,7 +1391,10 @@ async fn build_dashboard_overview_payload(
         .dashboard_recent_alerts_summary_for_cold_start_with_token(24)
         .await
         .unwrap_or_else(|_| {
-            let summary = tavily_hikari::RecentAlertsSummary::default();
+            let summary = stale_dashboard_recent_alerts_summary(
+                24,
+                "alert_projection_unavailable",
+            );
             (summary, [0; 4])
         });
 
@@ -1788,6 +1814,7 @@ async fn load_dashboard_overview_snapshot(
                     cache.last_refresh_requested_at = Some(tokio::time::Instant::now());
                     DashboardOverviewLoadAction::Refresh {
                         generation: cache.loading_generation,
+                        request_stats_generation,
                         alert_projection_generation: cache.alert_projection_generation,
                         last_good,
                         cold_waiter: Some(cache.notify.clone().notified_owned()),
@@ -1816,6 +1843,7 @@ async fn load_dashboard_overview_snapshot(
         }
         DashboardOverviewLoadAction::Refresh {
             generation,
+            request_stats_generation,
             alert_projection_generation,
             last_good,
             cold_waiter,
@@ -1827,6 +1855,7 @@ async fn load_dashboard_overview_snapshot(
                         &refresh_state,
                         cache_handle,
                         generation,
+                        request_stats_generation,
                         alert_projection_generation,
                     )
                     .await;
@@ -1840,6 +1869,7 @@ async fn load_dashboard_overview_snapshot(
                         &refresh_state,
                         refresh_cache,
                         generation,
+                        request_stats_generation,
                         alert_projection_generation,
                     )
                     .await;
@@ -1896,6 +1926,7 @@ enum DashboardOverviewLoadAction {
     Wait(tokio::sync::futures::OwnedNotified),
     Refresh {
         generation: u64,
+        request_stats_generation: Option<u64>,
         alert_projection_generation: u64,
         last_good: Option<Arc<DashboardOverviewSnapshot>>,
         cold_waiter: Option<tokio::sync::futures::OwnedNotified>,
@@ -1925,6 +1956,7 @@ async fn refresh_dashboard_overview_snapshot(
     state: &Arc<AppState>,
     cache_handle: Arc<Mutex<DashboardOverviewCacheState>>,
     load_generation: u64,
+    expected_request_stats_generation: Option<u64>,
     expected_alert_projection_generation: u64,
 ) -> Result<Arc<DashboardOverviewSnapshot>, ProxyError> {
     let perf = tavily_hikari::RuntimePerfScope::start();
@@ -1971,7 +2003,11 @@ async fn refresh_dashboard_overview_snapshot(
         let mut cache = cache_handle.lock().await;
         if cache.loading_generation == load_generation {
             cache.last_freshness_probe_at = Some(tokio::time::Instant::now());
-            cache.built_request_stats_generation = state.proxy.dashboard_read_generation();
+            acknowledge_dashboard_request_stats_generation(
+                &mut cache,
+                expected_request_stats_generation,
+                state.proxy.dashboard_read_generation(),
+            );
             acknowledge_dashboard_alert_projection_generation(
                 &mut cache,
                 expected_alert_projection_generation,
@@ -2051,7 +2087,11 @@ async fn refresh_dashboard_overview_snapshot(
             snapshot: snapshot.clone(),
             freshness: snapshot.freshness.clone(),
         });
-        cache.built_request_stats_generation = state.proxy.dashboard_read_generation();
+        acknowledge_dashboard_request_stats_generation(
+            &mut cache,
+            expected_request_stats_generation,
+            state.proxy.dashboard_read_generation(),
+        );
         acknowledge_dashboard_alert_projection_generation(
             &mut cache,
             expected_alert_projection_generation,

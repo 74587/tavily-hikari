@@ -29,6 +29,34 @@ fn dashboard_alert_dirty_generation_survives_an_older_refresh_completion() {
     assert_eq!(cache.built_alert_projection_generation, Some(2));
 }
 
+#[test]
+fn dashboard_request_stats_dirty_generation_survives_an_older_refresh_completion() {
+    let mut cache = DashboardOverviewCacheState {
+        built_request_stats_generation: Some(1),
+        ..Default::default()
+    };
+
+    // Request stats changed after the loader captured generation 1. The old
+    // loader may publish a snapshot, but it must leave generation 2 dirty.
+    acknowledge_dashboard_request_stats_generation(&mut cache, Some(1), Some(2));
+    assert_eq!(cache.built_request_stats_generation, Some(1));
+
+    acknowledge_dashboard_request_stats_generation(&mut cache, Some(2), Some(2));
+    assert_eq!(cache.built_request_stats_generation, Some(2));
+}
+
+#[test]
+fn unavailable_dashboard_alert_summary_is_explicitly_stale() {
+    let summary = stale_dashboard_recent_alerts_summary(24, "alert_projection_unavailable");
+
+    assert_eq!(summary.coverage, "stale");
+    assert!(summary.stale);
+    assert_eq!(
+        summary.error.as_deref(),
+        Some("alert_projection_unavailable")
+    );
+}
+
 #[tokio::test]
 async fn compute_signatures_reuses_dashboard_boundary_contract() {
     let db_path = temp_db_path("summary-signatures-dashboard-boundaries");
@@ -423,7 +451,7 @@ async fn dashboard_pressure_returns_last_good_without_refresh() {
         cache.loading_started_at = Some(tokio::time::Instant::now());
         cache.loading_generation
     };
-    let initial = refresh_dashboard_overview_snapshot(&state, cache_handle, generation, 0)
+    let initial = refresh_dashboard_overview_snapshot(&state, cache_handle, generation, None, 0)
         .await
         .expect("build an initial last-good overview snapshot for pressure containment");
     reset_dashboard_overview_build_count(&state).await;
