@@ -82,6 +82,8 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn("testbox-reconciliation-shadow-token", COMPARISON)
         self.assertIn("testbox-reconciliation-shadow-period", COMPARISON)
         self.assertIn("snapshot reconciliation fixture preparation failed", COMPARISON)
+        self.assertIn("prepare_reconciliation_runtime_fixture", COMPARISON)
+        self.assertIn("runtime reconciliation fixture preparation failed", COMPARISON)
 
 
 if __name__ == "__main__":
