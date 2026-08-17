@@ -332,7 +332,7 @@ SQL
          AND usage.settlement_mode = 'shadow'
          AND work.completed_generation < work.work_generation
     )
-      ) THEN 1 ELSE 0 END;
+      THEN 1 ELSE 0 END;
   ")"
   [[ "$reconciliation_fixture_ready" == "1" ]] || {
     echo "snapshot reconciliation fixture preparation failed" >&2
