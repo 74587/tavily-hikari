@@ -1053,6 +1053,19 @@ async fn compute_signatures_tracks_recent_alert_summary_changes() {
             .expect("advance alert projection after alert write");
     }
 
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_recent_summaries SET computed_at = ? WHERE window_hours = 24",
+    )
+    .bind(Utc::now().timestamp() - 61)
+    .execute(&pool)
+    .await
+    .expect("expire materialized alert summary refresh window");
+    state
+        .proxy
+        .advance_dashboard_alert_projection_scheduler_step()
+        .await
+        .expect("refresh alert projection after its rate-limit window");
+
     expire_dashboard_overview_freshness_probe(&state).await;
     let _ = compute_signatures(&state)
         .await
