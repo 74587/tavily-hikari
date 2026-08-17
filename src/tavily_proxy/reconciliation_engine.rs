@@ -93,6 +93,35 @@ impl ReconciliationEngine {
         matches!(err, ProxyError::Http(_) | ProxyError::Database(_))
     }
 
+    fn active_settlement_integrity_reason(err: &ProxyError) -> Option<&'static str> {
+        let ProxyError::Other(message) = err else {
+            return None;
+        };
+        if message.contains("invalid reconciliation billing subject") {
+            Some("invalid_billing_subject")
+        } else if message.contains("unsupported reconciliation billing subject") {
+            Some("unsupported_billing_subject")
+        } else {
+            None
+        }
+    }
+
+    async fn pause_active_settlement_integrity_failure(
+        proxy: &TavilyProxy,
+        settlement_mode: &str,
+        error: &ProxyError,
+    ) -> Result<(), ProxyError> {
+        if settlement_mode != "shadow"
+            && let Some(reason) = Self::active_settlement_integrity_reason(error)
+        {
+            proxy
+                .key_store
+                .pause_upstream_reconciliation_for_integrity(reason)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn projection_defer_exhausts_preparation(candidate_count: usize) -> bool {
         candidate_count == 0
     }
@@ -114,6 +143,8 @@ impl ReconciliationEngine {
 #[cfg(test)]
 mod reconciliation_engine_tests {
     use std::sync::atomic::AtomicI64;
+
+    use crate::ProxyError;
 
     use super::{
         ReconciliationEngine, ReconciliationOutcome, should_emit_reconciliation_summary_at,
@@ -178,6 +209,29 @@ mod reconciliation_engine_tests {
         assert_eq!(
             ReconciliationEngine::outcome(0, 0, 1, false, false, false, false),
             Some(ReconciliationOutcome::Observed)
+        );
+    }
+
+    #[test]
+    fn actual_settlement_integrity_failures_are_pauseable_but_retryable_errors_are_not() {
+        assert_eq!(
+            ReconciliationEngine::active_settlement_integrity_reason(&ProxyError::Other(
+                "invalid reconciliation billing subject".to_string(),
+            )),
+            Some("invalid_billing_subject")
+        );
+        assert_eq!(
+            ReconciliationEngine::active_settlement_integrity_reason(&ProxyError::Other(
+                "database is locked".to_string(),
+            )),
+            None
+        );
+        assert_eq!(
+            ReconciliationEngine::active_settlement_integrity_reason(&ProxyError::StaleClaim {
+                job_id: 1,
+                claim_generation: 2,
+            }),
+            None
         );
     }
 }

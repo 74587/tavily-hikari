@@ -1688,7 +1688,7 @@ impl TavilyProxy {
                             .get(&(candidate.token_id.clone(), candidate.period_code.clone()))
                             .copied()
                             .unwrap_or(0);
-                        let did_settle = if candidate.settlement_mode == "shadow" {
+                        let settlement_result = if candidate.settlement_mode == "shadow" {
                             self.key_store
                                 .settle_upstream_reconciliation_shadow(
                                     &candidate,
@@ -1699,7 +1699,7 @@ impl TavilyProxy {
                                         claimed_job,
                                     }),
                                 )
-                                .await?
+                                .await
                         } else {
                             self.key_store
                                 .settle_upstream_reconciliation(
@@ -1711,7 +1711,19 @@ impl TavilyProxy {
                                         claimed_job,
                                     }),
                                 )
-                                .await?
+                                .await
+                        };
+                        let did_settle = match settlement_result {
+                            Ok(did_settle) => did_settle,
+                            Err(error) => {
+                                ReconciliationEngine::pause_active_settlement_integrity_failure(
+                                    self,
+                                    &candidate.settlement_mode,
+                                    &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
                         };
                         if did_settle {
                             completed += 1;
