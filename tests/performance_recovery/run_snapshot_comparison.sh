@@ -199,6 +199,8 @@ capture_ha_gc_state() {
 capture_reconciliation_state() {
   local database_path="$1"
   local target_path="$2"
+  local fixture_token_id="testbox-reconciliation-shadow-token"
+  local fixture_period_code="testbox-reconciliation-shadow-period"
   local projection_p95=0
   if [[ "$(sqlite3 "$database_path" "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upstream_reconciliation_projection_state');")" == "1" ]]; then
     projection_p95="$(sqlite3 "$database_path" "SELECT COALESCE(transaction_p95_ms, 0) FROM upstream_reconciliation_projection_state WHERE id = 'local';")"
@@ -211,7 +213,14 @@ capture_reconciliation_state() {
       COALESCE(SUM(last_outcome = 'observed'), 0),
       $projection_p95,
       COALESCE((SELECT COUNT(*) FROM billing_reconciliation_adjustments), 0),
-      COALESCE((SELECT SUM(delta_credits) FROM billing_reconciliation_adjustments), 0)
+      COALESCE((SELECT SUM(delta_credits) FROM billing_reconciliation_adjustments), 0),
+      COALESCE((
+        SELECT completed_generation >= work_generation
+               AND last_outcome = 'no_adjustment'
+          FROM upstream_reconciliation_work
+         WHERE token_id = '$fixture_token_id'
+           AND period_code = '$fixture_period_code'
+      ), 0)
     FROM upstream_reconciliation_work;
   " > "$target_path"
 }
@@ -249,6 +258,54 @@ UPDATE scheduled_jobs
    SET available_at = 0
  WHERE job_type = 'upstream_reconciliation'
    AND status = 'queued';
+
+-- Historical work on a production snapshot may reference retired keys or
+-- malformed legacy periods. Keep it for projection coverage, but inject one
+-- deterministic current-shape shadow work item so both variants prove a
+-- terminal compare outcome against the isolated stub (which returns usage=0).
+-- This is clone-only test data and never reaches the source snapshot.
+INSERT OR IGNORE INTO api_keys (
+  id, api_key, status, created_at, status_changed_at, last_used_at, deleted_at
+) VALUES (
+  'testbox-reconciliation-shadow-key', 'tvly-load-key', 'active',
+  unixepoch(), unixepoch(), 0, NULL
+);
+UPDATE api_keys
+   SET status = 'active', deleted_at = NULL, status_changed_at = unixepoch()
+ WHERE api_key = 'tvly-load-key';
+INSERT INTO meta (key, value) VALUES
+  ('upstream_project_id_mode_v1', 'accessToken'),
+  ('api_rebalance_enabled_v1', '1'),
+  ('rebalance_mcp_enabled_v1', '1'),
+  ('upstream_precise_reconciliation_enabled_v1', '0')
+ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+UPDATE upstream_reconciliation_control_state
+   SET mode = 'compare', activation_period_code = NULL,
+       activation_period_start = NULL, legacy_active = 0,
+       paused_reason = NULL, transitioned_at = unixepoch()
+ WHERE id = 'local';
+INSERT INTO upstream_reconciliation_usage (
+  token_id, key_id, period_code, project_id, billing_subject, settlement_mode,
+  period_start, period_end, request_count, first_used_at, last_used_at, updated_at
+) VALUES (
+  'testbox-reconciliation-shadow-token',
+  (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key'),
+  'testbox-reconciliation-shadow-period',
+  'testbox-reconciliation-shadow-project',
+  'token:testbox-reconciliation-shadow-token', 'shadow',
+  unixepoch() - 1800, unixepoch() - 601, 1,
+  unixepoch() - 1800, unixepoch() - 601, unixepoch() - 601
+)
+ON CONFLICT(token_id, key_id, period_code) DO UPDATE SET
+  project_id = excluded.project_id,
+  billing_subject = excluded.billing_subject,
+  settlement_mode = excluded.settlement_mode,
+  period_start = excluded.period_start,
+  period_end = excluded.period_end,
+  request_count = excluded.request_count,
+  first_used_at = excluded.first_used_at,
+  last_used_at = excluded.last_used_at,
+  updated_at = excluded.updated_at;
 SQL
 
   local transport_isolated
@@ -263,6 +320,30 @@ SQL
   ")"
   [[ "$transport_isolated" == "1" ]] || {
     echo "snapshot forward-proxy transport isolation failed" >&2
+    exit 3
+  }
+
+  local reconciliation_fixture_ready
+  reconciliation_fixture_ready="$(sqlite3 "$database_path" "
+    SELECT CASE WHEN EXISTS (
+      SELECT 1
+        FROM upstream_reconciliation_usage AS usage
+        JOIN upstream_reconciliation_work AS work
+          ON work.token_id = usage.token_id
+         AND work.period_code = usage.period_code
+       WHERE usage.token_id = 'testbox-reconciliation-shadow-token'
+         AND usage.period_code = 'testbox-reconciliation-shadow-period'
+         AND usage.key_id = (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key')
+         AND usage.settlement_mode = 'shadow'
+         AND work.completed_generation < work.work_generation
+    )
+      AND EXISTS (
+        SELECT 1 FROM upstream_reconciliation_control_state
+         WHERE id = 'local' AND mode = 'compare' AND legacy_active = 0
+      ) THEN 1 ELSE 0 END;
+  ")"
+  [[ "$reconciliation_fixture_ready" == "1" ]] || {
+    echo "snapshot reconciliation fixture preparation failed" >&2
     exit 3
   }
 }
@@ -457,6 +538,7 @@ def read_reconciliation_state(path):
     keys = (
         "terminal", "settled", "noAdjustment", "observed",
         "projectionTransactionP95Ms", "billingAdjustmentCount", "billingAdjustmentSum",
+        "fixtureNoAdjustmentTerminal",
     )
     return dict(zip(keys, values, strict=True))
 
@@ -792,6 +874,8 @@ if candidate["reconciliationProjectionDiscarded"]:
     raise SystemExit("candidate discarded a reconciliation projection transaction connection")
 if candidate["reconciliation"]["terminalDelta"] <= 0:
     raise SystemExit("candidate reconciliation produced no terminal outcome")
+if not candidate["reconciliation"]["after"]["fixtureNoAdjustmentTerminal"]:
+    raise SystemExit("candidate did not complete the deterministic shadow reconciliation fixture")
 projection_p95 = candidate["reconciliation"]["after"]["projectionTransactionP95Ms"]
 if projection_p95 <= 0 or projection_p95 >= 100:
     raise SystemExit(
