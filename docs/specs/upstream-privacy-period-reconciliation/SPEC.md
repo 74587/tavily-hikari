@@ -233,6 +233,23 @@
 - source_type: `storybook_canvas`
 - target_program: `mock-only`
 - story_id_or_title: `Admin/Modules/SystemStatusModule/Observed`
+- scenario: annotated origin/main baseline versus current reconciliation controller and alert projection
+- requested_viewport: `desktop`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `browser-viewport`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: The red baseline marker identifies the original settlement-mode surface; the green
+  current markers identify the new reconciliation controller and alert projection coverage surfaces.
+- submission_gate: `approved`
+
+PR: include
+
+![Annotated dashboard baseline and current-state comparison](./assets/current/dashboard-read-model-baseline-comparison-135376b4.png)
+
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/Observed`
 - scenario: compare-mode observed terminal with alert projection coverage
 - requested_viewport: `desktop`
 - viewport_strategy: `storybook-viewport`
@@ -242,8 +259,6 @@
 - evidence_note: Current `135376b4` source confirms compare-mode observation does not present as
   billing settlement and exposes alert projection coverage.
 - submission_gate: `approved`
-
-PR: include
 
 ![Observed reconciliation state and alert projection coverage](./assets/current/dashboard-alert-projection-last-good-135376b4-desktop.png)
 
