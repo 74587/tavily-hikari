@@ -1245,20 +1245,24 @@ async fn analysis_pressure_background_rebuild_releases_latch_after_success() {
 
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let total_pressure: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(success_count + failure_count), 0) FROM observability.server_pressure_buckets WHERE bucket_kind = 'five_minute'",
+            let (success_count, failure_count): (i64, i64) = sqlx::query_as(
+                r#"
+                SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
+                FROM observability.server_pressure_buckets
+                WHERE bucket_kind = 'five_minute'
+                "#,
             )
             .fetch_one(&reopened.key_store.pool)
             .await
-            .expect("sum rebuilt server pressure buckets after reschedule");
-            if total_pressure >= 2 {
-                return total_pressure;
+            .expect("read rebuilt server pressure outcomes after reschedule");
+            if success_count >= 1 && failure_count >= 1 {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("rescheduled rebuild should include newly imported request logs");
+    .expect("rescheduled rebuild should include the newly imported failure");
 
     let snapshot = reopened
         .analysis_pressure_snapshot()
