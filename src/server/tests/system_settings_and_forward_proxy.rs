@@ -2551,6 +2551,7 @@ use super::upstream_support_and_manual_jobs::*;
                     SELECT status_code, failure_kind, fallback_reason
                     FROM observability.request_logs
                     WHERE path = '/mcp'
+                      AND fallback_reason = 'unknown_tool'
                     ORDER BY id DESC
                     LIMIT 1
                     "#,
