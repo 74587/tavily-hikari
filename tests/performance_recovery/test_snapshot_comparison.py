@@ -11,6 +11,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HA_DEFS = (ROOT / "src/store/key_store_ha_defs.rs").read_text()
 COMPARISON = (ROOT / "tests/performance_recovery/run_snapshot_comparison.sh").read_text()
+DOCKERFILE = (ROOT / "Dockerfile").read_text()
+DOCKERIGNORE = (ROOT / ".dockerignore").read_text()
 
 
 def rust_resources(constant: str) -> set[str]:
@@ -86,6 +88,10 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn("snapshot reconciliation fixture preparation failed", COMPARISON)
         self.assertIn("upstream_reconciliation_control_state", COMPARISON)
         self.assertIn("the persisted legacy switch above produces compare mode", COMPARISON)
+
+    def test_docker_context_allows_the_test_toolchain_input(self) -> None:
+        self.assertIn("!rust-toolchain.toml", DOCKERIGNORE)
+        self.assertIn("build.rs|rust-toolchain.toml|src", DOCKERFILE)
 
 
 if __name__ == "__main__":

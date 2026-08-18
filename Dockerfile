@@ -36,7 +36,7 @@ RUN test ! -e /context/.env \
     && test -z "$(find /context -type f \( -name '*.db' -o -name '*.db-*' \) -print -quit)" \
     && test -z "$(find /context -mindepth 1 -print | sed 's#^/context/##' | while IFS= read -r path; do \
       case "${path}" in \
-        Cargo.toml|Cargo.lock|build.rs|src|src/*|scripts|scripts/docker-entrypoint.sh|scripts/docker-healthcheck.sh|web|web/dist|web/dist/*) ;; \
+        Cargo.toml|Cargo.lock|build.rs|rust-toolchain.toml|src|src/*|scripts|scripts/docker-entrypoint.sh|scripts/docker-healthcheck.sh|web|web/dist|web/dist/*) ;; \
         *) printf '%s\n' "${path}" ;; \
       esac; \
     done)"
