@@ -74,6 +74,8 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('projection transaction p95 is not proven below 100ms', COMPARISON)
         self.assertIn('candidate billing truth differs', COMPARISON)
         self.assertIn("prepare_reconciliation_fixture", COMPARISON)
+        self.assertIn("Historical baselines predate this Dockerfile input allowlist", COMPARISON)
+        self.assertIn("grep -qx '!rust-toolchain.toml'", COMPARISON)
         self.assertIn("completed_generation < work_generation", COMPARISON)
         self.assertIn("upstream_reconciliation_backoff_until_v1", COMPARISON)
         self.assertIn("snapshot forward-proxy transport isolation failed", COMPARISON)
