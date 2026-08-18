@@ -309,17 +309,7 @@ async fn alert_projection_summary_refresh_is_rate_limited_across_generation_chan
     assert_eq!(stale.error.as_deref(), Some("summary_refresh_pending"));
 
     clock.set_now_ts(now + 60);
-    assert!(
-        proxy
-            .key_store
-            .refresh_dashboard_alert_projection_summary()
-            .await
-            .expect("refresh stale summary after the fixed window")
-    );
-    let refreshed = proxy
-        .dashboard_recent_alerts_summary(24)
-        .await
-        .expect("read refreshed dashboard summary");
+    let refreshed = refresh_projected_recent_alerts_until_fresh(&proxy).await;
     assert_eq!(refreshed.total_events, 2);
     assert!(!refreshed.stale);
 
