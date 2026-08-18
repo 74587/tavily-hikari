@@ -2,30 +2,6 @@ static LAST_RECONCILIATION_SUMMARY_LOG_AT: AtomicI64 = AtomicI64::new(0);
 
 include!("reconciliation_engine.rs");
 
-struct ReconciliationRunResult {
-    settled: i64,
-    completed: i64,
-    no_adjustment: i64,
-    observed: i64,
-    transport_failure_windows: i64,
-    last_transport_kind: Option<&'static str>,
-    semantic_failure_windows: i64,
-    settled_recent: i64,
-    settled_backlog: i64,
-    upstream_429_retry_windows: i64,
-    local_usage_rate_limit_windows: i64,
-    other_retry_windows: i64,
-    key_backoff_window_count: i64,
-    skipped_by_key_backoff: i64,
-    attempted_candidate_count: i64,
-    budget_exhausted: bool,
-    remote_attempt_limit_reached: bool,
-    max_retry_after_until: Option<i64>,
-    hydrate_ms: i64,
-    first_remote_ms: Option<i64>,
-    remote_ms: i64,
-}
-
 fn should_emit_reconciliation_summary_at(last_emitted_at: &AtomicI64, now: i64) -> bool {
     let mut previous = last_emitted_at.load(Ordering::Relaxed);
     loop {
