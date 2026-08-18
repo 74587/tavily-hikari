@@ -1,6 +1,10 @@
 impl TavilyProxy {
     fn spawn_request_stats_coalescer(&self) {
-        let store = self.key_store.clone();
+        // The worker must not extend the lifetime of a short-lived proxy. In
+        // particular, test proxies and restarted runtimes must release their
+        // SQLite pool after their final external owner is gone.
+        let store = Arc::downgrade(&self.key_store);
+        let owner = Arc::downgrade(&self.background_task_owner);
         let coalescer = self.key_store.request_stats_coalescer.clone();
         tokio::spawn(async move {
             {
@@ -8,6 +12,18 @@ impl TavilyProxy {
                 state.worker_stopped = false;
             }
             loop {
+                if owner.upgrade().is_none() {
+                    let mut state = coalescer.state.lock().await;
+                    state.worker_stopped = true;
+                    coalescer.flushed.notify_waiters();
+                    break;
+                }
+                let Some(store) = store.upgrade() else {
+                    let mut state = coalescer.state.lock().await;
+                    state.worker_stopped = true;
+                    coalescer.flushed.notify_waiters();
+                    break;
+                };
                 let (should_flush_now, wait_duration) = {
                     let state = coalescer.state.lock().await;
                     let should_flush_now = (state.shutdown && state.dashboard_rollup_repairs.is_empty())
@@ -26,6 +42,7 @@ impl TavilyProxy {
                         _ = coalescer.wake.notified() => {}
                         _ = tokio::time::sleep(wait_duration) => {}
                     }
+                    drop(store);
                     continue;
                 }
 
@@ -38,6 +55,7 @@ impl TavilyProxy {
                         && state.pending_request_log_catalog.is_empty()
                         && !state.shutdown
                     {
+                        drop(store);
                         continue;
                     }
                     state.shutdown && state.dashboard_rollup_repairs.is_empty()
@@ -97,6 +115,7 @@ impl TavilyProxy {
                         break;
                     }
                 }
+                drop(store);
             }
         });
     }
@@ -195,10 +214,17 @@ impl TavilyProxy {
     }
 
     fn spawn_ha_state_coalescer(&self) {
-        let store = self.key_store.clone();
+        let store = Arc::downgrade(&self.key_store);
+        let owner = Arc::downgrade(&self.background_task_owner);
         let coalescer = self.ha_state_coalescer.clone();
         tokio::spawn(async move {
             loop {
+                if owner.upgrade().is_none() {
+                    break;
+                }
+                let Some(store) = store.upgrade() else {
+                    break;
+                };
                 let (should_flush_now, wait_duration) = {
                     let state = coalescer.state.lock().await;
                     let pending_key_count = HaStateCoalescer::pending_key_count(&state);
@@ -219,6 +245,7 @@ impl TavilyProxy {
                         _ = coalescer.wake.notified() => {}
                         _ = tokio::time::sleep(wait_duration) => {}
                     }
+                    drop(store);
                     continue;
                 }
 
@@ -228,6 +255,7 @@ impl TavilyProxy {
                         && state.pending_sync_watermarks.is_empty()
                         && !state.shutdown
                     {
+                        drop(store);
                         continue;
                     }
                     state.flushing = true;
@@ -300,6 +328,7 @@ impl TavilyProxy {
                         break;
                     }
                 }
+                drop(store);
             }
         });
     }

@@ -596,6 +596,7 @@ impl TavilyProxy {
             user_rankings_cache: Arc::new(Mutex::new(UserRankingsCacheState::default())),
             analysis_pressure_cache: Arc::new(Mutex::new(AnalysisPressureCacheState::default())),
             ha_state_coalescer,
+            background_task_owner: Arc::new(()),
             token_billing_locks: shared_token_billing_locks(),
             mcp_session_init_locks: Arc::new(Mutex::new(HashMap::new())),
             mcp_session_request_locks: Arc::new(Mutex::new(HashMap::new())),

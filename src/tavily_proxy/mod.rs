@@ -768,6 +768,9 @@ pub struct TavilyProxy {
     user_rankings_cache: Arc<Mutex<UserRankingsCacheState>>,
     analysis_pressure_cache: Arc<Mutex<AnalysisPressureCacheState>>,
     pub(crate) ha_state_coalescer: HaStateCoalescer,
+    // External `TavilyProxy` clones own this token. Background loops only
+    // retain a weak reference so they cannot keep a discarded runtime alive.
+    background_task_owner: Arc<()>,
     // Fast in-process lock to collapse duplicate work within one instance.
     pub(crate) token_billing_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     pub(crate) mcp_session_init_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,

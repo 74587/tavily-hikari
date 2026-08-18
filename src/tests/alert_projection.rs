@@ -491,15 +491,11 @@ async fn alert_projection_keeps_dashboard_tail_complete_while_history_catches_up
             .await
             .expect("read projection status");
         if status.recent_coverage == "ok" && status.coverage == "projecting" {
-            proxy
-                .key_store
-                .refresh_dashboard_alert_projection_summary()
-                .await
-                .expect("materialize Dashboard tail summary");
-            let recent = proxy
-                .recent_alerts_summary(24)
-                .await
-                .expect("read materialized recent projected alert summary");
+            // Dashboard materialization is a separately admitted bulk step.
+            // A one-shot refresh may legitimately defer while the source tail
+            // is already complete, so prove the worker retry converges instead
+            // of treating that safe defer as a missing alert.
+            let recent = refresh_projected_recent_alerts_until_fresh(&proxy).await;
             assert_eq!(recent.total_events, 1);
             assert!(!recent.stale);
             break;
