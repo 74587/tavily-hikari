@@ -996,12 +996,22 @@ async fn observability_deferred_writer_source_fence_does_not_double_count_rebuil
     .await
     .expect("seed rebuild source row");
 
-    let held = match proxy.admit_dashboard_rollup_integrity() {
-        SqliteAdmissionOutcome::Admitted(permit) => permit,
-        SqliteAdmissionOutcome::Deferred { reason } => {
-            panic!("test must hold the shared bulk permit, got {reason}")
+    let held = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match proxy.admit_dashboard_rollup_integrity() {
+                SqliteAdmissionOutcome::Admitted(permit) => return permit,
+                SqliteAdmissionOutcome::Deferred { reason } => {
+                    assert_eq!(
+                        reason, "pool_pressure",
+                        "test setup must not mask a real bulk-admission defer"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
         }
-    };
+    })
+    .await
+    .expect("test must acquire the shared bulk permit after lazy pool startup");
     proxy
         .record_server_pressure_event(Some(request_log_id), now, OUTCOME_SUCCESS)
         .await
