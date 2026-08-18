@@ -63,6 +63,7 @@ struct DashboardOverviewCacheState {
     last_refresh_requested_at: Option<tokio::time::Instant>,
     last_freshness_probe_at: Option<tokio::time::Instant>,
     notify: Arc<tokio::sync::Notify>,
+    admin_alerts: AdminAlertsReadCache,
     #[cfg(test)]
     build_count: usize,
     #[cfg(test)]
@@ -82,12 +83,74 @@ impl Default for DashboardOverviewCacheState {
             last_refresh_requested_at: None,
             last_freshness_probe_at: None,
             notify: Arc::new(tokio::sync::Notify::new()),
+            admin_alerts: AdminAlertsReadCache::default(),
             #[cfg(test)]
             build_count: 0,
             #[cfg(test)]
             freshness_probe_count: 0,
         }
     }
+}
+
+const ADMIN_ALERTS_CACHE_CAPACITY: usize = 64;
+const ADMIN_ALERTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone)]
+enum AdminAlertsReadCacheValue {
+    Catalog(AlertCatalog),
+    Events(PaginatedAlertEvents),
+    Groups(PaginatedAlertGroups),
+}
+
+#[derive(Debug, Clone)]
+struct AdminAlertsReadCacheEntry {
+    key: String,
+    value: AdminAlertsReadCacheValue,
+    observed_at: i64,
+    stored_at: tokio::time::Instant,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AdminAlertsReadCache {
+    entries: VecDeque<AdminAlertsReadCacheEntry>,
+}
+
+async fn admin_alerts_last_good(
+    state: &AppState,
+    key: &str,
+) -> Option<(AdminAlertsReadCacheValue, i64)> {
+    let cache = dashboard_overview_cache_for_state(state);
+    let mut cache = cache.lock().await;
+    let position = cache
+        .admin_alerts
+        .entries
+        .iter()
+        .position(|entry| entry.key == key && entry.stored_at.elapsed() <= ADMIN_ALERTS_CACHE_TTL)?;
+    let entry = cache.admin_alerts.entries.remove(position)?;
+    let observed_at = entry.observed_at;
+    let value = entry.value.clone();
+    cache.admin_alerts.entries.push_front(entry);
+    Some((value, observed_at))
+}
+
+async fn record_admin_alerts_last_good(
+    state: &AppState,
+    key: String,
+    value: AdminAlertsReadCacheValue,
+) {
+    let cache = dashboard_overview_cache_for_state(state);
+    let mut cache = cache.lock().await;
+    cache.admin_alerts.entries.retain(|entry| entry.key != key);
+    cache.admin_alerts.entries.push_front(AdminAlertsReadCacheEntry {
+        key,
+        value,
+        observed_at: state.proxy.backend_time().now_ts(),
+        stored_at: tokio::time::Instant::now(),
+    });
+    cache
+        .admin_alerts
+        .entries
+        .truncate(ADMIN_ALERTS_CACHE_CAPACITY);
 }
 
 fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {

@@ -280,6 +280,8 @@
         "tests::user_tokens_and_pending_billing::settling_",
         "tests::request_rollup::sync_",
         "tests::user_pressure_analysis::analysis_",
+        "tests::user_pressure_analysis::observability_",
+        "tests::user_pressure_analysis::rebalance_",
         "tests::usage_series_and_backfills::system_",
         "tests::observability_and_lifecycle::ticker_",
         "tests::proxy_affinity_runtime_geo::update_",
@@ -410,6 +412,7 @@
         "server::tests::admin_token_filters_and_maintenance::public_",
         "server::tests::api_keys_and_registration::announcement_",
         "server::tests::alerts_and_ha_dashboard_defaults::alerts_",
+        "server::tests::alerts_and_ha_dashboard_defaults::admin_alerts_",
         "server::tests::alerts_and_ha_source_and_recovery::compute_",
         "server::tests::dashboard_overview_snapshot::compute_",
         "server::tests::log_catalog_and_dashboard_sse::compute_"

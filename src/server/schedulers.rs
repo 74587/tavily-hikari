@@ -754,6 +754,14 @@ fn spawn_scheduled_job_stale_reaper(state: Arc<AppState>) {
                     );
                     maintenance_worker_wake_for_state(state.as_ref()).notify_one();
                 }
+                Err(err) if tavily_hikari::is_transient_sqlite_write_error(&err) => {
+                    tracing::debug!(
+                        component = "scheduler",
+                        event = "stale_job_reaper_deferred",
+                        defer_reason = "sqlite_contention",
+                        retry_delay_secs = 30_i64,
+                    );
+                }
                 Err(err) => tracing::error!(
                     component = "scheduler",
                     event = "stale_job_reaper_failed",

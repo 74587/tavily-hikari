@@ -113,6 +113,7 @@ export interface ReconciliationRunObservation {
   transportFailure: number
   semanticFailure: number
   localPressure: number
+  lastTransportKind?: 'connect' | 'timeout' | 'response_body' | 'invalid_endpoint' | 'credentials_or_database' | 'unknown' | string | null
   continuationReason: string | null
   nextRetryAt: number | null
   observedAt: number | null

@@ -3,6 +3,33 @@ use axum::http::{Method, StatusCode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
+async fn wait_for_server_pressure_totals(
+    proxy: &TavilyProxy,
+    expected_success: i64,
+    expected_failure: i64,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (success_count, failure_count): (i64, i64) = sqlx::query_as(
+                r#"
+                SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
+                FROM observability.server_pressure_buckets
+                WHERE bucket_kind = 'five_minute'
+                "#,
+            )
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read deferred pressure totals");
+            if (success_count, failure_count) == (expected_success, expected_failure) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("deferred pressure buckets should converge within the test budget");
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn seed_pressure_attempt(
     proxy: &TavilyProxy,
@@ -189,6 +216,7 @@ async fn analysis_pressure_snapshot_uses_rolling_1h_and_excludes_non_upstream_ev
     .await;
 
     manual_clock.set_now_ts(now);
+    wait_for_server_pressure_totals(&proxy, 2, 1).await;
     let snapshot = proxy
         .analysis_pressure_snapshot()
         .await
@@ -345,6 +373,8 @@ async fn analysis_pressure_snapshot_live_local_mcp_logs_update_server_buckets() 
     .await
     .expect("count canonical pressure request logs");
     assert_eq!(canonical_rows, 1);
+
+    wait_for_server_pressure_totals(&proxy, 1, 0).await;
 
     let five_minute_pressure: i64 = sqlx::query_scalar(
         r#"
@@ -870,6 +900,233 @@ async fn analysis_pressure_background_rebuild_cancels_and_can_be_rescheduled() {
 }
 
 #[tokio::test]
+async fn observability_deferred_writer_requeues_pressure_deltas_after_writer_contention() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_500_000);
+    let db_path = temp_db_path("observability-deferred-writer");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let now = manual_clock.now_ts();
+    let lock_handle =
+        hold_sqlite_write_lock_for_test_for(&proxy.key_store.pool, Duration::from_millis(350))
+            .await;
+
+    let received_at = std::time::Instant::now();
+    proxy
+        .record_server_pressure_event(None, now, OUTCOME_SUCCESS)
+        .await
+        .expect("enqueue pressure event without waiting for writer");
+    assert!(
+        received_at.elapsed() < Duration::from_millis(250),
+        "request-path pressure observation must not wait for SQLite writer"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (queued, stale, _, _, _) = proxy
+                .observability_deferred_writer_snapshot_for_test()
+                .await;
+            if queued >= 2 && stale {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("transient writer contention requeues bounded pressure deltas");
+    lock_handle
+        .await
+        .expect("held SQLite writer lock releases cleanly");
+
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let bucket_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM observability.server_pressure_buckets WHERE bucket_kind IN ('five_minute', 'hour')",
+            )
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count asynchronously flushed pressure buckets");
+            if bucket_count == 2 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("requeued deltas flush after the writer becomes available");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn observability_deferred_writer_source_fence_does_not_double_count_rebuilds() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_500_000);
+    let db_path = temp_db_path("observability-deferred-writer-source-fence");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let now = manual_clock.now_ts();
+    let request_log_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO observability.request_logs (
+            method, path, status_code, tavily_status_code, result_status,
+            request_kind_key, request_kind_label, counts_business_quota,
+            request_user_id, upstream_operation, created_at
+        ) VALUES ('POST', '/mcp', 200, 200, ?, 'mcp:tool', 'MCP | tool', 1, 'source-fence-user', 'mcp', ?)
+        RETURNING id
+        "#,
+    )
+    .bind(OUTCOME_SUCCESS)
+    .bind(now)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("seed rebuild source row");
+
+    let held = match proxy.admit_dashboard_rollup_integrity() {
+        SqliteAdmissionOutcome::Admitted(permit) => permit,
+        SqliteAdmissionOutcome::Deferred { reason } => {
+            panic!("test must hold the shared bulk permit, got {reason}")
+        }
+    };
+    proxy
+        .record_server_pressure_event(Some(request_log_id), now, OUTCOME_SUCCESS)
+        .await
+        .expect("queue source-backed pressure delta");
+    proxy
+        .record_server_pressure_event(None, now, OUTCOME_ERROR)
+        .await
+        .expect("queue unsourced pressure delta");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (queued, stale, _, _, _) = proxy
+                .observability_deferred_writer_snapshot_for_test()
+                .await;
+            if queued == 2 && stale {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("source-backed delta should wait behind the held bulk permit");
+    drop(held);
+
+    assert!(
+        proxy.spawn_server_pressure_buckets_rebuild_once(),
+        "source rebuild should schedule while the old delta remains queued"
+    );
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if !proxy.server_pressure_rebuild_is_active_for_test() {
+                let (success_count, failure_count): (i64, i64) = sqlx::query_as(
+                    r#"
+                    SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
+                    FROM observability.server_pressure_buckets
+                    WHERE bucket_kind = 'five_minute'
+                    "#,
+                )
+                .fetch_one(&proxy.key_store.pool)
+                .await
+                .expect("read rebuilt source-backed totals");
+                if (success_count, failure_count) == (1, 1) {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("source-backed delta must not be replayed and unsourced delta must survive rebuild");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn rebalance_audit_writer_is_best_effort_and_payload_bounded() {
+    let db_path = temp_db_path("rebalance-audit-deferred-writer");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("create proxy");
+    let entry = RebalanceAuditEntry {
+        auth_token_id: None,
+        method: Method::POST,
+        path: "/mcp".to_string(),
+        request_body: br#"{"jsonrpc":"2.0"}"#.to_vec(),
+        response_status: StatusCode::OK,
+        tavily_status_code: Some(200),
+        response_body: br#"{"result":{}}"#.to_vec(),
+        result_status: OUTCOME_SUCCESS.to_string(),
+        failure_kind: None,
+        proxy_session_id: Some("rebalance-audit-test".to_string()),
+        routing_subject_hash: None,
+        fallback_reason: Some("affinity_rebalanced".to_string()),
+    };
+    let received_at = std::time::Instant::now();
+    assert!(proxy.enqueue_rebalance_audit(entry).await);
+    assert!(
+        received_at.elapsed() < Duration::from_millis(250),
+        "MCP completion must not wait for the best-effort audit write"
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let written: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM observability.request_logs WHERE gateway_mode = 'rebalance'",
+            )
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count rebalance audit records");
+            if written == 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background audit writer persists its bounded entry");
+
+    let oversized = RebalanceAuditEntry {
+        auth_token_id: None,
+        method: Method::POST,
+        path: "/mcp".to_string(),
+        request_body: vec![b'x'; 1024 * 1024 + 1],
+        response_status: StatusCode::OK,
+        tavily_status_code: Some(200),
+        response_body: Vec::new(),
+        result_status: OUTCOME_SUCCESS.to_string(),
+        failure_kind: None,
+        proxy_session_id: None,
+        routing_subject_hash: None,
+        fallback_reason: None,
+    };
+    assert!(
+        !proxy.enqueue_rebalance_audit(oversized).await,
+        "oversized best-effort audit is rejected without allocating an unbounded queue"
+    );
+    let (_, _, _, _, audit_stale) = proxy
+        .observability_deferred_writer_snapshot_for_test()
+        .await;
+    assert!(audit_stale, "dropped audit coverage is explicit");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn analysis_pressure_background_rebuild_releases_latch_after_success() {
     let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_450_000);
     let db_path = temp_db_path("analysis-pressure-background-success-reschedule");
@@ -1173,6 +1430,8 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
     .await
     .expect("pressure rebuild drains its live tail");
 
+    wait_for_server_pressure_totals(&proxy, 250, 100).await;
+
     let (success_count, failure_count): (i64, i64) = sqlx::query_as(
         r#"
         SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
@@ -1300,6 +1559,7 @@ async fn analysis_pressure_snapshot_warms_up_24h_rolling_window_edges() {
     .await;
 
     manual_clock.set_now_ts(now);
+    wait_for_server_pressure_totals(&proxy, 2, 0).await;
     let snapshot = proxy
         .analysis_pressure_snapshot()
         .await

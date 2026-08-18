@@ -146,6 +146,11 @@ month-tail public metrics scan.
   typed contention reason, and let the controller/watchdog re-establish automatic debt recovery.
   Do not use a synthetic job id or apply this exception to manual operations whose request itself is
   the only durable command.
+- Derived observability must not use foreground synchronous writes as a shortcut. Coalesce a bounded
+  pressure delta queue and persist it through one low-priority `SqliteRuntime` operation; when it
+  overflows or remains deferred, mark coverage stale and rebuild from request logs. For a bounded
+  rebalance audit queue, drop only the audit with explicit stale coverage, never the completed MCP
+  response or the underlying business result.
 - Keep admission budgets separate from SQLite connection configuration. A short maintenance budget
   is an operation deadline around pool acquisition and `BEGIN IMMEDIATE`, not a per-connection
   `PRAGMA busy_timeout` rewrite. Rewriting that pragma turns ordinary transient bulk pressure into

@@ -469,6 +469,48 @@ impl KeyStore {
         Ok(request_log_id)
     }
 
+    pub(crate) async fn log_rebalance_audit_entry(
+        &self,
+        entry: &RebalanceAuditEntry,
+    ) -> Result<(i64, i64), ProxyError> {
+        let created_at = self.backend_time.now_ts();
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ObservabilityDeferredWrite)
+            .await?;
+        let request_log_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO observability.request_logs (
+                auth_token_id, method, path, status_code, tavily_status_code,
+                result_status, failure_kind, gateway_mode, experiment_variant,
+                proxy_session_id, routing_subject_hash, upstream_operation,
+                fallback_reason, request_body, response_body, request_body_bytes,
+                response_body_bytes, forwarded_headers, dropped_headers, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'rebalance', 'rebalance', ?, ?, 'mcp', ?, ?, ?, ?, ?, '[]', '[]', ?)
+            RETURNING id
+            "#,
+        )
+        .bind(entry.auth_token_id.as_deref())
+        .bind(entry.method.as_str())
+        .bind(&entry.path)
+        .bind(i64::from(entry.response_status.as_u16()))
+        .bind(entry.tavily_status_code)
+        .bind(&entry.result_status)
+        .bind(entry.failure_kind.as_deref())
+        .bind(entry.proxy_session_id.as_deref())
+        .bind(entry.routing_subject_hash.as_deref())
+        .bind(entry.fallback_reason.as_deref())
+        .bind(&entry.request_body)
+        .bind(&entry.response_body)
+        .bind(entry.request_body.len() as i64)
+        .bind(entry.response_body.len() as i64)
+        .bind(created_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.finish(Ok(())).await?;
+        Ok((request_log_id, created_at))
+    }
+
     pub(crate) fn api_key_metrics_from_clause() -> &'static str {
         r#"
             FROM api_keys ak

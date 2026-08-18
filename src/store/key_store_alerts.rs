@@ -872,7 +872,14 @@ impl KeyStore {
         source: AlertReadSource,
     ) -> Result<Vec<sqlx::sqlite::SqliteRow>, ProxyError> {
         match source {
-            AlertReadSource::Raw => Ok(query.build().fetch_all(&self.pool).await?),
+            AlertReadSource::Raw => {
+                let mut conn = self
+                    .sqlite_runtime
+                    .acquire_operation_connection(SqliteOperation::AlertProjection)
+                    .await?;
+                let result = query.build().fetch_all(&mut *conn).await;
+                Ok(conn.complete_query(result).await?)
+            }
             AlertReadSource::Projected => {
                 let mut conn = self
                     .sqlite_runtime
@@ -975,7 +982,12 @@ impl KeyStore {
             "COALESCE(NULLIF(TRIM(request_kind_key), ''), 'unknown')",
             filters.request_kinds,
         );
-        let total: i64 = count_query.build_query_scalar().fetch_one(&self.pool).await?;
+        let mut count_conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let count_result = count_query.build_query_scalar().fetch_one(&mut *count_conn).await;
+        let total = count_conn.complete_query(count_result).await?;
 
         let mut query = QueryBuilder::new("");
         Self::push_alert_events_cte(&mut query, filters);
@@ -990,7 +1002,12 @@ impl KeyStore {
         query.push(" OFFSET ");
         query.push_bind(offset);
 
-        let rows = query.build().fetch_all(&self.pool).await?;
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let query_result = query.build().fetch_all(&mut *conn).await;
+        let rows = conn.complete_query(query_result).await?;
         let items = rows
             .into_iter()
             .map(Self::decode_alert_event_projection_row)
@@ -1486,7 +1503,12 @@ impl KeyStore {
         let mut count_query = QueryBuilder::new("");
         Self::push_alert_groups_cte(&mut count_query, filters);
         count_query.push(" SELECT COUNT(*) FROM grouped_alerts");
-        let total: i64 = count_query.build_query_scalar().fetch_one(&self.pool).await?;
+        let mut count_conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let count_result = count_query.build_query_scalar().fetch_one(&mut *count_conn).await;
+        let total = count_conn.complete_query(count_result).await?;
 
         let mut query = QueryBuilder::new("");
         Self::push_alert_groups_cte(&mut query, filters);
@@ -1498,7 +1520,12 @@ impl KeyStore {
         query.push(" OFFSET ");
         query.push_bind(offset);
 
-        let rows = query.build().fetch_all(&self.pool).await?;
+        let mut conn = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AlertProjection)
+            .await?;
+        let query_result = query.build().fetch_all(&mut *conn).await;
+        let rows = conn.complete_query(query_result).await?;
         let groups = rows
             .iter()
             .map(Self::decode_alert_group_projection_row)

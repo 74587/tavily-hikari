@@ -179,6 +179,9 @@
 - reconciliation 首次远端尝试小于 2 秒、单轮不超过 20 秒，查询成本受 page limit 约束。
 - 20 个 SSE 加并发 HTTP 下每 10 秒最多一次 Dashboard build；warm Dashboard 和缓存 HA GET
   p95 小于 100ms，读路径不执行写 SQL。
+- Administrator Alerts use an exact normalized query key for a five-minute last-good entry. Under
+  SQLite pressure the handler returns only that key's stale result with coverage metadata; without
+  a matching entry it returns `503 Retry-After: 1` instead of beginning a raw alert CTE.
 - AlertProjection 与旧结果在时间窗、过滤、分页、分组和状态跃迁上等价。
 - 30 分钟生产形状基准中进程组 RSS P95 不超过 256MiB。
 - architecture checker 证明目标热路径不存在 raw pool、coalescer、全局 pointer-map gate 或旧 cache。

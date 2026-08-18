@@ -83,6 +83,7 @@ pub struct ReconciliationRunObservation {
     pub transport_failure: i64,
     pub semantic_failure: i64,
     pub local_pressure: i64,
+    pub last_transport_kind: Option<String>,
     pub continuation_reason: Option<String>,
     pub next_retry_at: Option<i64>,
     pub observed_at: Option<i64>,

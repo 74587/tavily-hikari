@@ -62,6 +62,7 @@ pub(crate) enum SqliteOperation {
     HaOutboxGcWatchdog,
     RequestLogsGc,
     RequestStatsFlush,
+    ObservabilityDeferredWrite,
     ServerPressureRebuild,
     ReconciliationProjection,
     ScheduledJobControl,
@@ -80,6 +81,7 @@ impl SqliteOperation {
             Self::HaOutboxGcWatchdog => "ha_outbox_gc_watchdog",
             Self::RequestLogsGc => "request_logs_gc",
             Self::RequestStatsFlush => "request_stats_flush",
+            Self::ObservabilityDeferredWrite => "observability_deferred_write",
             Self::ServerPressureRebuild => "server_pressure_rebuild",
             Self::ReconciliationProjection => "reconciliation_projection",
             Self::ScheduledJobControl => "scheduled_job_control",
@@ -98,6 +100,7 @@ impl SqliteOperation {
             | Self::HaOutboxGc
             | Self::RequestLogsGc
             | Self::RequestStatsFlush
+            | Self::ObservabilityDeferredWrite
             | Self::ServerPressureRebuild
             | Self::ReconciliationProjection => "maintenance_bulk",
         }
@@ -113,6 +116,7 @@ impl SqliteOperation {
             Self::HaOutboxGc
             | Self::RequestLogsGc
             | Self::RequestStatsFlush
+            | Self::ObservabilityDeferredWrite
             | Self::ServerPressureRebuild
             | Self::ReconciliationProjection => Duration::from_millis(100),
             _ => Duration::from_secs(5),
@@ -131,6 +135,7 @@ impl SqliteOperation {
             | Self::RequestLogsGc
             | Self::ServerPressureRebuild
             | Self::ReconciliationProjection => Duration::from_millis(250),
+            Self::ObservabilityDeferredWrite => Duration::from_millis(100),
             _ => Duration::from_secs(5),
         }
     }
@@ -143,6 +148,7 @@ impl SqliteOperation {
             // a future that still owns the physical connection.
             Self::AlertProjection
             | Self::DashboardIntegrityWrite
+            | Self::ObservabilityDeferredWrite
             | Self::ReconciliationProjection => Some(100),
             _ => None,
         }
@@ -156,6 +162,7 @@ impl SqliteOperation {
                 | Self::HaOutboxGc
                 | Self::RequestLogsGc
                 | Self::RequestStatsFlush
+                | Self::ObservabilityDeferredWrite
                 | Self::ServerPressureRebuild
                 | Self::ReconciliationProjection
         )

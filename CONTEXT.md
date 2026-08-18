@@ -50,6 +50,21 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 - `retryable outcome`: `upstream_429`, `transport_failure`, `semantic_failure`, or
   `local_pressure`. It preserves the current work generation and its independent retry state until
   a later terminal outcome.
+- `transport failure kind`: a fixed, non-sensitive category (`connect`, `timeout`,
+  `response_body`, `invalid_endpoint`, `credentials_or_database`, or `unknown`) attached to the
+  local reconciliation observation. It is diagnostic state, never a terminal result or billing
+  decision.
+
+## Observability Boundaries
+
+- `foreground truth`: billing, request handling, and control-plane changes whose durable result is
+  required before a request can succeed. They do not depend on observability persistence.
+- `derived observability`: pressure buckets and alert/read diagnostics that may be stale because
+  their source records can rebuild them. They use instance-local bounded queues and low-priority
+  SQLite admission rather than holding a foreground request on the writer.
+- `best-effort audit`: rebalance audit records are capped in memory and may report stale coverage
+  when contention or capacity prevents persistence. A missing audit record never changes MCP
+  response semantics, billing truth, or durable business work.
 
 ## Dashboard Read Terms
 

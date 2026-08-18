@@ -2,6 +2,7 @@ use super::*;
 use super::core_support_and_parsing::*;
 use super::linuxdo_oauth_and_admin_keys::*;
 use super::upstream_support_and_manual_jobs::*;
+use tavily_hikari::SqliteAdmissionOutcome;
 
 #[tokio::test]
 async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_stays_24h() {
@@ -649,6 +650,73 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
             .and_then(|value| value.as_str()),
         Some("upstream_key_blocked")
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses() {
+    let db_path = temp_db_path("admin-alerts-last-good");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-admin-alerts-last-good".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let password = "admin-alerts-last-good-password";
+    let (admin_addr, state) = spawn_builtin_keys_admin_server_with_state(proxy, password).await;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build client");
+    let login = client
+        .post(format!("http://{admin_addr}/api/admin/login"))
+        .json(&serde_json::json!({ "password": password }))
+        .send()
+        .await
+        .expect("admin login");
+    let cookie = find_cookie_pair(login.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+        .expect("admin session cookie");
+
+    let warm = client
+        .get(format!("http://{admin_addr}/api/alerts/catalog"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("warm alerts catalog");
+    assert_eq!(warm.status(), reqwest::StatusCode::OK);
+
+    let held = match state.proxy.admit_dashboard_rollup_integrity() {
+        SqliteAdmissionOutcome::Admitted(permit) => permit,
+        SqliteAdmissionOutcome::Deferred { reason } => {
+            panic!("test must hold the shared bulk permit, got {reason}")
+        }
+    };
+    let stale = client
+        .get(format!("http://{admin_addr}/api/alerts/catalog"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("stale alerts catalog");
+    assert_eq!(stale.status(), reqwest::StatusCode::OK);
+    let stale_body: serde_json::Value = stale.json().await.expect("stale alerts json");
+    assert_eq!(stale_body.get("coverage").and_then(|v| v.as_str()), Some("stale"));
+    assert_eq!(
+        stale_body.get("staleReason").and_then(|v| v.as_str()),
+        Some("sqlite_pressure")
+    );
+
+    let cold = client
+        .get(format!("http://{admin_addr}/api/alerts/events?page=2"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("cold alerts page");
+    assert_eq!(cold.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(cold.headers().get("retry-after").and_then(|v| v.to_str().ok()), Some("1"));
+    drop(held);
 
     let _ = std::fs::remove_file(db_path);
 }

@@ -124,7 +124,11 @@
   - `component=admin_read event=token_logs_list_completed`
   - `component=admin_read event=/api/alerts/events phase=projection_sidecar|alerts_projection`
   - `component=admin_read event=/api/alerts/groups phase=projection_sidecar|alerts_grouping`
+  - `component=admin_read event=alerts_last_good_served|alerts_cold_pressure`
   - `component=admin_read event=low_memory_protection_decision`
+- `sqlite_workload_window` aggregates `observability_deferred_write` alongside other operation
+  classes. Per-flush defer/retry records remain DEBUG; queue recovery or a persistent stale state
+  is emitted only as a sampled state transition.
 - Forward proxy / xray startup:
   - `component=forward_proxy event=startup_runtime_begin`
   - `component=forward_proxy event=startup_runtime_snapshot_persisted`

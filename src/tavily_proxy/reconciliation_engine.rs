@@ -23,6 +23,43 @@ pub enum ClaimedReconciliationRunOutcome {
 
 pub(crate) struct ReconciliationEngine;
 
+/// A stable, non-sensitive classification for failures before a reconciliation
+/// response can be interpreted. The category is durable diagnostics only: it
+/// never changes settlement or billing semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransportFailureKind {
+    Connect,
+    Timeout,
+    ResponseBody,
+    InvalidEndpoint,
+    CredentialsOrDatabase,
+    Unknown,
+}
+
+impl TransportFailureKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Timeout => "timeout",
+            Self::ResponseBody => "response_body",
+            Self::InvalidEndpoint => "invalid_endpoint",
+            Self::CredentialsOrDatabase => "credentials_or_database",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn from_proxy_error(error: &ProxyError) -> Self {
+        match error {
+            ProxyError::InvalidEndpoint { .. } => Self::InvalidEndpoint,
+            ProxyError::Database(_) => Self::CredentialsOrDatabase,
+            ProxyError::Http(error) if error.is_timeout() => Self::Timeout,
+            ProxyError::Http(error) if error.is_connect() => Self::Connect,
+            ProxyError::Http(_) => Self::ResponseBody,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 impl ReconciliationEngine {
     const MAX_REMOTE_ATTEMPTS: i64 = 2;
     // The compatibility one-shot API has no durable representative job.
@@ -90,7 +127,10 @@ impl ReconciliationEngine {
     }
 
     fn is_transport_failure(err: &ProxyError) -> bool {
-        matches!(err, ProxyError::Http(_) | ProxyError::Database(_))
+        matches!(
+            err,
+            ProxyError::Http(_) | ProxyError::Database(_) | ProxyError::InvalidEndpoint { .. }
+        )
     }
 
     fn active_settlement_integrity_reason(err: &ProxyError) -> Option<&'static str> {
@@ -147,7 +187,8 @@ mod reconciliation_engine_tests {
     use crate::ProxyError;
 
     use super::{
-        ReconciliationEngine, ReconciliationOutcome, should_emit_reconciliation_summary_at,
+        ReconciliationEngine, ReconciliationOutcome, TransportFailureKind,
+        should_emit_reconciliation_summary_at,
     };
 
     #[test]
@@ -232,6 +273,30 @@ mod reconciliation_engine_tests {
                 claim_generation: 2,
             }),
             None
+        );
+    }
+
+    #[test]
+    fn transport_failure_categories_are_fixed_and_do_not_expose_error_text() {
+        let invalid_endpoint = ProxyError::InvalidEndpoint {
+            endpoint: "https://secret.invalid/path".to_string(),
+            source: url::Url::parse("http://[").expect_err("invalid URL fixture"),
+        };
+        assert_eq!(
+            TransportFailureKind::from_proxy_error(&invalid_endpoint).as_str(),
+            "invalid_endpoint"
+        );
+        assert_eq!(
+            TransportFailureKind::from_proxy_error(&ProxyError::Database(sqlx::Error::RowNotFound))
+                .as_str(),
+            "credentials_or_database"
+        );
+        assert_eq!(
+            TransportFailureKind::from_proxy_error(&ProxyError::Other(
+                "upstream body includes an access token".to_string(),
+            ))
+            .as_str(),
+            "unknown"
         );
     }
 }

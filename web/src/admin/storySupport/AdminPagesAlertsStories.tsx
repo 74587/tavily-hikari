@@ -327,7 +327,13 @@ const STORY_ALERTS_GROUPS_PAGE: AlertsPage<AlertGroup> = {
   ],
 }
 
-function AlertsPageCanvas({ inlineTabsVariant = 'all' }: { inlineTabsVariant?: 'all' | 'mobile' } = {}): JSX.Element {
+function AlertsPageCanvas({
+  inlineTabsVariant = 'all',
+  stale = false,
+}: {
+  inlineTabsVariant?: 'all' | 'mobile'
+  stale?: boolean
+} = {}): JSX.Element {
   const { language } = useLanguage()
   const [search, setSearch] = useState(alertsPath({ view: 'groups' }).replace('/admin/alerts', ''))
   const currentView = new URLSearchParams(search.startsWith('?') ? search.slice(1) : search).get('view') === 'events'
@@ -358,9 +364,15 @@ function AlertsPageCanvas({ inlineTabsVariant = 'all' }: { inlineTabsVariant?: '
         onOpenKey={() => {}}
         formatTime={storyTime}
         formatTimeDetail={storyTime}
-        initialCatalog={STORY_ALERTS_CATALOG}
-        initialEventsPage={STORY_ALERTS_EVENTS_PAGE}
-        initialGroupsPage={STORY_ALERTS_GROUPS_PAGE}
+        initialCatalog={stale
+          ? { ...STORY_ALERTS_CATALOG, coverage: 'stale', observedAt: 1_783_959_000, staleReason: 'sqlite_pressure' }
+          : STORY_ALERTS_CATALOG}
+        initialEventsPage={stale
+          ? { ...STORY_ALERTS_EVENTS_PAGE, coverage: 'stale', observedAt: 1_783_959_000, staleReason: 'sqlite_pressure' }
+          : STORY_ALERTS_EVENTS_PAGE}
+        initialGroupsPage={stale
+          ? { ...STORY_ALERTS_GROUPS_PAGE, coverage: 'stale', observedAt: 1_783_959_000, staleReason: 'sqlite_pressure' }
+          : STORY_ALERTS_GROUPS_PAGE}
         disableAutoLoad
         inlineTabsVariant={inlineTabsVariant}
       />
@@ -379,6 +391,20 @@ export const Alerts: Story = {
 
 export const AlertsMobile: Story = {
   render: () => <AlertsPageCanvas inlineTabsVariant="mobile" />,
+  parameters: {
+    viewport: { defaultViewport: '375-mobile' },
+  },
+}
+
+export const AlertsStale: Story = {
+  render: () => <AlertsPageCanvas stale />,
+  parameters: {
+    viewport: { defaultViewport: '1440-device-desktop' },
+  },
+}
+
+export const AlertsStaleMobile: Story = {
+  render: () => <AlertsPageCanvas inlineTabsVariant="mobile" stale />,
   parameters: {
     viewport: { defaultViewport: '375-mobile' },
   },

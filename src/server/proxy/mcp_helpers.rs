@@ -1323,36 +1323,29 @@ async fn log_rebalance_local_control_plane_response(
         }
         _ => analysis.failure_kind.as_deref(),
     };
-    let empty_headers: [String; 0] = [];
-    match state
+    let accepted = state
         .proxy
-        .record_local_request_log_without_key_with_diagnostics(
-            token_id,
-            method,
-            path,
-            None,
+        .enqueue_rebalance_audit(tavily_hikari::RebalanceAuditEntry {
+            auth_token_id: token_id.map(str::to_string),
+            method: method.clone(),
+            path: path.to_string(),
+            request_body: request_body.to_vec(),
             response_status,
-            analysis.tavily_status_code,
-            request_body,
-            response_body,
-            analysis.status,
-            failure_kind,
-            Some(tavily_hikari::MCP_GATEWAY_MODE_REBALANCE),
-            Some(tavily_hikari::MCP_EXPERIMENT_VARIANT_REBALANCE),
-            proxy_session_id,
-            routing_subject_hash,
-            Some("mcp"),
-            fallback_reason,
-            &empty_headers,
-            &empty_headers,
-            None,
-        )
-        .await
-    {
-        Ok(log_id) => Some(log_id),
-        Err(err) => {
-            eprintln!("local rebalance MCP request_log failed for {path}: {err}");
-            None
-        }
+            tavily_status_code: analysis.tavily_status_code,
+            response_body: response_body.to_vec(),
+            result_status: analysis.status.to_string(),
+            failure_kind: failure_kind.map(str::to_string),
+            proxy_session_id: proxy_session_id.map(str::to_string),
+            routing_subject_hash: routing_subject_hash.map(str::to_string),
+            fallback_reason: fallback_reason.map(str::to_string),
+        })
+        .await;
+    if !accepted {
+        tracing::debug!(
+            component = "observability",
+            event = "rebalance_audit_dropped",
+            reason = "bounded_queue",
+        );
     }
+    None
 }

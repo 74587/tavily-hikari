@@ -96,6 +96,10 @@
 - Every attempted work generation ends as exactly one typed result. `settled`, `no_adjustment`, and
   compare-mode `observed` are terminal. `upstream_429`, `transport_failure`, `semantic_failure`, and
   `local_pressure` are retryable and keep independent durable streaks and retry deadlines.
+- Transport failures store only a fixed local observation category: `connect`, `timeout`,
+  `response_body`, `invalid_endpoint`, `credentials_or_database`, or `unknown`. They never expose
+  endpoint text, response bodies, credentials, or database errors through run observation, and they
+  keep work incomplete on the `30/60/120/300s` retry ladder.
 - Compare-mode non-zero differences write only the shadow observation and complete as `observed`;
   they do not create an actual billing adjustment and are not included in settled totals.
 - Main settlement work always precedes the terminal Research sweep. Candidate preparation and at

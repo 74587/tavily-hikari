@@ -30,8 +30,17 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
             .expect("read migration ledger");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+        ]
     );
+    let transport_observation_column: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('upstream_reconciliation_run_observation') WHERE name = 'last_transport_kind'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read transport observation column");
+    assert_eq!(transport_observation_column, 1);
     let projection_state: (i64, i64, i64) = sqlx::query_as(
         "SELECT batch_size, scanned_rows, completed FROM upstream_reconciliation_projection_state WHERE id = 'local'",
     )
@@ -99,6 +108,72 @@ async fn versioned_schema_migrations_are_idempotent_and_fail_closed_on_drift() {
     .expect_err("checksum drift must reject startup");
     assert!(error.to_string().contains("checksum mismatch"));
 
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
+async fn reconciliation_transport_observation_migration_is_additive_and_warm_safe() {
+    let db_path = temp_db_path("reconciliation-transport-observation-migration");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-transport-observation".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create migrated database");
+
+    sqlx::query(
+        "INSERT INTO upstream_reconciliation_work (token_id, period_code, project_id, billing_subject, settlement_mode, period_start, period_end, scheduling_key_id, updated_at) VALUES ('transport-migration-token', '2026-08-18/S1', 'transport-migration-project', 'token:transport-migration-token', 'shadow', 1, 2, 'transport-migration-key', 2)",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed durable reconciliation work");
+    sqlx::query(
+        "ALTER TABLE upstream_reconciliation_run_observation DROP COLUMN last_transport_kind",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("shape v17 observation table");
+    sqlx::query("DELETE FROM schema_migrations WHERE version = 18")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("remove v18 ledger record");
+
+    assert!(
+        !proxy
+            .key_store
+            .prepare_versioned_schema()
+            .await
+            .expect("apply additive transport observation migration"),
+        "an existing database must not request full bootstrap"
+    );
+    let column_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('upstream_reconciliation_run_observation') WHERE name = 'last_transport_kind'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read re-added transport column");
+    let work_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM upstream_reconciliation_work WHERE token_id = 'transport-migration-token'",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("verify migration did not scan or rewrite durable work");
+    assert_eq!(column_count, 1);
+    assert_eq!(work_count, 1);
+
+    drop(proxy);
+    let reopened = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-transport-observation".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("warm reopen after v18 migration");
+    drop(reopened);
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -810,7 +885,9 @@ async fn baseline_adoption_records_compatible_existing_schema_without_full_boots
             .expect("read adopted ledger");
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        ]
     );
 
     drop(proxy);

@@ -96,6 +96,10 @@ source when a usable persisted runtime already exists.
   first healthy image status. Once the process is already serving business traffic, it may run once
   as a best-effort background rebuild whose failure is isolated to logs/observability and does not
   turn serving `/health` red.
+- Request-path pressure observations and rebalance audits must not synchronously wait for SQLite's
+  writer. They enter instance-owned bounded deferred queues; pressure deltas are replayable from
+  request logs, while a rejected rebalance audit records explicit stale coverage without changing
+  MCP success or billing truth. Every deferred flush uses `SqliteRuntime` operation budgets.
 - The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write
   transaction. It may acquire SQLite's writer only for the final small bucket replacement; the
   upper-bound request-log id and buffered live-event replay preserve the handoff across those two

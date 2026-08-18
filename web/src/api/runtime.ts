@@ -306,6 +306,9 @@ export interface AlertCatalog {
   users: AlertFacetOption[]
   tokens: AlertFacetOption[]
   keys: AlertFacetOption[]
+  coverage?: 'stale' | string
+  observedAt?: number | null
+  staleReason?: string | null
 }
 
 export interface RecentAlertsSummary {
@@ -327,6 +330,9 @@ export interface AlertsPage<T> {
   total: number
   page: number
   perPage: number
+  coverage?: 'stale' | string
+  observedAt?: number | null
+  staleReason?: string | null
 }
 
 export interface PublicMetrics {
@@ -667,6 +673,11 @@ interface ServerAlertsPage<T> {
   page: number
   perPage?: number
   per_page?: number
+  coverage?: string | null
+  observedAt?: number | null
+  observed_at?: number | null
+  staleReason?: string | null
+  stale_reason?: string | null
 }
 
 interface ServerAlertCatalog {
@@ -678,6 +689,11 @@ interface ServerAlertCatalog {
   users?: ServerAlertFacetOption[]
   tokens?: ServerAlertFacetOption[]
   keys?: ServerAlertFacetOption[]
+  coverage?: string | null
+  observedAt?: number | null
+  observed_at?: number | null
+  staleReason?: string | null
+  stale_reason?: string | null
 }
 
 interface ServerAlertTypeCount {
@@ -967,6 +983,9 @@ function normalizeAlertsPage<TSource, TTarget>(
     total: value.total ?? 0,
     page: value.page ?? 1,
     perPage: value.perPage ?? value.per_page ?? 20,
+    coverage: value.coverage ?? undefined,
+    observedAt: value.observedAt ?? value.observed_at ?? null,
+    staleReason: value.staleReason ?? value.stale_reason ?? null,
   }
 }
 
@@ -978,6 +997,9 @@ function normalizeAlertCatalog(value: ServerAlertCatalog): AlertCatalog {
     users: (value.users ?? []).map(normalizeAlertFacetOption),
     tokens: (value.tokens ?? []).map(normalizeAlertFacetOption),
     keys: (value.keys ?? []).map(normalizeAlertFacetOption),
+    coverage: value.coverage ?? undefined,
+    observedAt: value.observedAt ?? value.observed_at ?? null,
+    staleReason: value.staleReason ?? value.stale_reason ?? null,
   }
 }
 

@@ -46,6 +46,9 @@
 - Dashboard snapshot reads preserve a last-good value under admission or SQLite pressure. A cold
   shared loader is bounded per caller to one second without cancelling its in-flight build; startup
   gives that same loader a one-second head start before accepting external connections.
+- Alerts catalog/events/groups use a separate AppState-owned, 64-entry exact-query last-good cache.
+  It keeps stale coverage scoped to the requested filters and page; pressure on a cold key returns
+  a bounded `503 Retry-After: 1` rather than sending a raw alert aggregation into the SQLite pool.
 - The isolated 10-minute dual-database comparison records raw Dashboard and process RSS P95 values.
   Its relative regression gate has a 10ms Dashboard measurement floor and a 40MiB RSS noise band
   around the 10% threshold so controlled restart and allocator variation do not reject the same
