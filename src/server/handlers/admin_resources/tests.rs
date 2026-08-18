@@ -60,6 +60,38 @@ mod admin_resources_tests {
         headers
     }
 
+    #[test]
+    fn alert_read_cache_key_preserves_optional_time_filter_presence() {
+        let request_kinds = vec!["proxy".to_string()];
+        let unbounded = AlertReadCacheQuery {
+            alert_type: None,
+            since: None,
+            until: None,
+            user_id: None,
+            token_id: None,
+            key_id: None,
+            request_kinds: &request_kinds,
+            page: 1,
+            per_page: 20,
+        };
+        let epoch_bounded = AlertReadCacheQuery {
+            alert_type: unbounded.alert_type,
+            since: Some(0),
+            until: unbounded.until,
+            user_id: unbounded.user_id,
+            token_id: unbounded.token_id,
+            key_id: unbounded.key_id,
+            request_kinds: unbounded.request_kinds,
+            page: unbounded.page,
+            per_page: unbounded.per_page,
+        };
+
+        assert_ne!(
+            alert_read_cache_key("events", &unbounded),
+            alert_read_cache_key("events", &epoch_bounded),
+        );
+    }
+
     async fn totp_test_state(prefix: &str) -> (Arc<AppState>, PathBuf) {
         totp_test_state_with_builtin_admin(
             prefix,

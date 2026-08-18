@@ -92,18 +92,19 @@ fn alert_read_cache_key(kind: &str, query: &AlertReadCacheQuery<'_>) -> String {
     let mut request_kinds = query.request_kinds.to_vec();
     request_kinds.sort();
     request_kinds.dedup();
-    format!(
-        "{kind}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        query.alert_type.unwrap_or_default(),
-        query.since.unwrap_or_default(),
-        query.until.unwrap_or_default(),
-        query.user_id.unwrap_or_default(),
-        query.token_id.unwrap_or_default(),
-        query.key_id.unwrap_or_default(),
-        request_kinds.join(","),
+    serde_json::to_string(&(
+        kind,
+        query.alert_type,
+        query.since,
+        query.until,
+        query.user_id,
+        query.token_id,
+        query.key_id,
+        request_kinds,
         query.page,
         query.per_page,
-    )
+    ))
+    .expect("alert read cache key fields are serializable")
 }
 
 async fn get_alert_events(
