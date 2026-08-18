@@ -247,8 +247,6 @@
   current markers identify the new reconciliation controller and alert projection coverage surfaces.
 - submission_gate: `approved`
 
-PR: include
-
 ![Annotated dashboard baseline and current-state comparison](./assets/current/dashboard-read-model-baseline-comparison-135376b4.png)
 
 - source_type: `storybook_canvas`
@@ -278,8 +276,6 @@ PR: include
 - evidence_note: Current `135376b4` source confirms the status module remains readable in the
   required mobile viewport.
 - submission_gate: `approved`
-
-PR: include
 
 ![Mobile reconciliation status](./assets/current/dashboard-alert-projection-last-good-135376b4-mobile.png)
 
