@@ -2373,17 +2373,27 @@ use super::upstream_support_and_manual_jobs::*;
         );
 
         let pool = connect_sqlite_test_pool(&db_str).await;
-        let rows = sqlx::query(
-            r#"
-            SELECT status_code, failure_kind, fallback_reason, request_body
-            FROM request_logs
-            WHERE path = '/mcp'
-            ORDER BY id ASC
-            "#,
-        )
-        .fetch_all(&pool)
+        let rows = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT status_code, failure_kind, fallback_reason, request_body
+                    FROM observability.request_logs
+                    WHERE path = '/mcp'
+                    ORDER BY id ASC
+                    "#,
+                )
+                .fetch_all(&pool)
+                .await
+                .expect("fetch rebalance invalid argument audit records");
+                if rows.len() == 1 + invalid_case_count {
+                    return rows;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .expect("fetch rebalance invalid argument request logs");
+        .expect("rebalance invalid argument audits should flush promptly");
         assert_eq!(
             rows.len(),
             1 + invalid_case_count,
@@ -2534,18 +2544,28 @@ use super::upstream_support_and_manual_jobs::*;
         );
 
         let pool = connect_sqlite_test_pool(&db_str).await;
-        let row = sqlx::query(
-            r#"
-            SELECT status_code, failure_kind, fallback_reason
-            FROM request_logs
-            WHERE path = '/mcp'
-            ORDER BY id DESC
-            LIMIT 1
-            "#,
-        )
-        .fetch_one(&pool)
+        let row = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = sqlx::query(
+                    r#"
+                    SELECT status_code, failure_kind, fallback_reason
+                    FROM observability.request_logs
+                    WHERE path = '/mcp'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    "#,
+                )
+                .fetch_optional(&pool)
+                .await
+                .expect("fetch unknown tool audit record");
+                if let Some(row) = row {
+                    return row;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
         .await
-        .expect("fetch unknown tool request log");
+        .expect("unknown tool audit should flush promptly");
         assert_eq!(
             row.try_get::<Option<i64>, _>("status_code").unwrap(),
             Some(200),
