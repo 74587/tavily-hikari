@@ -349,23 +349,31 @@ async fn analysis_pressure_snapshot_requires_admin_auth_and_exposes_expected_sha
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let refreshed_resp = client
-        .get(format!("http://{}/api/analysis/pressure", admin_addr))
-        .header(reqwest::header::COOKIE, admin_cookie.clone())
-        .send()
-        .await
-        .expect("analysis pressure refresh request");
-    assert_eq!(refreshed_resp.status(), reqwest::StatusCode::OK);
-    pressure_json = refreshed_resp
-        .json()
-        .await
-        .expect("analysis pressure refresh json");
-    assert_eq!(
-        pressure_json
+    loop {
+        let refreshed_resp = client
+            .get(format!("http://{}/api/analysis/pressure", admin_addr))
+            .header(reqwest::header::COOKIE, admin_cookie.clone())
+            .send()
+            .await
+            .expect("analysis pressure refresh request");
+        assert_eq!(refreshed_resp.status(), reqwest::StatusCode::OK);
+        pressure_json = refreshed_resp
+            .json()
+            .await
+            .expect("analysis pressure refresh json");
+        if pressure_json
             .pointer("/server24h/currentPeak/pressure")
-            .and_then(|value| value.as_i64()),
-        Some(3)
-    );
+            .and_then(|value| value.as_i64())
+            == Some(3)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < rebuild_deadline,
+            "expected analysis pressure cache to refresh after background rebuild"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     let _ = std::fs::remove_file(db_path);
 }
