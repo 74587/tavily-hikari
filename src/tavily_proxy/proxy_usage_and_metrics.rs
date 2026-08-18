@@ -1,4 +1,166 @@
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct RebalanceAuditEntry {
+    pub auth_token_id: Option<String>,
+    pub method: Method,
+    pub path: String,
+    pub request_body: Vec<u8>,
+    pub response_status: StatusCode,
+    pub tavily_status_code: Option<i64>,
+    pub response_body: Vec<u8>,
+    pub result_status: String,
+    pub failure_kind: Option<String>,
+    pub proxy_session_id: Option<String>,
+    pub routing_subject_hash: Option<String>,
+    pub fallback_reason: Option<String>,
+}
+
+impl RebalanceAuditEntry {
+    fn payload_len(&self) -> usize {
+        self.path.len()
+            .saturating_add(self.request_body.len())
+            .saturating_add(self.response_body.len())
+            .saturating_add(self.auth_token_id.as_deref().map_or(0, str::len))
+            .saturating_add(self.proxy_session_id.as_deref().map_or(0, str::len))
+            .saturating_add(self.routing_subject_hash.as_deref().map_or(0, str::len))
+            .saturating_add(self.fallback_reason.as_deref().map_or(0, str::len))
+    }
+}
+
 impl TavilyProxy {
+    #[doc(hidden)]
+    pub async fn enqueue_rebalance_audit(&self, entry: RebalanceAuditEntry) -> bool {
+        const MAX_AUDITS: usize = 64;
+        const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+        let entry_size = entry.payload_len();
+        let spawn_flush = {
+            let mut writer = self.observability_deferred_writer.lock().await;
+            if entry_size > MAX_PAYLOAD_BYTES
+                || writer.rebalance_audits.len() >= MAX_AUDITS
+                || writer
+                    .rebalance_audit_payload_bytes
+                    .saturating_add(entry_size)
+                    > MAX_PAYLOAD_BYTES
+            {
+                writer.rebalance_audit_stale = true;
+                return false;
+            }
+            writer.rebalance_audit_payload_bytes = writer
+                .rebalance_audit_payload_bytes
+                .saturating_add(entry_size);
+            writer.rebalance_audits.push_back(entry);
+            let spawn_flush = !writer.rebalance_audit_flush_running;
+            if spawn_flush {
+                writer.rebalance_audit_flush_running = true;
+            }
+            spawn_flush
+        };
+        if spawn_flush {
+            let proxy = self.clone();
+            tokio::spawn(async move { proxy.flush_rebalance_audits().await });
+        }
+        true
+    }
+
+    async fn flush_rebalance_audits(&self) {
+        loop {
+            let batch = {
+                let mut writer = self.observability_deferred_writer.lock().await;
+                let mut batch = Vec::new();
+                while batch.len() < 10 {
+                    let Some(entry) = writer.rebalance_audits.pop_front() else {
+                        break;
+                    };
+                    writer.rebalance_audit_payload_bytes = writer
+                        .rebalance_audit_payload_bytes
+                        .saturating_sub(entry.payload_len());
+                    batch.push(entry);
+                }
+                if batch.is_empty() {
+                    writer.rebalance_audit_flush_running = false;
+                }
+                batch
+            };
+            if batch.is_empty() {
+                return;
+            }
+            let permit = match self.key_store.try_admit_observability_deferred_write() {
+                Ok(permit) => permit,
+                Err(reason) => {
+                    self.requeue_rebalance_audits(batch).await;
+                    tracing::debug!(
+                        component = "observability",
+                        event = "rebalance_audit_deferred",
+                        defer_reason = reason.as_str(),
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            for entry in batch {
+                match self.key_store.log_rebalance_audit_entry(&entry).await {
+                    Ok((_request_log_id, created_at)) => {
+                        if self
+                            .record_server_pressure_event(
+                                // Rebalance audit rows intentionally do not carry the
+                                // request-log fields used as rebuild source facts. Keep
+                                // their derived delta through a source-fenced rebuild.
+                                None,
+                                created_at,
+                                &entry.result_status,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            let mut writer = self.observability_deferred_writer.lock().await;
+                            writer.pressure_stale = true;
+                        }
+                    }
+                    Err(error) => {
+                        let transient = crate::store::is_transient_sqlite_write_error(&error);
+                        let mut writer = self.observability_deferred_writer.lock().await;
+                        writer.rebalance_audit_stale = true;
+                        drop(writer);
+                        if transient {
+                            tracing::debug!(
+                                component = "observability",
+                                event = "rebalance_audit_flush_deferred",
+                                defer_reason = "sqlite_contention",
+                            );
+                        } else {
+                            tracing::warn!(
+                                component = "observability",
+                                event = "rebalance_audit_flush_failed",
+                                error_kind = "sqlite_write",
+                            );
+                        }
+                    }
+                }
+            }
+            drop(permit);
+        }
+    }
+
+    async fn requeue_rebalance_audits(&self, mut entries: Vec<RebalanceAuditEntry>) {
+        let mut writer = self.observability_deferred_writer.lock().await;
+        while let Some(entry) = entries.pop() {
+            let entry_size = entry.payload_len();
+            if writer.rebalance_audits.len() >= 64
+                || writer
+                    .rebalance_audit_payload_bytes
+                    .saturating_add(entry_size)
+                    > 1024 * 1024
+            {
+                writer.rebalance_audit_stale = true;
+                continue;
+            }
+            writer.rebalance_audit_payload_bytes = writer
+                .rebalance_audit_payload_bytes
+                .saturating_add(entry_size);
+            writer.rebalance_audits.push_front(entry);
+        }
+    }
+
     /// Record a token usage log. Intended for /mcp proxy handler.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_local_request_log_without_key(

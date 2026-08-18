@@ -276,6 +276,7 @@ const runObservationBase: NonNullable<UpstreamPrivacyStatus['reconciliationRunOb
   transportFailure: 0,
   semanticFailure: 0,
   localPressure: 0,
+  lastTransportKind: null,
   continuationReason: null,
   nextRetryAt: null,
   observedAt: 1_783_959_000,
@@ -324,6 +325,7 @@ const transportFailureStatus: UpstreamPrivacyStatus = {
   reconciliationRunObservation: {
     ...runObservationBase,
     transportFailure: 1,
+    lastTransportKind: 'timeout',
     continuationReason: 'transport_failure',
     nextRetryAt: 1_783_959_030,
   },
@@ -573,6 +575,11 @@ export const Observed: Story = {
 
 export const TransportFailure: Story = {
   args: { status: transportFailureStatus },
+}
+
+export const TransportFailureMobile393x852: Story = {
+  args: { status: transportFailureStatus },
+  parameters: mobileViewport,
 }
 
 export const SemanticFailure: Story = {

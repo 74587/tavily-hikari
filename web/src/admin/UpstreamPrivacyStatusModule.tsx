@@ -640,6 +640,10 @@ export default function UpstreamPrivacyStatusModule({
                     : `${numberFormatter.format(status.reconciliationRunObservation.upstream429)} / ${numberFormatter.format(status.reconciliationRunObservation.transportFailure)} / ${numberFormatter.format(status.reconciliationRunObservation.semanticFailure)} / ${numberFormatter.format(status.reconciliationRunObservation.localPressure)}`}
                 />
                 <PrivacyStat
+                  label={language === 'zh' ? '最近传输失败类别' : 'Last transport failure'}
+                  value={status.reconciliationRunObservation?.lastTransportKind ?? (language === 'zh' ? '无' : 'None')}
+                />
+                <PrivacyStat
                   label={language === 'zh' ? '阶段耗时（准备 / 首次远端 / 远端）' : 'Phase ms (hydrate / first remote / remote)'}
                   value={status.reconciliationRunObservation == null
                     ? strings.statusMissing

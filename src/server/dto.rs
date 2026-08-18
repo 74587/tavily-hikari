@@ -1059,6 +1059,12 @@ struct PaginatedAlertEventsView {
     total: i64,
     page: i64,
     per_page: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<String>,
 }
 
 impl From<tavily_hikari::PaginatedAlertEvents> for PaginatedAlertEventsView {
@@ -1068,7 +1074,19 @@ impl From<tavily_hikari::PaginatedAlertEvents> for PaginatedAlertEventsView {
             total: value.total,
             page: value.page,
             per_page: value.per_page,
+            coverage: None,
+            observed_at: None,
+            stale_reason: None,
         }
+    }
+}
+
+impl PaginatedAlertEventsView {
+    fn stale(mut self, observed_at: i64) -> Self {
+        self.coverage = Some("stale".to_string());
+        self.observed_at = Some(observed_at);
+        self.stale_reason = Some("sqlite_pressure".to_string());
+        self
     }
 }
 
@@ -1079,6 +1097,12 @@ struct PaginatedAlertGroupsView {
     total: i64,
     page: i64,
     per_page: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<String>,
 }
 
 impl From<tavily_hikari::PaginatedAlertGroups> for PaginatedAlertGroupsView {
@@ -1088,7 +1112,19 @@ impl From<tavily_hikari::PaginatedAlertGroups> for PaginatedAlertGroupsView {
             total: value.total,
             page: value.page,
             per_page: value.per_page,
+            coverage: None,
+            observed_at: None,
+            stale_reason: None,
         }
+    }
+}
+
+impl PaginatedAlertGroupsView {
+    fn stale(mut self, observed_at: i64) -> Self {
+        self.coverage = Some("stale".to_string());
+        self.observed_at = Some(observed_at);
+        self.stale_reason = Some("sqlite_pressure".to_string());
+        self
     }
 }
 
@@ -1101,6 +1137,12 @@ struct AlertCatalogView {
     users: Vec<AlertFacetOptionView>,
     tokens: Vec<AlertFacetOptionView>,
     keys: Vec<AlertFacetOptionView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<String>,
 }
 
 impl From<tavily_hikari::AlertCatalog> for AlertCatalogView {
@@ -1116,7 +1158,19 @@ impl From<tavily_hikari::AlertCatalog> for AlertCatalogView {
             users: value.users.into_iter().map(AlertFacetOptionView::from).collect(),
             tokens: value.tokens.into_iter().map(AlertFacetOptionView::from).collect(),
             keys: value.keys.into_iter().map(AlertFacetOptionView::from).collect(),
+            coverage: None,
+            observed_at: None,
+            stale_reason: None,
         }
+    }
+}
+
+impl AlertCatalogView {
+    fn stale(mut self, observed_at: i64) -> Self {
+        self.coverage = Some("stale".to_string());
+        self.observed_at = Some(observed_at);
+        self.stale_reason = Some("sqlite_pressure".to_string());
+        self
     }
 }
 

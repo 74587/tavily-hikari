@@ -139,6 +139,7 @@ function createUpstreamPrivacyStatus(diagnostics: ActivityDiagnostics): Upstream
       transportFailure: 0,
       semanticFailure: 0,
       localPressure: 0,
+      lastTransportKind: null,
       continuationReason: 'observed',
       nextRetryAt: null,
       observedAt: 1_783_958_320,

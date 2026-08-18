@@ -30,6 +30,7 @@ describe('SystemStatusModule Storybook proofs', () => {
     expect(systemStatusStories.ErrorState).toMatchObject({})
     expect(systemStatusStories.LoadingState).toMatchObject({})
     expect(systemStatusStories.Mobile393x852).toMatchObject({})
+    expect(systemStatusStories.TransportFailureMobile393x852).toMatchObject({})
     expect(systemStatusStories.EvidenceLocalBackoffMobile393x852).toMatchObject({})
     expect(systemStatusStories.MobileStateGallery).toMatchObject({})
     expect(systemStatusStories.Mobile).toMatchObject({})

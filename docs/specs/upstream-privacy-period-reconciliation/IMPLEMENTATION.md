@@ -82,3 +82,6 @@
 - Transport and semantic failures preserve an active upstream-429 circuit. A real remote attempt
   clears local-pressure state; only `settled` or `no_adjustment` recovery clears the upstream
   circuit. This prevents unrelated local outcomes from restarting the remote-rate-limit loop.
+- `upstream_reconciliation_run_observation.last_transport_kind` is an additive local diagnostic
+  column. It records only the stable transport category, keeps retryable work incomplete, and adds
+  no HA outbox event or startup work scan.

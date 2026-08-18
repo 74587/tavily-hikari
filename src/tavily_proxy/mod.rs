@@ -88,6 +88,84 @@ struct MemoryUserBusinessCalls1hBackfill {
     upper_bound_request_log_id: i64,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ServerPressureBucketKey {
+    bucket_kind: &'static str,
+    bucket_start: i64,
+    bucket_secs: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ServerPressureBucketCounts {
+    source_success_count: i64,
+    source_failure_count: i64,
+    unsourced_success_count: i64,
+    unsourced_failure_count: i64,
+}
+
+impl ServerPressureBucketCounts {
+    fn record(&mut self, success: i64, failure: i64, source_backed: bool) {
+        if source_backed {
+            self.source_success_count = self.source_success_count.saturating_add(success);
+            self.source_failure_count = self.source_failure_count.saturating_add(failure);
+        } else {
+            self.unsourced_success_count = self.unsourced_success_count.saturating_add(success);
+            self.unsourced_failure_count = self.unsourced_failure_count.saturating_add(failure);
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.source_success_count = self
+            .source_success_count
+            .saturating_add(other.source_success_count);
+        self.source_failure_count = self
+            .source_failure_count
+            .saturating_add(other.source_failure_count);
+        self.unsourced_success_count = self
+            .unsourced_success_count
+            .saturating_add(other.unsourced_success_count);
+        self.unsourced_failure_count = self
+            .unsourced_failure_count
+            .saturating_add(other.unsourced_failure_count);
+    }
+
+    fn success_count(self) -> i64 {
+        self.source_success_count
+            .saturating_add(self.unsourced_success_count)
+    }
+
+    fn failure_count(self) -> i64 {
+        self.source_failure_count
+            .saturating_add(self.unsourced_failure_count)
+    }
+
+    fn has_unsourced(self) -> bool {
+        self.unsourced_success_count > 0 || self.unsourced_failure_count > 0
+    }
+
+    fn discard_source_backed(&mut self) {
+        self.source_success_count = 0;
+        self.source_failure_count = 0;
+    }
+
+    fn is_empty(self) -> bool {
+        self.success_count() == 0 && self.failure_count() == 0
+    }
+}
+
+#[derive(Debug, Default)]
+struct ObservabilityDeferredWriter {
+    pressure_deltas: BTreeMap<ServerPressureBucketKey, ServerPressureBucketCounts>,
+    pressure_flush_running: bool,
+    pressure_stale: bool,
+    pressure_unrecoverable_overflow: bool,
+    consecutive_pressure_defers: u8,
+    rebalance_audits: VecDeque<RebalanceAuditEntry>,
+    rebalance_audit_payload_bytes: usize,
+    rebalance_audit_flush_running: bool,
+    rebalance_audit_stale: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct RequestRateSubject {
     key: String,
@@ -690,6 +768,9 @@ pub struct TavilyProxy {
     user_rankings_cache: Arc<Mutex<UserRankingsCacheState>>,
     analysis_pressure_cache: Arc<Mutex<AnalysisPressureCacheState>>,
     pub(crate) ha_state_coalescer: HaStateCoalescer,
+    // External `TavilyProxy` clones own this token. Background loops only
+    // retain a weak reference so they cannot keep a discarded runtime alive.
+    background_task_owner: Arc<()>,
     // Fast in-process lock to collapse duplicate work within one instance.
     pub(crate) token_billing_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     pub(crate) mcp_session_init_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
@@ -704,6 +785,7 @@ pub struct TavilyProxy {
     server_pressure_rebuild_generation: Arc<AtomicU64>,
     server_pressure_rebuild_transition_gate: Arc<RwLock<()>>,
     server_pressure_rebuild_buffered_events: Arc<Mutex<Vec<ServerPressureBufferedEvent>>>,
+    observability_deferred_writer: Arc<Mutex<ObservabilityDeferredWriter>>,
     #[cfg(test)]
     server_pressure_tail_replay_test_gate: Arc<ServerPressureTailReplayTestGate>,
     health_readiness_grace_until: tokio::time::Instant,

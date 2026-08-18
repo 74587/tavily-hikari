@@ -32,21 +32,79 @@ fn resolve_alert_query_window(
 async fn get_alert_catalog(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<AlertCatalogView>, StatusCode> {
+) -> Result<axum::response::Response, axum::response::Response> {
     if !is_admin_request(state.as_ref(), &headers).await {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
 
-    state
-        .proxy
-        .alert_catalog()
-        .await
-        .map(AlertCatalogView::from)
-        .map(Json)
-        .map_err(|err| {
-            eprintln!("alert catalog error: {err}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    let key = "catalog";
+    if state.proxy.admin_alert_read_defer_reason().is_some() {
+        return match admin_alerts_last_good(state.as_ref(), key).await {
+            Some((AdminAlertsReadCacheValue::Catalog(catalog), observed_at)) => {
+                Ok(Json(AlertCatalogView::from(catalog).stale(observed_at)).into_response())
+            }
+            _ => Err(alerts_sqlite_pressure_response()),
+        };
+    }
+    match state.proxy.alert_catalog().await {
+        Ok(catalog) => {
+            record_admin_alerts_last_good(
+                state.as_ref(),
+                key.to_string(),
+                AdminAlertsReadCacheValue::Catalog(catalog.clone()),
+            )
+            .await;
+            Ok(Json(AlertCatalogView::from(catalog)).into_response())
+        }
+        Err(error) if tavily_hikari::is_transient_sqlite_write_error(&error) => {
+            match admin_alerts_last_good(state.as_ref(), key).await {
+                Some((AdminAlertsReadCacheValue::Catalog(catalog), observed_at)) => {
+                    Ok(Json(AlertCatalogView::from(catalog).stale(observed_at)).into_response())
+                }
+                _ => Err(alerts_sqlite_pressure_response()),
+            }
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
+}
+
+fn alerts_sqlite_pressure_response() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "1")],
+    )
+        .into_response()
+}
+
+struct AlertReadCacheQuery<'a> {
+    alert_type: Option<&'a str>,
+    since: Option<i64>,
+    until: Option<i64>,
+    user_id: Option<&'a str>,
+    token_id: Option<&'a str>,
+    key_id: Option<&'a str>,
+    request_kinds: &'a [String],
+    page: i64,
+    per_page: i64,
+}
+
+fn alert_read_cache_key(kind: &str, query: &AlertReadCacheQuery<'_>) -> String {
+    let mut request_kinds = query.request_kinds.to_vec();
+    request_kinds.sort();
+    request_kinds.dedup();
+    serde_json::to_string(&(
+        kind,
+        query.alert_type,
+        query.since,
+        query.until,
+        query.user_id,
+        query.token_id,
+        query.key_id,
+        request_kinds,
+        query.page,
+        query.per_page,
+    ))
+    .expect("alert read cache key fields are serializable")
 }
 
 async fn get_alert_events(
@@ -54,37 +112,73 @@ async fn get_alert_events(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(q): Query<AlertsQuery>,
-) -> Result<Json<PaginatedAlertEventsView>, StatusCode> {
+) -> Result<axum::response::Response, axum::response::Response> {
     if !is_admin_request(state.as_ref(), &headers).await {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
 
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
     let request_kinds = parse_request_kind_filters(raw_query.as_deref());
-    let alert_type = normalize_alert_type_filter(q.alert_type.as_deref())?;
-    let (since, until) = resolve_alert_query_window(q.since.as_deref(), q.until.as_deref())?;
-
-    state
-        .proxy
-        .alert_events_page(
+    let alert_type = normalize_alert_type_filter(q.alert_type.as_deref())
+        .map_err(|status| status.into_response())?;
+    let (since, until) = resolve_alert_query_window(q.since.as_deref(), q.until.as_deref())
+        .map_err(|status| status.into_response())?;
+    let user_id = normalize_optional_filter(q.user_id.as_deref());
+    let token_id = normalize_optional_filter(q.token_id.as_deref());
+    let key_id = normalize_optional_filter(q.key_id.as_deref());
+    let cache_query = AlertReadCacheQuery {
+        alert_type,
+        since,
+        until,
+        user_id,
+        token_id,
+        key_id,
+        request_kinds: &request_kinds,
+        page,
+        per_page,
+    };
+    let cache_key = alert_read_cache_key("events", &cache_query);
+    if state.proxy.admin_alert_read_defer_reason().is_some() {
+        return match admin_alerts_last_good(state.as_ref(), &cache_key).await {
+            Some((AdminAlertsReadCacheValue::Events(events), observed_at)) => {
+                Ok(Json(PaginatedAlertEventsView::from(events).stale(observed_at)).into_response())
+            }
+            _ => Err(alerts_sqlite_pressure_response()),
+        };
+    }
+    match state.proxy.alert_events_page(
             alert_type,
             since,
             until,
-            normalize_optional_filter(q.user_id.as_deref()),
-            normalize_optional_filter(q.token_id.as_deref()),
-            normalize_optional_filter(q.key_id.as_deref()),
+            user_id,
+            token_id,
+            key_id,
             &request_kinds,
             page,
             per_page,
         )
         .await
-        .map(PaginatedAlertEventsView::from)
-        .map(Json)
-        .map_err(|err| {
-            eprintln!("alert events error: {err}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    {
+        Ok(events) => {
+            record_admin_alerts_last_good(
+                state.as_ref(),
+                cache_key,
+                AdminAlertsReadCacheValue::Events(events.clone()),
+            )
+            .await;
+            Ok(Json(PaginatedAlertEventsView::from(events)).into_response())
+        }
+        Err(error) if tavily_hikari::is_transient_sqlite_write_error(&error) => {
+            match admin_alerts_last_good(state.as_ref(), &cache_key).await {
+                Some((AdminAlertsReadCacheValue::Events(events), observed_at)) => {
+                    Ok(Json(PaginatedAlertEventsView::from(events).stale(observed_at)).into_response())
+                }
+                _ => Err(alerts_sqlite_pressure_response()),
+            }
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
 }
 
 async fn get_alert_groups(
@@ -92,35 +186,71 @@ async fn get_alert_groups(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Query(q): Query<AlertsQuery>,
-) -> Result<Json<PaginatedAlertGroupsView>, StatusCode> {
+) -> Result<axum::response::Response, axum::response::Response> {
     if !is_admin_request(state.as_ref(), &headers).await {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
 
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
     let request_kinds = parse_request_kind_filters(raw_query.as_deref());
-    let alert_type = normalize_alert_type_filter(q.alert_type.as_deref())?;
-    let (since, until) = resolve_alert_query_window(q.since.as_deref(), q.until.as_deref())?;
-
-    state
-        .proxy
-        .alert_groups_page(
+    let alert_type = normalize_alert_type_filter(q.alert_type.as_deref())
+        .map_err(|status| status.into_response())?;
+    let (since, until) = resolve_alert_query_window(q.since.as_deref(), q.until.as_deref())
+        .map_err(|status| status.into_response())?;
+    let user_id = normalize_optional_filter(q.user_id.as_deref());
+    let token_id = normalize_optional_filter(q.token_id.as_deref());
+    let key_id = normalize_optional_filter(q.key_id.as_deref());
+    let cache_query = AlertReadCacheQuery {
+        alert_type,
+        since,
+        until,
+        user_id,
+        token_id,
+        key_id,
+        request_kinds: &request_kinds,
+        page,
+        per_page,
+    };
+    let cache_key = alert_read_cache_key("groups", &cache_query);
+    if state.proxy.admin_alert_read_defer_reason().is_some() {
+        return match admin_alerts_last_good(state.as_ref(), &cache_key).await {
+            Some((AdminAlertsReadCacheValue::Groups(groups), observed_at)) => {
+                Ok(Json(PaginatedAlertGroupsView::from(groups).stale(observed_at)).into_response())
+            }
+            _ => Err(alerts_sqlite_pressure_response()),
+        };
+    }
+    match state.proxy.alert_groups_page(
             alert_type,
             since,
             until,
-            normalize_optional_filter(q.user_id.as_deref()),
-            normalize_optional_filter(q.token_id.as_deref()),
-            normalize_optional_filter(q.key_id.as_deref()),
+            user_id,
+            token_id,
+            key_id,
             &request_kinds,
             page,
             per_page,
         )
         .await
-        .map(PaginatedAlertGroupsView::from)
-        .map(Json)
-        .map_err(|err| {
-            eprintln!("alert groups error: {err}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    {
+        Ok(groups) => {
+            record_admin_alerts_last_good(
+                state.as_ref(),
+                cache_key,
+                AdminAlertsReadCacheValue::Groups(groups.clone()),
+            )
+            .await;
+            Ok(Json(PaginatedAlertGroupsView::from(groups)).into_response())
+        }
+        Err(error) if tavily_hikari::is_transient_sqlite_write_error(&error) => {
+            match admin_alerts_last_good(state.as_ref(), &cache_key).await {
+                Some((AdminAlertsReadCacheValue::Groups(groups), observed_at)) => {
+                    Ok(Json(PaginatedAlertGroupsView::from(groups).stale(observed_at)).into_response())
+                }
+                _ => Err(alerts_sqlite_pressure_response()),
+            }
+        }
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    }
 }

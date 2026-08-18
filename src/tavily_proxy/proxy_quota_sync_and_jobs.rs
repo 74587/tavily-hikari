@@ -2,29 +2,6 @@ static LAST_RECONCILIATION_SUMMARY_LOG_AT: AtomicI64 = AtomicI64::new(0);
 
 include!("reconciliation_engine.rs");
 
-struct ReconciliationRunResult {
-    settled: i64,
-    completed: i64,
-    no_adjustment: i64,
-    observed: i64,
-    transport_failure_windows: i64,
-    semantic_failure_windows: i64,
-    settled_recent: i64,
-    settled_backlog: i64,
-    upstream_429_retry_windows: i64,
-    local_usage_rate_limit_windows: i64,
-    other_retry_windows: i64,
-    key_backoff_window_count: i64,
-    skipped_by_key_backoff: i64,
-    attempted_candidate_count: i64,
-    budget_exhausted: bool,
-    remote_attempt_limit_reached: bool,
-    max_retry_after_until: Option<i64>,
-    hydrate_ms: i64,
-    first_remote_ms: Option<i64>,
-    remote_ms: i64,
-}
-
 fn should_emit_reconciliation_summary_at(last_emitted_at: &AtomicI64, now: i64) -> bool {
     let mut previous = last_emitted_at.load(Ordering::Relaxed);
     loop {
@@ -1046,6 +1023,7 @@ impl TavilyProxy {
                         transport_failure: 0,
                         semantic_failure: 0,
                         local_pressure: 0,
+                        last_transport_kind: None,
                         continuation_reason: None,
                         next_retry_at: None,
                     },
@@ -1318,6 +1296,7 @@ impl TavilyProxy {
             let mut no_adjustment = 0_i64;
             let mut observed_terminal = 0_i64;
             let mut transport_failure_windows = 0_i64;
+            let mut last_transport_kind = None::<&'static str>;
             let mut semantic_failure_windows = 0_i64;
             let mut settled_recent = 0_i64;
             let mut settled_backlog = 0_i64;
@@ -1500,7 +1479,8 @@ impl TavilyProxy {
                     match usage_result {
                         Err(_) => {
                             transport_failure_windows += 1;
-                            retry_reason = Some("upstream transport timeout".to_string());
+                            last_transport_kind = Some(TransportFailureKind::Timeout.as_str());
+                            retry_reason = Some("transport_failure".to_string());
                             retry_key_id = Some(key_id.clone());
                             retry_outcome = Some(ReconciliationOutcome::TransportFailure);
                             break;
@@ -1526,7 +1506,17 @@ impl TavilyProxy {
                                 ReconciliationOutcome::SemanticFailure
                             };
                             retry_at = upstream_retry_at;
-                            retry_reason = Some(err.to_string());
+                            if outcome == ReconciliationOutcome::TransportFailure {
+                                last_transport_kind = Some(
+                                    TransportFailureKind::from_proxy_error(&err).as_str(),
+                                );
+                                retry_reason = Some("transport_failure".to_string());
+                            } else if outcome == ReconciliationOutcome::Upstream429 {
+                                retry_reason =
+                                    Some(RECONCILIATION_RETRY_REASON_UPSTREAM_429.to_string());
+                            } else {
+                                retry_reason = Some("semantic_failure".to_string());
+                            }
                             retry_key_id = Some(key_id.clone());
                             retry_outcome = Some(outcome);
                             break;
@@ -1749,6 +1739,7 @@ impl TavilyProxy {
                 no_adjustment,
                 observed: observed_terminal,
                 transport_failure_windows,
+                last_transport_kind,
                 semantic_failure_windows,
                 settled_recent,
                 settled_backlog,
@@ -1871,6 +1862,7 @@ impl TavilyProxy {
                 no_adjustment,
                 observed,
                 transport_failure_windows,
+                last_transport_kind,
                 semantic_failure_windows,
                 settled_recent,
                 settled_backlog,
@@ -2180,6 +2172,7 @@ impl TavilyProxy {
                             transport_failure: transport_failure_windows,
                             semantic_failure: semantic_failure_windows,
                             local_pressure: i64::from(local_pressure),
+                            last_transport_kind,
                             continuation_reason: reconciliation_outcome.map(|value| value.as_str()),
                             next_retry_at,
                         },

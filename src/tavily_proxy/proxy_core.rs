@@ -596,6 +596,7 @@ impl TavilyProxy {
             user_rankings_cache: Arc::new(Mutex::new(UserRankingsCacheState::default())),
             analysis_pressure_cache: Arc::new(Mutex::new(AnalysisPressureCacheState::default())),
             ha_state_coalescer,
+            background_task_owner: Arc::new(()),
             token_billing_locks: shared_token_billing_locks(),
             mcp_session_init_locks: Arc::new(Mutex::new(HashMap::new())),
             mcp_session_request_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -611,6 +612,7 @@ impl TavilyProxy {
             server_pressure_rebuild_generation: Arc::new(AtomicU64::new(0)),
             server_pressure_rebuild_transition_gate: Arc::new(RwLock::new(())),
             server_pressure_rebuild_buffered_events: Arc::new(Mutex::new(Vec::new())),
+            observability_deferred_writer: Arc::new(Mutex::new(ObservabilityDeferredWriter::default())),
             #[cfg(test)]
             server_pressure_tail_replay_test_gate: Arc::new(
                 ServerPressureTailReplayTestGate::default(),
@@ -927,10 +929,13 @@ impl TavilyProxy {
                         .load(Ordering::SeqCst)
                         != generation
                 {
-                    return self
-                        .key_store
-                        .upsert_server_pressure_event(created_at, result_status)
+                    self.enqueue_server_pressure_event(
+                        request_log_id.is_some(),
+                        created_at,
+                        result_status,
+                    )
                         .await;
+                    return Ok(());
                 }
                 generation
             };
@@ -950,6 +955,208 @@ impl TavilyProxy {
             // buffer acquisition. Retry through the direct-write path rather
             // than leaving an event in a completed generation.
         }
+    }
+
+    async fn enqueue_server_pressure_event(
+        &self,
+        source_backed: bool,
+        created_at: i64,
+        result_status: &str,
+    ) {
+        let Some(utc_dt) = chrono::Utc.timestamp_opt(created_at, 0).single() else {
+            return;
+        };
+        let success = i64::from(result_status == OUTCOME_SUCCESS);
+        let failure = i64::from(result_status != OUTCOME_SUCCESS);
+        let entries = [
+            ServerPressureBucketKey {
+                bucket_kind: "five_minute",
+                bucket_start: created_at - created_at.rem_euclid(SECS_PER_FIVE_MINUTES),
+                bucket_secs: SECS_PER_FIVE_MINUTES,
+            },
+            ServerPressureBucketKey {
+                bucket_kind: "hour",
+                bucket_start: start_of_local_hour_utc_ts(utc_dt.with_timezone(&chrono::Local)),
+                bucket_secs: SECS_PER_HOUR,
+            },
+        ];
+        let (spawn_flush, rebuild) = {
+            let mut writer = self.observability_deferred_writer.lock().await;
+            let mut rebuild = false;
+            for key in entries {
+                if !writer.pressure_deltas.contains_key(&key)
+                    && writer.pressure_deltas.len() >= 128
+                {
+                    writer.pressure_stale = true;
+                    writer.pressure_unrecoverable_overflow |= !source_backed;
+                    rebuild = true;
+                    continue;
+                }
+                let counts = writer.pressure_deltas.entry(key).or_default();
+                counts.record(success, failure, source_backed);
+            }
+            let spawn_flush = !writer.pressure_flush_running && !writer.pressure_deltas.is_empty();
+            if spawn_flush {
+                writer.pressure_flush_running = true;
+            }
+            (spawn_flush, rebuild)
+        };
+        if rebuild {
+            self.spawn_server_pressure_buckets_rebuild_once();
+        }
+        if spawn_flush {
+            let proxy = self.clone();
+            tokio::spawn(async move { proxy.flush_server_pressure_deferred_writer().await });
+        }
+    }
+
+    async fn flush_server_pressure_deferred_writer(&self) {
+        loop {
+            let batch = {
+                let mut writer = self.observability_deferred_writer.lock().await;
+                let keys: Vec<_> = writer.pressure_deltas.keys().take(25).cloned().collect();
+                if keys.is_empty() {
+                    writer.pressure_flush_running = false;
+                    return;
+                }
+                keys.into_iter()
+                    .filter_map(|key| writer.pressure_deltas.remove(&key).map(|counts| (key, counts)))
+                    .collect::<Vec<_>>()
+            };
+
+            let transition = self.server_pressure_rebuild_transition_gate.read().await;
+            if self.server_pressure_rebuild_phase.load(Ordering::SeqCst)
+                != Self::SERVER_PRESSURE_REBUILD_INACTIVE
+            {
+                drop(transition);
+                self.requeue_server_pressure_deltas(batch, false).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            let deltas = Self::server_pressure_bucket_deltas(&batch);
+
+            let permit = match self.key_store.try_admit_observability_deferred_write() {
+                Ok(permit) => permit,
+                Err(reason) => {
+                    drop(transition);
+                    self.requeue_server_pressure_deltas(batch, true).await;
+                    tracing::debug!(
+                        component = "observability",
+                        event = "server_pressure_flush_deferred",
+                        defer_reason = reason.as_str(),
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            let result = self
+                .key_store
+                .upsert_server_pressure_bucket_deltas(&deltas)
+                .await;
+            drop(permit);
+            drop(transition);
+            match result {
+                Ok(()) => {
+                    let mut writer = self.observability_deferred_writer.lock().await;
+                    writer.consecutive_pressure_defers = 0;
+                    if writer.pressure_deltas.is_empty() && !writer.pressure_unrecoverable_overflow {
+                        writer.pressure_stale = false;
+                    }
+                }
+                Err(error) => {
+                    let transient = crate::store::is_transient_sqlite_write_error(&error);
+                    self.requeue_server_pressure_deltas(batch, true).await;
+                    if transient {
+                        tracing::debug!(
+                            component = "observability",
+                            event = "server_pressure_flush_deferred",
+                            defer_reason = "sqlite_contention",
+                        );
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    tracing::warn!(
+                        component = "observability",
+                        event = "server_pressure_flush_failed",
+                        error_kind = "sqlite_write",
+                    );
+                    let mut writer = self.observability_deferred_writer.lock().await;
+                    writer.pressure_flush_running = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn requeue_server_pressure_deltas(
+        &self,
+        deltas: Vec<(ServerPressureBucketKey, ServerPressureBucketCounts)>,
+        mark_stale: bool,
+    ) {
+        let rebuild = {
+            let mut writer = self.observability_deferred_writer.lock().await;
+            for (key, delta) in deltas {
+                if !writer.pressure_deltas.contains_key(&key)
+                    && writer.pressure_deltas.len() >= 128
+                {
+                    writer.pressure_stale = true;
+                    writer.pressure_unrecoverable_overflow |= delta.has_unsourced();
+                    continue;
+                }
+                let counts = writer.pressure_deltas.entry(key).or_default();
+                counts.merge(delta);
+            }
+            if mark_stale {
+                writer.consecutive_pressure_defers = writer.consecutive_pressure_defers.saturating_add(1);
+                writer.pressure_stale = true;
+            }
+            writer.consecutive_pressure_defers >= 3 || writer.pressure_deltas.len() >= 128
+        };
+        if rebuild {
+            self.spawn_server_pressure_buckets_rebuild_once();
+        }
+    }
+
+    fn server_pressure_bucket_deltas(
+        batch: &[(ServerPressureBucketKey, ServerPressureBucketCounts)],
+    ) -> Vec<ServerPressureBucketDelta> {
+        batch
+            .iter()
+            .filter_map(|(key, counts)| {
+                (!counts.is_empty()).then_some(ServerPressureBucketDelta {
+                    bucket_kind: key.bucket_kind,
+                    bucket_start: key.bucket_start,
+                    bucket_secs: key.bucket_secs,
+                    success_count: counts.success_count(),
+                    failure_count: counts.failure_count(),
+                })
+            })
+            .collect()
+    }
+
+    async fn fence_server_pressure_deferred_writer_for_rebuild(&self) {
+        let mut writer = self.observability_deferred_writer.lock().await;
+        writer.pressure_deltas.retain(|_, counts| {
+            counts.discard_source_backed();
+            !counts.is_empty()
+        });
+        writer.consecutive_pressure_defers = 0;
+        writer.pressure_stale = writer.pressure_unrecoverable_overflow;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn observability_deferred_writer_snapshot_for_test(
+        &self,
+    ) -> (usize, bool, usize, usize, bool) {
+        let writer = self.observability_deferred_writer.lock().await;
+        (
+            writer.pressure_deltas.len(),
+            writer.pressure_stale,
+            writer.rebalance_audits.len(),
+            writer.rebalance_audit_payload_bytes,
+            writer.rebalance_audit_stale,
+        )
     }
 
     async fn requeue_server_pressure_buffered_events(
@@ -1239,16 +1446,18 @@ impl TavilyProxy {
                     attempt = attempt + 1,
                     "rebuilding server pressure buckets after listener readiness"
                 );
-                // Fence direct events that observed the previous inactive
-                // generation. They hold a shared gate through their
-                // incremental write, so the source upper bound below cannot
-                // pass them. This gate is released before source aggregation.
+                // Fence source-backed events queued in the previous inactive
+                // generation. The shared gate ensures that no source-backed
+                // enqueue can cross this boundary before source aggregation.
+                // Unsourced derived events remain queued for the post-rebuild
+                // flush because the source query cannot recreate them.
                 {
                     let _event_gate =
                         proxy.server_pressure_rebuild_transition_gate.write().await;
                     if !proxy.server_pressure_source_rebuild_is_active(generation) {
                         return;
                     }
+                    proxy.fence_server_pressure_deferred_writer_for_rebuild().await;
                 }
                 match proxy
                     .key_store

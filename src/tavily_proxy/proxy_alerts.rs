@@ -1,4 +1,15 @@
 impl TavilyProxy {
+    #[doc(hidden)]
+    pub fn admin_alert_read_defer_reason(&self) -> Option<&'static str> {
+        match self.key_store.try_admit_alert_projection() {
+            Ok(permit) => {
+                drop(permit);
+                None
+            }
+            Err(reason) => Some(reason.as_str()),
+        }
+    }
+
     async fn advance_dashboard_alert_projection_slice_outcome(
         &self,
     ) -> Result<AlertProjectionSliceOutcome, ProxyError> {

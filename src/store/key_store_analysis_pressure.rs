@@ -4,12 +4,66 @@ pub(crate) enum ServerPressureBucketsRebuildOutcome {
     Cancelled,
 }
 
+/// A coalesced derived-pressure delta. It contains no request payload or
+/// identity and can always be rebuilt from the observability request log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServerPressureBucketDelta {
+    pub(crate) bucket_kind: &'static str,
+    pub(crate) bucket_start: i64,
+    pub(crate) bucket_secs: i64,
+    pub(crate) success_count: i64,
+    pub(crate) failure_count: i64,
+}
+
 impl KeyStore {
     pub(crate) fn try_admit_server_pressure_rebuild(
         &self,
     ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
         self.sqlite_runtime
             .try_admit_maintenance_bulk(SqliteOperation::ServerPressureRebuild)
+    }
+
+    pub(crate) fn try_admit_observability_deferred_write(
+        &self,
+    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
+        self.sqlite_runtime
+            .try_admit_maintenance_bulk(SqliteOperation::ObservabilityDeferredWrite)
+    }
+
+    pub(crate) async fn upsert_server_pressure_bucket_deltas(
+        &self,
+        deltas: &[ServerPressureBucketDelta],
+    ) -> Result<(), ProxyError> {
+        if deltas.is_empty() {
+            return Ok(());
+        }
+        let updated_at = self.backend_time.now_ts();
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ObservabilityDeferredWrite)
+            .await?;
+        for delta in deltas {
+            sqlx::query(
+                r#"
+                INSERT INTO observability.server_pressure_buckets (
+                    bucket_kind, bucket_start, bucket_secs, success_count, failure_count, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bucket_kind, bucket_start) DO UPDATE SET
+                    success_count = server_pressure_buckets.success_count + excluded.success_count,
+                    failure_count = server_pressure_buckets.failure_count + excluded.failure_count,
+                    updated_at = excluded.updated_at
+                "#,
+            )
+            .bind(delta.bucket_kind)
+            .bind(delta.bucket_start)
+            .bind(delta.bucket_secs)
+            .bind(delta.success_count)
+            .bind(delta.failure_count)
+            .bind(updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.finish(Ok(())).await
     }
 
     async fn request_logs_support_server_pressure_rebuild(&self) -> Result<bool, ProxyError> {
@@ -289,7 +343,6 @@ impl KeyStore {
         self.ensure_server_pressure_bucket_schema().await?;
         let success = if result_status == OUTCOME_SUCCESS { 1_i64 } else { 0_i64 };
         let failure = if result_status == OUTCOME_SUCCESS { 0_i64 } else { 1_i64 };
-        let updated_at = self.backend_time.now_ts();
         let Some(utc_dt) = chrono::Utc.timestamp_opt(created_at, 0).single() else {
             return Ok(());
         };
@@ -297,41 +350,23 @@ impl KeyStore {
         let five_minute_bucket_start = created_at - created_at.rem_euclid(SECS_PER_FIVE_MINUTES);
         let hour_bucket_start = start_of_local_hour_utc_ts(local_dt);
 
-        let sql = r#"
-            INSERT INTO observability.server_pressure_buckets (
-                bucket_kind,
-                bucket_start,
-                bucket_secs,
-                success_count,
-                failure_count,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(bucket_kind, bucket_start) DO UPDATE SET
-                success_count = server_pressure_buckets.success_count + excluded.success_count,
-                failure_count = server_pressure_buckets.failure_count + excluded.failure_count,
-                updated_at = excluded.updated_at
-        "#;
-
-        sqlx::query(sql)
-            .bind("five_minute")
-            .bind(five_minute_bucket_start)
-            .bind(SECS_PER_FIVE_MINUTES)
-            .bind(success)
-            .bind(failure)
-            .bind(updated_at)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(sql)
-            .bind("hour")
-            .bind(hour_bucket_start)
-            .bind(SECS_PER_HOUR)
-            .bind(success)
-            .bind(failure)
-            .bind(updated_at)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        self.upsert_server_pressure_bucket_deltas(&[
+            ServerPressureBucketDelta {
+                bucket_kind: "five_minute",
+                bucket_start: five_minute_bucket_start,
+                bucket_secs: SECS_PER_FIVE_MINUTES,
+                success_count: success,
+                failure_count: failure,
+            },
+            ServerPressureBucketDelta {
+                bucket_kind: "hour",
+                bucket_start: hour_bucket_start,
+                bucket_secs: SECS_PER_HOUR,
+                success_count: success,
+                failure_count: failure,
+            },
+        ])
+        .await
     }
 
     pub(crate) async fn fetch_server_pressure_points(

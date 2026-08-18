@@ -70,6 +70,9 @@
 - `SqliteRuntime` 使用 60 秒有界 operation/class window 汇总 pool/begin wait、transaction hold、
   affected rows、错误和丢弃连接，并仅在窗口边界读取 process/cgroup write bytes。普通成功和重试不
   逐次输出，连接污染与最终错误立即可见。
+- The workload window includes bounded derived-observability flushes. Server-pressure and rebalance
+  audit defer/retry events stay DEBUG, while stale/recovered coverage changes and fixed transport
+  categories are safe owner-facing diagnostics without SQL, request bodies, endpoints, or tokens.
 - Schema migration emits fixed `component/event/outcome/elapsed_ms` fields for baseline adoption and warm verification. GC and reconciliation keep normal work at DEBUG, aggregate INFO to one-minute windows, and reserve WARN/INFO for state transitions.
 
 ## 已完成验证

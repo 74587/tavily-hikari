@@ -2373,17 +2373,11 @@ use super::upstream_support_and_manual_jobs::*;
         );
 
         let pool = connect_sqlite_test_pool(&db_str).await;
-        let rows = sqlx::query(
-            r#"
-            SELECT status_code, failure_kind, fallback_reason, request_body
-            FROM request_logs
-            WHERE path = '/mcp'
-            ORDER BY id ASC
-            "#,
+        let rows = super::observability_audit_support::wait_for_rebalance_audit_count(
+            &pool,
+            1 + invalid_case_count,
         )
-        .fetch_all(&pool)
-        .await
-        .expect("fetch rebalance invalid argument request logs");
+        .await;
         assert_eq!(
             rows.len(),
             1 + invalid_case_count,
@@ -2534,18 +2528,11 @@ use super::upstream_support_and_manual_jobs::*;
         );
 
         let pool = connect_sqlite_test_pool(&db_str).await;
-        let row = sqlx::query(
-            r#"
-            SELECT status_code, failure_kind, fallback_reason
-            FROM request_logs
-            WHERE path = '/mcp'
-            ORDER BY id DESC
-            LIMIT 1
-            "#,
+        let row = super::observability_audit_support::wait_for_rebalance_audit_with_fallback(
+            &pool,
+            "unknown_tool",
         )
-        .fetch_one(&pool)
-        .await
-        .expect("fetch unknown tool request log");
+        .await;
         assert_eq!(
             row.try_get::<Option<i64>, _>("status_code").unwrap(),
             Some(200),

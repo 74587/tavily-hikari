@@ -18,6 +18,11 @@
   permit or run a background retry loop. Runtime transaction deadlines implement their short
   writer budgets without changing the configured SQLite `busy_timeout`; bulk contention returns a
   typed deferred outcome, while a control write can reuse an already durable representative row.
+- Server-pressure deltas and rebalance audit persistence use an instance-owned deferred writer.
+  Pressure batches contain at most 25 bucket keys per `ObservabilityDeferredWrite` transaction and
+  return to a bounded queue after transient contention; its source-fenced rebuild remains the
+  recovery path. Rebalance audit batches contain at most ten entries and remain best-effort, so
+  MCP completion never waits for an observability SQLite write.
 - Dashboard reads no longer make raw alert aggregation part of the HTTP/SSE path. The AppState-owned
   read model returns its immutable last-good snapshot under pressure, while a bounded
   observability-sidecar AlertProjection advances source cursors and a fence/tail replay in the

@@ -11,6 +11,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HA_DEFS = (ROOT / "src/store/key_store_ha_defs.rs").read_text()
 COMPARISON = (ROOT / "tests/performance_recovery/run_snapshot_comparison.sh").read_text()
+DOCKERFILE = (ROOT / "Dockerfile").read_text()
+DOCKERIGNORE = (ROOT / ".dockerignore").read_text()
 
 
 def rust_resources(constant: str) -> set[str]:
@@ -74,6 +76,8 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn('projection transaction p95 is not proven below 100ms', COMPARISON)
         self.assertIn('candidate billing truth differs', COMPARISON)
         self.assertIn("prepare_reconciliation_fixture", COMPARISON)
+        self.assertIn("Historical baselines predate this Dockerfile input allowlist", COMPARISON)
+        self.assertIn("grep -qx '!rust-toolchain.toml'", COMPARISON)
         self.assertIn("completed_generation < work_generation", COMPARISON)
         self.assertIn("upstream_reconciliation_backoff_until_v1", COMPARISON)
         self.assertIn("snapshot forward-proxy transport isolation failed", COMPARISON)
@@ -84,6 +88,10 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn("snapshot reconciliation fixture preparation failed", COMPARISON)
         self.assertIn("upstream_reconciliation_control_state", COMPARISON)
         self.assertIn("the persisted legacy switch above produces compare mode", COMPARISON)
+
+    def test_docker_context_allows_the_test_toolchain_input(self) -> None:
+        self.assertIn("!rust-toolchain.toml", DOCKERIGNORE)
+        self.assertIn("build.rs|rust-toolchain.toml|src", DOCKERFILE)
 
 
 if __name__ == "__main__":

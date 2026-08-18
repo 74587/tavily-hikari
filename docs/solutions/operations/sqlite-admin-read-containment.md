@@ -65,6 +65,10 @@ reads:
   lists, key list facets, and similar management reads.
 - Recheck cache after acquiring the semaphore so concurrent cache misses collapse into one heavy
   query.
+- For administrator alert catalog/events/groups, key last-good data by the normalized complete
+  query rather than sharing one broad cache entry. Under SQLite admission pressure return only the
+  matching stale result with `coverage`, `observedAt`, and `staleReason`; a cold key returns
+  `503 Retry-After: 1` rather than starting a raw alert CTE.
 - Replace repeated window scans with a single bounded scan that derives all needed windows, then add
   a short manager-scoped TTL cache when settings and live stats can request the same window set in
   one admin refresh cycle.

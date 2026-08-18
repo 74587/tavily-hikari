@@ -51,6 +51,7 @@ mod tests {
     mod log_catalog_and_dashboard_sse;
     mod mcp_billing_and_sessions;
     mod mcp_rebalance_and_follow_up;
+    mod observability_audit_support;
     mod research_result_and_mcp_subpath;
     mod system_settings_and_forward_proxy;
     mod system_settings_reconciliation_status;

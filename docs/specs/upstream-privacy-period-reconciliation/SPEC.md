@@ -96,6 +96,10 @@
 - Every attempted work generation ends as exactly one typed result. `settled`, `no_adjustment`, and
   compare-mode `observed` are terminal. `upstream_429`, `transport_failure`, `semantic_failure`, and
   `local_pressure` are retryable and keep independent durable streaks and retry deadlines.
+- Transport failures store only a fixed local observation category: `connect`, `timeout`,
+  `response_body`, `invalid_endpoint`, `credentials_or_database`, or `unknown`. They never expose
+  endpoint text, response bodies, credentials, or database errors through run observation, and they
+  keep work incomplete on the `30/60/120/300s` retry ladder.
 - Compare-mode non-zero differences write only the shadow observation and complete as `observed`;
   they do not create an actual billing adjustment and are not included in settled totals.
 - Main settlement work always precedes the terminal Research sweep. Candidate preparation and at
@@ -243,8 +247,6 @@
   current markers identify the new reconciliation controller and alert projection coverage surfaces.
 - submission_gate: `approved`
 
-PR: include
-
 ![Annotated dashboard baseline and current-state comparison](./assets/current/dashboard-read-model-baseline-comparison-135376b4.png)
 
 - source_type: `storybook_canvas`
@@ -275,9 +277,41 @@ PR: include
   required mobile viewport.
 - submission_gate: `approved`
 
+![Mobile reconciliation status](./assets/current/dashboard-alert-projection-last-good-135376b4-mobile.png)
+
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Pages/AlertsStale`
+- scenario: exact-key alert last-good state under foreground SQLite write containment
+- requested_viewport: `desktop`
+- viewport_strategy: `storybook_canvas`
+- capture_scope: `browser-viewport`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Current `0bf773d8` source preserves the rendered alert rows while clearly marking
+  stale coverage, the last successful observation time, and the foreground-write containment reason.
+- submission_gate: `approved`
+
 PR: include
 
-![Mobile reconciliation status](./assets/current/dashboard-alert-projection-last-good-135376b4-mobile.png)
+![Alerts stale last-good state](./assets/current/alerts-stale-0bf773d8-desktop.png)
+
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/TransportFailureMobile393x852`
+- scenario: typed reconciliation transport failure with separated retry states
+- requested_viewport: `393x852`
+- viewport_strategy: `devtools-emulate`
+- capture_scope: `browser-viewport`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Current `0bf773d8` source distinguishes a timeout transport failure from 429,
+  semantic, and local-pressure outcomes without exposing an upstream error body.
+- submission_gate: `approved`
+
+PR: include
+
+![Reconciliation transport failure on mobile](./assets/current/reconciliation-transport-0bf773d8-mobile-393x852.png)
 
 ## Related PRs
 

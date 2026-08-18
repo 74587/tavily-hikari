@@ -367,6 +367,13 @@ write_compose() {
   local artifact_dir="$3"
   local dockerfile="$repo/tests/ha/Dockerfile.performance-recovery.app"
   local runner_uid runner_gid
+
+  # Historical baselines predate this Dockerfile input allowlist. The test harness
+  # owns the temporary baseline checkout, so normalize only that build context.
+  if ! grep -qx '!rust-toolchain.toml' "$repo/.dockerignore"; then
+    printf '\n!rust-toolchain.toml\n' >> "$repo/.dockerignore"
+  fi
+
   runner_uid="$(id -u)"
   runner_gid="$(id -g)"
   sed "s|^FROM rust:1.91-bookworm AS builder$|FROM $TESTBOX_RUST_BASE_IMAGE AS builder|" \

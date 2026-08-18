@@ -15,6 +15,33 @@ async fn public_metrics_proxy(db_str: &str, key: &str) -> TavilyProxy {
     .expect("proxy created")
 }
 
+#[tokio::test]
+async fn request_stats_coalescer_releases_dropped_proxy_store() {
+    let db_path = temp_db_path("request-stats-coalescer-store-lifetime");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = public_metrics_proxy(&db_str, "tvly-request-stats-store-lifetime").await;
+    let store = proxy.key_store.clone();
+    let weak_store = Arc::downgrade(&store);
+
+    drop(store);
+    drop(proxy);
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if weak_store.upgrade().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("request-stats worker must not retain a dropped proxy store");
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
 async fn seed_public_metrics_request_log_floor(proxy: &TavilyProxy, month_start: i64) {
     sqlx::query(
         r#"

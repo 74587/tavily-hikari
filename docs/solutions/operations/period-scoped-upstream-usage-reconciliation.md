@@ -15,6 +15,11 @@ their own durable retry state. This prevents a valid zero-delta observation from
 minute-by-minute reconciliation job and prevents a non-429 result from falsely clearing a remote
 rate-limit circuit.
 
+Transport failures need a small durable diagnosis, not a copied error. Map endpoint/connect,
+timeout, body-read, credential/database, and unknown failures into a fixed category, retain the
+work generation, and retry it on `30/60/120/300s`. Only a later terminal result clears the
+recovered state; do not log or expose the upstream body, URL, token, or database error text.
+
 ## Activation controller
 
 Treat the existing precise-reconciliation switch as the sole operator action. Persist and replicate

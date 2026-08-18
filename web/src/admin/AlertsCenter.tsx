@@ -228,6 +228,10 @@ function defaultCopy(language: Language) {
         },
         emptyEvents: '当前筛选下没有告警事件。',
         emptyGroups: '当前筛选下没有告警分组。',
+        stale: {
+          title: '告警数据暂时滞后',
+          detail: 'SQLite 正在处理前台写入，当前展示的是最近一次成功读取的结果。',
+        },
         groupUi: {
           expand: '展开',
           collapse: '收起',
@@ -326,6 +330,10 @@ function defaultCopy(language: Language) {
         },
         emptyEvents: 'No alert events match the current filters.',
         emptyGroups: 'No alert groups match the current filters.',
+        stale: {
+          title: 'Alert data is temporarily stale',
+          detail: 'SQLite is serving foreground writes; this is the last successful read.',
+        },
         groupUi: {
           expand: 'Expand',
           collapse: 'Collapse',
@@ -523,6 +531,12 @@ export default function AlertsCenter({
   const [requestLoadError, setRequestLoadError] = useState<string | null>(null)
   const hasLoadedCatalogRef = useRef(Boolean(initialCatalog))
   const currentPerPage = view === 'events' ? eventsPage.perPage : groupsPage.perPage
+  const activePage = view === 'events' ? eventsPage : groupsPage
+  const alertsCoverage = activePage.coverage === 'stale'
+    ? activePage
+    : catalog?.coverage === 'stale'
+      ? catalog
+      : null
   const currentListQuery = useMemo<AlertsQuery>(
     () => ({
       page,
@@ -972,6 +986,16 @@ export default function AlertsCenter({
             </div>
           </div>
         </div>
+        {alertsCoverage ? (
+          <div className="alerts-center-stale-notice" role="status">
+            <Icon icon="mdi:alert-circle-outline" width={17} height={17} aria-hidden="true" />
+            <div>
+              <strong>{copy.stale.title}</strong>
+              <span>{copy.stale.detail}</span>
+            </div>
+            <time>{formatTimeDetail(alertsCoverage.observedAt ?? null)}</time>
+          </div>
+        ) : null}
 
         <AdminLoadingRegion loadState={catalogLoadState} loadingLabel={copy.title} errorLabel={catalogError}>
           {view === 'events' ? (
