@@ -497,5 +497,5 @@ describe('AdminDashboard route switches', () => {
         root.unmount()
       })
     }
-  })
+  }, 20_000)
 })

@@ -392,7 +392,7 @@ export const Alerts: Story = {
 export const AlertsMobile: Story = {
   render: () => <AlertsPageCanvas inlineTabsVariant="mobile" />,
   parameters: {
-    viewport: { defaultViewport: '375-mobile' },
+    viewport: { defaultViewport: '0393-admin-mobile' },
   },
 }
 
@@ -406,6 +406,6 @@ export const AlertsStale: Story = {
 export const AlertsStaleMobile: Story = {
   render: () => <AlertsPageCanvas inlineTabsVariant="mobile" stale />,
   parameters: {
-    viewport: { defaultViewport: '375-mobile' },
+    viewport: { defaultViewport: '0393-admin-mobile' },
   },
 }

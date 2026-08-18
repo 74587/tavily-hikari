@@ -577,6 +577,11 @@ export const TransportFailure: Story = {
   args: { status: transportFailureStatus },
 }
 
+export const TransportFailureMobile393x852: Story = {
+  args: { status: transportFailureStatus },
+  parameters: mobileViewport,
+}
+
 export const SemanticFailure: Story = {
   args: { status: semanticFailureStatus },
 }
