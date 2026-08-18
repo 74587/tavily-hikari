@@ -1,0 +1,22 @@
+**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!src/
+!src/**
+!scripts/
+scripts/*
+!scripts/docker-entrypoint.sh
+!scripts/docker-healthcheck.sh
+!web/
+web/*
+!web/dist/
+!web/dist/**
+
+# Keep dependency caches, local configuration, and runtime databases out of the context.
+node_modules
+**/node_modules
+.env
+.env.*
+*.db
+*.db-*
