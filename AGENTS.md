@@ -95,11 +95,11 @@ The repository uses a single-context domain layout. See `docs/agents/domain.md`.
 
 - Storybook:
   - Start: `cd web && bun install --frozen-lockfile && bun run storybook` → `http://127.0.0.1:56006` (Storybook CLI forced through Bun runtime by the package script).
-  - Keep it in the current shell for short sessions, or run it under any team-approved background strategy.
+  - 仅在任务需要 Storybook 的 UI/浏览器验证时，于验证期间将其保留在当前 shell 或使用团队认可的后台策略；验证完成后释放该进程和会话。
 
 - Validation:
-  - Keep Playwright/Chrome DevTools sessions open for review; verify `/api/*`, `/mcp`, and SPA routes.
-  - Health: `curl -s http://127.0.0.1:58087/health` → `200`; Summary: `curl -s http://127.0.0.1:58087/api/summary | jq .`.
+  - 当任务需要交互验收、UI/浏览器验证或 HTTP 集成测试时，保持相关的 Playwright/Chrome DevTools 会话以供复核，并验证任务涉及的 `/api/*`、`/mcp` 和 SPA 路由。
+  - 后端服务参与该验证时，Health: `curl -s http://127.0.0.1:58087/health` → `200`; Summary: `curl -s http://127.0.0.1:58087/api/summary | jq .`.
 
 **IMPORTANT**
 
@@ -109,7 +109,10 @@ The repository uses a single-context domain layout. See `docs/agents/domain.md`.
 
 - 2025-03-??: During high-anonymity testing we accidentally hit the official Tavily MCP endpoint. All future tests must target a local/mock upstream. Never hit production Tavily without explicit approval.
 
-## Agent Review Prep
+## Local Service Review
 
-- 工作收尾时，心羽需确保后端服务正在运行（dev 模式可加 `--dev-open-admin`），以便主人可以立即访问 `/` 或 `/admin` 进行验收。若需关闭服务，必须先征得主人确认再停。
-- 心羽在“工作就绪”进入评审前，必须确保开发服务器已就绪：后端监听在 `127.0.0.1:58087` 且健康检查通过，前端 Vite Dev Server 运行在 `127.0.0.1:55173`，页面可直接打开并完成交互验证（必要时保持 Playwright 会话开启供主人复查）。
+- 仅在主人要求交互验收、任务的 UI/浏览器验证，或集成测试需要运行中的应用时，启动本地后端或前端服务。
+- 对文档、配置、构建、CI 与其他非交互任务，使用任务对应的验证；完成工作本身不启动或保留本地服务、浏览器会话或固定端口。
+- 启动服务时说明用途并限定于当前任务；仅管理当前任务启动的进程，并保留不终止无关进程的安全边界。
+- 交付 localhost URL 时，仅在已请求的复核或验证期间保持相应端口和会话，并遵守全局端口租约规则。
+- 相关复核或验证结束后，关闭当前任务打开的浏览器会话，停止当前任务启动的服务并释放所持端口；不得影响无关进程。
