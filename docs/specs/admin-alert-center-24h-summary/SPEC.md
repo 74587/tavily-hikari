@@ -20,6 +20,9 @@
 - 为 `/api/dashboard/overview` 增加最近 24 小时告警摘要；仪表盘摘要固定 24h，CTA 显式进入同口径 `聚合告警` 时间切片，而直接打开告警中心默认展示 retention 内全部历史。
 - 将仪表盘“近期告警”收口为“顶部三窗聚合计数 + 下方 24h 聚合列表”：顶部展示最近 `1h / 24h / 7d` 的聚合告警条数，下方列表固定展示最近 `24h`、最多 `10` 条聚合告警，并显示连续区间时间。
 - 为 Web UI 补齐 Storybook 稳定入口、页面/交互覆盖与视觉证据。
+- 管理员 Events、Groups 与 Catalog 在 projection 不完整或 SQLite 压力下只返回同一规范查询键
+  的 last-good 结果，并标记 `coverage`、`observedAt`、`staleReason`；没有可复用快照时返回
+  `503 Retry-After: 1`，不得在读取路径启动原始告警 CTE。
 
 ## Non-goals
 
@@ -254,6 +257,31 @@
 
 ## Visual Evidence
 
+- 当前实现 SHA `0325ae57` 的 Storybook 状态证据：
+  - `source_type=storybook_canvas`, `target_program=mock-only`, `capture_scope=browser-viewport`, `requested_viewport=1440x1000`, `viewport_strategy=storybook-viewport`, `state=transport-known`。证明管理员对账卡片显示脱敏传输类别、观察时间、retryable outcome 和阶段耗时。
+
+    PR: include
+
+    ![管理员对账 transport failure 桌面状态](./assets/admin-read-transport-desktop.png)
+
+  - `source_type=storybook_canvas`, `target_program=mock-only`, `capture_scope=browser-viewport`, `requested_viewport=1440x1000`, `viewport_strategy=storybook-viewport`, `state=stale-sqlite-pressure`。证明同一页面显示告警投影 stale、隐私状态 stale、sqlite pressure 和最近观察时间。
+
+    PR: include
+
+    ![管理员读模型 stale 桌面状态](./assets/admin-read-stale-desktop.png)
+
+  - `source_type=storybook_canvas`, `target_program=mock-only`, `capture_scope=browser-viewport`, `requested_viewport=393x852`, `viewport_strategy=storybook-viewport`, `state=transport-known-mobile`。
+
+    PR: include
+
+    ![管理员对账 transport failure 移动状态](./assets/admin-read-transport-mobile.png)
+
+  - `source_type=storybook_canvas`, `target_program=mock-only`, `capture_scope=browser-viewport`, `requested_viewport=393x852`, `viewport_strategy=storybook-viewport`, `state=stale-sqlite-pressure-mobile`。
+
+    PR: include
+
+    ![管理员读模型 stale 移动状态](./assets/admin-read-stale-mobile.png)
+
 - Storybook canvas 组件证据：
   - `Admin/Components/DashboardOverview / RecentAlertsDesktopEvidence` 提供稳定桌面证据，近期告警区已重做为“24h 队列导语 + 三窗聚合计数 + 聚合告警队列表格”。
   - 顶部概览区只保留最近 `1 小时 / 24 小时 / 7 天` 三窗聚合计数，并用 `24h` 窗口显式标注当前队列口径。
@@ -262,15 +290,15 @@
   - 分组查看按钮具备主体化可访问名称，且窄屏表头仍保留在无障碍语义树中，不再因为 `display: none` 丢失表格关系。
   - 用户主体 `Alice Wang` 以轻量可聚焦按钮呈现，可跳转用户详情；本地 request-rate 告警摘要明确写出 `rolling 5m request-rate window` 与请求类型，告警类型 badge 仅保留分类与 `5m window`，不重复展示 request kind 或上游封禁原因，也不再单独展示 `latestEvent.title`。
 
-    ![仪表盘近期告警聚合摘要 Storybook 证据](assets/dashboard-alerts-24h-grouped-summary.png)
+    ![仪表盘近期告警聚合摘要 Storybook 证据](./assets/dashboard-alerts-24h-grouped-summary.png)
 
-    ![仪表盘近期告警用户名跳转与限流窗口说明证据](assets/dashboard-alerts-user-link-window-summary.png)
+    ![仪表盘近期告警用户名跳转与限流窗口说明证据](./assets/dashboard-alerts-user-link-window-summary.png)
 
 - Storybook page fallback 证据：
   - `Admin/Pages / Alerts` 的 header tabs 与页面内 tabs 顺序已统一为 `聚合告警 -> 事件记录`。
   - 默认激活态仍为 `view=groups`，仅调整展示顺序，不改变查询语义。
 
-    ![告警中心 tabs 顺序统一 Storybook 证据](assets/alerts-center-groups-first-tabs.png)
+    ![告警中心 tabs 顺序统一 Storybook 证据](./assets/alerts-center-groups-first-tabs.png)
 
 - Chrome DevTools 复核：
   - `iframe.html?id=admin-components-dashboardoverview--recent-alerts-desktop-evidence` 已确认近期告警区显示 `Last 1 hour / Last 24 hours / Last 7 days` 三窗计数，以及 `Alert window` 连续区间文案。

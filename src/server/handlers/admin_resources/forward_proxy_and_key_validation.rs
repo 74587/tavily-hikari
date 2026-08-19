@@ -215,19 +215,58 @@ async fn put_system_settings(
 async fn get_upstream_privacy_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<tavily_hikari::UpstreamPrivacyStatus>, (StatusCode, String)> {
+) -> Result<axum::response::Response, axum::response::Response> {
     if !is_admin_request(state.as_ref(), &headers).await {
-        return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
-    state
-        .proxy
-        .upstream_privacy_status()
-        .await
-        .map(Json)
-        .map_err(|err| {
-            eprintln!("get upstream privacy status error: {err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
-        })
+
+    let _admission = match state.proxy.admit_admin_privacy_status() {
+        tavily_hikari::SqliteAdmissionOutcome::Admitted(admission) => admission,
+        tavily_hikari::SqliteAdmissionOutcome::Deferred { .. } => {
+            return match stale_admin_privacy_status(state.as_ref(), "sqlite_pressure").await {
+                Some(status) => Ok(Json(status).into_response()),
+                None => Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response()),
+            };
+        }
+    };
+
+    if let Some((status, _observed_at)) = admin_privacy_status_last_good(state.as_ref()).await {
+        return Ok(Json(status).into_response());
+    }
+
+    match tokio::time::timeout(Duration::from_millis(250), state.proxy.upstream_privacy_status()).await {
+        Ok(Ok(status)) => {
+            record_admin_privacy_status_last_good(state.as_ref(), status.clone()).await;
+            Ok(Json(status).into_response())
+        }
+        Ok(Err(error))
+            if tavily_hikari::is_transient_sqlite_write_error(&error) || error.is_deferred() =>
+        {
+            match stale_admin_privacy_status(state.as_ref(), "sqlite_pressure").await {
+                Some(status) => Ok(Json(status).into_response()),
+                None => Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response()),
+            }
+        }
+        Err(_) => match stale_admin_privacy_status(state.as_ref(), "read_timeout").await {
+            Some(status) => Ok(Json(status).into_response()),
+            None => Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response()),
+        },
+        Ok(Err(error)) => {
+            eprintln!("get upstream privacy status error: {error}");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response())
+        }
+    }
+}
+
+async fn stale_admin_privacy_status(
+    state: &AppState,
+    reason: &str,
+) -> Option<tavily_hikari::UpstreamPrivacyStatus> {
+    let (mut status, observed_at) = admin_privacy_status_cached(state).await?;
+    status.coverage = "stale".to_string();
+    status.observed_at = Some(observed_at);
+    status.stale_reason = Some(reason.to_string());
+    Some(status)
 }
 
 async fn get_admin_mcp_session_bindings(

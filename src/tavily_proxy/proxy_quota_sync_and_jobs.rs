@@ -24,19 +24,6 @@ fn should_emit_reconciliation_summary(now: i64) -> bool {
     should_emit_reconciliation_summary_at(&LAST_RECONCILIATION_SUMMARY_LOG_AT, now)
 }
 
-async fn await_reconciliation_post_process<T>(
-    deadline: std::time::Instant,
-    operation: impl std::future::Future<Output = Result<T, ProxyError>>,
-) -> Result<T, ProxyError> {
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    if remaining.is_zero() {
-        return Err(ProxyError::Other(
-            "reconciliation post-processing deadline exceeded".to_string(),
-        ));
-    }
-    operation.await
-}
-
 impl TavilyProxy {
     const RECONCILIATION_BACKOFF_SCOPE: &'static str = "period_reconciliation";
     // Candidate hydration is deliberately bounded so the first main settlement
@@ -280,6 +267,9 @@ impl TavilyProxy {
                 .recent_reconciliation_adjustments(10)
                 .await?,
             generated_at: now,
+            coverage: "ok".to_string(),
+            observed_at: Some(now),
+            stale_reason: None,
         })
     }
 
@@ -1024,6 +1014,7 @@ impl TavilyProxy {
                         semantic_failure: 0,
                         local_pressure: 0,
                         last_transport_kind: None,
+                        last_retryable_outcome: None,
                         continuation_reason: None,
                         next_retry_at: None,
                     },
@@ -2173,6 +2164,17 @@ impl TavilyProxy {
                             semantic_failure: semantic_failure_windows,
                             local_pressure: i64::from(local_pressure),
                             last_transport_kind,
+                            last_retryable_outcome: reconciliation_outcome
+                                .filter(|outcome| {
+                                    matches!(
+                                        outcome,
+                                        ReconciliationOutcome::Upstream429
+                                            | ReconciliationOutcome::TransportFailure
+                                            | ReconciliationOutcome::SemanticFailure
+                                            | ReconciliationOutcome::LocalPressure
+                                    )
+                                })
+                                .map(ReconciliationOutcome::as_str),
                             continuation_reason: reconciliation_outcome.map(|value| value.as_str()),
                             next_retry_at,
                         },
