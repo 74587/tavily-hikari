@@ -157,6 +157,8 @@ impl ServerPressureBucketCounts {
 struct ObservabilityDeferredWriter {
     pressure_deltas: BTreeMap<ServerPressureBucketKey, ServerPressureBucketCounts>,
     pressure_flush_running: bool,
+    #[cfg(test)]
+    pressure_flush_completed: std::sync::Arc<tokio::sync::Notify>,
     pressure_stale: bool,
     pressure_stale_since: Option<i64>,
     pressure_unrecoverable_overflow: bool,
