@@ -796,8 +796,9 @@ async fn admin_summary_does_not_start_a_slow_background_flush() {
         "summary reads must not start the background flush"
     );
 
+    let flush_arrived = pause.arrived.clone().notified_owned();
     proxy.nudge_request_stats_flush().await;
-    tokio::time::timeout(Duration::from_secs(1), pause.arrived.notified())
+    tokio::time::timeout(Duration::from_secs(1), flush_arrived)
         .await
         .expect("explicit background flush reached post-flush pause");
 

@@ -1039,6 +1039,8 @@ impl TavilyProxy {
                 let keys: Vec<_> = writer.pressure_deltas.keys().take(25).cloned().collect();
                 if keys.is_empty() {
                     writer.pressure_flush_running = false;
+                    #[cfg(test)]
+                    writer.pressure_flush_completed.notify_waiters();
                     return;
                 }
                 keys.into_iter()
@@ -1195,6 +1197,17 @@ impl TavilyProxy {
             .pressure_stale_since
             .get_or_insert_with(|| self.backend_time.now_ts());
         writer.pressure_rebuild_requested = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn server_pressure_flush_completed_notifier_for_test(
+        &self,
+    ) -> std::sync::Arc<tokio::sync::Notify> {
+        self.observability_deferred_writer
+            .lock()
+            .await
+            .pressure_flush_completed
+            .clone()
     }
 
     #[cfg(test)]

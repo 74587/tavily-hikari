@@ -47,7 +47,7 @@ async fn insert_projected_rate_limit_alert(proxy: &TavilyProxy, token_id: &str, 
 
 async fn advance_alert_projection_until(proxy: &TavilyProxy, projected_events: i64) {
     let mut outcomes = Vec::new();
-    for _ in 0..12 {
+    for _ in 0..48 {
         let dashboard_dirty = proxy
             .advance_dashboard_alert_projection_slice()
             .await
@@ -90,7 +90,7 @@ async fn advance_alert_projection_until(proxy: &TavilyProxy, projected_events: i
 async fn advance_alert_projection_slice_until_admitted(
     proxy: &TavilyProxy,
 ) -> AlertProjectionSliceOutcome {
-    for _ in 0..12 {
+    for _ in 0..48 {
         let outcome = proxy
             .key_store
             .advance_alert_projection_slice()
@@ -104,9 +104,25 @@ async fn advance_alert_projection_slice_until_admitted(
     panic!("alert projection remained admission-deferred");
 }
 
+async fn refresh_alert_projection_observation_until_admitted(proxy: &TavilyProxy) {
+    for _ in 0..48 {
+        if proxy
+            .refresh_dashboard_alert_projection_observation()
+            .await
+            .expect("refresh idle projection observation")
+        {
+            return;
+        }
+        // The maintenance admission policy can defer immediately after the
+        // foreground state reads in this test.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("idle projection observation remained admission-deferred");
+}
+
 async fn advance_alert_projection_until_full_coverage(proxy: &TavilyProxy) {
     let mut outcomes = Vec::new();
-    for _ in 0..24 {
+    for _ in 0..48 {
         let outcome = advance_alert_projection_slice_until_admitted(proxy).await;
         outcomes.push(format!("{outcome:?}"));
         let status = proxy
@@ -129,7 +145,7 @@ async fn advance_alert_projection_until_full_coverage(proxy: &TavilyProxy) {
 
 async fn refresh_projected_recent_alerts_until_fresh(proxy: &TavilyProxy) -> RecentAlertsSummary {
     let mut last_summary = None;
-    for _ in 0..12 {
+    for _ in 0..48 {
         proxy
             .key_store
             .refresh_dashboard_alert_projection_summary()
@@ -226,13 +242,8 @@ async fn alert_projection_materializes_empty_dashboard_summary_without_read_side
     .expect("create proxy");
 
     advance_alert_projection_until_full_coverage(&proxy).await;
-    assert!(
-        proxy
-            .key_store
-            .refresh_dashboard_alert_projection_summary()
-            .await
-            .expect("materialize empty dashboard summary")
-    );
+    let materialized = refresh_projected_recent_alerts_until_fresh(&proxy).await;
+    assert_eq!(materialized.total_events, 0);
     let cached_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM observability.dashboard_alert_projection_recent_summaries WHERE window_hours = 24",
     )
@@ -346,11 +357,8 @@ async fn alert_projection_materializes_dashboard_summary_before_dashboard_reads(
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
-    proxy
-        .key_store
-        .refresh_dashboard_alert_projection_summary()
-        .await
-        .expect("refresh materialized summary");
+    let materialized = refresh_projected_recent_alerts_until_fresh(&proxy).await;
+    assert_eq!(materialized.total_events, 1);
     let cached_rows: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM observability.dashboard_alert_projection_recent_summaries WHERE window_hours = 24",
     )
@@ -1060,12 +1068,7 @@ async fn alert_projection_idle_probe_does_not_persist_empty_cursors() {
         .await
         .expect("read expired tail coverage");
     assert_eq!(stale.recent_coverage, "stale");
-    assert!(
-        proxy
-            .refresh_dashboard_alert_projection_observation()
-            .await
-            .expect("refresh idle projection observation")
-    );
+    refresh_alert_projection_observation_until_admitted(&proxy).await;
     let recovered = proxy
         .dashboard_alert_projection_status()
         .await

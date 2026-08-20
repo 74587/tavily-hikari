@@ -525,9 +525,11 @@ impl RequestStatsCoalescer {
     pub(crate) async fn nudge_flush(&self) {
         {
             let mut state = self.state.lock().await;
-            Self::mark_flush_deadline_if_pending(&mut state);
+            if Self::pending_key_count(&state) > 0 {
+                state.flush_deadline = Some(Instant::now());
+            }
         }
-        self.wake.notify_waiters();
+        self.wake.notify_one();
     }
 
     pub(crate) async fn wait_until_worker_stopped(&self) {
