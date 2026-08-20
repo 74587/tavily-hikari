@@ -649,7 +649,7 @@
       "id": "bin-ha-rest-lifecycle",
       "kind": "bin",
       "name": "Bin HA Rest Lifecycle",
-      "estimated_seconds": 54,
+      "estimated_seconds": 100,
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "include_prefixes": [
@@ -747,7 +747,7 @@
       "id": "integration-server-http-contract",
       "kind": "integration",
       "name": "Integration Server HTTP Contract",
-      "estimated_seconds": 42,
+      "estimated_seconds": 70,
       "coverage_target": "integration:server_http_contract",
       "run_args": [
         "--test",

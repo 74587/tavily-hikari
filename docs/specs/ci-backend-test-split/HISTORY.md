@@ -31,6 +31,8 @@
   语义前缀改为单进程串行过滤，保持覆盖与断言不变。
 - 2026-08-21：`mcp_rebalance_and_follow_up::mcp_` 的实测长尾超过 manifest 估计；按 session/control
   语义拆成两个互斥 shard，避免单个测试进程拖慢 lane，同时保持完整 bin-main coverage。
+- 2026-08-21：`bin-ha-rest-lifecycle` 与 `server_http_contract` 的顺序执行叠加出新的 lane 长尾；提高
+  两个原子 shard 的 LPT 权重后将其稳定装入不同 lane，保持每个 coverage target 的完整归属。
 
 ## Key Reasons / Replacements
 
