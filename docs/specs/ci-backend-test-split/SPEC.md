@@ -72,8 +72,9 @@
 - `Backend Shard Plan` does not depend on `web-assets`. It compiles all backend test targets once
   with the `ci-test` profile and a minimal web fixture, verifies manifest ownership, uploads the
   backend bundle, and exports at most 16 non-empty lanes.
-- Each `Backend Test Lane` only checks out the runner, downloads the bundle, verifies executable
-  checksums while loading it, and executes its assigned shards in order. A lane does not install
+- Each `Backend Test Lane` downloads the self-contained bundle, verifies executable checksums while
+  loading it, and executes its assigned shards in order. Only the source-line-budget lane checks
+  out source files, because that integration contract reads them at runtime. A lane does not install
   Bun, Rust, Cargo caches, or system development packages.
 - The bundle writer emits only checksum-addressed artifact format 2. Readers keep format 1 support
   while cached artifacts age out. One executable or support binary is stored once and referenced by

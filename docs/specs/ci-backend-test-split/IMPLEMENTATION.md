@@ -25,9 +25,10 @@
   - `Backend Shard Plan` no longer waits for `web-assets`; it creates the minimal embedded-web
     fixture, compiles all backend targets with `ci-test`, verifies coverage, uploads one backend
     bundle, and exports a 16-lane matrix.
-  - `Backend Test Lane` jobs now only checkout, download, checksum-verify, and run a lane. The
-    former lib/bin/integration jobs each repeated frontend artifact downloads, system packages,
-    Rust setup, and Cargo cache restoration.
+  - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
+    bundle. Only the source-line-budget lane checks out source files; the former lib/bin/integration
+    jobs each repeated frontend artifact downloads, system packages, Rust setup, and Cargo cache
+    restoration.
   - `Backend Tests` remains the stable aggregate check. The target is the native Actions interval
     from plan start to aggregate completion, with no new required performance check.
 - Artifact and lane contracts
@@ -57,9 +58,9 @@
 
 ## Current Validation
 
-- `python3 scripts/test_ci_backend_tests.py`: passed seven runner contract tests covering format 2
-  checksum verification, format 1 loading, deduplicated references, stable LPT output, minimal web
-  fixture, and resource defaults.
+- `python3 scripts/test_ci_backend_tests.py`: passed eleven runner contract tests covering format 2
+  checksum verification, format 1 loading, deduplicated references, portable lane runtime, stable
+  LPT output, minimal web fixture, and resource defaults.
 - `actionlint .github/workflows/ci.yml`, `cargo fmt --all -- --check`, Markdown formatting, and
   `cargo clippy --locked -j 2 -- -D warnings`: passed.
 - `cargo test --locked -j 2 --all-features --lib runtime_logging::tests::runtime_memory_helpers_parse_status_and_cgroup_values -- --exact --test-threads=2`: passed.

@@ -232,7 +232,8 @@ jobs:
       matrix:
         lane: ${{ fromJson(needs.backend-shard-plan.outputs.lane-matrix) }}
     steps:
-      - name: Checkout
+      - name: Checkout source budget lane
+        if: ${{ contains(matrix.lane.shard_ids, 'integration-rust-source-line-budgets') }}
         uses: actions/checkout@v6
 
       - name: Download backend test artifacts
@@ -243,7 +244,10 @@ jobs:
 
       - name: Run backend lane
         run: |
-          python3 scripts/ci_backend_tests.py run-lane \
+          if [ "${{ contains(matrix.lane.shard_ids, 'integration-rust-source-line-budgets') }}" = "true" ]; then
+            export TAVILY_HIKARI_WORKSPACE_ROOT="$GITHUB_WORKSPACE"
+          fi
+          python3 /tmp/backend-test-artifacts/scripts/ci_backend_tests.py run-lane \
             --id "${{ matrix.lane.id }}" \
             --lane-count 16 \
             --prebuilt-root /tmp/backend-test-artifacts \

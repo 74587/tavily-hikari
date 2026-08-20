@@ -15,7 +15,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(
+    os.environ.get("TAVILY_HIKARI_WORKSPACE_ROOT", Path(__file__).resolve().parent.parent)
+).resolve()
 MANIFEST_PATH = ROOT / "scripts" / "ci_backend_test_manifest.json"
 BASE_CARGO_ARGS = ["cargo", "test", "--locked", "--all-features"]
 CARGO_LIST_TIMEOUT_SECONDS = 300
@@ -547,6 +549,13 @@ def artifact_executable_path(output_dir, digest, source_name):
     return Path(output_dir) / "executables" / f"{safe_name}-{digest}"
 
 
+def stage_lane_runner(output_dir):
+    runtime_scripts = Path(output_dir) / "scripts"
+    runtime_scripts.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(__file__).resolve(), runtime_scripts / "ci_backend_tests.py")
+    shutil.copy2(MANIFEST_PATH, runtime_scripts / MANIFEST_PATH.name)
+
+
 def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets="project"):
     targets, _ = load_manifest()
     output_dir = Path(output_dir)
@@ -663,6 +672,7 @@ def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets=
     with (output_dir / ARTIFACT_MANIFEST_NAME).open("w", encoding="utf-8") as fh:
         json.dump(manifest, fh, sort_keys=True, indent=2)
         fh.write("\n")
+    stage_lane_runner(output_dir)
 
 
 def load_v2_prebuilt_executables(artifact_root, coverage_target):

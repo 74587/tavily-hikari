@@ -3,6 +3,8 @@
 import argparse
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,6 +85,26 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             self.assertEqual(executables[0]["name"], "legacy")
             self.assertEqual(executables[0]["tests"], ["legacy::test"])
             self.assertEqual(support_binaries, {})
+
+    def test_bundle_stages_a_portable_lane_runner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            RUNNER.stage_lane_runner(root)
+
+            runtime_runner = root / "scripts" / "ci_backend_tests.py"
+            runtime_manifest = root / "scripts" / "ci_backend_test_manifest.json"
+            self.assertTrue(runtime_runner.is_file())
+            self.assertTrue(runtime_manifest.is_file())
+
+            completed = subprocess.run(
+                [sys.executable, str(runtime_runner), "lane-matrix", "--lane-count", "16"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            lanes = json.loads(completed.stdout)
+            self.assertEqual(lanes[0]["id"], "lane-01")
 
     def test_lane_matrix_is_stable_lpt(self):
         shards = [
