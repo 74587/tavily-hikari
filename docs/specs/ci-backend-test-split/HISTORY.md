@@ -25,6 +25,8 @@
   至八并使用 512 codegen units，开发默认 `2/1/2` 不变。
 - 2026-08-21：原生计时进一步暴露 MCP billing 与 research 前缀合并后的单 lane 长尾；manifest 将 MCP
   覆盖拆成 billing、rebalance、research、system 四个互斥 shard，并恢复固定十六 lane 装箱以保持单 lane 预算。
+- 2026-08-21：原生冷构建数据显示八个 Cargo jobs 与 512 codegen units 增加 prepare 尾部；恢复四个
+  CI 专用 Cargo jobs 与继承 test profile 的默认 codegen 配置，开发期资源边界保持不变。
 
 ## Key Reasons / Replacements
 
