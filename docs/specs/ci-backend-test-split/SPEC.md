@@ -67,6 +67,26 @@
 
 ## 功能与行为规格（Functional/Behavior Spec）
 
+### Current execution contract
+
+- `Backend Shard Plan` does not depend on `web-assets`. It compiles all backend test targets once
+  with the `ci-test` profile and a minimal web fixture, verifies manifest ownership, uploads the
+  backend bundle, and exports at most 16 non-empty lanes.
+- Each `Backend Test Lane` only checks out the runner, downloads the bundle, verifies executable
+  checksums while loading it, and executes its assigned shards in order. A lane does not install
+  Bun, Rust, Cargo caches, or system development packages.
+- The bundle writer emits only checksum-addressed artifact format 2. Readers keep format 1 support
+  while cached artifacts age out. One executable or support binary is stored once and referenced by
+  coverage-target metadata.
+- `build.rs` accepts `TAVILY_HIKARI_WEB_DIST_DIR`; the unset value remains `web/dist`. The frontend
+  asset job validates every path required by the minimal fixture, including HTML shells,
+  `version.json`, favicon, and branded assets.
+- Shards carry positive `estimated_seconds`. Lane generation uses stable LPT ordering: descending
+  estimate, shard ID for ties, and the currently lightest lane for placement.
+- `Backend Tests` remains the stable owner-facing aggregate check. Its five-minute objective is
+  measured from `Backend Shard Plan.startedAt` through `Backend Tests.completedAt`; it is not a
+  workflow-wide timeout or an automated performance gate.
+
 ### Core flows
 
 - PR1：
@@ -117,6 +137,15 @@
 - Given 比较“调优前后耗时”
   When 统计最近成功 runs 的 job wall time
   Then 应使用 job `startedAt/completedAt` 而不是 run `createdAt/updatedAt`，并证明关键路径明显下降。
+
+- Given a backend artifact is downloaded by a lane
+  When the loader resolves an executable or support binary
+  Then its SHA-256 must equal its manifest key, and a checksum mismatch must fail before tests run.
+
+- Given a developer needs complete backend coverage outside CI
+  When they run `run-all` or `run-shard`
+  Then the runner defaults to the documented low-resource bounds; selection of a heavy execution
+  target remains outside the repository contract.
 
 ## 验收清单（Acceptance checklist）
 

@@ -10,6 +10,10 @@
 
 ## Implemented Now
 
+- 执行器现在把低资源默认值与 CI fan-out 分开：开发期 `run-all` / `run-shard` 为
+  `2/1/2`，诊断模式为 `1/1/1`；CI 通过预构建 bundle 和 LPT lane 并发缩短墙钟。这没有
+  改变 `BackendTime` 的时钟注入边界或任何生产等待预算。
+
 - 新增 `src/backend_time.rs`
   - 统一 `now_ts()`、`now_utc()`、`deadline_after()`、`sleep()`。
   - 补充 test-only manual wall clock handle，用于显式推进持久化时间。

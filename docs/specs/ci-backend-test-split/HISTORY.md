@@ -9,6 +9,7 @@
 - 2026-06-07：确认当前 `cargo test --lib` / `cargo test --bins` 中的大量测试仍集中在共享命名空间；PR2 优先使用 shard manifest + coverage verifier，而不是先引入新 runner。
 - 2026-06-07：验证了 `libtest` 的 `FILTER` 与 `--skip FILTER` 默认都是子串匹配；直接用 `cargo test FILTER` 或 `--skip FILTER` 做 shard 容易出现 overlap / false match。
 - 2026-06-07：据此改为“manifest 负责测试归属，执行器先拿 test executable，再按精确测试名列表用 `--exact` 直接运行测试二进制”的方案，避免为了并行而重组大量测试源码。
+- 2026-08-20：Actions 原生计时显示 backend plan 到 aggregate 的稳定区间仍接近十分钟，且旧 fan-out 把编译环境、web artifact 和大体积 executable 重复带入每个 shard。后续 topology 改为一次 `ci-test` 编译、checksum-addressed bundle 和最多 16 个 LPT lanes；五分钟目标只约束该 backend 区间，不扩展为新的 required performance gate。
 
 ## Key Reasons / Replacements
 

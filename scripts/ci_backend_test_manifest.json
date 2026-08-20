@@ -75,6 +75,7 @@
       "id": "lib-core",
       "kind": "lib",
       "name": "Lib Core",
+      "estimated_seconds": 39,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -109,6 +110,7 @@
       "id": "lib-forward-proxy",
       "kind": "lib",
       "name": "Lib Forward Proxy",
+      "estimated_seconds": 46,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -121,18 +123,16 @@
       ]
     },
     {
-      "id": "lib-request-rollup",
+      "id": "lib-request-rollup-storage",
       "kind": "lib",
-      "name": "Lib Request Rollup",
+      "name": "Lib Request Rollup Storage",
+      "estimated_seconds": 26,
       "coverage_target": "lib",
-      "run_args": [
-        "--lib"
-      ],
+      "run_args": ["--lib"],
       "filtered_test_threads": 2,
       "serial_prefixes": [
         "tests::jobs_and_request_log_retention::request_",
         "tests::observability_and_lifecycle::request_",
-        "tests::request_rollup_public_metrics::admin_",
         "tests::request_kind_and_core::request_",
         "tests::request_rollup::request_",
         "tests::dashboard_rollup_integrity::",
@@ -147,17 +147,54 @@
         "tests::dashboard_rollup_integrity::",
         "tests::usage_series_and_backfills::request_",
         "tests::user_tokens_and_pending_billing::request_",
+        "tests::jobs_and_request_log_retention::startup_",
+        "tests::request_kind_and_core::startup_",
+        "tests::request_rollup::startup_",
+        "tests::jobs_and_request_log_retention::quota_",
+        "tests::request_rollup::quota_",
+        "tests::jobs_and_request_log_retention::standalone_request_logs_gc_",
+        "tests::ha_outbox_and_compaction::standalone_ha_outbox_gc_",
+        "tests::request_kind_and_core::successful_",
+        "tests::jobs_and_request_log_retention::scheduled_",
+        "tests::request_rollup::suppressed_"
+      ]
+    },
+    {
+      "id": "lib-request-rollup-reporting",
+      "kind": "lib",
+      "name": "Lib Request Rollup Reporting",
+      "estimated_seconds": 25,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "filtered_test_threads": 2,
+      "serial_prefixes": ["tests::request_rollup_public_metrics::admin_"],
+      "include_prefixes": [
         "tests::proxy_affinity_and_summary::summary_",
         "tests::request_rollup::summary_",
         "tests::dashboard_month_series::dashboard_",
         "tests::dashboard_hourly_credits::",
         "tests::request_rollup::dashboard_",
         "tests::request_rollup::rollup_",
+        "tests::request_rollup_public_metrics::admin_",
+        "tests::request_rollup_public_metrics::analysis_",
+        "tests::request_rollup_public_metrics::public_",
+        "tests::request_rollup_public_metrics::request_stats_",
+        "tests::request_rollup_public_metrics::admitted_flush_",
+        "tests::request_rollup_public_metrics::expired_flush_",
+        "tests::request_rollup::public_"
+      ]
+    },
+    {
+      "id": "lib-request-rollup-lifecycle",
+      "kind": "lib",
+      "name": "Lib Request Rollup Lifecycle",
+      "estimated_seconds": 25,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "filtered_test_threads": 2,
+      "include_prefixes": [
         "tests::account_quota_and_billing::startup_",
         "tests::account_quota_schema_migration::startup_",
-        "tests::jobs_and_request_log_retention::startup_",
-        "tests::request_kind_and_core::startup_",
-        "tests::request_rollup::startup_",
         "tests::usage_series_and_backfills::startup_",
         "tests::account_usage_rollup_request_days::startup_",
         "tests::user_tokens_and_pending_billing::startup_",
@@ -168,25 +205,11 @@
         "tests::observability_and_lifecycle::observability_",
         "tests::request_rollup::observability_",
         "tests::maintenance_and_mcp_affinity::mcp_",
-        "tests::request_rollup::public_",
-        "tests::request_rollup_public_metrics::admin_",
-        "tests::request_rollup_public_metrics::analysis_",
-        "tests::request_rollup_public_metrics::public_",
-        "tests::request_rollup_public_metrics::request_stats_",
-        "tests::request_rollup_public_metrics::admitted_flush_",
-        "tests::request_rollup_public_metrics::expired_flush_",
-        "tests::jobs_and_request_log_retention::quota_",
-        "tests::request_rollup::quota_",
         "tests::observability_and_lifecycle::large_",
-        "tests::jobs_and_request_log_retention::standalone_request_logs_gc_",
-        "tests::ha_outbox_and_compaction::standalone_ha_outbox_gc_",
         "tests::maintenance_and_mcp_affinity::successful_",
-        "tests::request_kind_and_core::successful_",
         "tests::proxy_affinity_and_summary::redact_",
         "tests::proxy_affinity_runtime_geo::record_",
         "tests::proxy_affinity_runtime_geo::persist_",
-        "tests::jobs_and_request_log_retention::scheduled_",
-        "tests::request_rollup::suppressed_",
         "tests::observability_and_lifecycle::small_"
       ]
     },
@@ -194,6 +217,7 @@
       "id": "lib-affinity-domain",
       "kind": "lib",
       "name": "Lib Affinity Domain",
+      "estimated_seconds": 30,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -220,13 +244,12 @@
       ]
     },
     {
-      "id": "lib-account-user",
+      "id": "lib-account-user-identity",
       "kind": "lib",
-      "name": "Lib Account User",
+      "name": "Lib Account User Identity",
+      "estimated_seconds": 61,
       "coverage_target": "lib",
-      "run_args": [
-        "--lib"
-      ],
+      "run_args": ["--lib"],
       "include_prefixes": [
         "tests::account_quota_and_billing::account_",
         "tests::account_usage_rollup_request_days::account_",
@@ -251,8 +274,6 @@
         "tests::user_tokens_and_pending_billing::user_",
         "tests::usage_series_and_backfills::admin_",
         "tests::user_tokens_and_pending_billing::ensure_",
-        "tests::request_rollup::hourly_",
-        "tests::maintenance_and_mcp_affinity::low_",
         "tests::account_quota_and_billing::manual_",
         "tests::account_quota_and_billing::list_",
         "tests::proxy_affinity_and_summary::list_",
@@ -262,20 +283,32 @@
         "tests::observability_and_lifecycle::legacy_",
         "tests::request_rollup::legacy_",
         "tests::user_tokens_and_pending_billing::legacy_",
-        "tests::user_tokens_and_pending_billing::shared_",
+        "tests::user_tokens_and_pending_billing::shared_"
+      ]
+    },
+    {
+      "id": "lib-account-user-lifecycle",
+      "kind": "lib",
+      "name": "Lib Account User Lifecycle",
+      "estimated_seconds": 61,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "include_prefixes": [
+        "tests::request_rollup::hourly_",
+        "tests::maintenance_and_mcp_affinity::low_",
         "tests::account_quota_and_billing::custom_",
         "tests::user_tokens_and_pending_billing::business_",
         "tests::user_tokens_and_pending_billing::bound_",
         "tests::account_quota_and_billing::block_",
         "tests::observability_and_lifecycle::active_",
-      "tests::account_quota_and_billing::auto_",
-      "tests::request_rollup::delete_",
-      "tests::observability_and_lifecycle::heal_",
-      "tests::observability_and_lifecycle::announcements_",
-      "tests::observability_and_lifecycle::modal_",
-      "tests::account_quota_and_billing::historical_",
-      "tests::proxy_affinity_runtime_geo::key_",
-      "tests::user_tokens_and_pending_billing::lock_",
+        "tests::account_quota_and_billing::auto_",
+        "tests::request_rollup::delete_",
+        "tests::observability_and_lifecycle::heal_",
+        "tests::observability_and_lifecycle::announcements_",
+        "tests::observability_and_lifecycle::modal_",
+        "tests::account_quota_and_billing::historical_",
+        "tests::proxy_affinity_runtime_geo::key_",
+        "tests::user_tokens_and_pending_billing::lock_",
         "tests::user_tokens_and_pending_billing::locked_",
         "tests::account_quota_and_billing::restored_",
         "tests::user_tokens_and_pending_billing::settle_",
@@ -294,6 +327,7 @@
       "id": "lib-misc",
       "kind": "lib",
       "name": "Lib Misc",
+      "estimated_seconds": 30,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -339,6 +373,7 @@
       "id": "bin-support",
       "kind": "bin",
       "name": "Bin Support",
+      "estimated_seconds": 20,
       "coverage_target": "bin-support",
       "run_args": [
         "--bin",
@@ -368,17 +403,12 @@
       ]
     },
     {
-      "id": "bin-admin-api",
+      "id": "bin-admin-api-resources",
       "kind": "bin",
-      "name": "Bin Admin API",
+      "name": "Bin Admin API Resources",
+      "estimated_seconds": 50,
       "coverage_target": "bin-main",
-      "run_args": [
-        "--bin",
-        "tavily-hikari"
-      ],
-      "serial_prefixes": [
-        "server::tests::token_log_details::token_"
-      ],
+      "run_args": ["--bin", "tavily-hikari"],
       "filtered_process_workers": 2,
       "include_prefixes": [
         "server::tests::admin_logs_and_summary::admin_",
@@ -400,7 +430,19 @@
         "server::tests::linuxdo_oauth_and_admin_keys::api_",
         "server::tests::log_catalog_and_dashboard_sse::api_",
         "server::admin_resources_tests::",
-        "server::dto_tests::",
+        "server::dto_tests::"
+      ]
+    },
+    {
+      "id": "bin-admin-api-lifecycle",
+      "kind": "bin",
+      "name": "Bin Admin API Lifecycle",
+      "estimated_seconds": 45,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "filtered_process_workers": 2,
+      "serial_prefixes": ["server::tests::token_log_details::token_"],
+      "include_prefixes": [
         "server::manual_trigger_tests::",
         "server::db_maintenance_gate_tests::",
         "server::version_detection_tests::",
@@ -425,6 +467,7 @@
       "id": "bin-tavily-http",
       "kind": "bin",
       "name": "Bin Tavily HTTP",
+      "estimated_seconds": 25,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -445,6 +488,7 @@
       "id": "bin-mcp-core",
       "kind": "bin",
       "name": "Bin MCP Core",
+      "estimated_seconds": 40,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -464,6 +508,7 @@
       "id": "bin-linuxdo-forward",
       "kind": "bin",
       "name": "Bin LinuxDo Forward",
+      "estimated_seconds": 40,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -497,24 +542,22 @@
       ]
     },
     {
-      "id": "bin-ha-rest",
+      "id": "bin-ha-rest-lifecycle",
       "kind": "bin",
-      "name": "Bin HA Rest",
+      "name": "Bin HA Rest Lifecycle",
+      "estimated_seconds": 38,
       "coverage_target": "bin-main",
-      "run_args": [
-        "--bin",
-        "tavily-hikari"
-      ],
+      "run_args": ["--bin", "tavily-hikari"],
       "include_prefixes": [
         "server::tests::linuxdo_oauth_and_admin_keys::manual_",
         "server::tests::upstream_support_and_manual_jobs::manual_",
         "server::tests::alerts_and_ha::admin_",
         "server::tests::alerts_and_ha_node_detail::admin_",
         "server::tests::alerts_and_ha::ha_",
-    "server::tests::alerts_and_ha::dual_active_",
-    "server::tests::alerts_and_ha_source_and_recovery::ha_",
-    "server::tests::alerts_and_ha_source_and_recovery::request_logs_gc_",
-    "server::tests::alerts_and_ha_sync_recovery::ha_",
+        "server::tests::alerts_and_ha::dual_active_",
+        "server::tests::alerts_and_ha_source_and_recovery::ha_",
+        "server::tests::alerts_and_ha_source_and_recovery::request_logs_gc_",
+        "server::tests::alerts_and_ha_sync_recovery::ha_",
         "server::tests::alerts_and_ha_sync_recovery::dual_active_",
         "server::tests::alerts_and_ha_node_state::redundant_",
         "server::tests::alerts_and_ha_node_state::dual_active_",
@@ -526,7 +569,17 @@
         "server::tests::alerts_and_ha_event_exports::ha_",
         "server::tests::alerts_and_ha_event_exports::legacy_",
         "server::tests::alerts_and_ha_event_exports::dual_active_",
-        "server::tests::alerts_and_ha_serving_modes::ha_",
+        "server::tests::alerts_and_ha_serving_modes::ha_"
+      ]
+    },
+    {
+      "id": "bin-ha-rest-serving",
+      "kind": "bin",
+      "name": "Bin HA Rest Serving",
+      "estimated_seconds": 38,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "include_prefixes": [
         "server::channel_health_tests::",
         "server::upstream_reconciliation_does_not_wait_for_db_execution_gate",
         "server::serve_tests::",
@@ -547,6 +600,7 @@
       "id": "integration-mcp-billing-regression",
       "kind": "integration",
       "name": "Integration MCP Billing Regression",
+      "estimated_seconds": 35,
       "coverage_target": "integration:mcp_billing_regression",
       "run_args": [
         "--test",
@@ -557,6 +611,7 @@
       "id": "integration-mcp-session-affinity",
       "kind": "integration",
       "name": "Integration MCP Session Affinity",
+      "estimated_seconds": 30,
       "coverage_target": "integration:mcp_session_affinity_e2e",
       "run_args": [
         "--test",
@@ -567,6 +622,7 @@
       "id": "integration-request-kind-backfill",
       "kind": "integration",
       "name": "Integration Request Kind Backfill",
+      "estimated_seconds": 15,
       "coverage_target": "integration:request_kind_canonical_backfill",
       "run_args": [
         "--test",
@@ -577,6 +633,7 @@
       "id": "integration-rust-source-line-budgets",
       "kind": "integration",
       "name": "Integration Rust Source Line Budgets",
+      "estimated_seconds": 5,
       "coverage_target": "integration:rust_source_line_budgets",
       "run_args": [
         "--test",
@@ -587,6 +644,7 @@
       "id": "integration-server-http-contract",
       "kind": "integration",
       "name": "Integration Server HTTP Contract",
+      "estimated_seconds": 25,
       "coverage_target": "integration:server_http_contract",
       "run_args": [
         "--test",
