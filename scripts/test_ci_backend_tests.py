@@ -139,10 +139,10 @@ class BackendTestRunnerContractTests(unittest.TestCase):
     def test_ci_lane_count_stays_within_the_maximum(self):
         lanes = RUNNER.build_lane_matrix(
             [{"id": f"shard-{index}", "estimated_seconds": index + 1} for index in range(25)],
-            10,
+            12,
         )
 
-        self.assertEqual(len(lanes), 10)
+        self.assertEqual(len(lanes), 12)
         self.assertLessEqual(len(lanes), 16)
 
     def test_low_resource_environment_is_explicit(self):

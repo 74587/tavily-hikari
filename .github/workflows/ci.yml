@@ -220,7 +220,7 @@ jobs:
         id: matrix
         run: |
           set -euo pipefail
-          echo "lane-matrix=$(python3 scripts/ci_backend_tests.py lane-matrix --lane-count 10)" >> "${GITHUB_OUTPUT}"
+          echo "lane-matrix=$(python3 scripts/ci_backend_tests.py lane-matrix --lane-count 12)" >> "${GITHUB_OUTPUT}"
 
   backend-test-lanes:
     name: Backend Test Lane (${{ matrix.lane.name }})
@@ -248,7 +248,7 @@ jobs:
           done
           python3 /tmp/backend-test-artifacts/scripts/ci_backend_tests.py run-lane \
             --id "${{ matrix.lane.id }}" \
-            --lane-count 10 \
+            --lane-count 12 \
             --prebuilt-root /tmp/backend-test-artifacts \
             --filtered-process-workers 3 \
             --filtered-test-threads 2

@@ -20,9 +20,9 @@
   compile-time manifest directory，使运行期读取 repository sources 的既有测试不再要求 checkout。
 - 2026-08-20：MCP rebalance 审计 flush 测试在与其它 MCP prefix 进程并行时超过其既有等待预算；该 prefix
   作为整体改为串行执行。admin resources group 保持原有两进程上限，同时显式允许两条测试线程以缩短其最长 lane。
-- 2026-08-20：原生 Actions 数据显示 16-way fan-out 在共享 workflow 配额下产生多分钟启动排队；目标是
-  maximum 而非固定数量，因此 CI 收敛为十个 LPT lanes。prepare 仅提高 CI 专用 Cargo 编译并发至八，开发默认
-  `2/1/2` 不变。
+- 2026-08-20：原生 Actions 数据显示 16-way fan-out 在共享 workflow 配额下产生多分钟启动排队，而十个
+  lanes 会把一个组合 lane 拉成长尾；CI 因此收敛为十二个 LPT lanes。prepare 仅提高 CI 专用 Cargo 编译并发
+  至八并使用 512 codegen units，开发默认 `2/1/2` 不变。
 
 ## Key Reasons / Replacements
 

@@ -24,7 +24,7 @@
 - CI five-minute backend path
   - `Backend Shard Plan` no longer waits for `web-assets`; it creates the minimal embedded-web
     fixture, compiles all backend targets with `ci-test`, verifies coverage, uploads one backend
-    bundle, and exports a ten-lane matrix within the sixteen-lane maximum.
+    bundle, and exports a twelve-lane matrix within the sixteen-lane maximum.
   - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
     bundle. The bundle includes a read-only source snapshot for tests that use the compile-time
     manifest directory; the former lib/bin/integration jobs each repeated frontend artifact
