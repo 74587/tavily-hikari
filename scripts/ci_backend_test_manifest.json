@@ -261,6 +261,7 @@
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
+      "serial_prefixes": ["tests::user_business_calls_1h::user_"],
       "include_prefixes": [
         "tests::account_quota_and_billing::account_",
         "tests::account_usage_rollup_request_days::account_",

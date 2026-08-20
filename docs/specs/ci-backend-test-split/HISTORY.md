@@ -27,6 +27,8 @@
   覆盖拆成 billing、rebalance、research、system 四个互斥 shard，并恢复固定十六 lane 装箱以保持单 lane 预算。
 - 2026-08-21：原生冷构建数据显示八个 Cargo jobs 与 512 codegen units 增加 prepare 尾部；恢复四个
   CI 专用 Cargo jobs 与继承 test profile 的默认 codegen 配置，开发期资源边界保持不变。
+- 2026-08-21：`user_business_calls_1h::user_` 在同一过滤进程并行执行时出现共享状态竞争；该互斥
+  语义前缀改为单进程串行过滤，保持覆盖与断言不变。
 
 ## Key Reasons / Replacements
 

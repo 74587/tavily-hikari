@@ -202,6 +202,9 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         admin_resources = next(
             shard for shard in shards if shard["id"] == "bin-admin-api-resources"
         )
+        account_identity = next(
+            shard for shard in shards if shard["id"] == "lib-account-user-identity"
+        )
         mcp_research = next(shard for shard in shards if shard["id"] == "bin-mcp-research")
         mcp_system = next(shard for shard in shards if shard["id"] == "bin-mcp-system")
 
@@ -212,6 +215,10 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_resources, 3, 2), (2, 2))
+        self.assertIn(
+            "tests::user_business_calls_1h::user_",
+            account_identity["serial_prefixes"],
+        )
         self.assertIn(
             "server::tests::system_settings_and_forward_proxy::mcp_",
             mcp_system["serial_prefixes"],
