@@ -143,7 +143,6 @@
         "tests::observability_and_lifecycle::request_",
         "tests::request_kind_and_core::request_",
         "tests::request_rollup::request_",
-        "tests::dashboard_rollup_integrity::",
         "tests::usage_series_and_backfills::request_",
         "tests::user_tokens_and_pending_billing::request_",
         "tests::jobs_and_request_log_retention::startup_",

@@ -147,6 +147,18 @@ class BackendTestRunnerContractTests(unittest.TestCase):
 
             RUNNER.verify_web_assets(temp_dir)
 
+    def test_request_rollup_integrity_has_one_manifest_owner(self):
+        _targets, shards = RUNNER.load_manifest()
+        storage = next(shard for shard in shards if shard["id"] == "lib-request-rollup-storage")
+        integrity = next(
+            shard for shard in shards if shard["id"] == "lib-request-rollup-integrity"
+        )
+
+        self.assertNotIn("tests::dashboard_rollup_integrity::", storage["include_prefixes"])
+        self.assertEqual(
+            integrity["include_prefixes"], ["tests::dashboard_rollup_integrity::"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

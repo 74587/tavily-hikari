@@ -203,6 +203,7 @@ jobs:
           python3 scripts/ci_backend_tests.py prepare-artifacts \
             --output-dir /tmp/backend-test-artifacts \
             --cargo-profile ci-test \
+            --cargo-jobs 4 \
             --web-assets minimal
 
       - name: Verify backend shard coverage
