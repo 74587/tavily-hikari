@@ -202,6 +202,9 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         admin_resources = next(
             shard for shard in shards if shard["id"] == "bin-admin-api-resources"
         )
+        admin_lifecycle = next(
+            shard for shard in shards if shard["id"] == "bin-admin-api-lifecycle"
+        )
         account_identity = next(
             shard for shard in shards if shard["id"] == "lib-account-user-identity"
         )
@@ -215,6 +218,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_resources, 3, 2), (2, 2))
+        self.assertIn(
+            "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change",
+            admin_resources["serial_prefixes"],
+        )
+        self.assertIn(
+            "server::tests::alerts_and_ha_dashboard_defaults::admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses",
+            admin_lifecycle["serial_prefixes"],
+        )
         self.assertIn(
             "tests::user_business_calls_1h::user_",
             account_identity["serial_prefixes"],

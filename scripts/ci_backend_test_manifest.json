@@ -441,6 +441,9 @@
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "filtered_process_workers": 2,
+      "serial_prefixes": [
+        "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change"
+      ],
       "filtered_test_threads": 2,
       "include_prefixes": [
         "server::tests::admin_logs_and_summary::admin_",
@@ -473,7 +476,10 @@
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "filtered_process_workers": 2,
-      "serial_prefixes": ["server::tests::token_log_details::token_"],
+      "serial_prefixes": [
+        "server::tests::token_log_details::token_",
+        "server::tests::alerts_and_ha_dashboard_defaults::admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses"
+      ],
       "include_prefixes": [
         "server::manual_trigger_tests::",
         "server::db_maintenance_gate_tests::",
