@@ -24,7 +24,7 @@
 - CI five-minute backend path
   - `Backend Shard Plan` no longer waits for `web-assets`; it creates the minimal embedded-web
     fixture, compiles all backend targets with `ci-test`, verifies coverage, uploads one backend
-    bundle, and exports a twelve-lane matrix within the sixteen-lane maximum.
+    bundle, and exports a sixteen-lane matrix within the fixed maximum.
   - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
     bundle. The bundle includes a read-only source snapshot for tests that use the compile-time
     manifest directory; the former lib/bin/integration jobs each repeated frontend artifact
@@ -42,6 +42,9 @@
     mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
     are independent groups so measured long tails can be packed separately. Manifest estimates
     feed stable LPT lane packing.
+  - MCP main-binary coverage is split into mutually exclusive billing, rebalance, research, and
+    system groups so the long billing and research prefixes cannot share one lane tail. Research
+    and system groups retain their serial process boundaries.
 - Development execution
   - `run-all`, `run-shard`, and `run-lane` accept Cargo-job, filtered-process-worker, and
     filtered-test-thread controls. The local default is `2/1/2`; `--diagnostic` is `1/1/1`.
@@ -77,7 +80,7 @@ behavioral coverage, but it is not evidence for the current lane topology or fiv
   - `python3 scripts/ci_backend_tests.py run-shard --id lib-account-user`
   - `python3 scripts/ci_backend_tests.py run-shard --id lib-request-rollup`
   - `python3 scripts/ci_backend_tests.py run-shard --id bin-admin-api`
-  - `python3 scripts/ci_backend_tests.py run-shard --id bin-mcp-core`
+  - `python3 scripts/ci_backend_tests.py run-shard --id bin-mcp-billing`
   - 结果表明最后几个慢 shard 主要由一串 `12-18s` 级顺序慢测试组成，而不是执行器挂死。
 - build-once fanout 本地证据：
   - `python3 scripts/ci_backend_tests.py prepare-artifacts --output-dir /tmp/backend-test-artifacts`：当前墙钟约 `70.71s`

@@ -23,6 +23,8 @@
 - 2026-08-20：原生 Actions 数据显示 16-way fan-out 在共享 workflow 配额下产生多分钟启动排队，而十个
   lanes 会把一个组合 lane 拉成长尾；CI 因此收敛为十二个 LPT lanes。prepare 仅提高 CI 专用 Cargo 编译并发
   至八并使用 512 codegen units，开发默认 `2/1/2` 不变。
+- 2026-08-21：原生计时进一步暴露 MCP billing 与 research 前缀合并后的单 lane 长尾；manifest 将 MCP
+  覆盖拆成 billing、rebalance、research、system 四个互斥 shard，并恢复固定十六 lane 装箱以保持单 lane 预算。
 
 ## Key Reasons / Replacements
 
