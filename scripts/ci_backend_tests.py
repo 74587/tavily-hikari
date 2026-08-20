@@ -58,6 +58,7 @@ def load_manifest():
         shard.setdefault("include_prefixes", [])
         shard.setdefault("exclude_prefixes", [])
         shard.setdefault("serial_prefixes", [])
+        shard.setdefault("isolated_prefixes", [])
         shard.setdefault("filtered_test_threads", 1)
         shard.setdefault("filtered_process_workers", 3)
         estimated_seconds = shard.get("estimated_seconds")
@@ -809,12 +810,15 @@ def validate_shard_prefixes(shard, tests, target_id):
         ensure_prefix_safe(prefix, tests, target_id)
     for prefix in shard["serial_prefixes"]:
         ensure_prefix_safe(prefix, tests, target_id)
+    for prefix in shard["isolated_prefixes"]:
+        ensure_prefix_safe(prefix, tests, target_id)
 
 
 def select_safe_filter_groups(executable_tests, shard):
     include_prefixes = shard["include_prefixes"]
     exclude_prefixes = shard["exclude_prefixes"]
     serial_prefixes = set(shard["serial_prefixes"])
+    isolated_prefixes = set(shard["isolated_prefixes"])
     selected = {
         test_name
         for test_name in executable_tests
@@ -826,6 +830,8 @@ def select_safe_filter_groups(executable_tests, shard):
     remaining = set(selected)
     safe_groups = []
     for prefix in include_prefixes:
+        if prefix in isolated_prefixes:
+            continue
         starts_with_prefix = {test_name for test_name in executable_tests if test_name.startswith(prefix)}
         if not starts_with_prefix:
             continue
@@ -839,8 +845,13 @@ def select_safe_filter_groups(executable_tests, shard):
 
     filters = [prefix for prefix, _ in safe_groups if prefix not in serial_prefixes]
     serial_filters = [prefix for prefix, _ in safe_groups if prefix in serial_prefixes]
-    exact_fallback = sorted(remaining)
-    return filters, serial_filters, exact_fallback
+    isolated_tests = sorted(
+        test_name
+        for test_name in remaining
+        if any(test_name.startswith(prefix) for prefix in isolated_prefixes)
+    )
+    exact_fallback = sorted(remaining.difference(isolated_tests))
+    return filters, serial_filters, exact_fallback, isolated_tests
 
 
 def verify_manifest(prebuilt_root=None):
@@ -942,7 +953,7 @@ def shard_resource_limits(shard, filtered_process_workers=None, filtered_test_th
     test_threads = (
         shard["filtered_test_threads"]
         if filtered_test_threads is None
-        else filtered_test_threads
+        else min(filtered_test_threads, shard["filtered_test_threads"])
     )
     process_workers = (
         shard["filtered_process_workers"]
@@ -1016,7 +1027,7 @@ def run_shard(
         if not executable_selected:
             continue
 
-        filter_groups, serial_filter_groups, exact_fallback = select_safe_filter_groups(
+        filter_groups, serial_filter_groups, exact_fallback, isolated_tests = select_safe_filter_groups(
             executable_tests, shard
         )
         run_filtered_tests(
@@ -1035,6 +1046,12 @@ def run_shard(
             exact_fallback,
             extra_env=extra_env,
             process_workers=filtered_process_workers,
+        )
+        run_exact_tests_with_env(
+            executable["path"],
+            isolated_tests,
+            extra_env=extra_env,
+            process_workers=1,
         )
 
 

@@ -248,7 +248,7 @@ jobs:
             --lane-count 16 \
             --prebuilt-root /tmp/backend-test-artifacts \
             --filtered-process-workers 3 \
-            --filtered-test-threads 1
+            --filtered-test-threads 2
 
   backend-tests:
     name: Backend Tests

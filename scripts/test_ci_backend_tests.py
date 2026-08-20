@@ -139,7 +139,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             filtered_test_threads=2,
         )
 
-        self.assertEqual((workers, threads), (2, 2))
+        self.assertEqual((workers, threads), (2, 1))
 
     def test_minimal_web_assets_meet_the_web_asset_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -157,6 +157,50 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertNotIn("tests::dashboard_rollup_integrity::", storage["include_prefixes"])
         self.assertEqual(
             integrity["include_prefixes"], ["tests::dashboard_rollup_integrity::"]
+        )
+
+    def test_sensitive_shards_cap_ci_parallelism(self):
+        _targets, shards = RUNNER.load_manifest()
+        reporting = next(
+            shard for shard in shards if shard["id"] == "lib-request-rollup-reporting"
+        )
+        alert = next(shard for shard in shards if shard["id"] == "lib-alert-projection")
+
+        self.assertEqual(
+            reporting["isolated_prefixes"],
+            ["tests::request_rollup_public_metrics::admin_"],
+        )
+        self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
+
+    def test_isolated_prefixes_run_as_serial_exact_tests(self):
+        executable_tests = [
+            "tests::safe::one",
+            "tests::request_rollup_public_metrics::admin_one",
+            "tests::request_rollup_public_metrics::admin_two",
+        ]
+        shard = {
+            "include_prefixes": [
+                "tests::safe::",
+                "tests::request_rollup_public_metrics::admin_",
+            ],
+            "exclude_prefixes": [],
+            "serial_prefixes": [],
+            "isolated_prefixes": ["tests::request_rollup_public_metrics::admin_"],
+        }
+
+        filters, serial_filters, exact_fallback, isolated_tests = RUNNER.select_safe_filter_groups(
+            executable_tests, shard
+        )
+
+        self.assertEqual(filters, ["tests::safe::"])
+        self.assertEqual(serial_filters, [])
+        self.assertEqual(exact_fallback, [])
+        self.assertEqual(
+            isolated_tests,
+            [
+                "tests::request_rollup_public_metrics::admin_one",
+                "tests::request_rollup_public_metrics::admin_two",
+            ],
         )
 
 

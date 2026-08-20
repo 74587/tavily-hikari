@@ -176,7 +176,7 @@
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
-      "serial_prefixes": ["tests::request_rollup_public_metrics::admin_"],
+      "isolated_prefixes": ["tests::request_rollup_public_metrics::admin_"],
       "include_prefixes": [
         "tests::proxy_affinity_and_summary::summary_",
         "tests::request_rollup::summary_",
@@ -259,6 +259,7 @@
       "estimated_seconds": 81,
       "coverage_target": "lib",
       "run_args": ["--lib"],
+      "filtered_test_threads": 2,
       "include_prefixes": [
         "tests::account_quota_and_billing::account_",
         "tests::account_usage_rollup_request_days::account_",
@@ -302,6 +303,7 @@
       "estimated_seconds": 51,
       "coverage_target": "lib",
       "run_args": ["--lib"],
+      "filtered_test_threads": 2,
       "include_prefixes": [
         "tests::request_rollup::hourly_",
         "tests::maintenance_and_mcp_affinity::low_",
