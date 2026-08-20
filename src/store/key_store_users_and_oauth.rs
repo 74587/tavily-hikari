@@ -1268,7 +1268,7 @@ impl KeyStore {
         selection_effect_code: &str,
         selection_effect_summary: Option<&str>,
         request_log_id: Option<i64>,
-    ) -> Result<Option<UserBusinessCallEventWrite>, ProxyError> {
+    ) -> Result<UserBusinessCallEventWriteDecision, ProxyError> {
         let created_at = self.backend_time.now_ts();
         let request_kind = self
             .resolve_token_log_request_kind(request_log_id, request_kind)
@@ -1377,7 +1377,7 @@ impl KeyStore {
         selection_effect_code: &str,
         selection_effect_summary: Option<&str>,
         request_log_id: Option<i64>,
-    ) -> Result<(i64, Option<UserBusinessCallEventWrite>), ProxyError> {
+    ) -> Result<(i64, UserBusinessCallEventWriteDecision), ProxyError> {
         let created_at = self.backend_time.now_ts();
         let request_kind = self
             .resolve_token_log_request_kind(request_log_id, request_kind)
@@ -1707,6 +1707,14 @@ impl KeyStore {
         let Some(request_log_id) = request_log_id else {
             return Ok(RequestLogDiagnosticMetadata::default());
         };
+        if let Some(metadata) = self
+            .request_log_diagnostic_handoff
+            .lock()
+            .await
+            .take(request_log_id)
+        {
+            return Ok(metadata);
+        }
 
         let row = sqlx::query_as::<_, (
             Option<i64>,
@@ -1720,7 +1728,7 @@ impl KeyStore {
         )>(
             r#"
             SELECT created_at, request_user_id, gateway_mode, experiment_variant, proxy_session_id, routing_subject_hash, upstream_operation, fallback_reason
-            FROM request_logs
+            FROM observability.request_logs
             WHERE id = ?
             LIMIT 1
             "#,
@@ -1766,7 +1774,7 @@ impl KeyStore {
         let row = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
             r#"
             SELECT request_kind_key, request_kind_label, request_kind_detail
-            FROM request_logs
+            FROM observability.request_logs
             WHERE id = ?
             LIMIT 1
             "#,
@@ -2605,21 +2613,95 @@ fn build_user_business_call_event_write(
     upstream_operation: Option<String>,
     result_status: &str,
     created_at: i64,
-) -> Option<UserBusinessCallEventWrite> {
-    let user_id = request_user_id?;
+) -> UserBusinessCallEventWriteDecision {
+    let Some(user_id) = request_user_id else {
+        return UserBusinessCallEventWriteDecision::Skipped {
+            request_log_id,
+            reason: UserBusinessCallEventSkipReason::MissingUserId,
+        };
+    };
     if counts_business_quota != 1 {
-        return None;
+        return UserBusinessCallEventWriteDecision::Skipped {
+            request_log_id,
+            reason: UserBusinessCallEventSkipReason::NotBusinessQuota,
+        };
     }
-    // Only request-log-backed upstream calls participate in business-call and
-    // server-pressure live windows; metadata-free token logs stay excluded.
-    upstream_operation.as_ref()?;
     if result_status == OUTCOME_QUOTA_EXHAUSTED {
-        return None;
+        return UserBusinessCallEventWriteDecision::Skipped {
+            request_log_id,
+            reason: UserBusinessCallEventSkipReason::QuotaExhausted,
+        };
     }
-    Some(UserBusinessCallEventWrite {
+    // Keep live eligibility identical to durable backfill and server-pressure
+    // reconstruction; metadata-free token logs stay excluded.
+    if upstream_operation.is_none() {
+        return UserBusinessCallEventWriteDecision::Skipped {
+            request_log_id,
+            reason: UserBusinessCallEventSkipReason::MissingUpstreamOperation,
+        };
+    }
+    UserBusinessCallEventWriteDecision::Applied(UserBusinessCallEventWrite {
         user_id,
         request_log_id,
         created_at,
         result_status: result_status.to_string(),
     })
+}
+
+#[cfg(test)]
+mod user_business_call_event_write_tests {
+    use super::*;
+
+    fn decision(
+        request_user_id: Option<&str>,
+        counts_business_quota: i64,
+        upstream_operation: Option<&str>,
+        result_status: &str,
+    ) -> UserBusinessCallEventWriteDecision {
+        build_user_business_call_event_write(
+            request_user_id.map(str::to_string),
+            Some(42),
+            counts_business_quota,
+            upstream_operation.map(str::to_string),
+            result_status,
+            1_700_200_000,
+        )
+    }
+
+    #[test]
+    fn skip_reasons_are_stable_and_precedence_ordered() {
+        assert_eq!(
+            decision(None, 1, Some("http_search"), OUTCOME_SUCCESS),
+            UserBusinessCallEventWriteDecision::Skipped {
+                request_log_id: Some(42),
+                reason: UserBusinessCallEventSkipReason::MissingUserId,
+            }
+        );
+        assert_eq!(
+            decision(Some("user"), 0, Some("http_search"), OUTCOME_SUCCESS),
+            UserBusinessCallEventWriteDecision::Skipped {
+                request_log_id: Some(42),
+                reason: UserBusinessCallEventSkipReason::NotBusinessQuota,
+            }
+        );
+        assert_eq!(
+            decision(
+                Some("user"),
+                1,
+                Some("http_search"),
+                OUTCOME_QUOTA_EXHAUSTED,
+            ),
+            UserBusinessCallEventWriteDecision::Skipped {
+                request_log_id: Some(42),
+                reason: UserBusinessCallEventSkipReason::QuotaExhausted,
+            }
+        );
+        assert_eq!(
+            decision(Some("user"), 1, None, OUTCOME_SUCCESS),
+            UserBusinessCallEventWriteDecision::Skipped {
+                request_log_id: Some(42),
+                reason: UserBusinessCallEventSkipReason::MissingUpstreamOperation,
+            }
+        );
+    }
 }
