@@ -202,7 +202,8 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         admin_resources = next(
             shard for shard in shards if shard["id"] == "bin-admin-api-resources"
         )
-        mcp_core = next(shard for shard in shards if shard["id"] == "bin-mcp-core")
+        mcp_research = next(shard for shard in shards if shard["id"] == "bin-mcp-research")
+        mcp_system = next(shard for shard in shards if shard["id"] == "bin-mcp-system")
 
         self.assertEqual(
             reporting["isolated_prefixes"],
@@ -213,7 +214,11 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(RUNNER.shard_resource_limits(admin_resources, 3, 2), (2, 2))
         self.assertIn(
             "server::tests::system_settings_and_forward_proxy::mcp_",
-            mcp_core["serial_prefixes"],
+            mcp_system["serial_prefixes"],
+        )
+        self.assertIn(
+            "server::tests::research_result_and_mcp_subpath::mcp_",
+            mcp_research["serial_prefixes"],
         )
 
     def test_isolated_prefixes_run_as_serial_exact_tests(self):
