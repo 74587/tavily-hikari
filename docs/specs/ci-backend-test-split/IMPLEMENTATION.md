@@ -34,10 +34,13 @@
   - `ci-test` inherits `test` while disabling debug information and incremental compilation.
   - `build.rs` can consume `TAVILY_HIKARI_WEB_DIST_DIR`; CI supplies the minimal fixture while the
     normal `web/dist` fallback is unchanged.
-  - The bundle writer emits format 2 with one checksum-addressed copy per executable. The loader
-    supports both formats and verifies SHA-256 before execution.
+  - The bundle writer emits format 2 with one checksum-addressed copy per executable. Filenames
+    preserve each source binary's prefix so Cargo sibling-binary resolution works without adding a
+    second copy. The loader supports both formats and verifies SHA-256 before execution.
   - `lib-request-rollup`, `lib-account-user`, `bin-admin-api`, and `bin-ha-rest` are split into
-    mutually exclusive semantic groups. Manifest estimates feed stable LPT lane packing.
+    mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
+    are independent groups so measured long tails can be packed separately. Manifest estimates
+    feed stable LPT lane packing.
 - Development execution
   - `run-all`, `run-shard`, and `run-lane` accept Cargo-job, filtered-process-worker, and
     filtered-test-thread controls. The local default is `2/1/2`; `--diagnostic` is `1/1/1`.
@@ -54,7 +57,7 @@
 
 ## Current Validation
 
-- `python3 scripts/test_ci_backend_tests.py`: passed six runner contract tests covering format 2
+- `python3 scripts/test_ci_backend_tests.py`: passed seven runner contract tests covering format 2
   checksum verification, format 1 loading, deduplicated references, stable LPT output, minimal web
   fixture, and resource defaults.
 - `actionlint .github/workflows/ci.yml`, `cargo fmt --all -- --check`, Markdown formatting, and

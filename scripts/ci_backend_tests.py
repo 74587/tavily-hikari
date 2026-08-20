@@ -541,7 +541,9 @@ def artifact_executable_path(output_dir, digest, source_name):
     ).strip(".-_")
     if not safe_name:
         safe_name = "executable"
-    return Path(output_dir) / "executables" / f"{digest}-{safe_name}"
+    # Keep the source name first so Rust helpers that resolve sibling binaries
+    # by an exact name or ``name-*`` prefix work without duplicate bundle files.
+    return Path(output_dir) / "executables" / f"{safe_name}-{digest}"
 
 
 def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets="project"):
@@ -1055,6 +1057,8 @@ def run_lane(
         flush=True,
     )
     for shard_id in lane["shard_ids"]:
+        shard_started = time.monotonic()
+        print(f"shard_start id={shard_id}", flush=True)
         run_shard(
             shard_id,
             prebuilt_root=prebuilt_root,
@@ -1062,6 +1066,10 @@ def run_lane(
             cargo_profile=cargo_profile,
             filtered_process_workers=filtered_process_workers,
             filtered_test_threads=filtered_test_threads,
+        )
+        print(
+            f"shard_complete id={shard_id} elapsed_seconds={time.monotonic() - shard_started:.2f}",
+            flush=True,
         )
     print(f"lane_complete id={lane_id}", flush=True)
 

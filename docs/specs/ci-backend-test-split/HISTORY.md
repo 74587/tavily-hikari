@@ -10,6 +10,7 @@
 - 2026-06-07：验证了 `libtest` 的 `FILTER` 与 `--skip FILTER` 默认都是子串匹配；直接用 `cargo test FILTER` 或 `--skip FILTER` 做 shard 容易出现 overlap / false match。
 - 2026-06-07：据此改为“manifest 负责测试归属，执行器先拿 test executable，再按精确测试名列表用 `--exact` 直接运行测试二进制”的方案，避免为了并行而重组大量测试源码。
 - 2026-08-20：Actions 原生计时显示 backend plan 到 aggregate 的稳定区间仍接近十分钟，且旧 fan-out 把编译环境、web artifact 和大体积 executable 重复带入每个 shard。后续 topology 改为一次 `ci-test` 编译、checksum-addressed bundle 和最多 16 个 LPT lanes；五分钟目标只约束该 backend 区间，不扩展为新的 required performance gate。
+- 2026-08-20：首次 16-lane 运行证明辅助二进制需要保持 Cargo 的 sibling-name 前缀，并暴露出 alert projection 的并行干扰与几个被低估的长 shard。bundle 改为单副本的 `source-name-SHA256` 文件名；manifest 随实测权重细分 rollup integrity、alert projection、reconciliation，并保持 CI lane 的单测试线程。
 
 ## Key Reasons / Replacements
 

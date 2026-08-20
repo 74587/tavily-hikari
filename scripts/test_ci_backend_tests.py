@@ -18,24 +18,32 @@ class BackendTestRunnerContractTests(unittest.TestCase):
     def test_v2_bundle_deduplicates_and_verifies_checksum(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            executable = root / "executables" / "fixture"
+            executable = root / "executables" / "fixture-abc123"
             executable.parent.mkdir()
             executable.write_bytes(b"fixture executable")
             digest = RUNNER.sha256_file(executable)
+            support_binary = root / "executables" / "support-source"
+            support_binary.write_bytes(b"fixture support binary")
+            support_digest = RUNNER.sha256_file(support_binary)
             manifest = {
                 "format_version": RUNNER.ARTIFACT_FORMAT_VERSION,
                 "executables": {
                     digest: {
-                        "path": "executables/fixture",
+                        "path": "executables/fixture-abc123",
                         "sha256": digest,
                         "name": "fixture",
                         "tests": ["fixture::test"],
-                    }
+                    },
+                    support_digest: {
+                        "path": "executables/support-source",
+                        "sha256": support_digest,
+                        "name": "observability_lock_holder",
+                    },
                 },
                 "coverage_targets": {
                     "lib": {
                         "executables": [digest],
-                        "support_binaries": {"FIXTURE_BIN": digest},
+                        "support_binaries": {"FIXTURE_BIN": support_digest},
                     }
                 },
             }
@@ -46,7 +54,15 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             executables, support_binaries = RUNNER.load_prebuilt_executables(root, "lib")
 
             self.assertEqual(executables[0]["tests"], ["fixture::test"])
-            self.assertEqual(executables[0]["path"], support_binaries["FIXTURE_BIN"])
+            self.assertEqual(
+                Path(support_binaries["FIXTURE_BIN"]), support_binary.resolve()
+            )
+            self.assertEqual(
+                RUNNER.artifact_executable_path(
+                    root, support_digest, "observability_lock_holder"
+                ).name,
+                f"observability_lock_holder-{support_digest}",
+            )
             executable.write_bytes(b"tampered")
             with self.assertRaises(SystemExit):
                 RUNNER.load_prebuilt_executables(root, "lib")
