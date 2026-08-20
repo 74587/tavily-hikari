@@ -75,7 +75,7 @@
       "id": "lib-core",
       "kind": "lib",
       "name": "Lib Core",
-      "estimated_seconds": 39,
+      "estimated_seconds": 35,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -110,7 +110,7 @@
       "id": "lib-forward-proxy",
       "kind": "lib",
       "name": "Lib Forward Proxy",
-      "estimated_seconds": 46,
+      "estimated_seconds": 35,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -172,7 +172,7 @@
       "id": "lib-request-rollup-reporting",
       "kind": "lib",
       "name": "Lib Request Rollup Reporting",
-      "estimated_seconds": 45,
+      "estimated_seconds": 85,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -197,7 +197,7 @@
       "id": "lib-request-rollup-lifecycle",
       "kind": "lib",
       "name": "Lib Request Rollup Lifecycle",
-      "estimated_seconds": 40,
+      "estimated_seconds": 45,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -226,7 +226,7 @@
       "id": "lib-affinity-domain",
       "kind": "lib",
       "name": "Lib Affinity Domain",
-      "estimated_seconds": 30,
+      "estimated_seconds": 90,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -257,7 +257,7 @@
       "id": "lib-account-user-identity",
       "kind": "lib",
       "name": "Lib Account User Identity",
-      "estimated_seconds": 81,
+      "estimated_seconds": 80,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -383,7 +383,7 @@
       "id": "lib-reconciliation",
       "kind": "lib",
       "name": "Lib Reconciliation",
-      "estimated_seconds": 60,
+      "estimated_seconds": 95,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "include_prefixes": [
@@ -404,7 +404,7 @@
       "id": "bin-support",
       "kind": "bin",
       "name": "Bin Support",
-      "estimated_seconds": 20,
+      "estimated_seconds": 10,
       "coverage_target": "bin-support",
       "run_args": [
         "--bin",
@@ -539,7 +539,7 @@
       "id": "bin-mcp-rebalance-session",
       "kind": "bin",
       "name": "Bin MCP Rebalance Session",
-      "estimated_seconds": 86,
+      "estimated_seconds": 20,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -578,7 +578,7 @@
       "id": "bin-mcp-research",
       "kind": "bin",
       "name": "Bin MCP Research",
-      "estimated_seconds": 82,
+      "estimated_seconds": 40,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -595,7 +595,7 @@
       "id": "bin-mcp-system",
       "kind": "bin",
       "name": "Bin MCP System",
-      "estimated_seconds": 14,
+      "estimated_seconds": 10,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -612,7 +612,7 @@
       "id": "bin-linuxdo-forward",
       "kind": "bin",
       "name": "Bin LinuxDo Forward",
-      "estimated_seconds": 63,
+      "estimated_seconds": 95,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -747,7 +747,7 @@
       "id": "integration-server-http-contract",
       "kind": "integration",
       "name": "Integration Server HTTP Contract",
-      "estimated_seconds": 70,
+      "estimated_seconds": 90,
       "coverage_target": "integration:server_http_contract",
       "run_args": [
         "--test",

@@ -48,6 +48,9 @@
   - MCP main-binary coverage is split into mutually exclusive billing, rebalance-session,
     rebalance-control, research, and system groups so long semantic prefixes cannot share one
     lane tail. Research and system groups retain their serial process boundaries.
+  - Manifest weights are calibrated from native shard timings; affinity, reconciliation, LinuxDo,
+    reporting, and server HTTP contract retain enough weight to keep the sixteen-lane LPT output
+    below the lane budget after semantic splits.
 - Development execution
   - `run-all`, `run-shard`, and `run-lane` accept Cargo-job, filtered-process-worker, and
     filtered-test-thread controls. The local default is `2/1/2`; `--diagnostic` is `1/1/1`.

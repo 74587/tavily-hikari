@@ -33,6 +33,8 @@
   语义拆成两个互斥 shard，避免单个测试进程拖慢 lane，同时保持完整 bin-main coverage。
 - 2026-08-21：`bin-ha-rest-lifecycle` 与 `server_http_contract` 的顺序执行叠加出新的 lane 长尾；提高
   两个原子 shard 的 LPT 权重后将其稳定装入不同 lane，保持每个 coverage target 的完整归属。
+- 2026-08-21：最新原生 lane 计时继续校准 affinity、reconciliation、LinuxDo、reporting 与 server HTTP
+  contract 权重，并下调已拆分 MCP shard 的旧估计；LPT 输出保持十六个非空 lane 且估算上限低于 120 秒。
 
 ## Key Reasons / Replacements
 
