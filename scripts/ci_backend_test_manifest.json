@@ -455,7 +455,6 @@
         "server::tests::admin_users_shadow_daily_projection::list_",
         "server::tests::dashboard_overview_snapshot::admin_",
         "server::tests::log_catalog_and_dashboard_sse::admin_",
-        "server::tests::mcp_rebalance_and_follow_up::admin_",
         "server::tests::system_settings_and_forward_proxy::admin_",
         "server::tests::system_settings_reconciliation_status::admin_",
         "server::tests::tavily_http_search::admin_",
@@ -537,17 +536,42 @@
       ]
     },
     {
-      "id": "bin-mcp-rebalance",
+      "id": "bin-mcp-rebalance-session",
       "kind": "bin",
-      "name": "Bin MCP Rebalance",
-      "estimated_seconds": 72,
+      "name": "Bin MCP Rebalance Session",
+      "estimated_seconds": 86,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
         "tavily-hikari"
       ],
       "include_prefixes": [
-        "server::tests::mcp_rebalance_and_follow_up::mcp_"
+        "server::tests::mcp_rebalance_and_follow_up::mcp_primary_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_session_affinity_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_session_gc_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_follow_up_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_initialized_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_initialize_"
+      ]
+    },
+    {
+      "id": "bin-mcp-rebalance-control",
+      "kind": "bin",
+      "name": "Bin MCP Rebalance Control",
+      "estimated_seconds": 60,
+      "coverage_target": "bin-main",
+      "run_args": [
+        "--bin",
+        "tavily-hikari"
+      ],
+      "include_prefixes": [
+        "server::tests::mcp_rebalance_and_follow_up::mcp_rebalance_",
+        "server::tests::mcp_rebalance_and_follow_up::observed_client_ip_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_tools_call_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_response_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_rejects_",
+        "server::tests::mcp_rebalance_and_follow_up::mcp_query_",
+        "server::tests::mcp_rebalance_and_follow_up::admin_forward_"
       ]
     },
     {
@@ -672,7 +696,6 @@
         "server::tests::system_settings_and_forward_proxy::standby_",
         "server::tests::log_catalog_and_dashboard_sse::key_",
         "server::tests::research_result_and_mcp_subpath::db_",
-        "server::tests::mcp_rebalance_and_follow_up::observed_",
         "server::tests::system_settings_and_forward_proxy::proxy_"
       ]
     },

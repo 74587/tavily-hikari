@@ -42,9 +42,9 @@
     mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
     are independent groups so measured long tails can be packed separately. Manifest estimates
     feed stable LPT lane packing.
-  - MCP main-binary coverage is split into mutually exclusive billing, rebalance, research, and
-    system groups so the long billing and research prefixes cannot share one lane tail. Research
-    and system groups retain their serial process boundaries.
+  - MCP main-binary coverage is split into mutually exclusive billing, rebalance-session,
+    rebalance-control, research, and system groups so long semantic prefixes cannot share one
+    lane tail. Research and system groups retain their serial process boundaries.
 - Development execution
   - `run-all`, `run-shard`, and `run-lane` accept Cargo-job, filtered-process-worker, and
     filtered-test-thread controls. The local default is `2/1/2`; `--diagnostic` is `1/1/1`.

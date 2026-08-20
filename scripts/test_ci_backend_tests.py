@@ -210,6 +210,12 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         mcp_research = next(shard for shard in shards if shard["id"] == "bin-mcp-research")
         mcp_system = next(shard for shard in shards if shard["id"] == "bin-mcp-system")
+        mcp_rebalance_session = next(
+            shard for shard in shards if shard["id"] == "bin-mcp-rebalance-session"
+        )
+        mcp_rebalance_control = next(
+            shard for shard in shards if shard["id"] == "bin-mcp-rebalance-control"
+        )
 
         self.assertEqual(
             reporting["isolated_prefixes"],
@@ -233,6 +239,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertIn(
             "server::tests::system_settings_and_forward_proxy::mcp_",
             mcp_system["serial_prefixes"],
+        )
+        self.assertIn(
+            "server::tests::mcp_rebalance_and_follow_up::mcp_session_affinity_",
+            mcp_rebalance_session["include_prefixes"],
+        )
+        self.assertIn(
+            "server::tests::mcp_rebalance_and_follow_up::mcp_rebalance_",
+            mcp_rebalance_control["include_prefixes"],
         )
         self.assertIn(
             "server::tests::research_result_and_mcp_subpath::mcp_",
