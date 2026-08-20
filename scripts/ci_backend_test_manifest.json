@@ -75,7 +75,7 @@
       "id": "lib-core",
       "kind": "lib",
       "name": "Lib Core",
-      "estimated_seconds": 35,
+      "estimated_seconds": 30,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -110,7 +110,7 @@
       "id": "lib-forward-proxy",
       "kind": "lib",
       "name": "Lib Forward Proxy",
-      "estimated_seconds": 35,
+      "estimated_seconds": 30,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -161,7 +161,7 @@
       "id": "lib-request-rollup-integrity",
       "kind": "lib",
       "name": "Lib Request Rollup Integrity",
-      "estimated_seconds": 29,
+      "estimated_seconds": 80,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -197,7 +197,7 @@
       "id": "lib-request-rollup-lifecycle",
       "kind": "lib",
       "name": "Lib Request Rollup Lifecycle",
-      "estimated_seconds": 45,
+      "estimated_seconds": 40,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -226,7 +226,7 @@
       "id": "lib-affinity-domain",
       "kind": "lib",
       "name": "Lib Affinity Domain",
-      "estimated_seconds": 90,
+      "estimated_seconds": 85,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -649,7 +649,7 @@
       "id": "bin-ha-rest-lifecycle",
       "kind": "bin",
       "name": "Bin HA Rest Lifecycle",
-      "estimated_seconds": 100,
+      "estimated_seconds": 85,
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "include_prefixes": [
@@ -657,7 +657,6 @@
         "server::tests::upstream_support_and_manual_jobs::manual_",
         "server::tests::alerts_and_ha::admin_",
         "server::tests::alerts_and_ha_node_detail::admin_",
-        "server::tests::alerts_and_ha::ha_",
         "server::tests::alerts_and_ha::dual_active_",
         "server::tests::alerts_and_ha_source_and_recovery::ha_",
         "server::tests::alerts_and_ha_source_and_recovery::request_logs_gc_",
@@ -666,7 +665,18 @@
         "server::tests::alerts_and_ha_node_state::redundant_",
         "server::tests::alerts_and_ha_node_state::dual_active_",
         "server::tests::alerts_and_ha_startup_roles::post_ready_",
-        "server::tests::alerts_and_ha_startup_roles::persist_",
+        "server::tests::alerts_and_ha_startup_roles::persist_"
+      ]
+    },
+    {
+      "id": "bin-ha-rest-lifecycle-state",
+      "kind": "bin",
+      "name": "Bin HA Rest Lifecycle State",
+      "estimated_seconds": 85,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "include_prefixes": [
+        "server::tests::alerts_and_ha::ha_",
         "server::tests::alerts_and_ha_startup_roles::startup_",
         "server::tests::alerts_and_ha_startup_roles::standby_",
         "server::tests::alerts_and_ha_startup_roles::dual_active_",
@@ -747,7 +757,7 @@
       "id": "integration-server-http-contract",
       "kind": "integration",
       "name": "Integration Server HTTP Contract",
-      "estimated_seconds": 90,
+      "estimated_seconds": 110,
       "coverage_target": "integration:server_http_contract",
       "run_args": [
         "--test",

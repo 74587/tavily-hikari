@@ -35,6 +35,8 @@
   两个原子 shard 的 LPT 权重后将其稳定装入不同 lane，保持每个 coverage target 的完整归属。
 - 2026-08-21：最新原生 lane 计时继续校准 affinity、reconciliation、LinuxDo、reporting 与 server HTTP
   contract 权重，并下调已拆分 MCP shard 的旧估计；LPT 输出保持十六个非空 lane 且估算上限低于 120 秒。
+- 2026-08-21：HA lifecycle 原子 shard 在原生 runner 上仍形成单体长尾；按 HA lifecycle/state 语义再拆为
+  两个互斥 shard，并提高 server HTTP 与 rollup integrity 权重，避免长 shard 组合在同一 lane。
 
 ## Key Reasons / Replacements
 
