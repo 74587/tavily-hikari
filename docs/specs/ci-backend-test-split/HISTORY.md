@@ -18,6 +18,8 @@
 - 2026-08-20：Actions 原生步骤计时表明完整 executable bundle 的下载只占少量时间，而 lane checkout
   位于关键路径。bundle 因此携带 runner、manifest 与 `src`/`tests` source snapshot，并把 snapshot 链接到
   compile-time manifest directory，使运行期读取 repository sources 的既有测试不再要求 checkout。
+- 2026-08-20：MCP rebalance 审计 flush 测试在与其它 MCP prefix 进程并行时超过其既有等待预算；该 prefix
+  作为整体改为串行执行。admin resources group 保持原有两进程上限，同时显式允许两条测试线程以缩短其最长 lane。
 
 ## Key Reasons / Replacements
 

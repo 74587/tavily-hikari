@@ -190,6 +190,10 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         alert = next(shard for shard in shards if shard["id"] == "lib-alert-projection")
         affinity = next(shard for shard in shards if shard["id"] == "lib-affinity-domain")
+        admin_resources = next(
+            shard for shard in shards if shard["id"] == "bin-admin-api-resources"
+        )
+        mcp_core = next(shard for shard in shards if shard["id"] == "bin-mcp-core")
 
         self.assertEqual(
             reporting["isolated_prefixes"],
@@ -197,6 +201,11 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
+        self.assertEqual(RUNNER.shard_resource_limits(admin_resources, 3, 2), (2, 2))
+        self.assertIn(
+            "server::tests::system_settings_and_forward_proxy::mcp_",
+            mcp_core["serial_prefixes"],
+        )
 
     def test_isolated_prefixes_run_as_serial_exact_tests(self):
         executable_tests = [
