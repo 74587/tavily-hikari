@@ -231,6 +231,7 @@
       "run_args": [
         "--lib"
       ],
+      "filtered_test_threads": 2,
       "include_prefixes": [
         "tests::proxy_affinity_and_summary::add_",
         "tests::proxy_affinity_runtime_geo::add_",

@@ -165,12 +165,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             shard for shard in shards if shard["id"] == "lib-request-rollup-reporting"
         )
         alert = next(shard for shard in shards if shard["id"] == "lib-alert-projection")
+        affinity = next(shard for shard in shards if shard["id"] == "lib-affinity-domain")
 
         self.assertEqual(
             reporting["isolated_prefixes"],
             ["tests::request_rollup_public_metrics::admin_"],
         )
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
+        self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
 
     def test_isolated_prefixes_run_as_serial_exact_tests(self):
         executable_tests = [

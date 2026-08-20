@@ -13,6 +13,7 @@
 - 2026-08-20：首次 16-lane 运行证明辅助二进制需要保持 Cargo 的 sibling-name 前缀，并暴露出 alert projection 的并行干扰与几个被低估的长 shard。bundle 改为单副本的 `source-name-SHA256` 文件名；manifest 随实测权重细分 rollup integrity、alert projection、reconciliation，并以 shard 自身的线程上限隔离敏感测试。
 - 2026-08-20：后续原生计时显示 account lifecycle 在全局单线程下拖慢 lane；执行器将请求线程数视为上限而非覆盖值。CI 传入两线程，只有 manifest 显式允许的 shard 使用两线程，alert projection 等敏感 shard 保持单线程。
 - 2026-08-20：reporting shard 中的后台 flush 协调测试在同一 test process 内触发超时；该 prefix 改为逐条串行 `--exact`，隔离进程级后台状态，不修改测试断言、生产超时或重试语义。
+- 2026-08-20：affinity domain 先前被默认单线程限制而形成 lane 长尾；该 shard 明确允许两条测试线程，已知敏感 shard 仍保持单线程。prepare job 使用 Ubuntu `mold` linker 替代未带来收益的 `lld`，缩短冷构建链接阶段而不改变 Cargo test profile 或覆盖集合。
 - 2026-08-20：coverage verifier 在下一轮执行中捕获 rollup storage 与 integrity selector 的重叠；移除旧 selector 后由契约测试固定该互斥边界。CI prepare 的一次性构建显式使用四个 Cargo jobs，开发默认资源仍保持 `2/1/2`。
 
 ## Key Reasons / Replacements
