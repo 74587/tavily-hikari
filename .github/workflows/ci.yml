@@ -66,7 +66,8 @@ jobs:
   version-layer-reuse:
     name: Version Layer Reuse
     runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: [backend-tests]
+    if: ${{ always() && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -126,7 +127,8 @@ jobs:
   lint:
     name: Lint & Checks
     runs-on: ubuntu-24.04
-    needs: [web-assets]
+    needs: [web-assets, backend-tests]
+    if: ${{ always() && needs.web-assets.result == 'success' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -423,8 +425,8 @@ jobs:
   build:
     name: Build (Release)
     runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request'
-    needs: [web-assets]
+    if: ${{ always() && github.event_name == 'pull_request' && needs.web-assets.result == 'success' }}
+    needs: [web-assets, backend-tests]
     timeout-minutes: 25
     steps:
       - name: Checkout

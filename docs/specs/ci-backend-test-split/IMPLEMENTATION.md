@@ -31,6 +31,9 @@
     downloads, system packages, Rust setup, and Cargo cache restoration.
   - `Backend Tests` remains the stable aggregate check. The target is the native Actions interval
     from plan start to aggregate completion, with no new required performance check.
+  - Unrelated heavy jobs keep their existing commands but wait for the backend aggregate, leaving
+    the hosted runner concurrency available for the fixed sixteen backend lanes. This changes only
+    job ordering; it does not alter release, lint, or version-layer validation semantics.
 - Artifact and lane contracts
   - `ci-test` inherits `test` while disabling debug information and incremental compilation.
   - `build.rs` can consume `TAVILY_HIKARI_WEB_DIST_DIR`; CI supplies the minimal fixture while the
