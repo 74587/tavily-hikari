@@ -15,9 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-ROOT = Path(
-    os.environ.get("TAVILY_HIKARI_WORKSPACE_ROOT", Path(__file__).resolve().parent.parent)
-).resolve()
+ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = ROOT / "scripts" / "ci_backend_test_manifest.json"
 BASE_CARGO_ARGS = ["cargo", "test", "--locked", "--all-features"]
 CARGO_LIST_TIMEOUT_SECONDS = 300
@@ -550,10 +548,14 @@ def artifact_executable_path(output_dir, digest, source_name):
 
 
 def stage_lane_runner(output_dir):
-    runtime_scripts = Path(output_dir) / "scripts"
+    output_dir = Path(output_dir)
+    runtime_scripts = output_dir / "scripts"
     runtime_scripts.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(__file__).resolve(), runtime_scripts / "ci_backend_tests.py")
     shutil.copy2(MANIFEST_PATH, runtime_scripts / MANIFEST_PATH.name)
+    source_snapshot = output_dir / "source"
+    for source_dir in ("src", "tests"):
+        shutil.copytree(ROOT / source_dir, source_snapshot / source_dir, dirs_exist_ok=True)
 
 
 def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets="project"):

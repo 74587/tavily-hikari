@@ -95,6 +95,8 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             runtime_manifest = root / "scripts" / "ci_backend_test_manifest.json"
             self.assertTrue(runtime_runner.is_file())
             self.assertTrue(runtime_manifest.is_file())
+            self.assertTrue((root / "source" / "src" / "lib.rs").is_file())
+            self.assertTrue((root / "source" / "tests" / "rust_source_line_budgets.rs").is_file())
 
             completed = subprocess.run(
                 [sys.executable, str(runtime_runner), "lane-matrix", "--lane-count", "16"],

@@ -16,8 +16,8 @@
 - 2026-08-20：affinity domain 先前被默认单线程限制而形成 lane 长尾；该 shard 明确允许两条测试线程，已知敏感 shard 仍保持单线程。prepare job 使用 Ubuntu `mold` linker 替代未带来收益的 `lld`，缩短冷构建链接阶段而不改变 Cargo test profile 或覆盖集合。
 - 2026-08-20：coverage verifier 在下一轮执行中捕获 rollup storage 与 integrity selector 的重叠；移除旧 selector 后由契约测试固定该互斥边界。CI prepare 的一次性构建显式使用四个 Cargo jobs，开发默认资源仍保持 `2/1/2`。
 - 2026-08-20：Actions 原生步骤计时表明完整 executable bundle 的下载只占少量时间，而 lane checkout
-  位于关键路径。bundle 因此携带 runner 与 manifest；只有 source-line-budget integration lane 保留 checkout，
-  因为该合同在运行期读取 repository sources。
+  位于关键路径。bundle 因此携带 runner、manifest 与 `src`/`tests` source snapshot，并把 snapshot 链接到
+  compile-time manifest directory，使运行期读取 repository sources 的既有测试不再要求 checkout。
 
 ## Key Reasons / Replacements
 

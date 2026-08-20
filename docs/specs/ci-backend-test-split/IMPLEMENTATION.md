@@ -26,9 +26,9 @@
     fixture, compiles all backend targets with `ci-test`, verifies coverage, uploads one backend
     bundle, and exports a 16-lane matrix.
   - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
-    bundle. Only the source-line-budget lane checks out source files; the former lib/bin/integration
-    jobs each repeated frontend artifact downloads, system packages, Rust setup, and Cargo cache
-    restoration.
+    bundle. The bundle includes a read-only source snapshot for tests that use the compile-time
+    manifest directory; the former lib/bin/integration jobs each repeated frontend artifact
+    downloads, system packages, Rust setup, and Cargo cache restoration.
   - `Backend Tests` remains the stable aggregate check. The target is the native Actions interval
     from plan start to aggregate completion, with no new required performance check.
 - Artifact and lane contracts
