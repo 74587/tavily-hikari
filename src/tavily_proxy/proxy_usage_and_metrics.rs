@@ -141,6 +141,21 @@ impl TavilyProxy {
         }
     }
 
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn wait_for_rebalance_audits_idle_for_test(&self) {
+        loop {
+            let idle = {
+                let writer = self.observability_deferred_writer.lock().await;
+                writer.rebalance_audits.is_empty() && !writer.rebalance_audit_flush_running
+            };
+            if idle {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn requeue_rebalance_audits(&self, mut entries: Vec<RebalanceAuditEntry>) {
         let mut writer = self.observability_deferred_writer.lock().await;
         while let Some(entry) = entries.pop() {

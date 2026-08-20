@@ -2741,10 +2741,26 @@ mod alert_grouping_tests {
         insert_upstream_usage_limit_alert(&store, token_id, key_id, 1_700_100_000).await;
         insert_upstream_usage_limit_alert(&store, token_id, key_id, 1_700_100_120).await;
 
-        let page = store
-            .fetch_alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
-            .await
-            .expect("fetch grouped alerts page");
+        let page = {
+            const MAX_ATTEMPTS: usize = 48;
+            let mut attempt = 0;
+            loop {
+                match store
+                    .fetch_alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
+                    .await
+                {
+                    Ok(page) => break page,
+                    Err(error)
+                        if crate::store::is_transient_sqlite_write_error(&error)
+                            && attempt + 1 < MAX_ATTEMPTS =>
+                    {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("fetch grouped alerts page: {error}"),
+                }
+            }
+        };
 
         assert_eq!(page.total, 2);
 
