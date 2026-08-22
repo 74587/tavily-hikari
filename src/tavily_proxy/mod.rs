@@ -157,6 +157,8 @@ impl ServerPressureBucketCounts {
 struct ObservabilityDeferredWriter {
     pressure_deltas: BTreeMap<ServerPressureBucketKey, ServerPressureBucketCounts>,
     pressure_flush_running: bool,
+    #[cfg(test)]
+    pressure_flush_completed: std::sync::Arc<tokio::sync::Notify>,
     pressure_stale: bool,
     pressure_stale_since: Option<i64>,
     pressure_unrecoverable_overflow: bool,
@@ -832,11 +834,20 @@ pub struct TavilyProxy {
     pub(crate) backend_time: BackendTime,
 }
 
-/// Admission token for a bounded maintenance SQLite slice. The runtime owns
-/// the permit; callers can only retain it while doing the admitted work.
+/// Admission token for a bounded maintenance SQLite slice. Bulk work retains
+/// a runtime permit; the compatibility privacy-status admission is detached
+/// because that endpoint owns its separate bounded read session.
 #[derive(Debug)]
 pub struct SqliteMaintenanceAdmission {
-    _permit: SqliteMaintenanceBulkPermit,
+    _kind: SqliteMaintenanceAdmissionKind,
+}
+
+#[derive(Debug)]
+enum SqliteMaintenanceAdmissionKind {
+    Bulk {
+        _permit: SqliteMaintenanceBulkPermit,
+    },
+    DetachedRead,
 }
 
 #[derive(Debug)]

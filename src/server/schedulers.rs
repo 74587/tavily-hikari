@@ -2622,13 +2622,34 @@ async fn run_manual_claimed_job(
             drop(_job_execution_gate);
             let foreground_rps = state.proxy.foreground_activity_rps();
             if foreground_rps > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
-                return defer_reconciliation_for_foreground(
+                return defer_reconciliation_for_sqlite_admission(
                     &state,
                     job_id,
                     claim_generation,
-                    foreground_rps,
+                    "foreground_pressure",
+                    state.proxy.backend_time().now_ts().saturating_add(30),
                 )
                 .await;
+            }
+            match state
+                .proxy
+                .clear_upstream_reconciliation_local_backoff_claimed(job_id, claim_generation)
+                .await
+            {
+                Ok(()) => {}
+                Err(ProxyError::StaleClaim { .. }) => return false,
+                Err(error) if tavily_hikari::is_transient_sqlite_write_error(&error) => {
+                    tracing::debug!(
+                        component = "reconciliation",
+                        event = "low_pressure_recovery_deferred",
+                        job_id,
+                        claim_generation,
+                        err = %error,
+                        "reconciliation retained its claim while low-pressure recovery could not start"
+                    );
+                    return false;
+                }
+                Err(error) => return finish(state, "error", error.to_string()).await,
             }
             let run_result = state
                 .proxy
@@ -2672,12 +2693,13 @@ async fn run_manual_claimed_job(
                         Err(err) => finish(state, "error", err.to_string()).await,
                     }
                 }
-                Ok(ClaimedReconciliationRunOutcome::Deferred { reason }) => {
+                Ok(ClaimedReconciliationRunOutcome::Deferred { reason, retry_at }) => {
                     defer_reconciliation_for_sqlite_admission(
                         &state,
                         job_id,
                         claim_generation,
                         reason,
+                        retry_at,
                     )
                     .await
                 }
@@ -2746,43 +2768,14 @@ async fn run_manual_claimed_job(
     }
 }
 
-async fn defer_reconciliation_for_foreground(
-    state: &Arc<AppState>,
-    job_id: i64,
-    claim_generation: i64,
-    foreground_rps: i64,
-) -> bool {
-    let available_at = state.proxy.backend_time().now_ts().saturating_add(30);
-    tracing::debug!(
-        component = "reconciliation",
-        event = "foreground_deferred",
-        job_id,
-        claim_generation,
-        foreground_rps,
-        available_at,
-    );
-    state
-        .proxy
-        .scheduled_job_finish_and_enqueue_auto_at(
-            job_id,
-            claim_generation,
-            "upstream_reconciliation",
-            None,
-            1,
-            Some("outcome=foreground_pressure"),
-            available_at,
-        )
-        .await
-        .is_ok()
-}
-
 async fn defer_reconciliation_for_sqlite_admission(
     state: &Arc<AppState>,
     job_id: i64,
     claim_generation: i64,
     defer_reason: &'static str,
+    retry_at: i64,
 ) -> bool {
-    let available_at = state.proxy.backend_time().now_ts().saturating_add(30);
+    let available_at = retry_at.max(state.proxy.backend_time().now_ts());
     tracing::debug!(
         component = "reconciliation",
         event = "local_preparation_deferred",
@@ -2794,13 +2787,10 @@ async fn defer_reconciliation_for_sqlite_admission(
     );
     state
         .proxy
-        .scheduled_job_finish_and_enqueue_auto_at(
+        .finalize_deferred_upstream_reconciliation_claim(
             job_id,
             claim_generation,
-            "upstream_reconciliation",
-            None,
-            1,
-            Some(&format!("outcome=sqlite_admission_deferred defer_reason={defer_reason}")),
+            defer_reason,
             available_at,
         )
         .await

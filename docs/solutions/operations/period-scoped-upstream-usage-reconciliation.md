@@ -6,7 +6,10 @@ Candidate windows are maintained in an indexed durable work projection. The engi
 starts primary settlement before research polling, permits at most two serial remote attempts per run, and gives
 research at most two seconds of the remaining time. Research exhaustion is diagnostic follow-up, not primary
 local pressure. Local-pressure backoff (`30/60/120/300s`) is separate from upstream-429 backoff
-(`2/5/10/30m`); non-429 failures do not reset the remote circuit.
+(`2/5/10/30m`); non-429 failures do not reset the remote circuit. A current claim that reaches a
+low-foreground recovery window clears only its local-pressure state before trying the engine again;
+if SQLite is still pressured, that attempt durably defers again. This preserves foreground yielding
+without letting a stale local backoff consume the whole recovery tail.
 
 Terminal completion is typed. Active non-zero delta uses `settled`, any zero delta uses
 `no_adjustment`, and compare-mode non-zero delta uses `observed` without writing billing truth.
@@ -198,3 +201,23 @@ normal per-key 429 logs at DEBUG and reserve state-transition logs for enter, es
 Main settlement must start before terminal-research polling. Hydrate the bounded candidate page and
 key/cooldown state in one indexed batch, reserve the first eligible key within the two-second local
 preparation budget, then use the remaining 20-second job budget for the research sweep.
+
+## Claim-fenced deferred finalization
+
+Treat finalization as durable work with its own reserve, not as an afterthought after remote I/O.
+Before starting the next remote request, reserve two seconds for the terminal observation and
+continuation boundary. If that reserve is exhausted, return only a typed deferred outcome with a
+reason and retry time.
+
+The scheduler must persist one deferred outcome through a single claim-fenced control transaction:
+finish the claimed job, advance independent local-backoff metadata, record local-pressure observation
+and retry time, and retain or create one delayed auto representative. Finalization-reserve exhaustion,
+admission defers, and transient SQLite pressure before a durable boundary are typed defers; other
+non-stale, non-transient failures remain terminal job errors so the scheduler does not hide invariants
+or storage faults. If the transaction cannot acquire the writer, leave the claim running for stale
+recovery. Do not add an in-memory retry loop that can fan out jobs after restart.
+
+Research health is separate from settlement retries. For a current-period starvation investigation,
+observe a fixed ten-minute window: terminal rate must become positive and pending Research must not
+grow. An `upstream429` bucket measures settlement retry pressure only; it is neither backlog size
+nor proof of terminal progress.

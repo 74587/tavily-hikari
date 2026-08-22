@@ -376,6 +376,7 @@ impl KeyStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn upstream_reconciliation_runtime_markers(
         &self,
     ) -> Result<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>), ProxyError> {
@@ -418,6 +419,7 @@ impl KeyStore {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn upstream_reconciliation_observation(
         &self,
     ) -> Result<ReconciliationObservation, ProxyError> {
@@ -545,6 +547,7 @@ impl KeyStore {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn upstream_reconciliation_degraded_estimate(
         &self,
     ) -> Result<(i64, bool), ProxyError> {
@@ -576,6 +579,7 @@ impl KeyStore {
         .await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn upstream_reconciliation_local_last_recovered_at(
         &self,
     ) -> Result<Option<i64>, ProxyError> {
@@ -836,58 +840,20 @@ impl KeyStore {
         claimed_job: Option<(i64, i64)>,
     ) -> Result<(i64, i64, i64), ProxyError> {
         let mut transaction = self.begin_reconciliation_control().await?;
-        let (previous_streak, previous_level, _) = Self::reconciliation_backoff_state_locked(
+        let result = Self::apply_upstream_reconciliation_local_backoff_locked(
             &mut transaction,
-            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1,
-            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1,
-            META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1,
+            pressure,
+            now,
+            claimed_job,
         )
-        .await?;
-        let (streak, level, until) = if pressure {
-            let streak = previous_streak.saturating_add(1);
-            let level = if streak < 3 {
-                0
-            } else {
-                previous_level.saturating_add(1).clamp(1, 4)
-            };
-            let delay_secs = match level {
-                1 => 30,
-                2 => 60,
-                3 => 120,
-                4 => 300,
-                _ => 0,
-            };
-            (streak, level, now.saturating_add(delay_secs))
-        } else {
-            (0, 0, 0)
+        .await;
+        let (streak, level, until) = match result {
+            Ok(state) => state,
+            Err(error) => {
+                transaction.finish(Err(error)).await?;
+                unreachable!("failed reconciliation local backoff transaction committed")
+            }
         };
-        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
-            let (job_id, claim_generation) = claimed_job.expect("claimed job was checked");
-            transaction.rollback().await?;
-            return Err(ProxyError::StaleClaim {
-                job_id,
-                claim_generation,
-            });
-        }
-        sqlx::query(
-            r#"INSERT INTO meta (key, value) VALUES (?, ?), (?, ?), (?, ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
-        )
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1)
-        .bind(streak.to_string())
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1)
-        .bind(level.to_string())
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
-        .bind(until.to_string())
-        .execute(&mut *transaction)
-        .await?;
-        if !pressure && previous_level > 0 {
-            sqlx::query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-                .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_LAST_RECOVERED_AT_V1)
-                .bind(now.to_string())
-                .execute(&mut *transaction)
-                .await?;
-        }
         Self::sync_upstream_reconciliation_representative_locked(
             &mut transaction,
             now,
@@ -2560,6 +2526,7 @@ impl KeyStore {
         );
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn recent_reconciliation_adjustments(
         &self,
         limit: i64,
@@ -2604,6 +2571,7 @@ impl KeyStore {
             .collect())
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn upstream_reconciliation_retry_buckets(
         &self,
     ) -> Result<UpstreamReconciliationRetryBuckets, ProxyError> {
@@ -2639,6 +2607,7 @@ impl KeyStore {
         Ok(buckets)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn current_period_reconciliation_key_activity(
         &self,
         current_period_code: &str,
@@ -2697,6 +2666,7 @@ impl KeyStore {
     }
 
 
+    #[allow(dead_code)]
     pub(crate) async fn daily_reconciliation_progress(
         &self,
     ) -> Result<(
