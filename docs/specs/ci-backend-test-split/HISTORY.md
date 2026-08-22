@@ -37,6 +37,9 @@
   contract 权重，并下调已拆分 MCP shard 的旧估计；LPT 输出保持十六个非空 lane 且估算上限低于 120 秒。
 - 2026-08-21：HA lifecycle 原子 shard 在原生 runner 上仍形成单体长尾；按 HA lifecycle/state 语义再拆为
   两个互斥 shard，并提高 server HTTP 与 rollup integrity 权重，避免长 shard 组合在同一 lane。
+- 2026-08-22：原生 lane 计时确认 reconciliation 的 upstream test process 在同一 shard 内排队；覆盖按
+  maintenance、upstream-reconciliation、projection 语义拆开，并以带余量的实测权重重新装箱。prepare
+  同时记录 compile、test-list discovery、bundle staging 三段耗时，作为诊断证据而非新的性能门禁。
 
 ## Key Reasons / Replacements
 

@@ -136,6 +136,50 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             ],
         )
 
+    def test_reconciliation_shards_are_mutually_exclusive(self):
+        _, shards = RUNNER.load_manifest()
+        reconciliation_shards = {
+            shard["id"]: shard
+            for shard in shards
+            if shard["id"]
+            in {
+                "lib-reconciliation-maintenance",
+                "lib-upstream-reconciliation",
+                "lib-reconciliation-projection",
+            }
+        }
+
+        self.assertEqual(
+            set(reconciliation_shards),
+            {
+                "lib-reconciliation-maintenance",
+                "lib-upstream-reconciliation",
+                "lib-reconciliation-projection",
+            },
+        )
+        prefixes = [
+            prefix
+            for shard in reconciliation_shards.values()
+            for prefix in shard["include_prefixes"]
+        ]
+        self.assertEqual(len(prefixes), len(set(prefixes)))
+        self.assertEqual(
+            set(prefixes),
+            {
+                "tests::maintenance_queue_performance::",
+                "tests::schema_migrations::",
+                "tests::reconciliation_controller::",
+                "tests::upstream_reconciliation::",
+                "tests::upstream_reconciliation_continuation::",
+                "tests::upstream_reconciliation_engine::",
+                "tests::upstream_reconciliation_fencing::",
+                "tests::upstream_reconciliation_projection::",
+                "tavily_proxy::reconciliation_engine_tests::",
+                "tavily_proxy::user_business_calls_memory::memory_window_regression_tests::",
+                "upstream_privacy::tests::",
+            },
+        )
+
     def test_ci_lane_count_stays_within_the_maximum(self):
         lanes = RUNNER.build_lane_matrix(
             [{"id": f"shard-{index}", "estimated_seconds": index + 1} for index in range(25)],

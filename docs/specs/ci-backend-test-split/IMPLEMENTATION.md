@@ -45,6 +45,9 @@
     mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
     are independent groups so measured long tails can be packed separately. Manifest estimates
     feed stable LPT lane packing.
+  - Reconciliation coverage is divided into maintenance, upstream-reconciliation, and projection
+    groups. This keeps the long upstream test binary from queueing behind unrelated reconciliation
+    prefixes while the coverage verifier continues to reject overlap or omissions.
   - MCP main-binary coverage is split into mutually exclusive billing, rebalance-session,
     rebalance-control, research, and system groups so long semantic prefixes cannot share one
     lane tail. Research and system groups retain their serial process boundaries.
@@ -53,6 +56,8 @@
     below the lane budget after semantic splits.
   - HA lifecycle coverage is divided into mutually exclusive lifecycle and lifecycle-state groups;
     this keeps the long HA prefix family from becoming a single atomic lane tail.
+  - `prepare-artifacts` logs compilation, test-list discovery, and bundle-staging elapsed markers.
+    They make a cold-compile regression attributable without turning elapsed time into a CI gate.
 - Development execution
   - `run-all`, `run-shard`, and `run-lane` accept Cargo-job, filtered-process-worker, and
     filtered-test-thread controls. The local default is `2/1/2`; `--diagnostic` is `1/1/1`.

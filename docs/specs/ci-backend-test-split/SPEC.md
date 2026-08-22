@@ -83,7 +83,12 @@
   asset job validates every path required by the minimal fixture, including HTML shells,
   `version.json`, favicon, and branded assets.
 - Shards carry positive `estimated_seconds`. Lane generation uses stable LPT ordering: descending
-  estimate, shard ID for ties, and the currently lightest lane for placement.
+  estimate, shard ID for ties, and the currently lightest lane for placement. Estimates are rounded
+  from native shard observations with enough headroom for ordinary variance; a semantic split must
+  update the affected estimates as part of the same coverage-preserving change.
+- `prepare-artifacts` emits elapsed markers for executable compilation, test-list discovery, and
+  bundle staging. These markers are diagnostic evidence for CI tuning only; they do not create a
+  required check or automatically reject a run.
 - `Backend Tests` remains the stable owner-facing aggregate check. Its five-minute objective is
   measured from `Backend Shard Plan.startedAt` through `Backend Tests.completedAt`; it is not a
   workflow-wide timeout or an automated performance gate.

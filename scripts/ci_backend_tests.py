@@ -562,6 +562,7 @@ def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets=
     targets, _ = load_manifest()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    prepare_started = time.monotonic()
 
     combined_args = combined_coverage_list_args(targets)
     temporary_fixture = None
@@ -574,12 +575,18 @@ def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets=
         raise SystemExit(f"unsupported web asset source: {web_assets}")
 
     try:
+        build_started = time.monotonic()
         executables = build_test_executables(
             combined_args,
             include_non_test_binaries=True,
             cargo_jobs=cargo_jobs,
             cargo_profile=cargo_profile,
             web_assets_dir=web_assets_dir,
+        )
+        print(
+            "prepare_phase_complete phase=compile_test_executables "
+            f"elapsed_seconds={time.monotonic() - build_started:.2f}",
+            flush=True,
         )
     finally:
         if temporary_fixture is not None:
@@ -618,8 +625,15 @@ def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets=
             continue
         executables_requiring_test_lists.extend(executable_entries)
 
+    test_list_started = time.monotonic()
     populate_executable_test_lists(executables_requiring_test_lists)
+    print(
+        "prepare_phase_complete phase=discover_test_lists "
+        f"elapsed_seconds={time.monotonic() - test_list_started:.2f}",
+        flush=True,
+    )
 
+    bundle_started = time.monotonic()
     artifact_files = {}
     source_digests = {}
 
@@ -675,6 +689,16 @@ def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets=
         json.dump(manifest, fh, sort_keys=True, indent=2)
         fh.write("\n")
     stage_lane_runner(output_dir)
+    print(
+        "prepare_phase_complete phase=stage_bundle "
+        f"elapsed_seconds={time.monotonic() - bundle_started:.2f}",
+        flush=True,
+    )
+    print(
+        "prepare_complete "
+        f"elapsed_seconds={time.monotonic() - prepare_started:.2f}",
+        flush=True,
+    )
 
 
 def load_v2_prebuilt_executables(artifact_root, coverage_target):
