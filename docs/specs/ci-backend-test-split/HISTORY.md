@@ -43,6 +43,10 @@
 - 2026-08-22：后续原生计时确认 admin resources 与 request rollup storage 仍是单 lane 长尾；分别按
   identity/observability/settings 和 storage/request-log-retention/scheduled-maintenance 语义细分。静态
   prefix-union 合同固定旧覆盖集合，artifact 上传降低压缩等级以缩短关键路径的上传 CPU 时间。
+- 2026-08-22：admin dashboard SSE refresh 在与其它 identity filter 进程共用时触发既有事件等待超时；
+  改为独立的单进程、单线程精确 shard，并由 identity 的 exact exclusion 保持唯一归属。Actions 计时还
+  发现 operational maintenance 被低估；按实测提高其权重并仅为该 shard 允许四个过滤进程，使 LPT 重新
+  保持在 120 秒预算内。
 
 ## Key Reasons / Replacements
 

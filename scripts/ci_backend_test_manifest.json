@@ -281,7 +281,7 @@
       "id": "lib-account-user-identity",
       "kind": "lib",
       "name": "Lib Account User Identity",
-      "estimated_seconds": 85,
+      "estimated_seconds": 80,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -364,11 +364,10 @@
       "id": "lib-operational-maintenance",
       "kind": "lib",
       "name": "Lib Operational Maintenance",
-      "estimated_seconds": 55,
+      "estimated_seconds": 110,
       "coverage_target": "lib",
-      "run_args": [
-        "--lib"
-      ],
+      "run_args": ["--lib"],
+      "filtered_process_workers": 4,
       "include_prefixes": [
         "ha_perf_sampling_tests::",
         "tests::jobs_and_request_log_retention::abandon_",
@@ -431,7 +430,7 @@
       "id": "lib-reconciliation-projection",
       "kind": "lib",
       "name": "Lib Reconciliation Projection",
-      "estimated_seconds": 85,
+      "estimated_seconds": 75,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "include_prefixes": [
@@ -481,11 +480,11 @@
       "id": "bin-admin-api-identity",
       "kind": "bin",
       "name": "Bin Admin API Identity",
-      "estimated_seconds": 70,
+      "estimated_seconds": 65,
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "filtered_process_workers": 2,
-      "serial_prefixes": [
+      "exclude_prefixes": [
         "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change"
       ],
       "filtered_test_threads": 2,
@@ -498,6 +497,19 @@
         "server::tests::admin_users_shadow_daily_projection::list_",
         "server::tests::api_keys_and_registration::api_",
         "server::tests::linuxdo_oauth_and_admin_keys::api_"
+      ]
+    },
+    {
+      "id": "bin-admin-api-sse",
+      "kind": "bin",
+      "name": "Bin Admin API SSE",
+      "estimated_seconds": 50,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "filtered_process_workers": 1,
+      "filtered_test_threads": 1,
+      "include_prefixes": [
+        "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change"
       ]
     },
     {
@@ -539,7 +551,7 @@
       "id": "bin-admin-api-lifecycle",
       "kind": "bin",
       "name": "Bin Admin API Lifecycle",
-      "estimated_seconds": 85,
+      "estimated_seconds": 80,
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "filtered_process_workers": 2,

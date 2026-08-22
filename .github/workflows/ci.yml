@@ -253,7 +253,7 @@ jobs:
             --id "${{ matrix.lane.id }}" \
             --lane-count 16 \
             --prebuilt-root /tmp/backend-test-artifacts \
-            --filtered-process-workers 3 \
+            --filtered-process-workers 4 \
             --filtered-test-threads 2
 
   backend-tests:

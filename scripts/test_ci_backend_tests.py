@@ -235,6 +235,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             if shard["id"]
             in {
                 "bin-admin-api-identity",
+                "bin-admin-api-sse",
                 "bin-admin-api-observability",
                 "bin-admin-api-settings",
             }
@@ -244,6 +245,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             set(resource_shards),
             {
                 "bin-admin-api-identity",
+                "bin-admin-api-sse",
                 "bin-admin-api-observability",
                 "bin-admin-api-settings",
             },
@@ -261,6 +263,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
                 "server::tests::admin_token_owner_summary::admin_",
                 "server::tests::admin_users_and_tokens::account_",
                 "server::tests::admin_users_and_tokens::admin_",
+                "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change",
                 "server::tests::admin_users_shadow_daily_projection::list_",
                 "server::tests::dashboard_overview_snapshot::admin_",
                 "server::tests::log_catalog_and_dashboard_sse::admin_",
@@ -349,8 +352,12 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         admin_settings = next(
             shard for shard in shards if shard["id"] == "bin-admin-api-settings"
         )
+        admin_sse = next(shard for shard in shards if shard["id"] == "bin-admin-api-sse")
         admin_lifecycle = next(
             shard for shard in shards if shard["id"] == "bin-admin-api-lifecycle"
+        )
+        operational = next(
+            shard for shard in shards if shard["id"] == "lib-operational-maintenance"
         )
         account_identity = next(
             shard for shard in shards if shard["id"] == "lib-account-user-identity"
@@ -371,12 +378,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_identity, 3, 2), (2, 2))
+        self.assertEqual(RUNNER.shard_resource_limits(admin_identity, 4, 2), (2, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_observability, 3, 2), (2, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_settings, 3, 2), (2, 2))
-        self.assertIn(
-            "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change",
-            admin_identity["serial_prefixes"],
-        )
+        sse_test = "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change"
+        self.assertIn(sse_test, admin_identity["exclude_prefixes"])
+        self.assertEqual(admin_sse["include_prefixes"], [sse_test])
+        self.assertEqual(RUNNER.shard_resource_limits(admin_sse, 4, 2), (1, 1))
+        self.assertEqual(RUNNER.shard_resource_limits(operational, 4, 2), (4, 1))
         self.assertIn(
             "server::tests::alerts_and_ha_dashboard_defaults::admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses",
             admin_lifecycle["serial_prefixes"],
@@ -432,6 +441,31 @@ class BackendTestRunnerContractTests(unittest.TestCase):
                 "tests::request_rollup_public_metrics::admin_two",
             ],
         )
+
+    def test_exact_exclusion_keeps_a_child_test_out_of_parent_filter(self):
+        special_test = "server::tests::admin::dashboard_sse"
+        shard = {
+            "include_prefixes": ["server::tests::admin::"],
+            "exclude_prefixes": [special_test],
+            "serial_prefixes": [],
+            "isolated_prefixes": [],
+        }
+
+        filters, serial_filters, exact_fallback, isolated_tests = RUNNER.select_safe_filter_groups(
+            [special_test, "server::tests::admin::other"], shard
+        )
+
+        self.assertEqual(filters, [])
+        self.assertEqual(serial_filters, [])
+        self.assertEqual(exact_fallback, ["server::tests::admin::other"])
+        self.assertEqual(isolated_tests, [])
+
+    def test_manifest_lpt_stays_within_the_lane_budget(self):
+        _targets, shards = RUNNER.load_manifest()
+        lanes = RUNNER.build_lane_matrix(shards, 16)
+
+        self.assertEqual(len(lanes), 16)
+        self.assertLessEqual(max(lane["estimated_seconds"] for lane in lanes), 120)
 
 
 if __name__ == "__main__":
