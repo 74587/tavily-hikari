@@ -47,6 +47,10 @@
   改为独立的单进程、单线程精确 shard，并由 identity 的 exact exclusion 保持唯一归属。Actions 计时还
   发现 operational maintenance 被低估；按实测提高其权重并仅为该 shard 允许四个过滤进程，使 LPT 重新
   保持在 120 秒预算内。
+- 2026-08-22：Actions 步骤计时确认 prepare 的 165 秒几乎完全是完整测试可执行文件的冷编译，test-list
+  discovery 和 bundle staging 合计不足一秒。Plan 因此缓存 profile-scoped `target/ci-test`，键固定平台、
+  toolchain、profile/linker 与 `Cargo.lock`；Cargo fingerprint 仍决定源码变更的重编，缓存不复用后端测试
+  bundle，也不把缓存容量或保留策略写进仓库。
 
 ## Key Reasons / Replacements
 

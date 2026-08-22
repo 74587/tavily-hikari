@@ -72,6 +72,10 @@
 - `Backend Shard Plan` does not depend on `web-assets`. It compiles all backend test targets once
   with the `ci-test` profile and a minimal web fixture, verifies manifest ownership, uploads the
   backend bundle, and exports at most 16 non-empty lanes.
+- The plan restores only the `ci-test` compilation directory from a cache keyed by platform,
+  toolchain, profile/linker configuration, and `Cargo.lock`. A cache hit may reuse valid
+  test-profile compilation; Cargo fingerprints rebuild changed project code. This cache is not a backend test
+  artifact and never replaces its bundle checksum verification.
 - Each `Backend Test Lane` downloads the self-contained bundle, materializes its bundled source
   contract, verifies executable checksums while loading it, and executes its assigned shards in
   order. A lane does not check out source files or install Bun, Rust, Cargo caches, or system

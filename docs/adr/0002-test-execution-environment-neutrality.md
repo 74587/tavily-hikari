@@ -25,8 +25,12 @@ duplicate test executables, and repeated toolchain setup on every test shard.
 - CI uses the `ci-test` Cargo profile, a minimal embedded-web fixture, a checksum-verified
   executable bundle, and balanced lanes. Full web asset production remains independently checked
   by the frontend build job.
-- External execution capacity, caching, scheduling, and retention remain outside repository
-  configuration.
+- CI restores the `ci-test` compilation directory with a key that fixes the platform, Rust
+  toolchain, profile/linker configuration, and `Cargo.lock`. Cargo fingerprints remain the source
+  of truth for rebuilding changed project code; the cache never replaces the checksum-verified
+  backend test bundle.
+- External execution capacity, cache capacity and retention, and scheduling remain outside
+  repository configuration.
 
 ## Consequences
 
