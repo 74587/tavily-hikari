@@ -216,6 +216,7 @@ jobs:
         with:
           name: backend-test-artifacts
           path: /tmp/backend-test-artifacts
+          compression-level: 1
           if-no-files-found: error
 
       - name: Export balanced backend lane matrix

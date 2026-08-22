@@ -126,12 +126,11 @@
       "id": "lib-request-rollup-storage",
       "kind": "lib",
       "name": "Lib Request Rollup Storage",
-      "estimated_seconds": 100,
+      "estimated_seconds": 45,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
       "serial_prefixes": [
-        "tests::jobs_and_request_log_retention::request_",
         "tests::observability_and_lifecycle::request_",
         "tests::request_kind_and_core::request_",
         "tests::request_rollup::request_",
@@ -139,22 +138,47 @@
         "tests::user_tokens_and_pending_billing::request_"
       ],
       "include_prefixes": [
-        "tests::jobs_and_request_log_retention::request_",
         "tests::observability_and_lifecycle::request_",
         "tests::request_kind_and_core::request_",
         "tests::request_rollup::request_",
         "tests::usage_series_and_backfills::request_",
         "tests::user_tokens_and_pending_billing::request_",
-        "tests::jobs_and_request_log_retention::startup_",
         "tests::request_kind_and_core::startup_",
         "tests::request_rollup::startup_",
-        "tests::jobs_and_request_log_retention::quota_",
         "tests::request_rollup::quota_",
-        "tests::jobs_and_request_log_retention::standalone_request_logs_gc_",
         "tests::ha_outbox_and_compaction::standalone_ha_outbox_gc_",
         "tests::request_kind_and_core::successful_",
-        "tests::jobs_and_request_log_retention::scheduled_",
         "tests::request_rollup::suppressed_"
+      ]
+    },
+    {
+      "id": "lib-request-log-retention",
+      "kind": "lib",
+      "name": "Lib Request Log Retention",
+      "estimated_seconds": 60,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "filtered_test_threads": 2,
+      "serial_prefixes": [
+        "tests::jobs_and_request_log_retention::request_"
+      ],
+      "include_prefixes": [
+        "tests::jobs_and_request_log_retention::request_",
+        "tests::jobs_and_request_log_retention::standalone_request_logs_gc_"
+      ]
+    },
+    {
+      "id": "lib-scheduled-request-maintenance",
+      "kind": "lib",
+      "name": "Lib Scheduled Request Maintenance",
+      "estimated_seconds": 45,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "filtered_test_threads": 2,
+      "include_prefixes": [
+        "tests::jobs_and_request_log_retention::startup_",
+        "tests::jobs_and_request_log_retention::quota_",
+        "tests::jobs_and_request_log_retention::scheduled_"
       ]
     },
     {
@@ -454,10 +478,10 @@
       ]
     },
     {
-      "id": "bin-admin-api-resources",
+      "id": "bin-admin-api-identity",
       "kind": "bin",
-      "name": "Bin Admin API Resources",
-      "estimated_seconds": 110,
+      "name": "Bin Admin API Identity",
+      "estimated_seconds": 70,
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "filtered_process_workers": 2,
@@ -466,25 +490,49 @@
       ],
       "filtered_test_threads": 2,
       "include_prefixes": [
-        "server::tests::admin_logs_and_summary::admin_",
         "server::tests::admin_token_filters_and_maintenance::admin_",
         "server::tests::admin_analysis_pressure::analysis_",
         "server::tests::admin_token_owner_summary::admin_",
         "server::tests::admin_users_and_tokens::account_",
         "server::tests::admin_users_and_tokens::admin_",
         "server::tests::admin_users_shadow_daily_projection::list_",
+        "server::tests::api_keys_and_registration::api_",
+        "server::tests::linuxdo_oauth_and_admin_keys::api_"
+      ]
+    },
+    {
+      "id": "bin-admin-api-observability",
+      "kind": "bin",
+      "name": "Bin Admin API Observability",
+      "estimated_seconds": 60,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "filtered_process_workers": 2,
+      "filtered_test_threads": 2,
+      "include_prefixes": [
+        "server::tests::admin_logs_and_summary::admin_",
         "server::tests::dashboard_overview_snapshot::admin_",
         "server::tests::log_catalog_and_dashboard_sse::admin_",
-        "server::tests::system_settings_and_forward_proxy::admin_",
-        "server::tests::system_settings_reconciliation_status::admin_",
         "server::tests::tavily_http_search::admin_",
         "server::tests::admin_logs_and_summary::api_",
-        "server::tests::api_keys_and_registration::api_",
         "server::tests::branded_assets_contract::",
-        "server::tests::linuxdo_oauth_and_admin_keys::api_",
         "server::tests::log_catalog_and_dashboard_sse::api_",
         "server::admin_resources_tests::",
         "server::dto_tests::"
+      ]
+    },
+    {
+      "id": "bin-admin-api-settings",
+      "kind": "bin",
+      "name": "Bin Admin API Settings",
+      "estimated_seconds": 55,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "filtered_process_workers": 2,
+      "filtered_test_threads": 2,
+      "include_prefixes": [
+        "server::tests::system_settings_and_forward_proxy::admin_",
+        "server::tests::system_settings_reconciliation_status::admin_"
       ]
     },
     {

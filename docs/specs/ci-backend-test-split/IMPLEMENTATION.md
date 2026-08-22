@@ -48,6 +48,10 @@
   - Reconciliation coverage is divided into maintenance, upstream-reconciliation, and projection
     groups. This keeps the long upstream test binary from queueing behind unrelated reconciliation
     prefixes while the coverage verifier continues to reject overlap or omissions.
+  - Request rollup storage is divided into rollup storage, request-log retention, and scheduled
+    request-maintenance groups. Admin resources are divided into identity, observability, and
+    settings groups. The manifest contract tests preserve the old prefix unions, so the split can
+    only alter lane placement, not test ownership.
   - MCP main-binary coverage is split into mutually exclusive billing, rebalance-session,
     rebalance-control, research, and system groups so long semantic prefixes cannot share one
     lane tail. Research and system groups retain their serial process boundaries.
@@ -58,6 +62,8 @@
     this keeps the long HA prefix family from becoming a single atomic lane tail.
   - `prepare-artifacts` logs compilation, test-list discovery, and bundle-staging elapsed markers.
     They make a cold-compile regression attributable without turning elapsed time into a CI gate.
+    Backend artifact upload uses a lower compression level to reduce CPU time on the critical path;
+    artifact metadata remains subject to the existing size budget.
 - Development execution
   - `run-all`, `run-shard`, and `run-lane` accept Cargo-job, filtered-process-worker, and
     filtered-test-thread controls. The local default is `2/1/2`; `--diagnostic` is `1/1/1`.

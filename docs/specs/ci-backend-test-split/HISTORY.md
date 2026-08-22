@@ -40,6 +40,9 @@
 - 2026-08-22：原生 lane 计时确认 reconciliation 的 upstream test process 在同一 shard 内排队；覆盖按
   maintenance、upstream-reconciliation、projection 语义拆开，并以带余量的实测权重重新装箱。prepare
   同时记录 compile、test-list discovery、bundle staging 三段耗时，作为诊断证据而非新的性能门禁。
+- 2026-08-22：后续原生计时确认 admin resources 与 request rollup storage 仍是单 lane 长尾；分别按
+  identity/observability/settings 和 storage/request-log-retention/scheduled-maintenance 语义细分。静态
+  prefix-union 合同固定旧覆盖集合，artifact 上传降低压缩等级以缩短关键路径的上传 CPU 时间。
 
 ## Key Reasons / Replacements
 

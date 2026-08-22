@@ -180,6 +180,103 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             },
         )
 
+    def test_request_rollup_storage_shards_are_mutually_exclusive(self):
+        _, shards = RUNNER.load_manifest()
+        storage_shards = {
+            shard["id"]: shard
+            for shard in shards
+            if shard["id"]
+            in {
+                "lib-request-rollup-storage",
+                "lib-request-log-retention",
+                "lib-scheduled-request-maintenance",
+            }
+        }
+
+        self.assertEqual(
+            set(storage_shards),
+            {
+                "lib-request-rollup-storage",
+                "lib-request-log-retention",
+                "lib-scheduled-request-maintenance",
+            },
+        )
+        prefixes = [
+            prefix for shard in storage_shards.values() for prefix in shard["include_prefixes"]
+        ]
+        self.assertEqual(len(prefixes), len(set(prefixes)))
+        self.assertEqual(
+            set(prefixes),
+            {
+                "tests::jobs_and_request_log_retention::request_",
+                "tests::observability_and_lifecycle::request_",
+                "tests::request_kind_and_core::request_",
+                "tests::request_rollup::request_",
+                "tests::usage_series_and_backfills::request_",
+                "tests::user_tokens_and_pending_billing::request_",
+                "tests::jobs_and_request_log_retention::startup_",
+                "tests::request_kind_and_core::startup_",
+                "tests::request_rollup::startup_",
+                "tests::jobs_and_request_log_retention::quota_",
+                "tests::request_rollup::quota_",
+                "tests::jobs_and_request_log_retention::standalone_request_logs_gc_",
+                "tests::ha_outbox_and_compaction::standalone_ha_outbox_gc_",
+                "tests::request_kind_and_core::successful_",
+                "tests::jobs_and_request_log_retention::scheduled_",
+                "tests::request_rollup::suppressed_",
+            },
+        )
+
+    def test_admin_api_resource_shards_are_mutually_exclusive(self):
+        _, shards = RUNNER.load_manifest()
+        resource_shards = {
+            shard["id"]: shard
+            for shard in shards
+            if shard["id"]
+            in {
+                "bin-admin-api-identity",
+                "bin-admin-api-observability",
+                "bin-admin-api-settings",
+            }
+        }
+
+        self.assertEqual(
+            set(resource_shards),
+            {
+                "bin-admin-api-identity",
+                "bin-admin-api-observability",
+                "bin-admin-api-settings",
+            },
+        )
+        prefixes = [
+            prefix for shard in resource_shards.values() for prefix in shard["include_prefixes"]
+        ]
+        self.assertEqual(len(prefixes), len(set(prefixes)))
+        self.assertEqual(
+            set(prefixes),
+            {
+                "server::tests::admin_logs_and_summary::admin_",
+                "server::tests::admin_token_filters_and_maintenance::admin_",
+                "server::tests::admin_analysis_pressure::analysis_",
+                "server::tests::admin_token_owner_summary::admin_",
+                "server::tests::admin_users_and_tokens::account_",
+                "server::tests::admin_users_and_tokens::admin_",
+                "server::tests::admin_users_shadow_daily_projection::list_",
+                "server::tests::dashboard_overview_snapshot::admin_",
+                "server::tests::log_catalog_and_dashboard_sse::admin_",
+                "server::tests::system_settings_and_forward_proxy::admin_",
+                "server::tests::system_settings_reconciliation_status::admin_",
+                "server::tests::tavily_http_search::admin_",
+                "server::tests::admin_logs_and_summary::api_",
+                "server::tests::api_keys_and_registration::api_",
+                "server::tests::branded_assets_contract::",
+                "server::tests::linuxdo_oauth_and_admin_keys::api_",
+                "server::tests::log_catalog_and_dashboard_sse::api_",
+                "server::admin_resources_tests::",
+                "server::dto_tests::",
+            },
+        )
+
     def test_ci_lane_count_stays_within_the_maximum(self):
         lanes = RUNNER.build_lane_matrix(
             [{"id": f"shard-{index}", "estimated_seconds": index + 1} for index in range(25)],
@@ -243,8 +340,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         alert = next(shard for shard in shards if shard["id"] == "lib-alert-projection")
         affinity = next(shard for shard in shards if shard["id"] == "lib-affinity-domain")
-        admin_resources = next(
-            shard for shard in shards if shard["id"] == "bin-admin-api-resources"
+        admin_identity = next(
+            shard for shard in shards if shard["id"] == "bin-admin-api-identity"
+        )
+        admin_observability = next(
+            shard for shard in shards if shard["id"] == "bin-admin-api-observability"
+        )
+        admin_settings = next(
+            shard for shard in shards if shard["id"] == "bin-admin-api-settings"
         )
         admin_lifecycle = next(
             shard for shard in shards if shard["id"] == "bin-admin-api-lifecycle"
@@ -267,10 +370,12 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
-        self.assertEqual(RUNNER.shard_resource_limits(admin_resources, 3, 2), (2, 2))
+        self.assertEqual(RUNNER.shard_resource_limits(admin_identity, 3, 2), (2, 2))
+        self.assertEqual(RUNNER.shard_resource_limits(admin_observability, 3, 2), (2, 2))
+        self.assertEqual(RUNNER.shard_resource_limits(admin_settings, 3, 2), (2, 2))
         self.assertIn(
             "server::tests::admin_users_and_tokens::admin_dashboard_sse_snapshot_refreshes_when_recent_alerts_change",
-            admin_resources["serial_prefixes"],
+            admin_identity["serial_prefixes"],
         )
         self.assertIn(
             "server::tests::alerts_and_ha_dashboard_defaults::admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses",
