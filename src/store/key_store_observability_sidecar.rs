@@ -592,16 +592,6 @@ impl KeyStore {
         )
         .execute(pool)
         .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO observability.server_pressure_rebuild_state (
-                singleton, active_generation, last_allocated_generation
-            ) VALUES (1, 0, 0)
-            ON CONFLICT(singleton) DO NOTHING
-            "#,
-        )
-        .execute(pool)
-        .await?;
         for sql in [
             r#"CREATE INDEX IF NOT EXISTS observability.idx_server_pressure_buckets_kind_time
                ON server_pressure_buckets(bucket_kind, bucket_start DESC)"#,

@@ -2358,6 +2358,7 @@ impl KeyStore {
 
         self.ensure_scheduled_jobs_queue_schema().await?;
         self.ensure_meta_schema().await?;
+        self.ensure_server_pressure_bucket_schema().await?;
         self.ensure_request_logs_read_indexes().await?;
         self.migrate_log_effect_buckets().await?;
 
