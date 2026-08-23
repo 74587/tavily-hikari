@@ -742,6 +742,10 @@
         "--bin",
         "tavily-hikari"
       ],
+      "isolated_prefixes": [
+        "server::tests::mcp_billing_and_sessions::mcp_"
+      ],
+      "isolated_process_workers": 4,
       "include_prefixes": [
         "server::tests::mcp_billing_and_sessions::mcp_"
       ]

@@ -100,6 +100,9 @@
   141 秒 lane。operational 的重复样本上界据此提升至 110 秒；已因独立并行处理而不再长尾的 dashboard
   overview 与 Tavily HTTP 分别回校为 51/68 秒，腾出 LPT 容量分散该组合。测试归属、selector、进程上限与
   断言保持不变。
+- 2026-08-23：MCP billing 的 32 条测试在单一过滤进程中偶发耗时 152 秒。该既有语义 prefix 改由 exact
+  dispatcher 在 CI 的四进程上限内逐条运行；低资源调用仍受一进程上限约束。测试集合、断言与生产时间语义
+  保持不变。
 
 ## Key Reasons / Replacements
 

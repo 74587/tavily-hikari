@@ -456,6 +456,17 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         self.assertEqual(RUNNER.isolated_process_worker_limit(reporting, 4), 1)
 
+    def test_mcp_billing_runs_as_isolated_exact_tests(self):
+        _targets, shards = RUNNER.load_manifest()
+        billing = next(shard for shard in shards if shard["id"] == "bin-mcp-billing")
+        billing_prefix = "server::tests::mcp_billing_and_sessions::mcp_"
+
+        self.assertEqual(billing["include_prefixes"], [billing_prefix])
+        self.assertEqual(billing["isolated_prefixes"], [billing_prefix])
+        self.assertEqual(billing["isolated_process_workers"], 4)
+        self.assertEqual(RUNNER.isolated_process_worker_limit(billing, 4), 4)
+        self.assertEqual(RUNNER.isolated_process_worker_limit(billing, 2), 2)
+
     def test_ha_lifecycle_shards_separate_event_and_recovery_tests(self):
         _targets, shards = RUNNER.load_manifest()
         selected = {
