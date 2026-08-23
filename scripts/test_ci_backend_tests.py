@@ -435,8 +435,8 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertIn(dashboard_prefix, forward["exclude_prefixes"])
         self.assertEqual(dashboard["include_prefixes"], [dashboard_prefix])
         self.assertEqual(dashboard["filtered_test_threads"], 2)
-        self.assertGreaterEqual(forward["estimated_seconds"], 100)
-        self.assertGreaterEqual(dashboard["estimated_seconds"], 112)
+        self.assertEqual(forward["estimated_seconds"], 41)
+        self.assertEqual(dashboard["estimated_seconds"], 41)
 
     def test_sensitive_shards_cap_ci_parallelism(self):
         _targets, shards = RUNNER.load_manifest()
@@ -477,8 +477,8 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         operational = next(
             shard for shard in shards if shard["id"] == "lib-operational-maintenance"
         )
-        account_identity = next(
-            shard for shard in shards if shard["id"] == "lib-account-user-identity"
+        user_business_calls = next(
+            shard for shard in shards if shard["id"] == "lib-user-business-calls"
         )
         mcp_research_protocol = next(
             shard for shard in shards if shard["id"] == "bin-mcp-research-protocol"
@@ -536,7 +536,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         )
         self.assertIn(
             "tests::user_business_calls_1h::user_",
-            account_identity["serial_prefixes"],
+            user_business_calls["serial_prefixes"],
         )
         self.assertIn(
             "server::tests::system_settings_and_forward_proxy::mcp_",
@@ -557,6 +557,46 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(mcp_research_protocol["serial_prefixes"], [mcp_prefix])
         self.assertEqual(mcp_research_batch["include_prefixes"], [batch_prefix])
         self.assertEqual(mcp_research_batch["serial_prefixes"], [batch_prefix])
+
+    def test_account_identity_shards_preserve_semantic_boundaries(self):
+        _targets, shards = RUNNER.load_manifest()
+        selected = {
+            shard["id"]: shard
+            for shard in shards
+            if shard["id"]
+            in {
+                "lib-account-linuxdo-identity",
+                "lib-user-token-identity",
+                "lib-user-business-calls",
+                "lib-account-legacy-identity",
+            }
+        }
+
+        self.assertEqual(
+            set(selected),
+            {
+                "lib-account-linuxdo-identity",
+                "lib-user-token-identity",
+                "lib-user-business-calls",
+                "lib-account-legacy-identity",
+            },
+        )
+        self.assertIn(
+            "tests::account_quota_and_billing::account_",
+            selected["lib-account-linuxdo-identity"]["include_prefixes"],
+        )
+        self.assertIn(
+            "tests::user_tokens_and_pending_billing::token_",
+            selected["lib-user-token-identity"]["include_prefixes"],
+        )
+        self.assertEqual(
+            selected["lib-user-business-calls"]["serial_prefixes"],
+            ["tests::user_business_calls_1h::user_"],
+        )
+        self.assertIn(
+            "tests::request_rollup::legacy_",
+            selected["lib-account-legacy-identity"]["include_prefixes"],
+        )
 
     def test_serial_parent_filter_safely_skips_a_child_prefix(self):
         parent_prefix = "server::tests::research::mcp_"

@@ -69,6 +69,9 @@
 - 2026-08-23：LinuxDo/forward lane 的 dashboard overview filter 单独运行 26 个测试时达到约 107 秒，和
   其它 forward checks 叠加后形成长尾。该 dashboard prefix 拆为独立的两线程语义 shard，并按实测提高剩余
   LinuxDo shard 权重。
+- 2026-08-23：native Actions shard telemetry 显示旧权重高估大部分短 shard，却低估账户/用户 identity
+  组合 shard；后者与 MCP protocol 串行后超过单 lane 预算。identity coverage 因此拆为四个互斥语义组，
+  其中 business-call 的既有串行 prefix 独立保留，全部 LPT 权重按实测重校准。
 
 ## Key Reasons / Replacements
 

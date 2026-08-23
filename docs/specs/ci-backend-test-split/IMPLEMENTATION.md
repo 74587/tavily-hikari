@@ -52,6 +52,9 @@
     ownership while avoiding shared SQLite pool contention in two-thread filter processes.
   - The LinuxDo/forward shard excludes the dashboard overview group, which runs in its own two-thread
     semantic shard. This keeps the long dashboard process from serially extending unrelated LinuxDo checks.
+  - Account and user identity coverage is divided into account/LinuxDo, user-token, user-business-call, and
+    legacy-account groups. The existing serial business-call prefix remains in its own group, so it no longer
+    waits behind unrelated identity filters.
   - `lib-request-rollup`, `lib-account-user`, `bin-admin-api`, and `bin-ha-rest` are split into
     mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
     are independent groups so measured long tails can be packed separately. Manifest estimates
@@ -77,7 +80,7 @@
     prefixes cannot share one lane tail. The protocol group runs its parent prefix with the batch
     child prefix skipped only after set-equivalence validation; both research groups and system
     retain their serial process boundaries.
-  - Manifest weights are calibrated from native shard timings with eight seconds of per-shard
+  - Manifest weights are recalibrated from native shard timings with four seconds of per-shard
     headroom. Request-log retention is divided into GC maintenance and serial policy groups, so
     its two long prefixes are independently packed while the policy process remains serial.
     Affinity, reconciliation, LinuxDo, reporting, and server HTTP contract retain enough weight
