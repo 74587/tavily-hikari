@@ -343,6 +343,8 @@ impl KeyStore {
                 cursor_id INTEGER,
                 counts_json TEXT NOT NULL,
                 status TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                recovery INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL
             )
             "#,
@@ -368,6 +370,20 @@ impl KeyStore {
                 bucket_end INTEGER NOT NULL,
                 cursor INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+            r#"
+            CREATE TABLE IF NOT EXISTS observability.dashboard_rollup_rebalance_recovery (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                range_start INTEGER,
+                range_end INTEGER,
+                source_fence INTEGER,
+                cursor INTEGER,
+                last_error TEXT,
+                completed_at INTEGER,
                 updated_at INTEGER NOT NULL
             )
             "#,
@@ -440,6 +456,36 @@ impl KeyStore {
             .execute(pool)
             .await?;
         }
+        let has_priority_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_work_items') WHERE name = 'priority' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_priority_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_work_items ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await?;
+        }
+        let has_recovery_column: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM observability.pragma_table_info('dashboard_rollup_integrity_work_items') WHERE name = 'recovery' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
+        if has_recovery_column.is_none() {
+            sqlx::query(
+                "ALTER TABLE observability.dashboard_rollup_integrity_work_items ADD COLUMN recovery INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS observability.idx_dashboard_rollup_integrity_work_priority
+               ON dashboard_rollup_integrity_work_items(status, priority DESC, updated_at ASC, range_start ASC)"#,
+        )
+        .execute(pool)
+        .await?;
 
         sqlx::query(
             r#"

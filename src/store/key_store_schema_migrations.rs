@@ -294,6 +294,7 @@ impl KeyStore {
             "dashboard_rollup_integrity_gaps",
             "dashboard_rollup_integrity_state",
             "dashboard_rollup_integrity_work_items",
+            "dashboard_rollup_rebalance_recovery",
             "request_log_catalog_rollups",
             "request_logs",
             "server_pressure_buckets",
