@@ -51,7 +51,7 @@ struct CachedDashboardOverviewSnapshot {
     freshness: Arc<DashboardOverviewFreshness>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DashboardOverviewCacheState {
     cached: Option<CachedDashboardOverviewSnapshot>,
     loading: bool,
@@ -128,11 +128,13 @@ struct AdminPrivacyStatusCacheEntry {
     stored_at: tokio::time::Instant,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct AdminPrivacyStatusController {
     last_good: Option<AdminPrivacyStatusCacheEntry>,
     refresh_in_flight: bool,
     last_refresh_reason: Option<&'static str>,
+    refresh_task: Option<tokio::task::JoinHandle<()>>,
+    shutting_down: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +230,10 @@ pub(crate) async fn start_admin_privacy_status_refresh(
     if cache.admin_privacy_status.refresh_in_flight {
         return AdminPrivacyStatusRefreshStart::InFlight;
     }
+    if cache.admin_privacy_status.shutting_down {
+        cache.admin_privacy_status.last_refresh_reason = Some("shutdown");
+        return AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" };
+    }
     if let Some(reason) = state.proxy.admin_privacy_status_refresh_defer_reason() {
         cache.admin_privacy_status.last_refresh_reason = Some(reason);
         return AdminPrivacyStatusRefreshStart::Deferred { reason };
@@ -239,12 +245,12 @@ pub(crate) async fn start_admin_privacy_status_refresh(
     {
         cache.admin_privacy_refresh_count = cache.admin_privacy_refresh_count.saturating_add(1);
     }
-    drop(cache);
-
-    tokio::spawn(async move {
+    let refresh_task = tokio::spawn(async move {
         let result = state.proxy.upstream_privacy_status().await;
         finish_admin_privacy_status_refresh(state.as_ref(), result).await;
     });
+    cache.admin_privacy_status.refresh_task = Some(refresh_task);
+    drop(cache);
     AdminPrivacyStatusRefreshStart::Started
 }
 
@@ -306,6 +312,30 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
     }
 }
 
+pub(crate) async fn shutdown_admin_privacy_status_refresh(state: &AppState) {
+    let refresh_task = {
+        let cache = dashboard_overview_cache_for_state(state);
+        let mut cache = cache.lock().await;
+        cache.admin_privacy_status.shutting_down = true;
+        cache.admin_privacy_status.refresh_task.take()
+    };
+    let Some(refresh_task) = refresh_task else {
+        return;
+    };
+
+    // A refresh owns an open immutable read snapshot until it reaches its
+    // explicit close boundary. Do not abort it during shutdown, because Drop
+    // must remain a fault-containment path rather than normal control flow.
+    if let Err(error) = refresh_task.await {
+        tracing::warn!(
+            component = "shutdown",
+            event = "admin_privacy_status_refresh_join_failed",
+            error = %error,
+            "privacy-status refresh ended before its cooperative close boundary"
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn expire_admin_privacy_status_last_good_for_test(state: &AppState) {
     let cache = dashboard_overview_cache_for_state(state);
@@ -333,6 +363,19 @@ pub(crate) async fn wait_for_admin_privacy_status_refresh(state: &AppState) {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("admin privacy status refresh did not finish");
+}
+
+#[cfg(test)]
+pub(crate) async fn prime_admin_privacy_status_for_test(state: Arc<AppState>) {
+    for _ in 0..100 {
+        prewarm_admin_privacy_status(state.clone()).await;
+        wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+        if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("admin privacy status prewarm did not publish last-good data");
 }
 
 fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {

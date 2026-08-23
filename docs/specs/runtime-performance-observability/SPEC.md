@@ -76,7 +76,8 @@
   enter maintenance-bulk admission, and explicitly close at a cooperative completion boundary.
   HTTP only copies last-good data: a cached value, including one older than 60 seconds, returns
   additive `stale` coverage within 250ms while refresh is in flight or deferred; a true cold miss
-  returns `503 Retry-After: 1` without canceling an open SQLite transaction.
+  returns `503 Retry-After: 1` without canceling an open SQLite transaction. Shutdown fences new
+  refreshes and waits for an active snapshot to close cooperatively.
 - A server-pressure rebuild scans at most 500 source rows per keyset slice below its fixed source
   fence, writes only an inactive staged generation, then atomically publishes that generation before
   replaying its buffered tail. Old generations are cleaned in 25-row slices; no rebuild may delete

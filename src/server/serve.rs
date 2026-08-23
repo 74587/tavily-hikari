@@ -607,6 +607,7 @@ pub async fn serve(
         shutdown_proxy.nudge_request_stats_flush().await;
     })
     .await?;
+    shutdown_admin_privacy_status_refresh(post_shutdown_state.as_ref()).await;
     if let Err(err) = post_shutdown_state
         .proxy
         .shutdown_request_stats_coalescer(Duration::from_secs(20))

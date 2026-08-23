@@ -768,8 +768,7 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
     .expect("proxy created");
     let password = "admin-privacy-status-last-good-password";
     let (admin_addr, state) = spawn_builtin_keys_admin_server_with_state(proxy, password).await;
-    prewarm_admin_privacy_status(state.clone()).await;
-    wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+    prime_admin_privacy_status_for_test(state.clone()).await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -938,8 +937,7 @@ async fn admin_privacy_status_serves_stale_last_good_without_cancelling_its_read
     .expect("proxy created");
     let password = "admin-privacy-status-singleflight-stale-password";
     let (admin_addr, state) = spawn_builtin_keys_admin_server_with_state(proxy, password).await;
-    prewarm_admin_privacy_status(state.clone()).await;
-    wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+    prime_admin_privacy_status_for_test(state.clone()).await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -1016,6 +1014,43 @@ async fn admin_privacy_status_serves_stale_last_good_without_cancelling_its_read
     );
     pause.release();
     wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+
+    expire_admin_privacy_status_last_good_for_test(state.as_ref()).await;
+    let shutdown_pause = state
+        .proxy
+        .install_admin_privacy_read_pause_for_test()
+        .await;
+    let shutdown_stale = client
+        .get(&privacy_status_url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("stale privacy status before shutdown");
+    assert_eq!(shutdown_stale.status(), reqwest::StatusCode::OK);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        shutdown_pause.wait_until_arrived(),
+    )
+    .await
+    .expect("the shutdown refresh reached its controlled read pause");
+    let shutdown = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            shutdown_admin_privacy_status_refresh(state.as_ref()).await;
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must wait for the refresh close boundary"
+    );
+    assert_eq!(
+        state.proxy.admin_privacy_read_discards_for_test(),
+        0,
+        "shutdown must not discard an open read snapshot"
+    );
+    shutdown_pause.release();
+    shutdown.await.expect("shutdown task joins");
     state
         .proxy
         .verify_admin_privacy_read_connection_clean_for_test()

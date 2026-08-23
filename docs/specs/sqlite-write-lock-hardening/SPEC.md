@@ -104,7 +104,8 @@ source when a usable persisted runtime already exists.
   only copy its immutable value: an expired cached value must return additive stale coverage while
   one low-priority refresh runs or is deferred, and a true cold miss must return
   `503 Retry-After: 1`. A refresh must explicitly close its `AdminPrivacyRead` snapshot at a
-  cooperative completion boundary; an HTTP deadline must never cancel an open SQLite transaction.
+  cooperative completion boundary; an HTTP deadline or graceful shutdown must never cancel an open
+  SQLite transaction.
 - The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write
   transaction. It may acquire SQLite's writer only for the final small bucket replacement; the
   upper-bound request-log id and buffered live-event replay preserve the handoff across those two
