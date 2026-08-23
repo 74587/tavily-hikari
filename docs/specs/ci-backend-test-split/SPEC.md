@@ -76,6 +76,10 @@
   toolchain, profile/linker configuration, and `Cargo.lock`. A cache hit may reuse valid
   test-profile compilation; Cargo fingerprints rebuild changed project code. This cache is not a backend test
   artifact and never replaces its bundle checksum verification.
+- A shard may own a parent test prefix minus a child prefix only when the runner proves both
+  libtest substring selectors resolve to their respective starts-with sets inside that parent.
+  It then runs one serial parent process with `--skip <child-prefix>`; otherwise it falls back to
+  exact test names. Serial shards retain one process and one test thread for their selected group.
 - Each `Backend Test Lane` downloads the self-contained bundle, materializes its bundled source
   contract, verifies executable checksums while loading it, and executes its assigned shards in
   order. A lane does not check out source files or install Bun, Rust, Cargo caches, or system

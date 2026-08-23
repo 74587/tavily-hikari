@@ -60,8 +60,10 @@
     filters from delaying its event deadline. Operational maintenance has a four-process cap; all
     other shards retain their explicit cap or the default of three.
   - MCP main-binary coverage is split into mutually exclusive billing, rebalance-session,
-    rebalance-control, research, and system groups so long semantic prefixes cannot share one
-    lane tail. Research and system groups retain their serial process boundaries.
+    rebalance-control, research protocol, research batch, and system groups so long semantic
+    prefixes cannot share one lane tail. The protocol group runs its parent prefix with the batch
+    child prefix skipped only after set-equivalence validation; both research groups and system
+    retain their serial process boundaries.
   - Manifest weights are calibrated from native shard timings; affinity, reconciliation, LinuxDo,
     reporting, and server HTTP contract retain enough weight to keep the sixteen-lane LPT output
     within the 120-second lane budget after semantic splits.
@@ -87,9 +89,9 @@
 
 ## Current Validation
 
-- `python3 scripts/test_ci_backend_tests.py`: passed eleven runner contract tests covering format 2
+- `python3 scripts/test_ci_backend_tests.py`: passed eighteen runner contract tests covering format 2
   checksum verification, format 1 loading, deduplicated references, portable lane runtime, stable
-  LPT output, minimal web fixture, and resource defaults.
+  LPT output, minimal web fixture, resource defaults, and the serial parent-prefix child-skip proof.
 - `actionlint .github/workflows/ci.yml`, `cargo fmt --all -- --check`, Markdown formatting, and
   `cargo clippy --locked -j 2 -- -D warnings`: passed.
 - `cargo test --locked -j 2 --all-features --lib runtime_logging::tests::runtime_memory_helpers_parse_status_and_cgroup_values -- --exact --test-threads=2`: passed.

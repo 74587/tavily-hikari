@@ -51,6 +51,10 @@
   discovery 和 bundle staging 合计不足一秒。Plan 因此缓存 profile-scoped `target/ci-test`，键固定平台、
   toolchain、profile/linker 与 `Cargo.lock`；Cargo fingerprint 仍决定源码变更的重编，缓存不复用后端测试
   bundle，也不把缓存容量或保留策略写进仓库。
+- 2026-08-23：缓存命中后原生计时将 prepare 编译降至约 94 秒，但 MCP research 与 HA serving 仍同处最长
+  lane。research 依据 batch 子前缀拆成 protocol/batch 两个互斥串行 shard；runner 仅在父/子 libtest
+  substring 匹配集合经验证等于 manifest starts-with 归属时使用 `--skip`，否则保持 exact fallback，避免以
+  更快的过滤命令换取漏跑或重叠。
 
 ## Key Reasons / Replacements
 

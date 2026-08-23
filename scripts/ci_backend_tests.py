@@ -411,6 +411,10 @@ def run_filtered_tests(
     )
 
 
+def filter_group_name(filter_group):
+    return filter_group[0] if isinstance(filter_group, tuple) else filter_group
+
+
 def run_filtered_tests_with_env(
     executable_path, filters, test_threads, process_workers, extra_env=None
 ):
@@ -420,10 +424,20 @@ def run_filtered_tests_with_env(
     # Keep each prefix in its own rust test process. Running the prefixes in
     # parallel is safe because each invocation gets its own process-global env,
     # temp dir state, and sqlite connections.
-    commands = [
-        [executable_path, f"--test-threads={test_threads}", filter_name]
-        for filter_name in filters
-    ]
+    commands = []
+    for filter_group in filters:
+        if isinstance(filter_group, tuple):
+            filter_name, skipped_prefixes = filter_group
+        else:
+            filter_name, skipped_prefixes = filter_group, ()
+        commands.append(
+            [
+                executable_path,
+                f"--test-threads={test_threads}",
+                *[argument for prefix in skipped_prefixes for argument in ("--skip", prefix)],
+                filter_name,
+            ]
+        )
     run_parallel_test_commands(
         commands,
         max_workers=min(process_workers, len(commands)),
@@ -861,7 +875,7 @@ def select_safe_filter_groups(executable_tests, shard):
         if match_prefixes(test_name, include_prefixes, exclude_prefixes)
     }
     if not selected:
-        return [], []
+        return [], [], [], []
 
     remaining = set(selected)
     safe_groups = []
@@ -874,13 +888,41 @@ def select_safe_filter_groups(executable_tests, shard):
         substring_matches = {test_name for test_name in executable_tests if prefix in test_name}
         if substring_matches != starts_with_prefix:
             continue
-        if not starts_with_prefix.issubset(remaining):
-            continue
-        safe_groups.append((prefix, starts_with_prefix))
-        remaining -= starts_with_prefix
 
-    filters = [prefix for prefix, _ in safe_groups if prefix not in serial_prefixes]
-    serial_filters = [prefix for prefix, _ in safe_groups if prefix in serial_prefixes]
+        skipped_prefixes = []
+        skipped_tests = set()
+        skip_is_safe = True
+        for excluded_prefix in exclude_prefixes:
+            excluded_starts = {
+                test_name for test_name in starts_with_prefix if test_name.startswith(excluded_prefix)
+            }
+            if not excluded_starts:
+                continue
+            excluded_substrings = {
+                test_name for test_name in starts_with_prefix if excluded_prefix in test_name
+            }
+            if excluded_substrings != excluded_starts:
+                skip_is_safe = False
+                break
+            skipped_prefixes.append(excluded_prefix)
+            skipped_tests.update(excluded_starts)
+        if not skip_is_safe:
+            continue
+        if skipped_prefixes and prefix not in serial_prefixes:
+            continue
+
+        group_tests = starts_with_prefix.difference(skipped_tests)
+        if group_tests and group_tests.issubset(remaining):
+            filter_group = (prefix, tuple(skipped_prefixes)) if skipped_prefixes else prefix
+            safe_groups.append((filter_group, group_tests))
+            remaining -= group_tests
+
+    filters = [
+        prefix for prefix, _ in safe_groups if filter_group_name(prefix) not in serial_prefixes
+    ]
+    serial_filters = [
+        prefix for prefix, _ in safe_groups if filter_group_name(prefix) in serial_prefixes
+    ]
     isolated_tests = sorted(
         test_name
         for test_name in remaining

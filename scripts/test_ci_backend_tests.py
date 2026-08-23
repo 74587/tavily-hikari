@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -362,7 +363,12 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         account_identity = next(
             shard for shard in shards if shard["id"] == "lib-account-user-identity"
         )
-        mcp_research = next(shard for shard in shards if shard["id"] == "bin-mcp-research")
+        mcp_research_protocol = next(
+            shard for shard in shards if shard["id"] == "bin-mcp-research-protocol"
+        )
+        mcp_research_batch = next(
+            shard for shard in shards if shard["id"] == "bin-mcp-research-batch"
+        )
         mcp_system = next(shard for shard in shards if shard["id"] == "bin-mcp-system")
         mcp_rebalance_session = next(
             shard for shard in shards if shard["id"] == "bin-mcp-rebalance-session"
@@ -406,9 +412,50 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             "server::tests::mcp_rebalance_and_follow_up::mcp_rebalance_",
             mcp_rebalance_control["include_prefixes"],
         )
-        self.assertIn(
-            "server::tests::research_result_and_mcp_subpath::mcp_",
-            mcp_research["serial_prefixes"],
+        mcp_prefix = "server::tests::research_result_and_mcp_subpath::mcp_"
+        batch_prefix = "server::tests::research_result_and_mcp_subpath::mcp_batch_"
+        self.assertEqual(mcp_research_protocol["include_prefixes"], [mcp_prefix])
+        self.assertEqual(mcp_research_protocol["exclude_prefixes"], [batch_prefix])
+        self.assertEqual(mcp_research_protocol["serial_prefixes"], [mcp_prefix])
+        self.assertEqual(mcp_research_batch["include_prefixes"], [batch_prefix])
+        self.assertEqual(mcp_research_batch["serial_prefixes"], [batch_prefix])
+
+    def test_serial_parent_filter_safely_skips_a_child_prefix(self):
+        parent_prefix = "server::tests::research::mcp_"
+        batch_prefix = "server::tests::research::mcp_batch_"
+        protocol_test = "server::tests::research::mcp_initialize"
+        batch_test = "server::tests::research::mcp_batch_tools_call"
+        shard = {
+            "include_prefixes": [parent_prefix],
+            "exclude_prefixes": [batch_prefix],
+            "serial_prefixes": [parent_prefix],
+            "isolated_prefixes": [],
+        }
+
+        filters, serial_filters, exact_fallback, isolated_tests = RUNNER.select_safe_filter_groups(
+            [protocol_test, batch_test], shard
+        )
+
+        self.assertEqual(filters, [])
+        self.assertEqual(serial_filters, [(parent_prefix, (batch_prefix,))])
+        self.assertEqual(exact_fallback, [])
+        self.assertEqual(isolated_tests, [])
+        with mock.patch.object(RUNNER, "run_parallel_test_commands") as run_commands:
+            RUNNER.run_filtered_tests_with_env(
+                "/tmp/test-binary", serial_filters, 1, 1
+            )
+        run_commands.assert_called_once_with(
+            [
+                [
+                    "/tmp/test-binary",
+                    "--test-threads=1",
+                    "--skip",
+                    batch_prefix,
+                    parent_prefix,
+                ]
+            ],
+            max_workers=1,
+            extra_env=None,
         )
 
     def test_isolated_prefixes_run_as_serial_exact_tests(self):
@@ -442,7 +489,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             ],
         )
 
-    def test_exact_exclusion_keeps_a_child_test_out_of_parent_filter(self):
+    def test_nonserial_exclusion_keeps_a_child_test_out_of_parent_filter(self):
         special_test = "server::tests::admin::dashboard_sse"
         shard = {
             "include_prefixes": ["server::tests::admin::"],
