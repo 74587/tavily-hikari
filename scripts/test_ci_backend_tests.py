@@ -189,7 +189,8 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             if shard["id"]
             in {
                 "lib-request-rollup-storage",
-                "lib-request-log-retention",
+                "lib-request-log-retention-maintenance",
+                "lib-request-log-retention-policy",
                 "lib-scheduled-request-maintenance",
             }
         }
@@ -198,7 +199,8 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             set(storage_shards),
             {
                 "lib-request-rollup-storage",
-                "lib-request-log-retention",
+                "lib-request-log-retention-maintenance",
+                "lib-request-log-retention-policy",
                 "lib-scheduled-request-maintenance",
             },
         )
@@ -226,6 +228,38 @@ class BackendTestRunnerContractTests(unittest.TestCase):
                 "tests::jobs_and_request_log_retention::scheduled_",
                 "tests::request_rollup::suppressed_",
             },
+        )
+
+    def test_request_log_retention_shards_preserve_serial_policy_execution(self):
+        _targets, shards = RUNNER.load_manifest()
+        retention_shards = {
+            shard["id"]: shard
+            for shard in shards
+            if shard["id"]
+            in {
+                "lib-request-log-retention-maintenance",
+                "lib-request-log-retention-policy",
+            }
+        }
+
+        self.assertEqual(
+            set(retention_shards),
+            {
+                "lib-request-log-retention-maintenance",
+                "lib-request-log-retention-policy",
+            },
+        )
+        self.assertEqual(
+            retention_shards["lib-request-log-retention-maintenance"]["include_prefixes"],
+            ["tests::jobs_and_request_log_retention::standalone_request_logs_gc_"],
+        )
+        self.assertEqual(
+            retention_shards["lib-request-log-retention-policy"]["include_prefixes"],
+            ["tests::jobs_and_request_log_retention::request_"],
+        )
+        self.assertEqual(
+            retention_shards["lib-request-log-retention-policy"]["serial_prefixes"],
+            ["tests::jobs_and_request_log_retention::request_"],
         )
 
     def test_admin_api_resource_shards_are_mutually_exclusive(self):

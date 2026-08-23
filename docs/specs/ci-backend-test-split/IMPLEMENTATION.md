@@ -64,9 +64,11 @@
     prefixes cannot share one lane tail. The protocol group runs its parent prefix with the batch
     child prefix skipped only after set-equivalence validation; both research groups and system
     retain their serial process boundaries.
-  - Manifest weights are calibrated from native shard timings; affinity, reconciliation, LinuxDo,
-    reporting, and server HTTP contract retain enough weight to keep the sixteen-lane LPT output
-    within the 120-second lane budget after semantic splits.
+  - Manifest weights are calibrated from native shard timings with eight seconds of per-shard
+    headroom. Request-log retention is divided into GC maintenance and serial policy groups, so
+    its two long prefixes are independently packed while the policy process remains serial.
+    Affinity, reconciliation, LinuxDo, reporting, and server HTTP contract retain enough weight
+    to keep the sixteen-lane LPT output within the 120-second lane budget after semantic splits.
   - HA lifecycle coverage is divided into mutually exclusive lifecycle and lifecycle-state groups;
     this keeps the long HA prefix family from becoming a single atomic lane tail.
   - `prepare-artifacts` logs compilation, test-list discovery, and bundle-staging elapsed markers.

@@ -55,6 +55,9 @@
   lane。research 依据 batch 子前缀拆成 protocol/batch 两个互斥串行 shard；runner 仅在父/子 libtest
   substring 匹配集合经验证等于 manifest starts-with 归属时使用 `--skip`，否则保持 exact fallback，避免以
   更快的过滤命令换取漏跑或重叠。
+- 2026-08-23：后续完整 CI 的 MCP 拆分已将原 lane 从 173 秒降到 93 秒，但 request-log retention 与
+  rollup lifecycle 的顺序组合仍使 aggregate 比五分钟多一秒。以该轮所有原子 shard 的实测耗时加八秒余量
+  重校 LPT 权重，并把 retention 的 GC maintenance 与 serial policy 前缀拆成独立 shard，消除这条组合尾部。
 
 ## Key Reasons / Replacements
 
