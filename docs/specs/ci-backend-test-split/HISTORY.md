@@ -87,6 +87,9 @@
 - 2026-08-23：后续 cold sample 发现 admin identity 与 operational maintenance 的峰值也会使组合 lane
   超预算。两者改与低波动 shard 配对；state base、HA event/recovery、support 与单条 contract shard 的
   余量按重复观测收回，使固定十六 lane 装箱保持在 120 秒上限内。
+- 2026-08-23：`tavily_http_search` 的 40 个测试在同一两线程过滤进程中出现 184 秒长尾。该 prefix
+  改由既有 exact dispatcher 在 CI 的四进程上限内逐条运行；测试集合、断言和生产 SQLite 控制预算不变。
+  同时提高该原子 shard 的 LPT 权重，使其不再与 forward-proxy 串行。
 
 ## Key Reasons / Replacements
 

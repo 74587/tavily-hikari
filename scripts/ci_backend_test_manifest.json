@@ -710,12 +710,16 @@
       "id": "bin-tavily-http",
       "kind": "bin",
       "name": "Bin Tavily HTTP",
-      "estimated_seconds": 78,
+      "estimated_seconds": 80,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
         "tavily-hikari"
       ],
+      "isolated_prefixes": [
+        "server::tests::tavily_http_search::tavily_"
+      ],
+      "filtered_process_workers": 4,
       "include_prefixes": [
         "server::avatar_url_tests::",
         "server::spa_404_tests::",
