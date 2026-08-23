@@ -436,7 +436,42 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(dashboard["include_prefixes"], [dashboard_prefix])
         self.assertEqual(dashboard["filtered_test_threads"], 2)
         self.assertEqual(forward["estimated_seconds"], 41)
-        self.assertEqual(dashboard["estimated_seconds"], 41)
+        self.assertEqual(dashboard["estimated_seconds"], 80)
+
+    def test_ha_lifecycle_shards_separate_event_and_recovery_tests(self):
+        _targets, shards = RUNNER.load_manifest()
+        selected = {
+            shard["id"]: shard
+            for shard in shards
+            if shard["id"]
+            in {
+                "bin-ha-rest-lifecycle-state-base",
+                "bin-ha-rest-lifecycle-ha-events",
+                "bin-ha-rest-lifecycle-ha-recovery",
+            }
+        }
+
+        self.assertEqual(
+            set(selected),
+            {
+                "bin-ha-rest-lifecycle-state-base",
+                "bin-ha-rest-lifecycle-ha-events",
+                "bin-ha-rest-lifecycle-ha-recovery",
+            },
+        )
+        parent_prefix = "server::tests::alerts_and_ha::ha_"
+        self.assertNotIn(
+            parent_prefix,
+            selected["bin-ha-rest-lifecycle-state-base"]["include_prefixes"],
+        )
+        self.assertIn(
+            "server::tests::alerts_and_ha::ha_events_",
+            selected["bin-ha-rest-lifecycle-ha-events"]["include_prefixes"],
+        )
+        self.assertIn(
+            "server::tests::alerts_and_ha::ha_sync_",
+            selected["bin-ha-rest-lifecycle-ha-recovery"]["include_prefixes"],
+        )
 
     def test_sensitive_shards_cap_ci_parallelism(self):
         _targets, shards = RUNNER.load_manifest()

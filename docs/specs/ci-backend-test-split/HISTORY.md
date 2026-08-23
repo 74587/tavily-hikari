@@ -75,6 +75,9 @@
 - 2026-08-23：第二个 native cold sample 显示 request-rollup lifecycle、HA lifecycle 与 MCP batch
   各自仍在单 lane 预算内，却同时波动并被 LPT 串到同一 lane。权重改取重复样本的上界并将三者分散，
   不改变其 selector、进程上限或测试语义。
+- 2026-08-23：后续 sample 的 `alerts_and_ha::ha_` 单一过滤进程执行 24 个测试达到 175 秒，超过任何
+  lane 预算。该 prefix 按事件与恢复语义改为两个互斥 shard，复用既有独立测试进程模型；state base 保留
+  其它 HA lifecycle selector，coverage verifier 继续阻止漏跑和重叠。
 
 ## Key Reasons / Replacements
 

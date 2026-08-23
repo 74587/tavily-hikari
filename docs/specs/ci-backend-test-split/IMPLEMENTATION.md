@@ -85,8 +85,9 @@
     its two long prefixes are independently packed while the policy process remains serial.
     Affinity, reconciliation, LinuxDo, reporting, and server HTTP contract retain enough weight
     to keep the sixteen-lane LPT output within the 120-second lane budget after semantic splits.
-  - HA lifecycle coverage is divided into mutually exclusive lifecycle and lifecycle-state groups;
-    this keeps the long HA prefix family from becoming a single atomic lane tail.
+  - HA lifecycle coverage is divided into mutually exclusive lifecycle, lifecycle-state base, HA-event, and
+    HA-recovery groups. The event and recovery groups preserve separate test processes, so the long HA family
+    cannot become one atomic lane tail.
   - `prepare-artifacts` logs compilation, test-list discovery, and bundle-staging elapsed markers.
     They make a cold-compile regression attributable without turning elapsed time into a CI gate.
     Backend artifact upload uses a lower compression level to reduce CPU time on the critical path;
