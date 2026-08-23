@@ -71,6 +71,33 @@ impl TavilyProxy {
         }
     }
 
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn install_admin_privacy_read_pause_for_test(
+        &self,
+    ) -> crate::store::RequestStatsPostFlushPause {
+        self.key_store.install_admin_privacy_read_pause().await
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn admin_privacy_read_discards_for_test(&self) -> u64 {
+        self.key_store
+            .sqlite_runtime
+            .discarded_connections_for_test(crate::store::SqliteOperation::AdminPrivacyRead)
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn verify_admin_privacy_read_connection_clean_for_test(&self) -> Result<(), ProxyError> {
+        self.key_store
+            .sqlite_runtime
+            .begin_immediate(crate::store::SqliteOperation::AdminPrivacyRead)
+            .await?
+            .rollback()
+            .await
+    }
+
     pub async fn record_upstream_reconciliation_usage(
         &self,
         token_id: &str,

@@ -572,6 +572,11 @@ pub async fn serve(
         "tavily proxy listening"
     );
 
+    // Privacy status is an owner-facing derived read model. It must populate
+    // last-good after readiness without delaying the listener or competing
+    // with foreground work; requests only ever copy the immutable result.
+    prewarm_admin_privacy_status(state.clone()).await;
+
     // Always-on HA tasks must stay available on standby/recovery so health, role
     // refresh, and pull-sync keep working even while business traffic is fenced.
     // Start them after the dashboard singleflight prewarm: a cold restart must

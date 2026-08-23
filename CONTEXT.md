@@ -28,10 +28,12 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   operation or when its bounded transaction sees transient writer contention. The affected durable
   work returns uncommitted deltas or records a retry time; unrelated eligible work remains free to
   progress.
-- `admin privacy read session`: a dedicated immutable SQLite snapshot for privacy status. Its
-  acquire and begin budgets are 100ms, the HTTP build is bounded to 250ms, and it never uses
-  maintenance-bulk admission. A 60-second last-good result is explicit stale coverage; a cold miss
-  returns retryable service-unavailable.
+- `admin privacy read controller`: an AppState-owned immutable privacy-status last-good value,
+  observation time, and singleflight refresh flag. It schedules its dedicated SQLite snapshot only
+  after ready and outside the HTTP response path. Snapshot acquire and `BEGIN` remain bounded to
+  100ms and close explicitly at a cooperative completion boundary; cached readers immediately
+  receive `stale` coverage while a refresh is in flight or deferred. A true cold miss returns
+  `503 Retry-After: 1` without opening a request-owned SQLite transaction.
 
 ## Reconciliation Terms
 

@@ -64,11 +64,13 @@ struct DashboardOverviewCacheState {
     last_freshness_probe_at: Option<tokio::time::Instant>,
     notify: Arc<tokio::sync::Notify>,
     admin_alerts: AdminAlertsReadCache,
-    admin_privacy_status: Option<AdminPrivacyStatusCacheEntry>,
+    admin_privacy_status: AdminPrivacyStatusController,
     #[cfg(test)]
     build_count: usize,
     #[cfg(test)]
     freshness_probe_count: usize,
+    #[cfg(test)]
+    admin_privacy_refresh_count: usize,
 }
 
 impl Default for DashboardOverviewCacheState {
@@ -85,11 +87,13 @@ impl Default for DashboardOverviewCacheState {
             last_freshness_probe_at: None,
             notify: Arc::new(tokio::sync::Notify::new()),
             admin_alerts: AdminAlertsReadCache::default(),
-            admin_privacy_status: None,
+            admin_privacy_status: AdminPrivacyStatusController::default(),
             #[cfg(test)]
             build_count: 0,
             #[cfg(test)]
             freshness_probe_count: 0,
+            #[cfg(test)]
+            admin_privacy_refresh_count: 0,
         }
     }
 }
@@ -122,6 +126,20 @@ struct AdminPrivacyStatusCacheEntry {
     value: tavily_hikari::UpstreamPrivacyStatus,
     observed_at: i64,
     stored_at: tokio::time::Instant,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AdminPrivacyStatusController {
+    last_good: Option<AdminPrivacyStatusCacheEntry>,
+    refresh_in_flight: bool,
+    last_refresh_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdminPrivacyStatusRefreshStart {
+    Started,
+    InFlight,
+    Deferred { reason: &'static str },
 }
 
 const ADMIN_PRIVACY_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -169,7 +187,7 @@ pub(crate) async fn admin_privacy_status_last_good(
 ) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
     let cache = dashboard_overview_cache_for_state(state);
     let cache = cache.lock().await;
-    let entry = cache.admin_privacy_status.as_ref()?;
+    let entry = cache.admin_privacy_status.last_good.as_ref()?;
     (entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
         .then(|| (entry.value.clone(), entry.observed_at))
 }
@@ -179,34 +197,142 @@ pub(crate) async fn admin_privacy_status_cached(
 ) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
     let cache = dashboard_overview_cache_for_state(state);
     let cache = cache.lock().await;
-    let entry = cache.admin_privacy_status.as_ref()?;
+    let entry = cache.admin_privacy_status.last_good.as_ref()?;
     Some((entry.value.clone(), entry.observed_at))
+}
+
+pub(crate) async fn stale_admin_privacy_status(
+    state: &AppState,
+) -> Option<tavily_hikari::UpstreamPrivacyStatus> {
+    let cache = dashboard_overview_cache_for_state(state);
+    let cache = cache.lock().await;
+    let controller = &cache.admin_privacy_status;
+    let entry = controller.last_good.as_ref()?;
+    let mut status = entry.value.clone();
+    status.coverage = "stale".to_string();
+    status.observed_at = Some(entry.observed_at);
+    status.stale_reason = Some(
+        controller
+            .last_refresh_reason
+            .unwrap_or("refresh_in_flight")
+            .to_string(),
+    );
+    Some(status)
+}
+
+pub(crate) async fn start_admin_privacy_status_refresh(
+    state: Arc<AppState>,
+) -> AdminPrivacyStatusRefreshStart {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache.lock().await;
+    if cache.admin_privacy_status.refresh_in_flight {
+        return AdminPrivacyStatusRefreshStart::InFlight;
+    }
+    if let Some(reason) = state.proxy.admin_privacy_status_refresh_defer_reason() {
+        cache.admin_privacy_status.last_refresh_reason = Some(reason);
+        return AdminPrivacyStatusRefreshStart::Deferred { reason };
+    }
+
+    cache.admin_privacy_status.refresh_in_flight = true;
+    cache.admin_privacy_status.last_refresh_reason = Some("refresh_in_flight");
+    #[cfg(test)]
+    {
+        cache.admin_privacy_refresh_count = cache.admin_privacy_refresh_count.saturating_add(1);
+    }
+    drop(cache);
+
+    tokio::spawn(async move {
+        let result = state.proxy.upstream_privacy_status().await;
+        finish_admin_privacy_status_refresh(state.as_ref(), result).await;
+    });
+    AdminPrivacyStatusRefreshStart::Started
+}
+
+async fn finish_admin_privacy_status_refresh(
+    state: &AppState,
+    result: Result<tavily_hikari::UpstreamPrivacyStatus, tavily_hikari::ProxyError>,
+) {
+    let cache = dashboard_overview_cache_for_state(state);
+    let mut cache = cache.lock().await;
+    cache.admin_privacy_status.refresh_in_flight = false;
+    match result {
+        Ok(mut value) => {
+            let observed_at = state.proxy.backend_time().now_ts();
+            value.coverage = "ok".to_string();
+            value.observed_at = Some(observed_at);
+            value.stale_reason = None;
+            cache.admin_privacy_status.last_good = Some(AdminPrivacyStatusCacheEntry {
+                value,
+                observed_at,
+                stored_at: tokio::time::Instant::now(),
+            });
+            cache.admin_privacy_status.last_refresh_reason = None;
+        }
+        Err(error) => {
+            cache.admin_privacy_status.last_refresh_reason = Some(
+                if tavily_hikari::is_transient_sqlite_write_error(&error) || error.is_deferred() {
+                    "sqlite_pressure"
+                } else {
+                    "refresh_failed"
+                },
+            );
+            tracing::debug!(
+                component = "admin_read",
+                event = "privacy_status_refresh_deferred",
+                reason = cache.admin_privacy_status.last_refresh_reason.unwrap_or("unknown"),
+                "privacy status refresh completed without replacing last-good data"
+            );
+        }
+    }
+}
+
+pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
+    match start_admin_privacy_status_refresh(state).await {
+        AdminPrivacyStatusRefreshStart::Started | AdminPrivacyStatusRefreshStart::InFlight => {
+            tracing::info!(
+                component = "startup",
+                event = "admin_privacy_status_prewarm_started",
+                "scheduled immutable privacy-status last-good prewarm"
+            );
+        }
+        AdminPrivacyStatusRefreshStart::Deferred { reason } => {
+            tracing::debug!(
+                component = "startup",
+                event = "admin_privacy_status_prewarm_deferred",
+                reason,
+                "deferred privacy-status prewarm before SQLite acquisition"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) async fn expire_admin_privacy_status_last_good_for_test(state: &AppState) {
     let cache = dashboard_overview_cache_for_state(state);
     let mut cache = cache.lock().await;
-    if let Some(entry) = cache.admin_privacy_status.as_mut() {
+    if let Some(entry) = cache.admin_privacy_status.last_good.as_mut() {
         entry.stored_at = tokio::time::Instant::now() - ADMIN_PRIVACY_STATUS_CACHE_TTL;
     }
 }
 
-pub(crate) async fn record_admin_privacy_status_last_good(
-    state: &AppState,
-    mut value: tavily_hikari::UpstreamPrivacyStatus,
-) {
-    let observed_at = state.proxy.backend_time().now_ts();
-    value.coverage = "ok".to_string();
-    value.observed_at = Some(observed_at);
-    value.stale_reason = None;
+#[cfg(test)]
+pub(crate) async fn admin_privacy_refresh_count_for_test(state: &AppState) -> usize {
+    dashboard_overview_cache_for_state(state)
+        .lock()
+        .await
+        .admin_privacy_refresh_count
+}
+
+#[cfg(test)]
+pub(crate) async fn wait_for_admin_privacy_status_refresh(state: &AppState) {
     let cache = dashboard_overview_cache_for_state(state);
-    let mut cache = cache.lock().await;
-    cache.admin_privacy_status = Some(AdminPrivacyStatusCacheEntry {
-        value,
-        observed_at,
-        stored_at: tokio::time::Instant::now(),
-    });
+    for _ in 0..100 {
+        if !cache.lock().await.admin_privacy_status.refresh_in_flight {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("admin privacy status refresh did not finish");
 }
 
 fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {

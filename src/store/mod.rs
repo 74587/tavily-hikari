@@ -2664,6 +2664,9 @@ pub(crate) struct KeyStore {
     #[cfg(debug_assertions)]
     #[allow(dead_code)]
     pub(crate) dashboard_overview_read_pause: Arc<Mutex<Option<RequestStatsPostFlushPause>>>,
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) admin_privacy_read_pause: Arc<Mutex<Option<RequestStatsPostFlushPause>>>,
     // Lightweight failpoint registry used by integration tests to simulate a lost quota
     // subject lease after precheck but before settlement.
     pub(crate) forced_quota_subject_lock_loss_subjects: std::sync::Mutex<HashSet<String>>,
@@ -2704,6 +2707,21 @@ impl KeyStore {
     #[allow(dead_code)]
     pub(crate) async fn wait_for_dashboard_overview_read_pause_if_installed(&self) {
         wait_for_request_stats_test_pause_if_installed(&self.dashboard_overview_read_pause).await;
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) async fn install_admin_privacy_read_pause(&self) -> RequestStatsPostFlushPause {
+        let pause = new_request_stats_test_pause();
+        let mut slot = self.admin_privacy_read_pause.lock().await;
+        *slot = Some(pause.clone());
+        pause
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) async fn wait_for_admin_privacy_read_pause_if_installed(&self) {
+        wait_for_request_stats_test_pause_if_installed(&self.admin_privacy_read_pause).await;
     }
 }
 

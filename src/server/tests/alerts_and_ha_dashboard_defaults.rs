@@ -768,6 +768,8 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
     .expect("proxy created");
     let password = "admin-privacy-status-last-good-password";
     let (admin_addr, state) = spawn_builtin_keys_admin_server_with_state(proxy, password).await;
+    prewarm_admin_privacy_status(state.clone()).await;
+    wait_for_admin_privacy_status_refresh(state.as_ref()).await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -789,6 +791,9 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
         .await
         .expect("warm privacy status");
     assert_eq!(warm.status(), reqwest::StatusCode::OK);
+    let warm_body: serde_json::Value = warm.json().await.expect("warm privacy status json");
+    assert!(warm_body.get("dailyReconciliationProgress").is_some());
+    assert!(warm_body.get("retryBuckets").is_some());
     expire_admin_privacy_status_last_good_for_test(state.as_ref()).await;
 
     let held = match state.proxy.admit_dashboard_rollup_integrity() {
@@ -797,21 +802,38 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
             panic!("test must hold the shared bulk permit, got {reason}")
         }
     };
-    let fresh = client
+    let stale = client
         .get(&privacy_status_url)
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await
-        .expect("fresh privacy status");
-    assert_eq!(fresh.status(), reqwest::StatusCode::OK);
-    let fresh_body: serde_json::Value = fresh.json().await.expect("fresh privacy status json");
-    assert_eq!(fresh_body.get("coverage").and_then(|v| v.as_str()), Some("ok"));
+        .expect("stale privacy status");
+    assert_eq!(stale.status(), reqwest::StatusCode::OK);
+    let stale_body: serde_json::Value = stale.json().await.expect("stale privacy status json");
+    assert_eq!(stale_body.get("coverage").and_then(|v| v.as_str()), Some("stale"));
     assert!(
-        fresh_body
+        stale_body
             .get("staleReason")
-            .is_none_or(serde_json::Value::is_null)
+            .and_then(|value| value.as_str())
+            .is_some()
     );
     drop(held);
+    wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+    let refreshed = client
+        .get(&privacy_status_url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("refreshed privacy status");
+    assert_eq!(refreshed.status(), reqwest::StatusCode::OK);
+    let refreshed_body: serde_json::Value = refreshed
+        .json()
+        .await
+        .expect("refreshed privacy status json");
+    assert_eq!(
+        refreshed_body.get("coverage").and_then(|value| value.as_str()),
+        Some("ok")
+    );
 
     let cold_db_path = temp_db_path("admin-privacy-status-cold-pressure");
     let cold_db_str = cold_db_path.to_string_lossy().to_string();
@@ -867,7 +889,7 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
             .and_then(|value| value.to_str().ok()),
         Some("1")
     );
-    assert!(cold_started.elapsed() < std::time::Duration::from_millis(350));
+    assert!(cold_started.elapsed() < std::time::Duration::from_millis(250));
     sqlx::query("ROLLBACK")
         .execute(&mut *cold_writer)
         .await
@@ -879,15 +901,128 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
         .send()
         .await
         .expect("retry cold privacy status after pressure drains");
-    assert_eq!(retry.status(), reqwest::StatusCode::OK);
-    let retry_body: serde_json::Value = retry
+    if retry.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        wait_for_admin_privacy_status_refresh(cold_state.as_ref()).await;
+    }
+    let ready = if retry.status() == reqwest::StatusCode::OK {
+        retry
+    } else {
+        client
+            .get(format!("http://{cold_addr}/api/settings/system/privacy-status"))
+            .header(reqwest::header::COOKIE, &cold_cookie)
+            .send()
+            .await
+            .expect("privacy status after cold refresh")
+    };
+    assert_eq!(ready.status(), reqwest::StatusCode::OK);
+    let ready_body: serde_json::Value = ready
         .json()
         .await
-        .expect("retry cold privacy status json");
-    assert_eq!(retry_body.get("coverage").and_then(|v| v.as_str()), Some("ok"));
+        .expect("cold refresh privacy status json");
+    assert_eq!(ready_body.get("coverage").and_then(|v| v.as_str()), Some("ok"));
 
     let _ = std::fs::remove_file(db_path);
     let _ = std::fs::remove_file(cold_db_path);
+}
+
+#[tokio::test]
+async fn admin_privacy_status_serves_stale_last_good_without_cancelling_its_read_snapshot() {
+    let db_path = temp_db_path("admin-privacy-status-singleflight-stale");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-admin-privacy-status-singleflight-stale".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let password = "admin-privacy-status-singleflight-stale-password";
+    let (admin_addr, state) = spawn_builtin_keys_admin_server_with_state(proxy, password).await;
+    prewarm_admin_privacy_status(state.clone()).await;
+    wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build client");
+    let login = client
+        .post(format!("http://{admin_addr}/api/admin/login"))
+        .json(&serde_json::json!({ "password": password }))
+        .send()
+        .await
+        .expect("admin login");
+    let cookie = find_cookie_pair(login.headers(), BUILTIN_ADMIN_COOKIE_NAME)
+        .expect("admin session cookie");
+    let privacy_status_url = format!("http://{admin_addr}/api/settings/system/privacy-status");
+
+    let warm = client
+        .get(&privacy_status_url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("warm privacy status");
+    assert_eq!(warm.status(), reqwest::StatusCode::OK);
+    let refresh_count_before = admin_privacy_refresh_count_for_test(state.as_ref()).await;
+    expire_admin_privacy_status_last_good_for_test(state.as_ref()).await;
+    let pause = state
+        .proxy
+        .install_admin_privacy_read_pause_for_test()
+        .await;
+    let started = std::time::Instant::now();
+    let first_request = {
+        let client = client.clone();
+        let cookie = cookie.clone();
+        let privacy_status_url = privacy_status_url.clone();
+        tokio::spawn(async move {
+            client
+                .get(privacy_status_url)
+                .header(reqwest::header::COOKIE, cookie)
+                .send()
+                .await
+                .expect("stale privacy status")
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait_until_arrived())
+        .await
+        .expect("the background refresh reached its controlled read pause");
+    let stale = first_request.await.expect("stale request task joins");
+    assert_eq!(stale.status(), reqwest::StatusCode::OK);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(225),
+        "last-good reads must not wait for the refresh"
+    );
+    let body: serde_json::Value = stale.json().await.expect("stale privacy status json");
+    assert_eq!(body.get("coverage").and_then(|value| value.as_str()), Some("stale"));
+    let second_started = std::time::Instant::now();
+    let second = client
+        .get(&privacy_status_url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("second stale privacy status");
+    assert_eq!(second.status(), reqwest::StatusCode::OK);
+    assert!(
+        second_started.elapsed() < std::time::Duration::from_millis(225),
+        "a refresh already in flight must not delay another stale reader"
+    );
+    assert_eq!(
+        admin_privacy_refresh_count_for_test(state.as_ref()).await,
+        refresh_count_before + 1,
+        "concurrent request refreshes must be singleflight"
+    );
+    assert_eq!(
+        state.proxy.admin_privacy_read_discards_for_test(),
+        0,
+        "the request budget must not discard an open read snapshot"
+    );
+    pause.release();
+    wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+    state
+        .proxy
+        .verify_admin_privacy_read_connection_clean_for_test()
+        .await
+        .expect("the next SQLite transaction must be clean after refresh");
+
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

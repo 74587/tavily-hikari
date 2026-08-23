@@ -224,39 +224,16 @@ async fn get_upstream_privacy_status(
         return Ok(Json(status).into_response());
     }
 
-    match tokio::time::timeout(Duration::from_millis(250), state.proxy.upstream_privacy_status()).await {
-        Ok(Ok(status)) => {
-            record_admin_privacy_status_last_good(state.as_ref(), status.clone()).await;
-            Ok(Json(status).into_response())
-        }
-        Ok(Err(error))
-            if tavily_hikari::is_transient_sqlite_write_error(&error) || error.is_deferred() =>
-        {
-            match stale_admin_privacy_status(state.as_ref(), "sqlite_pressure").await {
-                Some(status) => Ok(Json(status).into_response()),
-                None => Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response()),
-            }
-        }
-        Err(_) => match stale_admin_privacy_status(state.as_ref(), "read_timeout").await {
+    let had_cached_value = admin_privacy_status_cached(state.as_ref()).await.is_some();
+    start_admin_privacy_status_refresh(state.clone()).await;
+    if had_cached_value {
+        match stale_admin_privacy_status(state.as_ref()).await {
             Some(status) => Ok(Json(status).into_response()),
             None => Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response()),
-        },
-        Ok(Err(error)) => {
-            eprintln!("get upstream privacy status error: {error}");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response())
         }
+    } else {
+        Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response())
     }
-}
-
-async fn stale_admin_privacy_status(
-    state: &AppState,
-    reason: &str,
-) -> Option<tavily_hikari::UpstreamPrivacyStatus> {
-    let (mut status, observed_at) = admin_privacy_status_cached(state).await?;
-    status.coverage = "stale".to_string();
-    status.observed_at = Some(observed_at);
-    status.stale_reason = Some(reason.to_string());
-    Some(status)
 }
 
 async fn get_admin_mcp_session_bindings(

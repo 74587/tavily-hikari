@@ -367,7 +367,7 @@ pub(crate) struct SqliteRuntime {
 }
 
 impl SqliteRuntime {
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     pub(crate) fn discarded_connections_for_test(&self, operation: SqliteOperation) -> u64 {
         self.inner
             .workload
@@ -634,6 +634,20 @@ impl SqliteRuntime {
         } else if self.recent_contention_active() {
             Some(SqliteAdmissionDeferReason::RecentContention)
         } else if self.inner.pool.num_idle() == 0
+            || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
+        {
+            Some(SqliteAdmissionDeferReason::PoolPressure)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn admin_privacy_read_defer_reason(&self) -> Option<SqliteAdmissionDeferReason> {
+        if self.foreground_activity_rps() > MAINTENANCE_BULK_MAX_FOREGROUND_RPS {
+            Some(SqliteAdmissionDeferReason::ForegroundPressure)
+        } else if self.recent_contention_active() {
+            Some(SqliteAdmissionDeferReason::RecentContention)
+        } else if !self.has_foreground_pool_capacity()
             || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
         {
             Some(SqliteAdmissionDeferReason::PoolPressure)
@@ -1178,6 +1192,13 @@ impl SqliteRuntime {
 }
 
 impl KeyStore {
+    pub(crate) fn admin_privacy_read_refresh_defer_reason(&self) -> Option<&'static str> {
+        let reason = self.sqlite_runtime.admin_privacy_read_defer_reason()?;
+        self.sqlite_runtime
+            .record_deferred(SqliteOperation::AdminPrivacyRead, reason);
+        Some(reason.as_str())
+    }
+
     pub(crate) async fn begin_admin_privacy_read_session(
         &self,
     ) -> Result<SqliteReadSnapshot, ProxyError> {

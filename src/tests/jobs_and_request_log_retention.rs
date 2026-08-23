@@ -36,6 +36,8 @@ async fn quota_subject_lock_retries_transient_sqlite_write_lock() {
         forced_pending_claim_miss_log_ids: Mutex::new(std::collections::HashSet::new()),
         #[cfg(test)]
         dashboard_overview_read_pause: Arc::new(Mutex::new(None)),
+        #[cfg(debug_assertions)]
+        admin_privacy_read_pause: Arc::new(Mutex::new(None)),
         forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(
             std::collections::HashSet::new(),
         ),

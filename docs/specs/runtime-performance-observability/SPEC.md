@@ -70,11 +70,13 @@
 - 对账主结算必须先于 Research sweep；本地预算压力与 upstream 429 必须分开记录，且最终
   远端观察、结算和状态落盘都必须受同一轮预算约束。HA GC 正常进展继续按通道 60 秒聚合，
   不能恢复逐片 WARN。
-- Privacy status owns a dedicated `AdminPrivacyRead` session: acquire and `BEGIN` are bounded to
-  100ms, response construction is bounded to 250ms, and every status query runs through one
-  immutable SQLite snapshot connection. It neither enters maintenance-bulk admission nor borrows
-  raw pool connections; a warm 60-second last-good result may become additive stale coverage,
-  while a cold result returns `503 Retry-After: 1`.
+- Privacy status owns an AppState-owned immutable last-good controller. After ready it starts one
+  low-priority prewarm; prewarm failure never delays readiness or competes with foreground work.
+  The controller's `AdminPrivacyRead` snapshot acquire and `BEGIN` are bounded to 100ms, never
+  enter maintenance-bulk admission, and explicitly close at a cooperative completion boundary.
+  HTTP only copies last-good data: a cached value, including one older than 60 seconds, returns
+  additive `stale` coverage within 250ms while refresh is in flight or deferred; a true cold miss
+  returns `503 Retry-After: 1` without canceling an open SQLite transaction.
 - A server-pressure rebuild scans at most 500 source rows per keyset slice below its fixed source
   fence, writes only an inactive staged generation, then atomically publishes that generation before
   replaying its buffered tail. Old generations are cleaned in 25-row slices; no rebuild may delete
@@ -136,7 +138,8 @@
   - `component=admin_read event=token_logs_list_completed`
   - `component=admin_read event=/api/alerts/events phase=projection_sidecar|alerts_projection`
   - `component=admin_read event=/api/alerts/groups phase=projection_sidecar|alerts_grouping`
-  - `component=admin_read event=alerts_last_good_served|alerts_cold_pressure`
+- `component=admin_read event=alerts_last_good_served|alerts_cold_pressure`
+- `component=startup event=admin_privacy_status_prewarm_started|admin_privacy_status_prewarm_deferred`
   - `component=admin_read event=low_memory_protection_decision`
 - `sqlite_workload_window` aggregates `observability_deferred_write` alongside other operation
   classes. Per-flush defer/retry records remain DEBUG; queue recovery or a persistent stale state

@@ -29,6 +29,11 @@
 - `dailyReconciliationByKey`：当天每 Key 的 `{ keyIdHint, terminalResearch, pendingResearch, pendingProjectIds, cooldownUntil, cooldownReason }`，仅返回稳定短 hint 与固定原因枚举；
 - 最近 signed adjustments（token 只显示稳定短 id，upstream key 只显示本地短 id）。
 
+响应保留既有字段并可附加读模型 freshness 字段：`coverage` 为 `ok|stale`，`observedAt` 是当前
+immutable last-good 的观测时间，`staleReason` 只使用固定的本地分类。服务启动后异步预热该
+last-good；有缓存时请求不得同步重建，refresh 或本地压力下直接返回 `200 stale`。无缓存时返回
+`503 Retry-After: 1`，且不会因为 HTTP deadline 取消开放 SQLite transaction。
+
 响应不得包含 HMAC secret、官方 API key、完整 Hikari token 或客户端原始 `X-Project-ID`。
 
 phase 当前为：

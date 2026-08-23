@@ -158,6 +158,8 @@ impl KeyStore {
         &self,
         snapshot: &mut SqliteReadSnapshot,
     ) -> Result<UpstreamPrivacyStatus, ProxyError> {
+        #[cfg(debug_assertions)]
+        self.wait_for_admin_privacy_read_pause_if_installed().await;
         let now = self.backend_time.now_ts();
         let period = business_period_for_timestamp(now);
         let day_window = server_local_day_window_utc(self.backend_time.now_utc().with_timezone(&Local));
