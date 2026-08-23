@@ -55,6 +55,9 @@
     request-maintenance groups. Admin resources are divided into identity, observability, and
     settings groups. The manifest contract tests preserve the old prefix unions, so the split can
     only alter lane placement, not test ownership.
+  - The request-stats background slice test is its own serial reporting shard. The remaining
+    reporting shard excludes that exact test, preventing its pool-admission workload from sharing
+    a test process while preserving one manifest owner for every reporting test.
   - The admin dashboard SSE refresh test is an independent single-process, single-thread shard.
     Identity excludes that exact name, preserving one owner while preventing unrelated admin API
     filters from delaying its event deadline. Operational maintenance has a four-process cap; all

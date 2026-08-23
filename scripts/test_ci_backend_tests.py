@@ -376,6 +376,9 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         reporting = next(
             shard for shard in shards if shard["id"] == "lib-request-rollup-reporting"
         )
+        reporting_slice = next(
+            shard for shard in shards if shard["id"] == "lib-request-rollup-reporting-slice"
+        )
         alert = next(shard for shard in shards if shard["id"] == "lib-alert-projection")
         affinity = next(shard for shard in shards if shard["id"] == "lib-affinity-domain")
         admin_identity = next(
@@ -415,6 +418,13 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             reporting["isolated_prefixes"],
             ["tests::request_rollup_public_metrics::admin_"],
         )
+        reporting_slice_test = (
+            "tests::request_rollup_public_metrics::request_stats_background_slice_bounds_work_and_requeues_the_tail"
+        )
+        self.assertIn(reporting_slice_test, reporting["exclude_prefixes"])
+        self.assertEqual(reporting_slice["include_prefixes"], [reporting_slice_test])
+        self.assertEqual(reporting_slice["serial_prefixes"], [reporting_slice_test])
+        self.assertEqual(RUNNER.shard_resource_limits(reporting_slice, 4, 2), (1, 1))
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_identity, 3, 2), (2, 2))

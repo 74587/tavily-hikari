@@ -58,6 +58,9 @@
 - 2026-08-23：后续完整 CI 的 MCP 拆分已将原 lane 从 173 秒降到 93 秒，但 request-log retention 与
   rollup lifecycle 的顺序组合仍使 aggregate 比五分钟多一秒。以该轮所有原子 shard 的实测耗时加八秒余量
   重校 LPT 权重，并把 retention 的 GC maintenance 与 serial policy 前缀拆成独立 shard，消除这条组合尾部。
+- 2026-08-23：重复计时中 reporting 的 request-stats background slice 在两线程 test process 内发生
+  `PoolTimedOut`。该测试拆为单独的单进程、单线程 shard，主 reporting shard 精确排除它；不改变断言、
+  等待预算或任何测试的归属集合。
 
 ## Key Reasons / Replacements
 
