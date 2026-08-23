@@ -87,9 +87,10 @@
 - The bundle writer emits only checksum-addressed artifact format 2. Readers keep format 1 support
   while cached artifacts age out. One executable or support binary is stored once and referenced by
   coverage-target metadata.
-- `build.rs` accepts `TAVILY_HIKARI_WEB_DIST_DIR`; the unset value remains `web/dist`. The frontend
-  asset job validates every path required by the minimal fixture, including HTML shells,
-  `version.json`, favicon, and branded assets.
+- `build.rs` accepts `TAVILY_HIKARI_WEB_DIST_DIR`; the unset value remains `web/dist`. CI materializes
+  its minimal fixture at a stable profile-local path and only rewrites files when their content changes,
+  preserving Cargo fingerprints across cache hits. The frontend asset job validates every path required by
+  the fixture, including HTML shells, `version.json`, favicon, and branded assets.
 - Shards carry positive `estimated_seconds`. Lane generation uses stable LPT ordering: descending
   estimate, shard ID for ties, and the currently lightest lane for placement. Estimates are rounded
   from native shard observations with enough headroom for ordinary variance; a semantic split must

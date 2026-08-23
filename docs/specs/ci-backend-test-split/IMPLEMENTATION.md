@@ -39,8 +39,10 @@
     job ordering; it does not alter release, lint, or version-layer validation semantics.
 - Artifact and lane contracts
   - `ci-test` inherits `test` while disabling debug information and incremental compilation.
-  - `build.rs` can consume `TAVILY_HIKARI_WEB_DIST_DIR`; CI supplies the minimal fixture while the
-    normal `web/dist` fallback is unchanged.
+  - `build.rs` can consume `TAVILY_HIKARI_WEB_DIST_DIR`; CI supplies a stable minimal fixture under the
+    selected profile while the normal `web/dist` fallback is unchanged.
+    Repeated CI preparation does not rewrite unchanged fixture files or vary the build-script environment
+    path, so a restored target cache remains Cargo-fingerprint-valid.
   - The bundle writer emits format 2 with one checksum-addressed copy per executable. Filenames
     preserve each source binary's prefix so Cargo sibling-binary resolution works without adding a
     second copy. The loader supports both formats and verifies SHA-256 before execution.

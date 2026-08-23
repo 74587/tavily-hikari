@@ -80,3 +80,8 @@
 ## Legacy Identity
 
 - Legacy compatibility identity: `#3grrf`.
+
+## Stable minimal web fixture
+
+- The CI fixture now uses a stable profile-local path and preserves mtimes for unchanged files. This keeps
+  the build-script environment input stable across cache hits while retaining normal asset-change tracking.

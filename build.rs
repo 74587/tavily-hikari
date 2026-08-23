@@ -5,15 +5,18 @@ use std::{
 
 fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=web/dist");
     println!("cargo:rerun-if-env-changed=TAVILY_HIKARI_WEB_DIST_DIR");
     println!("cargo:rustc-check-cfg=cfg(web_assets_embedded)");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     let generated_path = out_dir.join("embedded_web_assets.rs");
-    let dist_dir = env::var_os("TAVILY_HIKARI_WEB_DIST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("web/dist"));
+    let dist_dir = match env::var_os("TAVILY_HIKARI_WEB_DIST_DIR") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            println!("cargo:rerun-if-changed=web/dist");
+            PathBuf::from("web/dist")
+        }
+    };
 
     if dist_dir.is_dir() {
         println!("cargo:rustc-cfg=web_assets_embedded");

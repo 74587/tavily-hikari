@@ -372,6 +372,22 @@ class BackendTestRunnerContractTests(unittest.TestCase):
 
             RUNNER.verify_web_assets(temp_dir)
 
+    def test_minimal_web_assets_do_not_rewrite_unchanged_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fixture_dir = Path(temp_dir)
+            RUNNER.write_minimal_web_assets(fixture_dir)
+            asset_path = fixture_dir / "index.html"
+            initial_mtime = asset_path.stat().st_mtime_ns
+
+            RUNNER.write_minimal_web_assets(fixture_dir)
+
+            self.assertEqual(asset_path.stat().st_mtime_ns, initial_mtime)
+
+    def test_ci_test_fixture_path_is_stable(self):
+        fixture_dir = RUNNER.minimal_web_assets_dir("ci-test")
+
+        self.assertEqual(fixture_dir, RUNNER.ROOT / "target" / "ci-test" / "ci-web-assets")
+
     def test_request_rollup_integrity_has_one_manifest_owner(self):
         _targets, shards = RUNNER.load_manifest()
         storage = next(shard for shard in shards if shard["id"] == "lib-request-rollup-storage")

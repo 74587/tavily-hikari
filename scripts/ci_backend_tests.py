@@ -519,8 +519,15 @@ def write_minimal_web_assets(output_dir):
     for relative_path, contents in WEB_ASSET_FIXTURE_FILES.items():
         path = output_dir / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_file() and path.read_text(encoding="utf-8") == contents:
+            continue
         path.write_text(contents, encoding="utf-8")
     return output_dir
+
+
+def minimal_web_assets_dir(cargo_profile):
+    profile_dir = cargo_profile or "debug"
+    return ROOT / "target" / profile_dir / "ci-web-assets"
 
 
 def verify_web_assets(root):
@@ -579,32 +586,26 @@ def build_artifacts(output_dir, cargo_jobs=None, cargo_profile=None, web_assets=
     prepare_started = time.monotonic()
 
     combined_args = combined_coverage_list_args(targets)
-    temporary_fixture = None
     web_assets_dir = None
     if web_assets == "minimal":
-        temporary_fixture = tempfile.TemporaryDirectory(prefix="ci-web-assets-")
-        web_assets_dir = write_minimal_web_assets(temporary_fixture.name)
+        web_assets_dir = write_minimal_web_assets(minimal_web_assets_dir(cargo_profile))
         verify_web_assets(web_assets_dir)
     elif web_assets != "project":
         raise SystemExit(f"unsupported web asset source: {web_assets}")
 
-    try:
-        build_started = time.monotonic()
-        executables = build_test_executables(
-            combined_args,
-            include_non_test_binaries=True,
-            cargo_jobs=cargo_jobs,
-            cargo_profile=cargo_profile,
-            web_assets_dir=web_assets_dir,
-        )
-        print(
-            "prepare_phase_complete phase=compile_test_executables "
-            f"elapsed_seconds={time.monotonic() - build_started:.2f}",
-            flush=True,
-        )
-    finally:
-        if temporary_fixture is not None:
-            temporary_fixture.cleanup()
+    build_started = time.monotonic()
+    executables = build_test_executables(
+        combined_args,
+        include_non_test_binaries=True,
+        cargo_jobs=cargo_jobs,
+        cargo_profile=cargo_profile,
+        web_assets_dir=web_assets_dir,
+    )
+    print(
+        "prepare_phase_complete phase=compile_test_executables "
+        f"elapsed_seconds={time.monotonic() - build_started:.2f}",
+        flush=True,
+    )
     if not executables:
         raise SystemExit("no test executables produced while preparing backend test artifacts")
     built_executables_by_target = {target_id: [] for target_id in targets}
