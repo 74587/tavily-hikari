@@ -50,6 +50,8 @@
   - The scheduled duplicate-claim and reporting admitted-flush tests run as dedicated serial exact
     shards. Their parent prefixes exclude only those full test names, preserving the original coverage
     ownership while avoiding shared SQLite pool contention in two-thread filter processes.
+  - The LinuxDo/forward shard excludes the dashboard overview group, which runs in its own two-thread
+    semantic shard. This keeps the long dashboard process from serially extending unrelated LinuxDo checks.
   - `lib-request-rollup`, `lib-account-user`, `bin-admin-api`, and `bin-ha-rest` are split into
     mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
     are independent groups so measured long tails can be packed separately. Manifest estimates

@@ -424,6 +424,20 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             integrity["include_prefixes"], ["tests::dashboard_rollup_integrity::"]
         )
 
+    def test_linuxdo_dashboard_overview_has_one_manifest_owner(self):
+        _targets, shards = RUNNER.load_manifest()
+        forward = next(shard for shard in shards if shard["id"] == "bin-linuxdo-forward")
+        dashboard = next(
+            shard for shard in shards if shard["id"] == "bin-linuxdo-dashboard-overview"
+        )
+        dashboard_prefix = "server::tests::dashboard_overview_snapshot::dashboard_"
+
+        self.assertIn(dashboard_prefix, forward["exclude_prefixes"])
+        self.assertEqual(dashboard["include_prefixes"], [dashboard_prefix])
+        self.assertEqual(dashboard["filtered_test_threads"], 2)
+        self.assertGreaterEqual(forward["estimated_seconds"], 100)
+        self.assertGreaterEqual(dashboard["estimated_seconds"], 112)
+
     def test_sensitive_shards_cap_ci_parallelism(self):
         _targets, shards = RUNNER.load_manifest()
         reporting = next(

@@ -805,7 +805,7 @@
       "id": "bin-linuxdo-forward",
       "kind": "bin",
       "name": "Bin LinuxDo Forward",
-      "estimated_seconds": 77,
+      "estimated_seconds": 100,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -815,6 +815,9 @@
         "server::tests::api_keys_and_registration::post_",
         "server::tests::admin_token_filters_and_maintenance::builtin_",
         "server::tests::api_keys_and_registration::builtin_"
+      ],
+      "exclude_prefixes": [
+        "server::tests::dashboard_overview_snapshot::dashboard_"
       ],
       "include_prefixes": [
         "server::tests::api_keys_and_registration::linuxdo_",
@@ -836,6 +839,18 @@
         "server::tests::admin_logs_and_summary::session_",
         "main_tests::",
         "tests::parse_"
+      ]
+    },
+    {
+      "id": "bin-linuxdo-dashboard-overview",
+      "kind": "bin",
+      "name": "Bin LinuxDo Dashboard Overview",
+      "estimated_seconds": 112,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "filtered_test_threads": 2,
+      "include_prefixes": [
+        "server::tests::dashboard_overview_snapshot::dashboard_"
       ]
     },
     {

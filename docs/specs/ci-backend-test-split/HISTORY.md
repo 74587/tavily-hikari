@@ -66,6 +66,9 @@
 - 2026-08-23：scheduled duplicate-claim 与 reporting admitted-flush 在各自两线程过滤进程中出现
   `PoolTimedOut`。二者各自成为单进程、单线程的精确 shard，父 prefix 只排除对应全名；不改变断言、等待预算、
   重试或覆盖归属。
+- 2026-08-23：LinuxDo/forward lane 的 dashboard overview filter 单独运行 26 个测试时达到约 107 秒，和
+  其它 forward checks 叠加后形成长尾。该 dashboard prefix 拆为独立的两线程语义 shard，并按实测提高剩余
+  LinuxDo shard 权重。
 
 ## Key Reasons / Replacements
 
