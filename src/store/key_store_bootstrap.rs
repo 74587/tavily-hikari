@@ -682,6 +682,10 @@ impl KeyStore {
             dashboard_overview_read_pause: Arc::new(Mutex::new(None)),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
         };
+        // Existing deployments may predate newly added observability control
+        // tables. Create only the small derived-schema objects before the
+        // strict migration baseline check so warm upgrades remain online.
+        Self::ensure_observability_sidecar_derived_schema_in_pool(&store.pool).await?;
         #[cfg(test)]
         {
             instrument_db_operation(
