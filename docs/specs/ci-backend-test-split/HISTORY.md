@@ -48,9 +48,8 @@
   发现 operational maintenance 被低估；按实测提高其权重并仅为该 shard 允许四个过滤进程，使 LPT 重新
   保持在 120 秒预算内。
 - 2026-08-22：Actions 步骤计时确认 prepare 的 165 秒几乎完全是完整测试可执行文件的冷编译，test-list
-  discovery 和 bundle staging 合计不足一秒。Plan 因此缓存 profile-scoped `target/ci-test`，键固定平台、
-  toolchain、profile/linker 与 `Cargo.lock`；Cargo fingerprint 仍决定源码变更的重编，缓存不复用后端测试
-  bundle，也不把缓存容量或保留策略写进仓库。
+  discovery 和 bundle staging 合计不足一秒。Plan 因此缓存 profile-scoped `target/ci-test`；缓存不复用后端
+  测试 bundle，也不把缓存容量或保留策略写进仓库。
 - 2026-08-23：缓存命中后原生计时将 prepare 编译降至约 94 秒，但 MCP research 与 HA serving 仍同处最长
   lane。research 依据 batch 子前缀拆成 protocol/batch 两个互斥串行 shard；runner 仅在父/子 libtest
   substring 匹配集合经验证等于 manifest starts-with 归属时使用 `--skip`，否则保持 exact fallback，避免以
@@ -85,3 +84,9 @@
 
 - The CI fixture now uses a stable profile-local path and preserves mtimes for unchanged files. This keeps
   the build-script environment input stable across cache hits while retaining normal asset-change tracking.
+
+## Exact compilation cache keys
+
+- The compilation cache now keys all Cargo-relevant source, configuration, fixture-generator, platform,
+  toolchain, profile, and linker inputs. A same-prefix fallback still restores reusable dependency artifacts,
+  while a changed source state can save its own exact target cache for later retries.

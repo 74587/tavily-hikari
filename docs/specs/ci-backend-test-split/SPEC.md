@@ -73,9 +73,9 @@
   with the `ci-test` profile and a minimal web fixture, verifies manifest ownership, uploads the
   backend bundle, and exports at most 16 non-empty lanes.
 - The plan restores only the `ci-test` compilation directory from a cache keyed by platform,
-  toolchain, profile/linker configuration, and `Cargo.lock`. A cache hit may reuse valid
-  test-profile compilation; Cargo fingerprints rebuild changed project code. This cache is not a backend test
-  artifact and never replaces its bundle checksum verification.
+  toolchain, profile/linker configuration, and all Cargo compilation inputs. A changed input receives a new
+  exact key, while a same-prefix fallback may reuse dependency artifacts before saving the new target state.
+  This cache is not a backend test artifact and never replaces its bundle checksum verification.
 - A shard may own a parent test prefix minus a child prefix only when the runner proves both
   libtest substring selectors resolve to their respective starts-with sets inside that parent.
   It then runs one serial parent process with `--skip <child-prefix>`; otherwise it falls back to

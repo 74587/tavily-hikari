@@ -388,6 +388,26 @@ class BackendTestRunnerContractTests(unittest.TestCase):
 
         self.assertEqual(fixture_dir, RUNNER.ROOT / "target" / "ci-test" / "ci-web-assets")
 
+    def test_backend_compilation_cache_uses_exact_inputs_and_fallback(self):
+        workflow = (RUNNER.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        cache_block = workflow.split("- name: Cache backend test compilation", 1)[1].split(
+            "- name: Prepare backend test artifacts", 1
+        )[0]
+
+        for cache_input in (
+            "Cargo.lock",
+            "Cargo.toml",
+            "build.rs",
+            "rust-toolchain.toml",
+            ".cargo/**",
+            "src/**",
+            "tests/**",
+            "scripts/ci_backend_tests.py",
+        ):
+            self.assertIn(cache_input, cache_block)
+        self.assertIn("restore-keys:", cache_block)
+        self.assertIn("backend-test-target-rust-1.91.0-ci-test-mold-", cache_block)
+
     def test_request_rollup_integrity_has_one_manifest_owner(self):
         _targets, shards = RUNNER.load_manifest()
         storage = next(shard for shard in shards if shard["id"] == "lib-request-rollup-storage")

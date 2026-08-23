@@ -25,9 +25,10 @@
   - `Backend Shard Plan` no longer waits for `web-assets`; it creates the minimal embedded-web
     fixture, compiles all backend targets with `ci-test`, verifies coverage, uploads one backend
     bundle, and exports a sixteen-lane matrix within the fixed maximum.
-  - The plan restores `target/ci-test` with a platform, Rust toolchain, profile/linker, and
-    `Cargo.lock` cache key. It retains Cargo fingerprint invalidation for changed source and keeps
-    the cached compilation state separate from the per-run, checksum-verified backend bundle.
+  - The plan restores `target/ci-test` with a platform, Rust toolchain, profile/linker, and complete
+    compilation-input cache key. Changed inputs create a fresh exact key, while a same-prefix fallback
+    reuses dependency artifacts and allows the newly compiled target state to be saved. The cached
+    compilation state remains separate from the per-run, checksum-verified backend bundle.
   - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
     bundle. The bundle includes a read-only source snapshot for tests that use the compile-time
     manifest directory; the former lib/bin/integration jobs each repeated frontend artifact

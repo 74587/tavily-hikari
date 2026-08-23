@@ -202,7 +202,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: target/ci-test
-          key: ${{ runner.os }}-backend-test-target-rust-1.91.0-ci-test-mold-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-backend-test-target-rust-1.91.0-ci-test-mold-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'rust-toolchain.toml', '.cargo/**', 'src/**', 'tests/**', 'scripts/ci_backend_tests.py') }}
+          restore-keys: |
+            ${{ runner.os }}-backend-test-target-rust-1.91.0-ci-test-mold-
 
       - name: Prepare backend test artifacts
         env:
