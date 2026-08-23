@@ -90,6 +90,9 @@
 - 2026-08-23：`tavily_http_search` 的 40 个测试在同一两线程过滤进程中出现 184 秒长尾。该 prefix
   改由 exact dispatcher 在 CI 的四进程上限内逐条运行；测试集合、断言和生产 SQLite 控制预算不变。
   同时提高该原子 shard 的 LPT 权重，使其不再与 forward-proxy 串行。
+- 2026-08-23：缓存命中的完整原生计时显示 MCP research protocol 的旧 64 秒权重显著高于其 18.89 秒实际
+  执行时间，反而把 operational/reporting/session 串在同一 lane。按带余量的实测值校准为 28 秒，使 LPT
+  分散该组合；selector、进程上限、测试集合与断言保持不变。
 
 ## Key Reasons / Replacements
 

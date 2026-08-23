@@ -789,7 +789,7 @@
       "id": "bin-mcp-research-protocol",
       "kind": "bin",
       "name": "Bin MCP Research Protocol",
-      "estimated_seconds": 64,
+      "estimated_seconds": 28,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
