@@ -96,6 +96,10 @@
 - 2026-08-23：随后冷缓存完整运行中 MCP billing 波动至 74.36 秒，与 rollup integrity 串行后使单 lane
   达到 123 秒。其权重提高到 81 秒，使 LPT 改与两个短 shard 配对；selector、进程上限、测试集合与断言
   保持不变。
+- 2026-08-23：另一次冷缓存运行显示 operational maintenance、MCP research batch 与 MCP affinity 被串为
+  141 秒 lane。operational 的重复样本上界据此提升至 110 秒；已因独立并行处理而不再长尾的 dashboard
+  overview 与 Tavily HTTP 分别回校为 51/68 秒，腾出 LPT 容量分散该组合。测试归属、selector、进程上限与
+  断言保持不变。
 
 ## Key Reasons / Replacements
 

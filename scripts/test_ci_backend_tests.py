@@ -436,14 +436,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(dashboard["include_prefixes"], [dashboard_prefix])
         self.assertEqual(dashboard["filtered_test_threads"], 2)
         self.assertEqual(forward["estimated_seconds"], 41)
-        self.assertEqual(dashboard["estimated_seconds"], 80)
+        self.assertEqual(dashboard["estimated_seconds"], 51)
 
     def test_tavily_http_search_runs_as_isolated_exact_tests(self):
         _targets, shards = RUNNER.load_manifest()
         tavily_http = next(shard for shard in shards if shard["id"] == "bin-tavily-http")
         search_prefix = "server::tests::tavily_http_search::tavily_"
 
-        self.assertEqual(tavily_http["estimated_seconds"], 80)
+        self.assertEqual(tavily_http["estimated_seconds"], 68)
         self.assertIn(search_prefix, tavily_http["include_prefixes"])
         self.assertEqual(tavily_http["isolated_prefixes"], [search_prefix])
         self.assertEqual(tavily_http["isolated_process_workers"], 4)
