@@ -80,7 +80,7 @@
     prefixes cannot share one lane tail. The protocol group runs its parent prefix with the batch
     child prefix skipped only after set-equivalence validation; both research groups and system
     retain their serial process boundaries.
-  - Manifest weights are recalibrated from native shard timings with four seconds of per-shard
+  - Manifest weights are recalibrated from the maximum of repeated native shard timings with bounded
     headroom. Request-log retention is divided into GC maintenance and serial policy groups, so
     its two long prefixes are independently packed while the policy process remains serial.
     Affinity, reconciliation, LinuxDo, reporting, and server HTTP contract retain enough weight

@@ -75,7 +75,7 @@
       "id": "lib-core",
       "kind": "lib",
       "name": "Lib Core",
-      "estimated_seconds": 25,
+      "estimated_seconds": 23,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -226,7 +226,7 @@
       "id": "lib-request-rollup-reporting",
       "kind": "lib",
       "name": "Lib Request Rollup Reporting",
-      "estimated_seconds": 47,
+      "estimated_seconds": 45,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -287,7 +287,7 @@
       "id": "lib-request-rollup-lifecycle",
       "kind": "lib",
       "name": "Lib Request Rollup Lifecycle",
-      "estimated_seconds": 50,
+      "estimated_seconds": 83,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -316,7 +316,7 @@
       "id": "lib-affinity-domain",
       "kind": "lib",
       "name": "Lib Affinity Domain",
-      "estimated_seconds": 52,
+      "estimated_seconds": 50,
       "coverage_target": "lib",
       "run_args": [
         "--lib"
@@ -518,7 +518,7 @@
       "id": "lib-upstream-reconciliation",
       "kind": "lib",
       "name": "Lib Upstream Reconciliation",
-      "estimated_seconds": 25,
+      "estimated_seconds": 23,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_process_workers": 4,
@@ -784,7 +784,7 @@
       "id": "bin-mcp-research-protocol",
       "kind": "bin",
       "name": "Bin MCP Research Protocol",
-      "estimated_seconds": 51,
+      "estimated_seconds": 49,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -804,7 +804,7 @@
       "id": "bin-mcp-research-batch",
       "kind": "bin",
       "name": "Bin MCP Research Batch",
-      "estimated_seconds": 19,
+      "estimated_seconds": 37,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
@@ -890,7 +890,7 @@
       "id": "bin-ha-rest-lifecycle",
       "kind": "bin",
       "name": "Bin HA Rest Lifecycle",
-      "estimated_seconds": 45,
+      "estimated_seconds": 83,
       "coverage_target": "bin-main",
       "run_args": ["--bin", "tavily-hikari"],
       "include_prefixes": [
@@ -999,7 +999,7 @@
       "id": "integration-server-http-contract",
       "kind": "integration",
       "name": "Integration Server HTTP Contract",
-      "estimated_seconds": 46,
+      "estimated_seconds": 44,
       "coverage_target": "integration:server_http_contract",
       "run_args": [
         "--test",

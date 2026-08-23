@@ -72,6 +72,9 @@
 - 2026-08-23：native Actions shard telemetry 显示旧权重高估大部分短 shard，却低估账户/用户 identity
   组合 shard；后者与 MCP protocol 串行后超过单 lane 预算。identity coverage 因此拆为四个互斥语义组，
   其中 business-call 的既有串行 prefix 独立保留，全部 LPT 权重按实测重校准。
+- 2026-08-23：第二个 native cold sample 显示 request-rollup lifecycle、HA lifecycle 与 MCP batch
+  各自仍在单 lane 预算内，却同时波动并被 LPT 串到同一 lane。权重改取重复样本的上界并将三者分散，
+  不改变其 selector、进程上限或测试语义。
 
 ## Key Reasons / Replacements
 
