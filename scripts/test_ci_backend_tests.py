@@ -158,6 +158,20 @@ class BackendTestRunnerContractTests(unittest.TestCase):
                 "lib-reconciliation-projection",
             },
         )
+        upstream = reconciliation_shards["lib-upstream-reconciliation"]
+        self.assertEqual(RUNNER.shard_resource_limits(upstream, 4, 2), (4, 1))
+        self.assertEqual(len(upstream["include_prefixes"]), 26)
+        self.assertEqual(len(upstream["include_prefixes"]), len(set(upstream["include_prefixes"])))
+        self.assertTrue(
+            all(
+                prefix.startswith("tests::upstream_reconciliation::")
+                for prefix in upstream["include_prefixes"]
+            )
+        )
+        self.assertIn(
+            "tests::upstream_reconciliation::reconciliation_waits_for_a_complete_eligible_period",
+            upstream["include_prefixes"],
+        )
         prefixes = [
             prefix
             for shard in reconciliation_shards.values()
@@ -170,7 +184,6 @@ class BackendTestRunnerContractTests(unittest.TestCase):
                 "tests::maintenance_queue_performance::",
                 "tests::schema_migrations::",
                 "tests::reconciliation_controller::",
-                "tests::upstream_reconciliation::",
                 "tests::upstream_reconciliation_continuation::",
                 "tests::upstream_reconciliation_engine::",
                 "tests::upstream_reconciliation_fencing::",
@@ -178,7 +191,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
                 "tavily_proxy::reconciliation_engine_tests::",
                 "tavily_proxy::user_business_calls_memory::memory_window_regression_tests::",
                 "upstream_privacy::tests::",
-            },
+            }.union(upstream["include_prefixes"]),
         )
 
     def test_request_rollup_storage_shards_are_mutually_exclusive(self):

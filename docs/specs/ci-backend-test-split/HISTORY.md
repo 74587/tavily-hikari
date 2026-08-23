@@ -61,6 +61,9 @@
 - 2026-08-23：重复计时中 reporting 的 request-stats background slice 在两线程 test process 内发生
   `PoolTimedOut`。该测试拆为单独的单进程、单线程 shard，主 reporting shard 精确排除它；不改变断言、
   等待预算或任何测试的归属集合。
+- 2026-08-23：另一次重复计时显示 26-test upstream reconciliation filter 在同一进程内偶发延长至 147 秒。
+  该 shard 改以 coverage verifier 所列出的精确测试名运行，每个进程只运行一个单线程测试；CI 调用方可并行
+  至四个进程，低资源本地默认仍是一进程。测试集合、断言与时间语义保持不变。
 
 ## Key Reasons / Replacements
 

@@ -49,8 +49,10 @@
     are independent groups so measured long tails can be packed separately. Manifest estimates
     feed stable LPT lane packing.
   - Reconciliation coverage is divided into maintenance, upstream-reconciliation, and projection
-    groups. This keeps the long upstream test binary from queueing behind unrelated reconciliation
-    prefixes while the coverage verifier continues to reject overlap or omissions.
+    groups. Upstream reconciliation runs its 26 verified test names in independent single-thread
+    processes, capped at four only when the caller requests that capacity. This prevents an
+    unrelated slow test process from serializing the whole group while the coverage verifier
+    continues to reject overlap or omissions.
   - Request rollup storage is divided into rollup storage, request-log retention, and scheduled
     request-maintenance groups. Admin resources are divided into identity, observability, and
     settings groups. The manifest contract tests preserve the old prefix unions, so the split can
