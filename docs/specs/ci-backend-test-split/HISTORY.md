@@ -81,6 +81,9 @@
 - 2026-08-23：HA event/recovery 拆分后，原 175 秒 prefix 收敛为两个短 shard。随后 telemetry 捕获到
   account/LinuxDo、business-call、MCP rebalance-control 与若干组合 lane 的真实峰值；LPT 权重按这些峰值
   重校准，使每个高波动 shard 不再与另一高波动 shard 串行。
+- 2026-08-23：dashboard overview 与 admin observability 的同 lane 组合达到 124 秒，虽未超过 backend
+  墙钟预算却超过单 lane 预算。两者按新峰值重新加权并分散到不同 lane；其它调整只收回已由重复样本
+  证明的冗余余量。
 
 ## Key Reasons / Replacements
 
