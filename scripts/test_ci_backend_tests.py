@@ -388,10 +388,10 @@ class BackendTestRunnerContractTests(unittest.TestCase):
 
         self.assertEqual(fixture_dir, RUNNER.ROOT / "target" / "ci-test" / "ci-web-assets")
 
-    def test_backend_compilation_cache_uses_exact_inputs_and_fallback(self):
+    def test_backend_bundle_cache_skips_cold_setup_on_an_exact_input_hit(self):
         workflow = (RUNNER.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        cache_block = workflow.split("- name: Cache backend test compilation", 1)[1].split(
-            "- name: Prepare backend test artifacts", 1
+        bundle_cache_block = workflow.split("- name: Cache prepared backend test bundle", 1)[1].split(
+            "- name: Install system dependencies", 1
         )[0]
 
         for cache_input in (
@@ -403,13 +403,14 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             "src/**",
             "tests/**",
             "scripts/ci_backend_tests.py",
+            "scripts/ci_backend_test_manifest.json",
         ):
-            self.assertIn(cache_input, cache_block)
-        self.assertIn("restore-keys:", cache_block)
-        self.assertIn("backend-test-target-rust-1.91.0-ci-test-mold-", cache_block)
-        self.assertIn("id: backend-test-cache", cache_block)
-        self.assertIn("Refresh exact compilation cache timestamps", workflow)
-        self.assertIn("steps.backend-test-cache.outputs.cache-hit == 'true'", workflow)
+            self.assertIn(cache_input, bundle_cache_block)
+        self.assertIn("id: backend-test-bundle-cache", bundle_cache_block)
+        self.assertIn("backend-test-bundle-v1-rust-1.91.0-ci-test-mold-", bundle_cache_block)
+        self.assertNotIn("Refresh exact compilation cache timestamps", workflow)
+        cold_setup_guard = "steps.backend-test-bundle-cache.outputs.cache-hit != 'true'"
+        self.assertEqual(workflow.count(cold_setup_guard), 5)
 
     def test_request_rollup_integrity_has_one_manifest_owner(self):
         _targets, shards = RUNNER.load_manifest()

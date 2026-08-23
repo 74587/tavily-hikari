@@ -88,14 +88,9 @@
 - The CI fixture now uses a stable profile-local path and preserves mtimes for unchanged files. This keeps
   the build-script environment input stable across cache hits while retaining normal asset-change tracking.
 
-## Exact compilation cache keys
+## Exact prepared bundle cache
 
-- The compilation cache now keys all Cargo-relevant source, configuration, fixture-generator, platform,
-  toolchain, profile, and linker inputs. A same-prefix fallback still restores reusable dependency artifacts,
-  while a changed source state can save its own exact target cache for later retries.
-
-## Exact cache freshness
-
-- Git checkout gives unchanged source files fresh mtimes, which otherwise made Cargo rebuild after every
-  cache restore. CI refreshes target timestamps only after an exact input-key hit; fallback restores retain
-  Cargo's normal invalidation and compile before saving their new exact key.
+- Cargo rebuilds test executables after a fresh checkout even when a restored `target` directory is content
+  compatible. The plan therefore caches the smaller, checksum-verified v2 backend bundle by every input that
+  affects compilation or sharding. Exact hits bypass Cargo entirely; target caching remains only for the
+  cold-build dependency fallback.

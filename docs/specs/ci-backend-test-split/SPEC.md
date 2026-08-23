@@ -69,15 +69,14 @@
 
 ### Current execution contract
 
-- `Backend Shard Plan` does not depend on `web-assets`. It compiles all backend test targets once
-  with the `ci-test` profile and a minimal web fixture, verifies manifest ownership, uploads the
-  backend bundle, and exports at most 16 non-empty lanes.
-- The plan restores only the `ci-test` compilation directory from a cache keyed by platform,
-  toolchain, profile/linker configuration, and all Cargo compilation inputs. A changed input receives a new
-  exact key, while a same-prefix fallback may reuse dependency artifacts before saving the new target state.
-  On an exact hit only, CI refreshes restored target timestamps after checkout so Cargo does not mistake the
-  fresh checkout's file mtimes for source changes. A fallback never receives this timestamp refresh.
-  This cache is not a backend test artifact and never replaces its bundle checksum verification.
+- `Backend Shard Plan` does not depend on `web-assets`. It restores an exact, input-keyed v2 backend bundle
+  when available; a hit skips system setup, Rust setup, Cargo caches, and compilation, then still verifies
+  manifest ownership, uploads the bundle, and exports at most 16 non-empty lanes. A miss compiles all
+  backend targets once with the `ci-test` profile and a minimal web fixture.
+- The exact bundle cache key includes platform, toolchain, profile/linker, Cargo configuration, backend
+  source and tests, fixture generator, and shard manifest. The runner's SHA-256 verification remains
+  mandatory after either cache restoration or fresh assembly. The separate `ci-test` target cache remains a
+  cold-build dependency fallback and never replaces the bundle checksum verification.
 - A shard may own a parent test prefix minus a child prefix only when the runner proves both
   libtest substring selectors resolve to their respective starts-with sets inside that parent.
   It then runs one serial parent process with `--skip <child-prefix>`; otherwise it falls back to
