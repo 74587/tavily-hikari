@@ -719,6 +719,7 @@
       "isolated_prefixes": [
         "server::tests::tavily_http_search::tavily_"
       ],
+      "isolated_process_workers": 4,
       "filtered_process_workers": 4,
       "include_prefixes": [
         "server::avatar_url_tests::",

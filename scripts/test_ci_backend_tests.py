@@ -446,7 +446,15 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(tavily_http["estimated_seconds"], 80)
         self.assertIn(search_prefix, tavily_http["include_prefixes"])
         self.assertEqual(tavily_http["isolated_prefixes"], [search_prefix])
+        self.assertEqual(tavily_http["isolated_process_workers"], 4)
         self.assertEqual(RUNNER.shard_resource_limits(tavily_http, 4, 2), (4, 1))
+        self.assertEqual(RUNNER.isolated_process_worker_limit(tavily_http, 4), 4)
+        self.assertEqual(RUNNER.isolated_process_worker_limit(tavily_http, 2), 2)
+
+        reporting = next(
+            shard for shard in shards if shard["id"] == "lib-request-rollup-reporting"
+        )
+        self.assertEqual(RUNNER.isolated_process_worker_limit(reporting, 4), 1)
 
     def test_ha_lifecycle_shards_separate_event_and_recovery_tests(self):
         _targets, shards = RUNNER.load_manifest()

@@ -59,8 +59,14 @@ def load_manifest():
         shard.setdefault("exclude_prefixes", [])
         shard.setdefault("serial_prefixes", [])
         shard.setdefault("isolated_prefixes", [])
+        shard.setdefault("isolated_process_workers", 1)
         shard.setdefault("filtered_test_threads", 1)
         shard.setdefault("filtered_process_workers", 3)
+        if (
+            not isinstance(shard["isolated_process_workers"], int)
+            or shard["isolated_process_workers"] < 1
+        ):
+            raise SystemExit(f"shard {shard_id} needs at least one isolated process worker")
         estimated_seconds = shard.get("estimated_seconds")
         if not isinstance(estimated_seconds, (int, float)) or estimated_seconds <= 0:
             raise SystemExit(f"shard {shard_id} needs a positive estimated_seconds value")
@@ -1042,6 +1048,10 @@ def shard_resource_limits(shard, filtered_process_workers=None, filtered_test_th
     return process_workers, test_threads
 
 
+def isolated_process_worker_limit(shard, filtered_process_workers):
+    return min(filtered_process_workers, shard["isolated_process_workers"])
+
+
 def output_lane_matrix(lane_count):
     _, shards = load_manifest()
     print(json.dumps(build_lane_matrix(shards, lane_count), separators=(",", ":")))
@@ -1064,6 +1074,7 @@ def run_shard(
         filtered_process_workers=filtered_process_workers,
         filtered_test_threads=filtered_test_threads,
     )
+    isolated_process_workers = isolated_process_worker_limit(shard, filtered_process_workers)
 
     target_id = shard["coverage_target"]
     extra_env = os.environ.copy()
@@ -1130,7 +1141,7 @@ def run_shard(
             executable["path"],
             isolated_tests,
             extra_env=extra_env,
-            process_workers=1,
+            process_workers=isolated_process_workers,
         )
 
 
