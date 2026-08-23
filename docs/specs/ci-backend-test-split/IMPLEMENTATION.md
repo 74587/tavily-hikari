@@ -29,10 +29,11 @@
     skips system and Rust setup plus Cargo compilation, but still runs the existing checksum and coverage
     verifier before uploading a per-run artifact. A miss uses `target/ci-test` only as a cold-build
     dependency fallback, then saves the newly assembled exact bundle.
-  - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
-    bundle. The bundle includes a read-only source snapshot for tests that use the compile-time
-    manifest directory; the former lib/bin/integration jobs each repeated frontend artifact
-    downloads, system packages, Rust setup, and Cargo cache restoration.
+  - `Backend Test Lane` jobs now checkout the source tree at the default workspace path, then
+    download, checksum-verify, and run a lane from the self-contained bundle. Checkout only
+    satisfies tests that use the compile-time manifest directory; lanes still avoid frontend
+    artifact downloads, system packages, Rust setup, Cargo cache restoration, and recompilation.
+    The bundle retains its read-only source snapshot for artifact provenance and compatibility.
   - `Backend Tests` remains the stable aggregate check. The target is the native Actions interval
     from plan start to aggregate completion, with no new required performance check.
   - Unrelated heavy jobs keep their existing commands but wait for the backend aggregate, leaving

@@ -255,6 +255,9 @@ jobs:
       matrix:
         lane: ${{ fromJson(needs.backend-shard-plan.outputs.lane-matrix) }}
     steps:
+      - name: Checkout source tree
+        uses: actions/checkout@v4
+
       - name: Download backend test artifacts
         uses: actions/download-artifact@v4
         with:
@@ -263,12 +266,6 @@ jobs:
 
       - name: Run backend lane
         run: |
-          for source_dir in src tests; do
-            source_path="/tmp/backend-test-artifacts/source/${source_dir}"
-            workspace_path="${GITHUB_WORKSPACE}/${source_dir}"
-            test ! -e "$workspace_path"
-            ln -s "$source_path" "$workspace_path"
-          done
           python3 /tmp/backend-test-artifacts/scripts/ci_backend_tests.py run-lane \
             --id "${{ matrix.lane.id }}" \
             --lane-count 16 \

@@ -84,10 +84,11 @@
 - Tests that demonstrate SQLite pool contention in a two-thread filter process use dedicated serial exact
   shards. Their parent shard excludes only the full test name, so the verifier still requires every test to
   have exactly one owner.
-- Each `Backend Test Lane` downloads the self-contained bundle, materializes its bundled source
-  contract, verifies executable checksums while loading it, and executes its assigned shards in
-  order. A lane does not check out source files or install Bun, Rust, Cargo caches, or system
-  development packages.
+- Each `Backend Test Lane` checks out the source tree at the default workspace path, downloads the
+  self-contained bundle, verifies executable checksums while loading it, and executes its assigned
+  shards in order. Checkout exists only for tests that resolve `CARGO_MANIFEST_DIR` at compile time;
+  a lane does not install Bun, Rust, Cargo caches, or system development packages, and never
+  recompiles the test bundle.
 - The bundle writer emits only checksum-addressed artifact format 2. Readers keep format 1 support
   while cached artifacts age out. One executable or support binary is stored once and referenced by
   coverage-target metadata.

@@ -18,6 +18,9 @@
 - 2026-08-20：Actions 原生步骤计时表明完整 executable bundle 的下载只占少量时间，而 lane checkout
   位于关键路径。bundle 因此携带 runner、manifest 与 `src`/`tests` source snapshot，并把 snapshot 链接到
   compile-time manifest directory，使运行期读取 repository sources 的既有测试不再要求 checkout。
+- 2026-08-24：当前 head 的 review 发现 no-checkout lane 无法满足测试二进制编译期固定的
+  `CARGO_MANIFEST_DIR`。lane 恢复默认 workspace 的 source checkout，仅用于提供 `src`/`tests`；
+  不恢复 Rust/Bun/toolchain 安装，也不重新编译 bundle。
 - 2026-08-20：MCP rebalance 审计 flush 测试在与其它 MCP prefix 进程并行时超过其既有等待预算；该 prefix
   作为整体改为串行执行。admin resources group 保持原有两进程上限，同时显式允许两条测试线程以缩短其最长 lane。
 - 2026-08-20：原生 Actions 数据显示 16-way fan-out 在共享 workflow 配额下产生多分钟启动排队，而十个
