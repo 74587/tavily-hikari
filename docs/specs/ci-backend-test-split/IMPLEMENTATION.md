@@ -49,6 +49,9 @@
   - The bundle writer emits format 2 with one checksum-addressed copy per executable. Filenames
     preserve each source binary's prefix so Cargo sibling-binary resolution works without adding a
     second copy. The loader supports both formats and verifies SHA-256 before execution.
+  - The scheduled duplicate-claim and reporting admitted-flush tests run as dedicated serial exact
+    shards. Their parent prefixes exclude only those full test names, preserving the original coverage
+    ownership while avoiding shared SQLite pool contention in two-thread filter processes.
   - `lib-request-rollup`, `lib-account-user`, `bin-admin-api`, and `bin-ha-rest` are split into
     mutually exclusive semantic groups. Rollup integrity, alert projection, and reconciliation
     are independent groups so measured long tails can be packed separately. Manifest estimates

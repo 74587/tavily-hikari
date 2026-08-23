@@ -82,6 +82,9 @@
   libtest substring selectors resolve to their respective starts-with sets inside that parent.
   It then runs one serial parent process with `--skip <child-prefix>`; otherwise it falls back to
   exact test names. Serial shards retain one process and one test thread for their selected group.
+- Tests that demonstrate SQLite pool contention in a two-thread filter process use dedicated serial exact
+  shards. Their parent shard excludes only the full test name, so the verifier still requires every test to
+  have exactly one owner.
 - Each `Backend Test Lane` downloads the self-contained bundle, materializes its bundled source
   contract, verifies executable checksums while loading it, and executes its assigned shards in
   order. A lane does not check out source files or install Bun, Rust, Cargo caches, or system

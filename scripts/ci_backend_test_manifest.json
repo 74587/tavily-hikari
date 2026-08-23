@@ -186,10 +186,29 @@
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
+      "exclude_prefixes": [
+        "tests::jobs_and_request_log_retention::scheduled_job_claim_serializes_concurrent_duplicate_triggers"
+      ],
       "include_prefixes": [
         "tests::jobs_and_request_log_retention::startup_",
         "tests::jobs_and_request_log_retention::quota_",
         "tests::jobs_and_request_log_retention::scheduled_"
+      ]
+    },
+    {
+      "id": "lib-scheduled-request-maintenance-claim",
+      "kind": "lib",
+      "name": "Lib Scheduled Request Maintenance Claim",
+      "estimated_seconds": 20,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "filtered_process_workers": 1,
+      "filtered_test_threads": 1,
+      "serial_prefixes": [
+        "tests::jobs_and_request_log_retention::scheduled_job_claim_serializes_concurrent_duplicate_triggers"
+      ],
+      "include_prefixes": [
+        "tests::jobs_and_request_log_retention::scheduled_job_claim_serializes_concurrent_duplicate_triggers"
       ]
     },
     {
@@ -213,7 +232,8 @@
       "filtered_test_threads": 2,
       "isolated_prefixes": ["tests::request_rollup_public_metrics::admin_"],
       "exclude_prefixes": [
-        "tests::request_rollup_public_metrics::request_stats_background_slice_bounds_work_and_requeues_the_tail"
+        "tests::request_rollup_public_metrics::request_stats_background_slice_bounds_work_and_requeues_the_tail",
+        "tests::request_rollup_public_metrics::admitted_flush_drains_followup_batches_before_reporting_fresh"
       ],
       "include_prefixes": [
         "tests::proxy_affinity_and_summary::summary_",
@@ -245,6 +265,22 @@
       ],
       "include_prefixes": [
         "tests::request_rollup_public_metrics::request_stats_background_slice_bounds_work_and_requeues_the_tail"
+      ]
+    },
+    {
+      "id": "lib-request-rollup-reporting-admitted-flush",
+      "kind": "lib",
+      "name": "Lib Request Rollup Reporting Admitted Flush",
+      "estimated_seconds": 20,
+      "coverage_target": "lib",
+      "run_args": ["--lib"],
+      "filtered_process_workers": 1,
+      "filtered_test_threads": 1,
+      "serial_prefixes": [
+        "tests::request_rollup_public_metrics::admitted_flush_drains_followup_batches_before_reporting_fresh"
+      ],
+      "include_prefixes": [
+        "tests::request_rollup_public_metrics::admitted_flush_drains_followup_batches_before_reporting_fresh"
       ]
     },
     {

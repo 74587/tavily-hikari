@@ -63,6 +63,9 @@
 - 2026-08-23：另一次重复计时显示 26-test upstream reconciliation filter 在同一进程内偶发延长至 147 秒。
   该 shard 改以 coverage verifier 所列出的精确测试名运行，每个进程只运行一个单线程测试；CI 调用方可并行
   至四个进程，低资源本地默认仍是一进程。测试集合、断言与时间语义保持不变。
+- 2026-08-23：scheduled duplicate-claim 与 reporting admitted-flush 在各自两线程过滤进程中出现
+  `PoolTimedOut`。二者各自成为单进程、单线程的精确 shard，父 prefix 只排除对应全名；不改变断言、等待预算、
+  重试或覆盖归属。
 
 ## Key Reasons / Replacements
 

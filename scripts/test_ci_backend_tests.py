@@ -431,6 +431,19 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         reporting_slice = next(
             shard for shard in shards if shard["id"] == "lib-request-rollup-reporting-slice"
         )
+        reporting_admitted_flush = next(
+            shard
+            for shard in shards
+            if shard["id"] == "lib-request-rollup-reporting-admitted-flush"
+        )
+        scheduled_maintenance = next(
+            shard for shard in shards if shard["id"] == "lib-scheduled-request-maintenance"
+        )
+        scheduled_maintenance_claim = next(
+            shard
+            for shard in shards
+            if shard["id"] == "lib-scheduled-request-maintenance-claim"
+        )
         alert = next(shard for shard in shards if shard["id"] == "lib-alert-projection")
         affinity = next(shard for shard in shards if shard["id"] == "lib-affinity-domain")
         admin_identity = next(
@@ -477,6 +490,20 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(reporting_slice["include_prefixes"], [reporting_slice_test])
         self.assertEqual(reporting_slice["serial_prefixes"], [reporting_slice_test])
         self.assertEqual(RUNNER.shard_resource_limits(reporting_slice, 4, 2), (1, 1))
+        admitted_flush_test = (
+            "tests::request_rollup_public_metrics::admitted_flush_drains_followup_batches_before_reporting_fresh"
+        )
+        self.assertIn(admitted_flush_test, reporting["exclude_prefixes"])
+        self.assertEqual(reporting_admitted_flush["include_prefixes"], [admitted_flush_test])
+        self.assertEqual(reporting_admitted_flush["serial_prefixes"], [admitted_flush_test])
+        self.assertEqual(RUNNER.shard_resource_limits(reporting_admitted_flush, 4, 2), (1, 1))
+        scheduled_claim_test = (
+            "tests::jobs_and_request_log_retention::scheduled_job_claim_serializes_concurrent_duplicate_triggers"
+        )
+        self.assertIn(scheduled_claim_test, scheduled_maintenance["exclude_prefixes"])
+        self.assertEqual(scheduled_maintenance_claim["include_prefixes"], [scheduled_claim_test])
+        self.assertEqual(scheduled_maintenance_claim["serial_prefixes"], [scheduled_claim_test])
+        self.assertEqual(RUNNER.shard_resource_limits(scheduled_maintenance_claim, 4, 2), (1, 1))
         self.assertEqual(RUNNER.shard_resource_limits(alert, 3, 2), (3, 1))
         self.assertEqual(RUNNER.shard_resource_limits(affinity, 3, 2), (3, 2))
         self.assertEqual(RUNNER.shard_resource_limits(admin_identity, 3, 2), (2, 2))
