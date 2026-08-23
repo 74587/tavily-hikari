@@ -31,7 +31,8 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 - `admin privacy read controller`: an AppState-owned immutable privacy-status last-good value,
   observation time, and singleflight refresh flag. It schedules its dedicated SQLite snapshot only
   after ready and outside the HTTP response path. Snapshot acquire and `BEGIN` remain bounded to
-  100ms and close explicitly at a cooperative completion boundary; cached readers immediately
+  100ms through operation admission and a connection-local busy timeout, then close explicitly at
+  a cooperative completion boundary; cached readers immediately
   receive `stale` coverage while a refresh is in flight or deferred. Shutdown fences new refreshes
   and waits for an active snapshot's explicit close. A true cold miss returns `503 Retry-After: 1`
   without opening a request-owned SQLite transaction.

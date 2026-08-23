@@ -802,19 +802,33 @@ impl SqliteRuntime {
             started_at: Instant::now(),
             restore_busy_timeout,
         };
-        match tokio::time::timeout(
-            operation.begin_budget(),
-            sqlx::query("BEGIN").execute(&mut *snapshot),
-        )
-        .await
-        {
+        let begin_result = if matches!(operation, SqliteOperation::AdminPrivacyRead) {
+            // Admin privacy refreshes are detached from the HTTP budget. Its
+            // connection-local busy timeout is the bounded defer mechanism;
+            // cancelling this future would leave a physical connection in an
+            // unknown transaction state and turn discard into normal flow.
+            Ok(sqlx::query("BEGIN").execute(&mut *snapshot).await)
+        } else {
+            tokio::time::timeout(
+                operation.begin_budget(),
+                sqlx::query("BEGIN").execute(&mut *snapshot),
+            )
+            .await
+        };
+        match begin_result {
             Ok(Ok(_)) => {}
             Ok(Err(err)) => {
                 let conn = snapshot
                     .conn
                     .take()
                     .expect("SQLite read snapshot connection");
-                conn.detach().close().await.ok();
+                if let Err(restore_err) =
+                    restore_operation_connection(conn, snapshot.restore_busy_timeout).await
+                {
+                    let err = ProxyError::Database(restore_err);
+                    self.record_error(operation, pool_wait, begin_started.elapsed(), &err);
+                    return Err(err);
+                }
                 let err = ProxyError::Database(err);
                 self.record_error(operation, pool_wait, begin_started.elapsed(), &err);
                 return Err(err);

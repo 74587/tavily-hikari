@@ -965,7 +965,6 @@ async fn admin_privacy_status_serves_stale_last_good_without_cancelling_its_read
         .proxy
         .install_admin_privacy_read_pause_for_test()
         .await;
-    let started = std::time::Instant::now();
     let first_request = {
         let client = client.clone();
         let cookie = cookie.clone();
@@ -979,17 +978,16 @@ async fn admin_privacy_status_serves_stale_last_good_without_cancelling_its_read
                 .expect("stale privacy status")
         })
     };
+    let stale = tokio::time::timeout(std::time::Duration::from_millis(225), first_request)
+        .await
+        .expect("last-good request must not wait for the refresh")
+        .expect("stale request task joins");
+    assert_eq!(stale.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = stale.json().await.expect("stale privacy status json");
+    assert_eq!(body.get("coverage").and_then(|value| value.as_str()), Some("stale"));
     tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait_until_arrived())
         .await
         .expect("the background refresh reached its controlled read pause");
-    let stale = first_request.await.expect("stale request task joins");
-    assert_eq!(stale.status(), reqwest::StatusCode::OK);
-    assert!(
-        started.elapsed() < std::time::Duration::from_millis(225),
-        "last-good reads must not wait for the refresh"
-    );
-    let body: serde_json::Value = stale.json().await.expect("stale privacy status json");
-    assert_eq!(body.get("coverage").and_then(|value| value.as_str()), Some("stale"));
     let second_started = std::time::Instant::now();
     let second = client
         .get(&privacy_status_url)

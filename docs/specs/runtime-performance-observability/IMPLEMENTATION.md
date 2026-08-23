@@ -85,8 +85,10 @@
   most one generation every five minutes. Rebuild slices remain bounded and replayable from the
   request-log source.
 - Privacy status refresh acquires one dedicated read snapshot within 100ms and constructs its full
-  immutable result on that connection outside the HTTP path. The refresh closes explicitly before
-  its result is published, so request timeouts never discard an open read snapshot. It bypasses
+  immutable result on that connection outside the HTTP path. Its `BEGIN` uses the connection-local
+  100ms busy timeout rather than task cancellation, restoring the connection to the pool on
+  contention. The refresh closes explicitly before its result is published, so request timeouts
+  never discard an open read snapshot. It bypasses
   maintenance-bulk admission; cached reads return stale coverage during pressure or refresh, while
   true cold reads return `503 Retry-After: 1`.
 - Server-pressure recovery allocates a staged generation, aggregates fixed-fence 500-row keyset

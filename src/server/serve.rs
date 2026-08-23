@@ -590,6 +590,7 @@ pub async fn serve(
     let _ = spawn_post_ready_serving_tasks_for_status(state.clone(), &startup_ha_status);
 
     let shutdown_proxy = state.proxy.clone();
+    let shutdown_state = state.clone();
     let post_shutdown_state = state.clone();
     axum::serve(
         listener,
@@ -603,6 +604,7 @@ pub async fn serve(
     )
     .with_graceful_shutdown(async move {
         shutdown_signal().await;
+        fence_admin_privacy_status_refresh(shutdown_state.as_ref()).await;
         shutdown_proxy.begin_sqlite_maintenance_run_shutdown();
         shutdown_proxy.nudge_request_stats_flush().await;
     })

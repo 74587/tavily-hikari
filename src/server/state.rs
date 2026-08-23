@@ -313,10 +313,10 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
 }
 
 pub(crate) async fn shutdown_admin_privacy_status_refresh(state: &AppState) {
+    fence_admin_privacy_status_refresh(state).await;
     let refresh_task = {
         let cache = dashboard_overview_cache_for_state(state);
         let mut cache = cache.lock().await;
-        cache.admin_privacy_status.shutting_down = true;
         cache.admin_privacy_status.refresh_task.take()
     };
     let Some(refresh_task) = refresh_task else {
@@ -334,6 +334,11 @@ pub(crate) async fn shutdown_admin_privacy_status_refresh(state: &AppState) {
             "privacy-status refresh ended before its cooperative close boundary"
         );
     }
+}
+
+pub(crate) async fn fence_admin_privacy_status_refresh(state: &AppState) {
+    let cache = dashboard_overview_cache_for_state(state);
+    cache.lock().await.admin_privacy_status.shutting_down = true;
 }
 
 #[cfg(test)]
