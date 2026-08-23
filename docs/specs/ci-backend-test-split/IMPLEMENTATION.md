@@ -28,7 +28,9 @@
   - The plan restores `target/ci-test` with a platform, Rust toolchain, profile/linker, and complete
     compilation-input cache key. Changed inputs create a fresh exact key, while a same-prefix fallback
     reuses dependency artifacts and allows the newly compiled target state to be saved. The cached
-    compilation state remains separate from the per-run, checksum-verified backend bundle.
+    compilation state remains separate from the per-run, checksum-verified backend bundle. Only an exact
+    cache hit refreshes restored target timestamps after checkout; a fallback preserves normal Cargo rebuild
+    behavior for changed sources.
   - `Backend Test Lane` jobs now download, checksum-verify, and run a lane from the self-contained
     bundle. The bundle includes a read-only source snapshot for tests that use the compile-time
     manifest directory; the former lib/bin/integration jobs each repeated frontend artifact

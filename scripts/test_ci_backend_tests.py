@@ -407,6 +407,9 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             self.assertIn(cache_input, cache_block)
         self.assertIn("restore-keys:", cache_block)
         self.assertIn("backend-test-target-rust-1.91.0-ci-test-mold-", cache_block)
+        self.assertIn("id: backend-test-cache", cache_block)
+        self.assertIn("Refresh exact compilation cache timestamps", workflow)
+        self.assertIn("steps.backend-test-cache.outputs.cache-hit == 'true'", workflow)
 
     def test_request_rollup_integrity_has_one_manifest_owner(self):
         _targets, shards = RUNNER.load_manifest()

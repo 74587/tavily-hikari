@@ -90,3 +90,9 @@
 - The compilation cache now keys all Cargo-relevant source, configuration, fixture-generator, platform,
   toolchain, profile, and linker inputs. A same-prefix fallback still restores reusable dependency artifacts,
   while a changed source state can save its own exact target cache for later retries.
+
+## Exact cache freshness
+
+- Git checkout gives unchanged source files fresh mtimes, which otherwise made Cargo rebuild after every
+  cache restore. CI refreshes target timestamps only after an exact input-key hit; fallback restores retain
+  Cargo's normal invalidation and compile before saving their new exact key.

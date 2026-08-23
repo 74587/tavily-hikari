@@ -75,6 +75,8 @@
 - The plan restores only the `ci-test` compilation directory from a cache keyed by platform,
   toolchain, profile/linker configuration, and all Cargo compilation inputs. A changed input receives a new
   exact key, while a same-prefix fallback may reuse dependency artifacts before saving the new target state.
+  On an exact hit only, CI refreshes restored target timestamps after checkout so Cargo does not mistake the
+  fresh checkout's file mtimes for source changes. A fallback never receives this timestamp refresh.
   This cache is not a backend test artifact and never replaces its bundle checksum verification.
 - A shard may own a parent test prefix minus a child prefix only when the runner proves both
   libtest substring selectors resolve to their respective starts-with sets inside that parent.
