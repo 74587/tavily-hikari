@@ -84,6 +84,9 @@
 - 2026-08-23：dashboard overview 与 admin observability 的同 lane 组合达到 124 秒，虽未超过 backend
   墙钟预算却超过单 lane 预算。两者按新峰值重新加权并分散到不同 lane；其它调整只收回已由重复样本
   证明的冗余余量。
+- 2026-08-23：后续 cold sample 发现 admin identity 与 operational maintenance 的峰值也会使组合 lane
+  超预算。两者改与低波动 shard 配对；state base、HA event/recovery、support 与单条 contract shard 的
+  余量按重复观测收回，使固定十六 lane 装箱保持在 120 秒上限内。
 
 ## Key Reasons / Replacements
 

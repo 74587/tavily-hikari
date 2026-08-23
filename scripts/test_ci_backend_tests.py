@@ -436,7 +436,7 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(dashboard["include_prefixes"], [dashboard_prefix])
         self.assertEqual(dashboard["filtered_test_threads"], 2)
         self.assertEqual(forward["estimated_seconds"], 41)
-        self.assertEqual(dashboard["estimated_seconds"], 82)
+        self.assertEqual(dashboard["estimated_seconds"], 80)
 
     def test_ha_lifecycle_shards_separate_event_and_recovery_tests(self):
         _targets, shards = RUNNER.load_manifest()
