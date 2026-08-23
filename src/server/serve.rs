@@ -575,7 +575,7 @@ pub async fn serve(
     // Privacy status is an owner-facing derived read model. It must populate
     // last-good after readiness without delaying the listener or competing
     // with foreground work; requests only ever copy the immutable result.
-    prewarm_admin_privacy_status(state.clone()).await;
+    prewarm_owner_read_models_after_ready(state.clone()).await;
 
     // Always-on HA tasks must stay available on standby/recovery so health, role
     // refresh, and pull-sync keep working even while business traffic is fenced.
@@ -2002,6 +2002,10 @@ async fn shutdown_signal() {
     );
 }
 
+async fn prewarm_owner_read_models_after_ready(state: Arc<AppState>) {
+    prewarm_admin_privacy_status(state).await;
+}
+
 const BODY_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB 默认限制
 const DEFAULT_LOG_LIMIT: usize = 200;
 
@@ -2009,6 +2013,52 @@ const DEFAULT_LOG_LIMIT: usize = 200;
 mod serve_tests {
     use super::*;
     use tavily_hikari::DEFAULT_UPSTREAM;
+
+    #[tokio::test]
+    async fn listener_ready_hook_schedules_privacy_status_prewarm() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("privacy-status-ready-hook.db");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-privacy-status-ready-hook".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: false,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            admin_passkey: AdminPasskeyOptions {
+                enabled: false,
+                rp_id: None,
+                rp_origin: None,
+                scope: None,
+                challenge_ttl_secs: 300,
+                session_max_age_secs: 60 * 60,
+            },
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
+            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+            dev_open_admin: false,
+            usage_base: "http://127.0.0.1:58088".to_string(),
+            api_key_ip_geo_origin: "https://api.country.is".to_string(),
+            dashboard_overview_cache: new_dashboard_overview_cache(),
+        });
+
+        for _ in 0..100 {
+            prewarm_owner_read_models_after_ready(state.clone()).await;
+            wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+            if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("listener-ready hook did not publish privacy-status last-good data");
+    }
 
     #[tokio::test]
     async fn ha_control_apply_refreshes_in_memory_admin_password_state() {
