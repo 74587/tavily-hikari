@@ -12,6 +12,40 @@ pub async fn serve(
     linuxdo_oauth: LinuxDoOAuthOptions,
     linuxdo_credit: LinuxDoCreditOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    serve_with_shutdown(
+        addr,
+        proxy,
+        static_dir,
+        forward_auth,
+        admin_auth,
+        dev_open_admin,
+        usage_base,
+        api_key_ip_geo_origin,
+        ha_config,
+        linuxdo_oauth,
+        linuxdo_credit,
+        shutdown_signal(),
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_with_shutdown(
+    addr: SocketAddr,
+    proxy: TavilyProxy,
+    static_dir: Option<PathBuf>,
+    forward_auth: ForwardAuthConfig,
+    admin_auth: AdminAuthOptions,
+    dev_open_admin: bool,
+    usage_base: String,
+    api_key_ip_geo_origin: String,
+    ha_config: tavily_hikari::HaConfig,
+    linuxdo_oauth: LinuxDoOAuthOptions,
+    linuxdo_credit: LinuxDoCreditOptions,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ready: Option<tokio::sync::oneshot::Sender<Arc<AppState>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let AdminAuthOptions {
         forward_auth_enabled,
         builtin_auth_enabled,
@@ -576,6 +610,9 @@ pub async fn serve(
     // last-good after readiness without delaying the listener or competing
     // with foreground work; requests only ever copy the immutable result.
     prewarm_owner_read_models_after_ready(state.clone()).await;
+    if let Some(ready) = ready {
+        let _ = ready.send(state.clone());
+    }
 
     // Always-on HA tasks must stay available on standby/recovery so health, role
     // refresh, and pull-sync keep working even while business traffic is fenced.
@@ -603,7 +640,7 @@ pub async fn serve(
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        shutdown.await;
         fence_admin_privacy_status_refresh(shutdown_state.as_ref()).await;
         shutdown_proxy.begin_sqlite_maintenance_run_shutdown();
         shutdown_proxy.nudge_request_stats_flush().await;
@@ -2026,37 +2063,59 @@ mod serve_tests {
         )
         .await
         .expect("proxy created");
-        let state = Arc::new(AppState {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let server = serve_with_shutdown(
+            "127.0.0.1:0".parse().expect("test socket address"),
             proxy,
-            static_dir: None,
-            forward_auth: ForwardAuthConfig::new(None, None, None, None),
-            forward_auth_enabled: false,
-            builtin_admin: BuiltinAdminAuth::new(false, None, None),
-            admin_passkey: AdminPasskeyOptions {
-                enabled: false,
-                rp_id: None,
-                rp_origin: None,
-                scope: None,
-                challenge_ttl_secs: 300,
-                session_max_age_secs: 60 * 60,
+            None,
+            ForwardAuthConfig::new(None, None, None, None),
+            AdminAuthOptions {
+                forward_auth_enabled: false,
+                builtin_auth_enabled: false,
+                builtin_auth_password: None,
+                builtin_auth_password_hash: None,
+                passkey_auth_enabled: false,
+                passkey_rp_id: None,
+                passkey_rp_origin: None,
+                passkey_challenge_ttl_secs: 300,
+                passkey_session_max_age_secs: 60 * 60,
             },
-            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
-            linuxdo_credit: LinuxDoCreditOptions::disabled(),
-            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
-            dev_open_admin: false,
-            usage_base: "http://127.0.0.1:58088".to_string(),
-            api_key_ip_geo_origin: "https://api.country.is".to_string(),
-            dashboard_overview_cache: new_dashboard_overview_cache(),
-        });
+            false,
+            "http://127.0.0.1:58088".to_string(),
+            "https://api.country.is".to_string(),
+            tavily_hikari::HaConfig::default(),
+            LinuxDoOAuthOptions::disabled(),
+            LinuxDoCreditOptions::disabled(),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            Some(ready_tx),
+        );
+        tokio::pin!(server);
+        let state = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                ready = ready_rx => ready.expect("server reported ready state"),
+                result = &mut server => panic!("server exited before listener-ready hook: {result:?}"),
+            }
+        })
+            .await
+            .expect("server reached listener-ready hook");
 
         for _ in 0..100 {
-            prewarm_owner_read_models_after_ready(state.clone()).await;
             wait_for_admin_privacy_status_refresh(state.as_ref()).await;
             if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+                shutdown_tx.send(()).expect("signal server shutdown");
+                tokio::time::timeout(Duration::from_secs(2), &mut server)
+                    .await
+                    .expect("server shuts down")
+                    .expect("server exits cleanly");
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
         panic!("listener-ready hook did not publish privacy-status last-good data");
     }
 
