@@ -93,6 +93,9 @@
 - 2026-08-23：缓存命中的完整原生计时显示 MCP research protocol 的旧 64 秒权重显著高于其 18.89 秒实际
   执行时间，反而把 operational/reporting/session 串在同一 lane。按带余量的实测值校准为 28 秒，使 LPT
   分散该组合；selector、进程上限、测试集合与断言保持不变。
+- 2026-08-23：随后冷缓存完整运行中 MCP billing 波动至 74.36 秒，与 rollup integrity 串行后使单 lane
+  达到 123 秒。其权重提高到 81 秒，使 LPT 改与两个短 shard 配对；selector、进程上限、测试集合与断言
+  保持不变。
 
 ## Key Reasons / Replacements
 

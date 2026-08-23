@@ -736,7 +736,7 @@
       "id": "bin-mcp-billing",
       "kind": "bin",
       "name": "Bin MCP Billing",
-      "estimated_seconds": 65,
+      "estimated_seconds": 81,
       "coverage_target": "bin-main",
       "run_args": [
         "--bin",
