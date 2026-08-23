@@ -78,6 +78,9 @@
 - 2026-08-23：后续 sample 的 `alerts_and_ha::ha_` 单一过滤进程执行 24 个测试达到 175 秒，超过任何
   lane 预算。该 prefix 按事件与恢复语义改为两个互斥 shard，复用既有独立测试进程模型；state base 保留
   其它 HA lifecycle selector，coverage verifier 继续阻止漏跑和重叠。
+- 2026-08-23：HA event/recovery 拆分后，原 175 秒 prefix 收敛为两个短 shard。随后 telemetry 捕获到
+  account/LinuxDo、business-call、MCP rebalance-control 与若干组合 lane 的真实峰值；LPT 权重按这些峰值
+  重校准，使每个高波动 shard 不再与另一高波动 shard 串行。
 
 ## Key Reasons / Replacements
 
