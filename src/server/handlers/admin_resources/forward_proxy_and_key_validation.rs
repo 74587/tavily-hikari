@@ -220,19 +220,13 @@ async fn get_upstream_privacy_status(
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 
-    if let Some((status, _observed_at)) = admin_privacy_status_last_good(state.as_ref()).await {
-        return Ok(Json(status).into_response());
-    }
-
-    let had_cached_value = admin_privacy_status_cached(state.as_ref()).await.is_some();
-    start_admin_privacy_status_refresh(state.clone()).await;
-    if had_cached_value {
-        match stale_admin_privacy_status(state.as_ref()).await {
-            Some(status) => Ok(Json(status).into_response()),
-            None => Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response()),
+    match read_admin_privacy_status(state).await {
+        AdminPrivacyStatusResponse::Fresh(status) | AdminPrivacyStatusResponse::Stale(status) => {
+            Ok(Json(status).into_response())
         }
-    } else {
-        Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response())
+        AdminPrivacyStatusResponse::Cold => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response())
+        }
     }
 }
 

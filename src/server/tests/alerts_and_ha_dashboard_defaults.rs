@@ -889,11 +889,22 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
         Some("1")
     );
     assert!(cold_started.elapsed() < std::time::Duration::from_millis(250));
+    wait_for_admin_privacy_status_refresh(cold_state.as_ref()).await;
+    assert_eq!(
+        cold_state.proxy.admin_privacy_read_discards_for_test(),
+        0,
+        "a bounded SQLite BEGIN failure must restore its connection instead of discarding it"
+    );
     sqlx::query("ROLLBACK")
         .execute(&mut *cold_writer)
         .await
         .expect("release exclusive cold read lock");
     drop(cold_held);
+    cold_state
+        .proxy
+        .verify_admin_privacy_read_connection_clean_for_test()
+        .await
+        .expect("the failed cold refresh must leave the next SQLite transaction clean");
     let retry = client
         .get(format!("http://{cold_addr}/api/settings/system/privacy-status"))
         .header(reqwest::header::COOKIE, &cold_cookie)
@@ -1012,6 +1023,17 @@ async fn admin_privacy_status_serves_stale_last_good_without_cancelling_its_read
     );
     pause.release();
     wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+    let refresh_count_after_completion = admin_privacy_refresh_count_for_test(state.as_ref()).await;
+    assert_eq!(
+        start_admin_privacy_status_refresh(state.clone()).await,
+        AdminPrivacyStatusRefreshStart::Fresh,
+        "a completed refresh must publish fresh last-good before another claim can start"
+    );
+    assert_eq!(
+        admin_privacy_refresh_count_for_test(state.as_ref()).await,
+        refresh_count_after_completion,
+        "a completion-boundary claim must not start a redundant privacy refresh"
+    );
 
     expire_admin_privacy_status_last_good_for_test(state.as_ref()).await;
     let shutdown_pause = state

@@ -140,9 +140,16 @@ struct AdminPrivacyStatusController {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdminPrivacyStatusRefreshStart {
+    Fresh,
     Started,
     InFlight,
     Deferred { reason: &'static str },
+}
+
+pub(crate) enum AdminPrivacyStatusResponse {
+    Fresh(tavily_hikari::UpstreamPrivacyStatus),
+    Stale(tavily_hikari::UpstreamPrivacyStatus),
+    Cold,
 }
 
 const ADMIN_PRIVACY_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -185,16 +192,6 @@ async fn record_admin_alerts_last_good(
         .truncate(ADMIN_ALERTS_CACHE_CAPACITY);
 }
 
-pub(crate) async fn admin_privacy_status_last_good(
-    state: &AppState,
-) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
-    let cache = dashboard_overview_cache_for_state(state);
-    let cache = cache.lock().await;
-    let entry = cache.admin_privacy_status.last_good.as_ref()?;
-    (entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
-        .then(|| (entry.value.clone(), entry.observed_at))
-}
-
 pub(crate) async fn admin_privacy_status_cached(
     state: &AppState,
 ) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
@@ -204,13 +201,22 @@ pub(crate) async fn admin_privacy_status_cached(
     Some((entry.value.clone(), entry.observed_at))
 }
 
-pub(crate) async fn stale_admin_privacy_status(
-    state: &AppState,
-) -> Option<tavily_hikari::UpstreamPrivacyStatus> {
-    let cache = dashboard_overview_cache_for_state(state);
-    let cache = cache.lock().await;
+pub(crate) async fn read_admin_privacy_status(
+    state: Arc<AppState>,
+) -> AdminPrivacyStatusResponse {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache.lock().await;
+    if let Some(entry) = cache.admin_privacy_status.last_good.as_ref()
+        && entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL
+    {
+        return AdminPrivacyStatusResponse::Fresh(entry.value.clone());
+    }
+
+    start_admin_privacy_status_refresh_locked(state, &mut cache);
     let controller = &cache.admin_privacy_status;
-    let entry = controller.last_good.as_ref()?;
+    let Some(entry) = controller.last_good.as_ref() else {
+        return AdminPrivacyStatusResponse::Cold;
+    };
     let mut status = entry.value.clone();
     status.coverage = "stale".to_string();
     status.observed_at = Some(entry.observed_at);
@@ -220,7 +226,7 @@ pub(crate) async fn stale_admin_privacy_status(
             .unwrap_or("refresh_in_flight")
             .to_string(),
     );
-    Some(status)
+    AdminPrivacyStatusResponse::Stale(status)
 }
 
 pub(crate) async fn start_admin_privacy_status_refresh(
@@ -228,6 +234,21 @@ pub(crate) async fn start_admin_privacy_status_refresh(
 ) -> AdminPrivacyStatusRefreshStart {
     let cache = dashboard_overview_cache_for_state(state.as_ref());
     let mut cache = cache.lock().await;
+    start_admin_privacy_status_refresh_locked(state, &mut cache)
+}
+
+fn start_admin_privacy_status_refresh_locked(
+    state: Arc<AppState>,
+    cache: &mut DashboardOverviewCacheState,
+) -> AdminPrivacyStatusRefreshStart {
+    if cache
+        .admin_privacy_status
+        .last_good
+        .as_ref()
+        .is_some_and(|entry| entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
+    {
+        return AdminPrivacyStatusRefreshStart::Fresh;
+    }
     if cache.admin_privacy_status.refresh_in_flight {
         return AdminPrivacyStatusRefreshStart::InFlight;
     }
@@ -251,7 +272,6 @@ pub(crate) async fn start_admin_privacy_status_refresh(
         finish_admin_privacy_status_refresh(state.as_ref(), result).await;
     });
     cache.admin_privacy_status.refresh_task = Some(refresh_task);
-    drop(cache);
     AdminPrivacyStatusRefreshStart::Started
 }
 
@@ -311,6 +331,7 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
                 return;
             }
             match start_admin_privacy_status_refresh(state.clone()).await {
+                AdminPrivacyStatusRefreshStart::Fresh => return,
                 AdminPrivacyStatusRefreshStart::Started => {
                     tracing::info!(
                         component = "startup",
