@@ -26,6 +26,8 @@ pub async fn serve(
         linuxdo_credit,
         shutdown_signal(),
         None,
+        #[cfg(test)]
+        None,
     )
     .await
 }
@@ -45,6 +47,10 @@ async fn serve_with_shutdown(
     linuxdo_credit: LinuxDoCreditOptions,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ready: Option<tokio::sync::oneshot::Sender<Arc<AppState>>>,
+    #[cfg(test)] prewarm_gate: Option<(
+        tokio::sync::oneshot::Sender<Arc<AppState>>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let AdminAuthOptions {
         forward_auth_enabled,
@@ -605,6 +611,12 @@ async fn serve_with_shutdown(
         bind_addr = %bound_addr,
         "tavily proxy listening"
     );
+
+    #[cfg(test)]
+    if let Some((prewarm_blocked, prewarm_gate)) = prewarm_gate {
+        let _ = prewarm_blocked.send(state.clone());
+        let _ = prewarm_gate.await;
+    }
 
     // Privacy status is an owner-facing derived read model. It must populate
     // last-good after readiness without delaying the listener or competing
@@ -2065,6 +2077,8 @@ mod serve_tests {
         .expect("proxy created");
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (prewarm_blocked_tx, prewarm_blocked_rx) = tokio::sync::oneshot::channel();
+        let (prewarm_gate_tx, prewarm_gate_rx) = tokio::sync::oneshot::channel();
         let server = serve_with_shutdown(
             "127.0.0.1:0".parse().expect("test socket address"),
             proxy,
@@ -2091,8 +2105,25 @@ mod serve_tests {
                 let _ = shutdown_rx.await;
             },
             Some(ready_tx),
+            Some((prewarm_blocked_tx, prewarm_gate_rx)),
         );
         tokio::pin!(server);
+        let state = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                blocked = prewarm_blocked_rx => blocked.expect("server reached prewarm gate"),
+                result = &mut server => panic!("server exited before listener-ready prewarm gate: {result:?}"),
+            }
+        })
+        .await
+        .expect("server reached listener-ready prewarm gate");
+        for _ in 0..6 {
+            state.proxy.record_foreground_activity();
+        }
+        assert!(
+            state.proxy.foreground_activity_rps() > 5,
+            "test must establish foreground pressure before startup prewarm"
+        );
+        prewarm_gate_tx.send(()).expect("release listener-ready prewarm");
         let state = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
                 ready = ready_rx => ready.expect("server reported ready state"),
@@ -2102,7 +2133,13 @@ mod serve_tests {
             .await
             .expect("server reached listener-ready hook");
 
-        for _ in 0..800 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            admin_privacy_status_cached(state.as_ref()).await.is_none(),
+            "startup prewarm must defer while foreground pressure is active"
+        );
+
+        for _ in 0..300 {
             if admin_privacy_status_cached(state.as_ref()).await.is_some() {
                 shutdown_tx.send(()).expect("signal server shutdown");
                 tokio::time::timeout(Duration::from_secs(2), &mut server)
@@ -2115,7 +2152,7 @@ mod serve_tests {
         }
         let _ = shutdown_tx.send(());
         let _ = server.await;
-        panic!("listener-ready hook did not publish privacy-status last-good data");
+        panic!("deferred listener-ready prewarm did not publish privacy-status last-good data");
     }
 
     #[tokio::test]
