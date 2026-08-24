@@ -76,8 +76,9 @@
   The controller's `AdminPrivacyRead` snapshot acquire and `BEGIN` are bounded to 100ms, never
   enter maintenance-bulk admission, and explicitly close at a cooperative completion boundary.
   Its complete diagnostic run is bounded to two seconds by SQLite's progress handler and an
-  explicit check before every next SQLite phase. The handler interrupts the active statement; the
-  phase check prevents a series of short statements from extending the snapshot past its run budget.
+  explicit check before every next SQLite phase and each row of unbounded result shaping. The handler
+  interrupts the active statement; the phase checks prevent a series of short statements or a large
+  in-memory diagnostic projection from extending the snapshot past its run budget.
   Both are cleared before the explicit rollback; HTTP and shutdown never cancel the task while it
   owns a snapshot.
   HTTP only copies last-good data: a cached value, including one older than 60 seconds, returns

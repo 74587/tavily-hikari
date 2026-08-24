@@ -5,11 +5,15 @@ async fn admin_privacy_meta_values(
     snapshot: &mut SqliteReadSnapshot,
 ) -> Result<StdHashMap<String, String>, ProxyError> {
     snapshot.ensure_cooperative_run_budget()?;
-    Ok(sqlx::query_as::<_, (String, String)>("SELECT key, value FROM meta")
+    let rows = sqlx::query_as::<_, (String, String)>("SELECT key, value FROM meta")
         .fetch_all(&mut **snapshot)
-        .await?
-        .into_iter()
-        .collect())
+        .await?;
+    let mut values = StdHashMap::with_capacity(rows.len());
+    for (key, value) in rows {
+        snapshot.ensure_cooperative_run_budget()?;
+        values.insert(key, value);
+    }
+    Ok(values)
 }
 
 fn admin_privacy_meta_i64(values: &StdHashMap<String, String>, key: &str) -> Option<i64> {
@@ -328,6 +332,7 @@ impl KeyStore {
             other: 0,
         };
         for (reason, count) in retry_rows {
+            snapshot.ensure_cooperative_run_budget()?;
             match classify_reconciliation_retry_reason(reason.as_deref()) {
                 RECONCILIATION_RETRY_REASON_UPSTREAM_429 => retry_buckets.upstream_429 += count,
                 RECONCILIATION_RETRY_REASON_LOCAL_USAGE_RATE_LIMIT => {
@@ -433,17 +438,19 @@ impl KeyStore {
         .fetch_all(&mut **snapshot)
         .await?;
         snapshot.ensure_cooperative_run_budget()?;
-        let backoffs = sqlx::query_as::<_, (String, i64, Option<String>)>(
+        let backoff_rows = sqlx::query_as::<_, (String, i64, Option<String>)>(
             r#"SELECT key_id, cooldown_until, reason_code
                  FROM api_key_transient_backoffs
                 WHERE scope = 'period_reconciliation' AND cooldown_until > ?"#,
         )
         .bind(now)
         .fetch_all(&mut **snapshot)
-        .await?
-        .into_iter()
-        .map(|(key_id, cooldown_until, reason)| (key_id, (cooldown_until, reason)))
-        .collect::<StdHashMap<_, _>>();
+        .await?;
+        let mut backoffs = StdHashMap::with_capacity(backoff_rows.len());
+        for (key_id, cooldown_until, reason) in backoff_rows {
+            snapshot.ensure_cooperative_run_budget()?;
+            backoffs.insert(key_id, (cooldown_until, reason));
+        }
         let daily_reconciliation_progress = DailyReconciliationProgress {
             observed_accounts,
             accounts_with_settled_period,
@@ -504,20 +511,19 @@ impl KeyStore {
                 && last_window_pending_delta <= 0,
             complete: complete_research_window.is_some(),
         };
-        let daily_reconciliation_by_key = key_rows
-            .into_iter()
-            .map(|(key_id, terminal_research, pending_research, pending_project_ids)| {
-                let cooldown = backoffs.get(&key_id);
-                DailyReconciliationKeyProgress {
-                    key_id_hint: key_id.chars().take(12).collect(),
-                    terminal_research,
-                    pending_research,
-                    pending_project_ids,
-                    cooldown_until: cooldown.map(|(until, _)| *until),
-                    cooldown_reason: cooldown.and_then(|(_, reason)| reason.clone()),
-                }
-            })
-            .collect();
+        let mut daily_reconciliation_by_key = Vec::with_capacity(key_rows.len());
+        for (key_id, terminal_research, pending_research, pending_project_ids) in key_rows {
+            snapshot.ensure_cooperative_run_budget()?;
+            let cooldown = backoffs.get(&key_id);
+            daily_reconciliation_by_key.push(DailyReconciliationKeyProgress {
+                key_id_hint: key_id.chars().take(12).collect(),
+                terminal_research,
+                pending_research,
+                pending_project_ids,
+                cooldown_until: cooldown.map(|(until, _)| *until),
+                cooldown_reason: cooldown.and_then(|(_, reason)| reason.clone()),
+            });
+        }
         snapshot.ensure_cooperative_run_budget()?;
         let degraded_observed: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM (SELECT 1 FROM upstream_reconciliation_settlements \
@@ -604,7 +610,7 @@ impl KeyStore {
         })?;
         let dashboard_alert_projection = admin_privacy_alert_projection_status(snapshot, now).await?;
         snapshot.ensure_cooperative_run_budget()?;
-        let recent_adjustments = sqlx::query_as::<_, (String, String, String, String, i64, Option<String>, i64)>(
+        let recent_adjustment_rows = sqlx::query_as::<_, (String, String, String, String, i64, Option<String>, i64)>(
             r#"SELECT settlement_key, token_id, billing_subject, period_code, delta_credits,
                       degraded_reason, created_at
                  FROM billing_reconciliation_adjustments
@@ -612,10 +618,20 @@ impl KeyStore {
                 LIMIT 10"#,
         )
         .fetch_all(&mut **snapshot)
-        .await?
-        .into_iter()
-        .map(|(settlement_key, token_id, billing_subject, period_code, delta_credits, degraded_reason, created_at)| {
-            UpstreamReconciliationAdjustment {
+        .await?;
+        let mut recent_adjustments = Vec::with_capacity(recent_adjustment_rows.len());
+        for (
+            settlement_key,
+            token_id,
+            billing_subject,
+            period_code,
+            delta_credits,
+            degraded_reason,
+            created_at,
+        ) in recent_adjustment_rows
+        {
+            snapshot.ensure_cooperative_run_budget()?;
+            recent_adjustments.push(UpstreamReconciliationAdjustment {
                 settlement_key,
                 token_id_hint: token_id.chars().take(8).collect(),
                 billing_subject_kind: billing_subject.split(':').next().unwrap_or("unknown").to_string(),
@@ -623,9 +639,8 @@ impl KeyStore {
                 delta_credits,
                 degraded_reason,
                 created_at,
-            }
-        })
-        .collect();
+            });
+        }
         let value_i64 = |key| meta_i64(key).unwrap_or(0);
         let shadow_ready = mode_ready && api_rebalance_enabled && rebalance_mcp_enabled;
         let next_epoch_at = if legacy_active != 0
@@ -637,6 +652,23 @@ impl KeyStore {
         } else {
             activation_period_start
         };
+        let mut current_period_bound_users_by_key = Vec::with_capacity(bound_rows.len());
+        for (key_id, count) in bound_rows {
+            snapshot.ensure_cooperative_run_budget()?;
+            current_period_bound_users_by_key.push(UpstreamKeyActivityPoint {
+                key_id_hint: key_id.chars().take(12).collect(),
+                count,
+            });
+        }
+        let mut current_period_pending_project_ids_by_key =
+            Vec::with_capacity(pending_project_rows.len());
+        for (key_id, count) in pending_project_rows {
+            snapshot.ensure_cooperative_run_budget()?;
+            current_period_pending_project_ids_by_key.push(UpstreamKeyActivityPoint {
+                key_id_hint: key_id.chars().take(12).collect(),
+                count,
+            });
+        }
         snapshot.ensure_cooperative_run_budget()?;
         Ok(UpstreamPrivacyStatus {
             phase: controller_mode.as_str().to_string(),
@@ -696,8 +728,8 @@ impl KeyStore {
                 stale_reason: dashboard_alert_projection.stale_reason,
             },
             retry_buckets,
-            current_period_bound_users_by_key: bound_rows.into_iter().map(|(key_id, count)| UpstreamKeyActivityPoint { key_id_hint: key_id.chars().take(12).collect(), count }).collect(),
-            current_period_pending_project_ids_by_key: pending_project_rows.into_iter().map(|(key_id, count)| UpstreamKeyActivityPoint { key_id_hint: key_id.chars().take(12).collect(), count }).collect(),
+            current_period_bound_users_by_key,
+            current_period_pending_project_ids_by_key,
             daily_reconciliation_progress,
             daily_reconciliation_by_key,
             recent_adjustments,

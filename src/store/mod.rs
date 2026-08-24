@@ -2676,6 +2676,7 @@ pub(crate) struct KeyStore {
 fn new_request_stats_test_pause() -> RequestStatsPostFlushPause {
     RequestStatsPostFlushPause {
         arrived: Arc::new(Notify::new()),
+        arrival_observed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release: Arc::new(Notify::new()),
         released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
@@ -2687,6 +2688,9 @@ async fn wait_for_request_stats_test_pause_if_installed(
 ) {
     if let Some(pause) = slot.lock().await.take() {
         // Retain the arrival signal when the request returns before the test waits.
+        pause
+            .arrival_observed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         pause.arrived.notify_one();
         while !pause.released.load(std::sync::atomic::Ordering::SeqCst) {
             pause.release.notified().await;
@@ -2820,7 +2824,19 @@ mod tests {
     #[tokio::test]
     async fn request_stats_test_pause_retains_one_arrival_permit() {
         let pause = new_request_stats_test_pause();
-        pause.arrived.notify_one();
+        let slot = Arc::new(tokio::sync::Mutex::new(Some(pause.clone())));
+        let paused_task = {
+            let slot = Arc::clone(&slot);
+            tokio::spawn(async move {
+                wait_for_request_stats_test_pause_if_installed(&slot).await;
+            })
+        };
+        while !pause
+            .arrival_observed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::task::yield_now().await;
+        }
 
         tokio::time::timeout(Duration::from_millis(10), pause.wait_until_arrived())
             .await
@@ -2831,6 +2847,8 @@ mod tests {
                 .is_err(),
             "the pause must retain only one arrival permit"
         );
+        pause.release();
+        paused_task.await.expect("paused task joins after release");
     }
 
     #[test]
