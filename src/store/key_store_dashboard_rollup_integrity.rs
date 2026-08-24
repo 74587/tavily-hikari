@@ -8,6 +8,7 @@ const DASHBOARD_ROLLUP_INTEGRITY_WRITE_TARGET: Duration = Duration::from_millis(
 const DASHBOARD_ROLLUP_INTEGRITY_WRITE_WARN: Duration = Duration::from_millis(250);
 const DASHBOARD_ROLLUP_INTEGRITY_HOT_WINDOW_SECS: i64 = SECS_PER_DAY;
 const DASHBOARD_ROLLUP_INTEGRITY_STALLED_SECS: i64 = 2 * SECS_PER_HOUR;
+const DASHBOARD_ROLLUP_REBALANCE_RECOVERY_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DashboardRollupIntegritySlice {
@@ -22,6 +23,15 @@ enum DashboardRollupIntegrityWorkKind {
     HotReaudit,
     History,
     SealedDayReaudit { day_start: i64 },
+}
+
+impl DashboardRollupIntegrityWorkKind {
+    fn priority(self) -> i64 {
+        match self {
+            Self::InitialHot | Self::HotReaudit | Self::SealedDayReaudit { .. } => 2,
+            Self::History => 1,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -91,7 +101,7 @@ impl KeyStore {
             UPDATE dashboard_rollup_integrity_work_items
             SET source_fence = ?, source_version = 0, cursor_created_at = NULL, cursor_id = NULL,
                 counts_json = ?, status = 'pending', updated_at = ?
-            WHERE status = 'pending'
+            WHERE status = 'pending' AND recovery = 0
             "#,
         )
         .bind(source_fence_id)
@@ -132,6 +142,21 @@ impl KeyStore {
         )
         .fetch_one(&mut *conn)
         .await?;
+        let recovery_backlog_bucket_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT CASE
+                WHEN status = 'complete' OR range_end IS NULL OR cursor IS NULL THEN 0
+                ELSE MAX(1, (range_end - cursor + ? - 1) / ?)
+            END
+            FROM dashboard_rollup_rebalance_recovery
+            WHERE id = 1
+            "#,
+        )
+        .bind(DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS)
+        .bind(DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS)
+        .fetch_optional(&mut *conn)
+        .await?
+        .unwrap_or_default();
         let DashboardRollupIntegrityStateRow {
             last_verified_at,
             stalled_since,
@@ -194,7 +219,8 @@ impl KeyStore {
             next_attempt_at,
             unverified_bucket_count: unverified_bucket_count
                 + hot_backlog_bucket_count
-                + history_backlog_bucket_count,
+                + history_backlog_bucket_count
+                + recovery_backlog_bucket_count,
         };
         conn.close().await?;
         Ok(result)
@@ -205,13 +231,14 @@ impl KeyStore {
     ) -> Result<DashboardRollupIntegritySlice, ProxyError> {
         let now = self.backend_time.now_ts();
         self.ensure_dashboard_rollup_integrity_state(now).await?;
-        if let Some(item) = self.load_dashboard_rollup_integrity_work_item().await? {
+        self.ensure_dashboard_rollup_rebalance_recovery(now).await?;
+        if let Some(item) = self.load_dashboard_rollup_integrity_work_item(now).await? {
             return self.process_dashboard_rollup_integrity_work_item(item, now).await;
         }
         if self.dashboard_rollup_integrity_seal_verification_due(now).await? {
             self.verify_next_dashboard_rollup_daily_seal(now).await?;
             self.mark_dashboard_rollup_integrity_seal_attempt(now).await?;
-            if let Some(item) = self.load_dashboard_rollup_integrity_work_item().await? {
+            if let Some(item) = self.load_dashboard_rollup_integrity_work_item(now).await? {
                 return self.process_dashboard_rollup_integrity_work_item(item, now).await;
             }
         }
@@ -221,6 +248,14 @@ impl KeyStore {
         {
             return self.process_dashboard_rollup_integrity_work_item(item, now).await;
         }
+        if let Some(item) = self
+            .create_next_dashboard_rollup_rebalance_recovery_work_item(now)
+            .await?
+        {
+            return self.process_dashboard_rollup_integrity_work_item(item, now).await;
+        }
+        self.complete_dashboard_rollup_rebalance_recovery_if_ready(now)
+            .await?;
         self.mark_dashboard_rollup_integrity_success(now, 60).await?;
         Ok(DashboardRollupIntegritySlice::Verified {
             next_delay_secs: 60,
@@ -255,18 +290,267 @@ impl KeyStore {
         Ok(())
     }
 
+    async fn ensure_dashboard_rollup_rebalance_recovery(&self, now: i64) -> Result<(), ProxyError> {
+        let current: Option<(i64, String)> = sqlx::query_as(
+            "SELECT version, status FROM dashboard_rollup_rebalance_recovery WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if current
+            .as_ref()
+            .is_some_and(|(version, _)| *version >= DASHBOARD_ROLLUP_REBALANCE_RECOVERY_VERSION)
+        {
+            return Ok(());
+        }
+
+        let (minimum, maximum): (Option<i64>, Option<i64>) = sqlx::query_as(
+            r#"
+            SELECT MIN(created_at), MAX(created_at)
+            FROM request_logs
+            WHERE visibility = ?
+              AND gateway_mode = 'rebalance'
+              AND experiment_variant = 'rebalance'
+              AND upstream_operation = 'mcp'
+              AND request_kind_key IS NULL
+            "#,
+        )
+        .bind(REQUEST_LOG_VISIBILITY_VISIBLE)
+        .fetch_one(&self.pool)
+        .await?;
+        let source_fence: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM request_logs")
+            .fetch_one(&self.pool)
+            .await?;
+        let (status, range_start, range_end, cursor) = if let (Some(minimum), Some(maximum)) = (minimum, maximum) {
+            let range_start = minimum - minimum.rem_euclid(DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS);
+            let range_end = (maximum + 1 + DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS - 1)
+                .div_euclid(DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS)
+                * DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS;
+            ("pending", Some(range_start), Some(range_end), Some(range_start))
+        } else {
+            ("complete", None, None, None)
+        };
+        let mut conn = self.begin_dashboard_rollup_integrity_short_write().await?;
+        let write_result = sqlx::query(
+            r#"
+            INSERT INTO dashboard_rollup_rebalance_recovery (
+                id, version, status, range_start, range_end, source_fence, cursor,
+                last_error, completed_at, updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version,
+                status = excluded.status,
+                range_start = excluded.range_start,
+                range_end = excluded.range_end,
+                source_fence = excluded.source_fence,
+                cursor = excluded.cursor,
+                last_error = NULL,
+                completed_at = excluded.completed_at,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(DASHBOARD_ROLLUP_REBALANCE_RECOVERY_VERSION)
+        .bind(status)
+        .bind(range_start)
+        .bind(range_end)
+        .bind(source_fence)
+        .bind(cursor)
+        .bind((status == "complete").then_some(now))
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(Into::into);
+        self.finish_dashboard_rollup_integrity_short_write(&mut conn, write_result)
+            .await?;
+        tracing::info!(
+            component = "dashboard_rollup_integrity",
+            event = "rebalance_rollup_recovery_initialized",
+            status,
+            range_start = ?range_start,
+            range_end = ?range_end,
+            source_fence,
+        );
+        Ok(())
+    }
+
+    async fn create_next_dashboard_rollup_rebalance_recovery_work_item(
+        &self,
+        now: i64,
+    ) -> Result<Option<DashboardRollupIntegrityWorkItem>, ProxyError> {
+        let Some(row) = sqlx::query(
+            "SELECT status, range_start, range_end, source_fence, cursor FROM dashboard_rollup_rebalance_recovery WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let status: String = row.try_get("status")?;
+        let Some(_range_start): Option<i64> = row.try_get("range_start")? else {
+            return Ok(None);
+        };
+        let range_end: i64 = row.try_get("range_end")?;
+        let source_fence_id: i64 = row.try_get("source_fence")?;
+        let cursor: i64 = row.try_get("cursor")?;
+        if status == "complete" || cursor >= range_end {
+            return Ok(None);
+        }
+
+        if let Some(existing) = sqlx::query(
+            "SELECT status, source_fence FROM dashboard_rollup_integrity_work_items WHERE range_start = ?",
+        )
+        .bind(cursor)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            let existing_status: String = existing.try_get("status")?;
+            let existing_fence: i64 = existing.try_get("source_fence")?;
+            if existing_status == "pending" && existing_fence == source_fence_id {
+                return Ok(None);
+            }
+            if existing_status == "done" && existing_fence == source_fence_id {
+                let next_cursor = (cursor + DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS).min(range_end);
+                sqlx::query(
+                    "UPDATE dashboard_rollup_rebalance_recovery SET cursor = ?, updated_at = ? WHERE id = 1 AND status != 'complete'",
+                )
+                .bind(next_cursor)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+                return Ok(None);
+            }
+        }
+
+        let range_end_for_item = (cursor + DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS).min(range_end);
+        let source_version = self
+            .request_stats_coalescer
+            .dashboard_rollup_source_version(cursor)
+            .await;
+        let item = DashboardRollupIntegrityWorkItem::empty(
+            cursor,
+            range_end_for_item,
+            source_fence_id,
+            source_version,
+        );
+        let counts_json = serde_json::to_string(&item.counts)
+            .map_err(|err| ProxyError::Other(format!("serialize rebalance recovery work item: {err}")))?;
+        let mut conn = self.begin_dashboard_rollup_integrity_short_write().await?;
+        let write_result = sqlx::query(
+            r#"
+            INSERT INTO dashboard_rollup_integrity_work_items (
+                range_start, range_end, source_fence, source_version, cursor_created_at,
+                cursor_id, counts_json, status, priority, recovery, updated_at
+            ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'pending', 0, 1, ?)
+            ON CONFLICT(range_start) DO UPDATE SET
+                range_end = excluded.range_end,
+                source_fence = excluded.source_fence,
+                source_version = excluded.source_version,
+                cursor_created_at = NULL,
+                cursor_id = NULL,
+                counts_json = excluded.counts_json,
+                status = 'pending',
+                priority = 0,
+                recovery = 1,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(item.range_start)
+        .bind(item.range_end)
+        .bind(item.source_fence_id)
+        .bind(item.source_version)
+        .bind(counts_json)
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .map(|_| ())
+        .map_err(Into::into);
+        self.finish_dashboard_rollup_integrity_short_write(&mut conn, write_result)
+            .await?;
+        tracing::info!(
+            component = "dashboard_rollup_integrity",
+            event = "rebalance_rollup_recovery_slice_started",
+            range_start = item.range_start,
+            range_end = item.range_end,
+            source_fence = item.source_fence_id,
+        );
+        Ok(Some(item))
+    }
+
+    async fn complete_dashboard_rollup_rebalance_recovery_if_ready(
+        &self,
+        now: i64,
+    ) -> Result<(), ProxyError> {
+        let Some(row) = sqlx::query(
+            "SELECT status, range_start, range_end, cursor FROM dashboard_rollup_rebalance_recovery WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(());
+        };
+        let status: String = row.try_get("status")?;
+        let Some(range_start): Option<i64> = row.try_get("range_start")? else {
+            return Ok(());
+        };
+        let range_end: i64 = row.try_get("range_end")?;
+        let cursor: i64 = row.try_get("cursor")?;
+        if status == "complete" || cursor < range_end {
+            return Ok(());
+        }
+        let pending_work: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dashboard_rollup_integrity_work_items WHERE status = 'pending' AND range_start >= ? AND range_start < ?",
+        )
+        .bind(range_start)
+        .bind(range_end)
+        .fetch_one(&self.pool)
+        .await?;
+        let pending_days: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dashboard_rollup_integrity_day_reaudits WHERE status = 'pending' AND bucket_end > ? AND bucket_start < ?",
+        )
+        .bind(range_start)
+        .bind(range_end)
+        .fetch_one(&self.pool)
+        .await?;
+        if pending_work > 0 || pending_days > 0 {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE dashboard_rollup_rebalance_recovery SET status = 'complete', completed_at = ?, updated_at = ?, last_error = NULL WHERE id = 1",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        tracing::info!(
+            component = "dashboard_rollup_integrity",
+            event = "rebalance_rollup_recovery_completed",
+            range_start,
+            range_end,
+        );
+        Ok(())
+    }
+
     async fn load_dashboard_rollup_integrity_work_item(
         &self,
+        now: i64,
     ) -> Result<Option<DashboardRollupIntegrityWorkItem>, ProxyError> {
         let row = sqlx::query(
             r#"
             SELECT range_start, range_end, source_fence, source_version, cursor_created_at, cursor_id, counts_json
             FROM dashboard_rollup_integrity_work_items
             WHERE status = 'pending'
-            ORDER BY updated_at ASC, range_start ASC
+              AND (
+                  recovery = 0 OR NOT EXISTS (
+                      SELECT 1 FROM dashboard_rollup_integrity_state
+                      WHERE id = 1
+                        AND (hot_cursor < hot_fence OR hot_fence < ?)
+                  )
+              )
+            ORDER BY priority DESC, updated_at ASC, range_start ASC
             LIMIT 1
             "#,
         )
+        .bind(now - now.rem_euclid(DASHBOARD_ROLLUP_INTEGRITY_WORK_SECS))
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| {
@@ -418,8 +702,8 @@ impl KeyStore {
             sqlx::query(
                 r#"
                 INSERT INTO dashboard_rollup_integrity_work_items (
-                    range_start, range_end, source_fence, source_version, cursor_created_at, cursor_id, counts_json, status, updated_at
-                ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'pending', ?)
+                    range_start, range_end, source_fence, source_version, cursor_created_at, cursor_id, counts_json, status, priority, recovery, updated_at
+                ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'pending', ?, 0, ?)
                 ON CONFLICT(range_start) DO UPDATE SET
                     range_end = excluded.range_end,
                     source_fence = excluded.source_fence,
@@ -428,6 +712,8 @@ impl KeyStore {
                     cursor_id = NULL,
                     counts_json = excluded.counts_json,
                     status = 'pending',
+                    priority = excluded.priority,
+                    recovery = 0,
                     updated_at = excluded.updated_at
                 "#,
             )
@@ -436,6 +722,7 @@ impl KeyStore {
             .bind(item.source_fence_id)
             .bind(item.source_version)
             .bind(counts_json)
+            .bind(kind.priority())
             .bind(now)
             .execute(&mut *conn)
             .await?;

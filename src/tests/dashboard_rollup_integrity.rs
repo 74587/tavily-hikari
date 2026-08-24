@@ -495,6 +495,150 @@ async fn insert_visible_dashboard_log(proxy: &TavilyProxy, created_at: i64) {
     .expect("insert visible dashboard log");
 }
 
+async fn insert_rebalance_recovery_log(proxy: &TavilyProxy, created_at: i64) {
+    sqlx::query(
+        r#"
+        INSERT INTO request_logs (
+            auth_token_id, method, path, query, status_code, tavily_status_code,
+            error_message, result_status, request_kind_key, counts_business_quota,
+            business_credits, gateway_mode, experiment_variant, upstream_operation,
+            request_body, response_body, forwarded_headers, dropped_headers,
+            visibility, created_at
+        ) VALUES (
+            NULL, 'POST', '/mcp', NULL, 200, 200,
+            NULL, 'success', NULL, NULL,
+            NULL, 'rebalance', 'rebalance', 'mcp',
+            '{"jsonrpc":"2.0","method":"tools/call"}', '{"result":{}}', '[]', '[]',
+            'visible', ?
+        )
+        "#,
+    )
+    .bind(created_at)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert rebalance recovery source log");
+}
+
+async fn pin_integrity_after_hot_window(proxy: &TavilyProxy, now: i64, history_cursor: i64) {
+    let latest_closed = now - now.rem_euclid(SECS_PER_FIVE_MINUTES);
+    sqlx::query(
+        r#"
+        INSERT INTO dashboard_rollup_integrity_state (
+            id, hot_cursor, hot_fence, hot_reaudit_cursor, history_cursor,
+            last_history_attempt_at, last_day_reaudit_attempt_at, last_seal_attempt_at,
+            seal_cursor, updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            hot_cursor = excluded.hot_cursor,
+            hot_fence = excluded.hot_fence,
+            hot_reaudit_cursor = excluded.hot_reaudit_cursor,
+            history_cursor = excluded.history_cursor,
+            last_history_attempt_at = excluded.last_history_attempt_at,
+            last_day_reaudit_attempt_at = excluded.last_day_reaudit_attempt_at,
+            last_seal_attempt_at = excluded.last_seal_attempt_at,
+            seal_cursor = NULL,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(latest_closed)
+    .bind(latest_closed)
+    .bind(latest_closed)
+    .bind(history_cursor)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("pin integrity after hot window");
+}
+
+#[tokio::test]
+async fn rebalance_rollup_recovery_is_fenced_and_resumable() {
+    let db_path = temp_db_path("rebalance-rollup-recovery-fenced");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("create proxy");
+    sqlx::query(
+        "DROP TRIGGER IF EXISTS observability.trg_request_logs_canonical_request_kind_insert",
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("disable canonical trigger for legacy recovery fixture");
+    let now = proxy.backend_time().now_ts();
+    let range_start = local_day_bucket_start_utc_ts(now - 2 * SECS_PER_DAY);
+    let recovery_start = range_start + SECS_PER_FIVE_MINUTES;
+    for offset in 0..501_i64 {
+        insert_rebalance_recovery_log(
+            &proxy,
+            recovery_start + offset.rem_euclid(SECS_PER_FIVE_MINUTES),
+        )
+        .await;
+    }
+    pin_integrity_after_hot_window(&proxy, now, range_start).await;
+    let matched: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM request_logs WHERE gateway_mode = 'rebalance' AND experiment_variant = 'rebalance' AND upstream_operation = 'mcp' AND request_kind_key IS NULL",
+    )
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("count matching recovery source logs");
+    assert_eq!(matched, 501);
+
+    let first = proxy
+        .run_dashboard_rollup_integrity_slice()
+        .await
+        .expect("start fenced recovery slice");
+    assert_eq!(first.state, "deferred");
+    let integrity_status = proxy
+        .key_store
+        .dashboard_rollup_integrity_status()
+        .await
+        .expect("read recovery integrity status");
+    assert_eq!(integrity_status.state, "repairing");
+    assert!(integrity_status.unverified_bucket_count > 0);
+    let second = proxy
+        .run_dashboard_rollup_integrity_slice()
+        .await
+        .expect("resume fenced recovery slice");
+    assert_eq!(second.state, "repaired");
+    let third = proxy
+        .run_dashboard_rollup_integrity_slice()
+        .await
+        .expect("complete recovery operation");
+    assert!(matches!(third.state.as_str(), "verified" | "repaired"));
+
+    let recovered_total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(total_requests), 0) FROM dashboard_request_rollup_buckets WHERE bucket_secs = 60 AND bucket_start >= ? AND bucket_start < ?",
+    )
+    .bind(recovery_start)
+    .bind(recovery_start + SECS_PER_FIVE_MINUTES)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read recovered rebalance rollup");
+    assert_eq!(recovered_total, 501);
+    let recovery_status: String =
+        sqlx::query_scalar("SELECT status FROM dashboard_rollup_rebalance_recovery WHERE id = 1")
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read recovery operation status");
+    assert_eq!(recovery_status, "complete");
+
+    proxy
+        .run_dashboard_rollup_integrity_slice()
+        .await
+        .expect("verify completed recovery is idempotent");
+    let idempotent_total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(total_requests), 0) FROM dashboard_request_rollup_buckets WHERE bucket_secs = 60 AND bucket_start >= ? AND bucket_start < ?",
+    )
+    .bind(recovery_start)
+    .bind(recovery_start + SECS_PER_FIVE_MINUTES)
+    .fetch_one(&proxy.key_store.pool)
+    .await
+    .expect("read idempotent recovery rollup");
+    assert_eq!(idempotent_total, 501);
+}
+
 async fn pin_integrity_hot_work(proxy: &TavilyProxy, range_start: i64, range_end: i64) {
     sqlx::query(
         r#"

@@ -1275,8 +1275,9 @@ async fn rebalance_audit_writer_is_best_effort_and_payload_bounded() {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let written: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM observability.request_logs WHERE gateway_mode = 'rebalance'",
+                "SELECT COUNT(*) FROM observability.request_logs WHERE gateway_mode = ?",
             )
+            .bind(MCP_GATEWAY_MODE_REBALANCE)
             .fetch_one(&proxy.key_store.pool)
             .await
             .expect("count rebalance audit records");
@@ -1288,6 +1289,36 @@ async fn rebalance_audit_writer_is_best_effort_and_payload_bounded() {
     })
     .await
     .expect("background audit writer persists its bounded entry");
+
+    let (request_kind_key, counts_business_quota): (Option<String>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT request_kind_key, counts_business_quota FROM observability.request_logs WHERE gateway_mode = ? LIMIT 1",
+        )
+        .bind(MCP_GATEWAY_MODE_REBALANCE)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("read rebalance audit classification");
+    assert!(
+        request_kind_key.is_some(),
+        "deferred audits retain request classification"
+    );
+    assert_eq!(counts_business_quota, Some(1));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let total: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(total_requests), 0) FROM dashboard_request_rollup_buckets WHERE bucket_secs = 60",
+            )
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read rebalance dashboard rollup");
+            if total == 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("deferred audit enqueues one dashboard rollup delta");
 
     let oversized = RebalanceAuditEntry {
         auth_token_id: None,
