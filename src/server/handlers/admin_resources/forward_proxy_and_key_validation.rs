@@ -216,8 +216,16 @@ async fn get_upstream_privacy_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, axum::response::Response> {
-    if !is_admin_request(state.as_ref(), &headers).await {
-        return Err(StatusCode::FORBIDDEN.into_response());
+    match try_is_admin_request(state.as_ref(), &headers).await {
+        Ok(true) => {}
+        Ok(false) => return Err(StatusCode::FORBIDDEN.into_response()),
+        // Do not reveal a cached administrative read model before the caller
+        // is authenticated. A bounded passkey lookup may defer under SQLite
+        // pressure, so retain the endpoint's retry contract without treating
+        // a valid session as an authorization failure.
+        Err(_) => {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response());
+        }
     }
 
     match read_admin_privacy_status(state).await {

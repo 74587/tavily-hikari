@@ -1450,16 +1450,20 @@ fn wants_secure_cookie(headers: &HeaderMap) -> bool {
 }
 
 async fn is_admin_request(state: &AppState, headers: &HeaderMap) -> bool {
+    try_is_admin_request(state, headers).await.unwrap_or(false)
+}
+
+async fn try_is_admin_request(state: &AppState, headers: &HeaderMap) -> Result<bool, ProxyError> {
     if state.dev_open_admin {
-        return true;
+        return Ok(true);
     }
     if state.forward_auth_enabled && state.forward_auth.is_request_admin(headers) {
-        return true;
+        return Ok(true);
     }
     if state.builtin_admin.is_admin(headers) {
-        return true;
+        return Ok(true);
     }
-    resolve_admin_passkey_session(state, headers).await.is_some()
+    Ok(resolve_admin_passkey_session(state, headers).await?.is_some())
 }
 
 async fn require_full_master_write(state: &AppState) -> Result<(), (StatusCode, String)> {
@@ -1486,16 +1490,17 @@ async fn resolve_user_session(
 async fn resolve_admin_passkey_session(
     state: &AppState,
     headers: &HeaderMap,
-) -> Option<tavily_hikari::AdminPasskeySessionRecord> {
+) -> Result<Option<tavily_hikari::AdminPasskeySessionRecord>, ProxyError> {
     if !state.admin_passkey.is_configured() {
-        return None;
+        return Ok(None);
     }
-    let token = cookie_value(headers, ADMIN_PASSKEY_COOKIE_NAME)?;
-    let scope = state.admin_passkey.scope.as_ref()?;
-    match state.proxy.get_active_admin_passkey_session(scope, &token).await {
-        Ok(Some(session)) => Some(session),
-        _ => None,
-    }
+    let Some(token) = cookie_value(headers, ADMIN_PASSKEY_COOKIE_NAME) else {
+        return Ok(None);
+    };
+    let Some(scope) = state.admin_passkey.scope.as_ref() else {
+        return Ok(None);
+    };
+    state.proxy.get_active_admin_passkey_session(scope, &token).await
 }
 
 async fn admin_maintenance_actor(
@@ -1538,7 +1543,11 @@ async fn admin_maintenance_actor(
         return actor;
     }
 
-    if let Some(session) = resolve_admin_passkey_session(state, headers).await {
+    if let Some(session) = resolve_admin_passkey_session(state, headers)
+        .await
+        .ok()
+        .flatten()
+    {
         actor.actor_display_name = Some(
             session
                 .credential_id
@@ -1720,6 +1729,8 @@ async fn debug_is_admin(
     let builtin_admin = state.builtin_admin.is_admin(&headers);
     let admin_passkey = resolve_admin_passkey_session(state.as_ref(), &headers)
         .await
+        .ok()
+        .flatten()
         .is_some();
     let is_admin = state.dev_open_admin || forward_auth_admin || builtin_admin || admin_passkey;
     Ok(Json(IsAdminDebug {

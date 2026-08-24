@@ -2347,6 +2347,95 @@ mod serve_tests {
     }
 
     #[tokio::test]
+    async fn passkey_auth_pressure_returns_a_bounded_privacy_status_retry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("passkey-privacy-status-pressure.db");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-passkey-privacy-status-pressure".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+        let scope = tavily_hikari::AdminPasskeyScope::new(
+            "node-passkey-privacy-status-pressure",
+            "admin.example.com",
+            "https://admin.example.com",
+        )
+        .expect("passkey scope");
+        let session = proxy
+            .create_admin_passkey_session(&scope, None, 120)
+            .await
+            .expect("create passkey session");
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: false,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            admin_passkey: AdminPasskeyOptions {
+                enabled: true,
+                rp_id: Some("admin.example.com".to_string()),
+                rp_origin: Some("https://admin.example.com".to_string()),
+                scope: Some(scope),
+                challenge_ttl_secs: 300,
+                session_max_age_secs: 120,
+            },
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
+            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+            dev_open_admin: false,
+            usage_base: "http://127.0.0.1:58088".to_string(),
+            api_key_ip_geo_origin: "https://api.country.is".to_string(),
+            dashboard_overview_cache: new_dashboard_overview_cache(),
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("{ADMIN_PASSKEY_COOKIE_NAME}={}", session.token))
+                .expect("cookie header should be valid"),
+        );
+        assert!(
+            try_is_admin_request(state.as_ref(), &headers)
+                .await
+                .expect("session is valid before pressure")
+        );
+
+        let lock_pool = sqlx::SqlitePool::connect(&format!("sqlite://{db_str}"))
+            .await
+            .expect("connect lock pool");
+        let mut writer = lock_pool.acquire().await.expect("acquire lock writer");
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut *writer)
+            .await
+            .expect("hold exclusive lock");
+        sqlx::query("CREATE TABLE passkey_privacy_status_pressure_lock (id INTEGER)")
+            .execute(&mut *writer)
+            .await
+            .expect("hold schema lock");
+
+        let started = std::time::Instant::now();
+        let response = get_upstream_privacy_status(State(state), headers)
+            .await
+            .expect_err("passkey auth pressure must return a retry response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        sqlx::query("ROLLBACK")
+            .execute(&mut *writer)
+            .await
+            .expect("release schema lock");
+    }
+
+    #[tokio::test]
     async fn passkey_authentication_start_is_available_on_standby() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let db_path = temp_dir.path().join("standby-passkey-auth.db");
