@@ -103,7 +103,8 @@ source when a usable persisted runtime already exists.
 - Administrator privacy-status reads use one AppState-owned last-good controller. HTTP handlers
   only copy its immutable value: an expired cached value must return additive stale coverage while
   one low-priority refresh runs or is deferred, and a true cold miss must return
-  `503 Retry-After: 1`. A refresh must explicitly close its `AdminPrivacyRead` snapshot at a
+  `503 Retry-After: 1`. A deferred startup prewarm retries in the background without consuming
+  foreground capacity. A refresh must explicitly close its `AdminPrivacyRead` snapshot at a
   cooperative completion boundary; an HTTP deadline or graceful shutdown must never cancel an open
   SQLite transaction.
 - The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write

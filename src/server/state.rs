@@ -134,6 +134,7 @@ struct AdminPrivacyStatusController {
     refresh_in_flight: bool,
     last_refresh_reason: Option<&'static str>,
     refresh_task: Option<tokio::task::JoinHandle<()>>,
+    prewarm_task: Option<tokio::task::JoinHandle<()>>,
     shutting_down: bool,
 }
 
@@ -293,32 +294,65 @@ async fn finish_admin_privacy_status_refresh(
 }
 
 pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
-    match start_admin_privacy_status_refresh(state).await {
-        AdminPrivacyStatusRefreshStart::Started | AdminPrivacyStatusRefreshStart::InFlight => {
-            tracing::info!(
-                component = "startup",
-                event = "admin_privacy_status_prewarm_started",
-                "scheduled immutable privacy-status last-good prewarm"
-            );
-        }
-        AdminPrivacyStatusRefreshStart::Deferred { reason } => {
-            tracing::debug!(
-                component = "startup",
-                event = "admin_privacy_status_prewarm_deferred",
-                reason,
-                "deferred privacy-status prewarm before SQLite acquisition"
-            );
-        }
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache.lock().await;
+    if cache.admin_privacy_status.shutting_down
+        || cache
+            .admin_privacy_status
+            .prewarm_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    {
+        return;
     }
+    cache.admin_privacy_status.prewarm_task = Some(tokio::spawn(async move {
+        loop {
+            if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+                return;
+            }
+            match start_admin_privacy_status_refresh(state.clone()).await {
+                AdminPrivacyStatusRefreshStart::Started | AdminPrivacyStatusRefreshStart::InFlight => {
+                    tracing::info!(
+                        component = "startup",
+                        event = "admin_privacy_status_prewarm_started",
+                        "scheduled immutable privacy-status last-good prewarm"
+                    );
+                }
+                AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" } => return,
+                AdminPrivacyStatusRefreshStart::Deferred { reason } => {
+                    tracing::debug!(
+                        component = "startup",
+                        event = "admin_privacy_status_prewarm_deferred",
+                        reason,
+                        "deferred privacy-status prewarm before SQLite acquisition"
+                    );
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }));
 }
 
 pub(crate) async fn shutdown_admin_privacy_status_refresh(state: &AppState) {
     fence_admin_privacy_status_refresh(state).await;
-    let refresh_task = {
+    let (prewarm_task, refresh_task) = {
         let cache = dashboard_overview_cache_for_state(state);
         let mut cache = cache.lock().await;
-        cache.admin_privacy_status.refresh_task.take()
+        (
+            cache.admin_privacy_status.prewarm_task.take(),
+            cache.admin_privacy_status.refresh_task.take(),
+        )
     };
+    if let Some(prewarm_task) = prewarm_task
+        && let Err(error) = prewarm_task.await
+    {
+        tracing::warn!(
+            component = "shutdown",
+            event = "admin_privacy_status_prewarm_join_failed",
+            error = %error,
+            "privacy-status prewarm ended before its cooperative boundary"
+        );
+    }
     let Some(refresh_task) = refresh_task else {
         return;
     };

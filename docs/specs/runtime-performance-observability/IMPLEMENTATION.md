@@ -74,9 +74,9 @@
   audit defer/retry events stay DEBUG, while stale/recovered coverage changes and fixed transport
   categories are safe owner-facing diagnostics without SQL, request bodies, endpoints, or tokens.
 - Administrator privacy status uses an AppState-owned immutable last-good controller with one
-  refresh flight. Ready startup schedules a non-blocking prewarm; requests copy cached data rather
-  than building the status synchronously. An expired cached value returns fixed-reason stale
-  coverage while the controller refreshes or defers, and a true cold miss returns
+  refresh flight. Ready startup schedules a non-blocking retrying prewarm; requests copy cached
+  data rather than building the status synchronously. An expired cached value returns fixed-reason
+  stale coverage while the controller refreshes or defers, and a true cold miss returns
   `503 Retry-After: 1`. Administrator alert Events, Groups, and Catalog use a normalized
   exact-query cache with a five-minute cap; a bounded read may return the matching stale entry,
   while a cold key returns `503 Retry-After: 1` rather than waiting for a raw alert CTE.

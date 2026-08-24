@@ -285,6 +285,31 @@
         decode_sse_json_text(&text)
     }
 
+    pub(super) async fn get_system_status_after_cold_retry(
+        client: &reqwest::Client,
+        addr: SocketAddr,
+    ) -> reqwest::Response {
+        let url = format!("http://{addr}/api/settings/system/status");
+        let mut response = client.get(&url).send().await.expect("get cold system status");
+        for _ in 0..100 {
+            if response.status() == StatusCode::OK {
+                return response;
+            }
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response.headers().get("retry-after").and_then(|value| value.to_str().ok()),
+                Some("1")
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            response = client
+                .get(&url)
+                .send()
+                .await
+                .expect("retry system status after privacy refresh");
+        }
+        response
+    }
+
     pub(super) async fn fetch_key_quota_snapshot(
         pool: &sqlx::SqlitePool,
         key_id: &str,

@@ -71,7 +71,8 @@
   远端观察、结算和状态落盘都必须受同一轮预算约束。HA GC 正常进展继续按通道 60 秒聚合，
   不能恢复逐片 WARN。
 - Privacy status owns an AppState-owned immutable last-good controller. After ready it starts one
-  low-priority prewarm; prewarm failure never delays readiness or competes with foreground work.
+  low-priority prewarm; deferred prewarm retries in the background until last-good is published or
+  shutdown fences it, without delaying readiness or competing with foreground work.
   The controller's `AdminPrivacyRead` snapshot acquire and `BEGIN` are bounded to 100ms, never
   enter maintenance-bulk admission, and explicitly close at a cooperative completion boundary.
   HTTP only copies last-good data: a cached value, including one older than 60 seconds, returns

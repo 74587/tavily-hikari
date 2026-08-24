@@ -2754,27 +2754,7 @@ use super::upstream_support_and_manual_jobs::*;
             Some(1)
         );
 
-        let mut status_response = client
-            .get(format!("http://{addr}/api/settings/system/status"))
-            .send()
-            .await
-            .expect("get cold system status");
-        for _ in 0..100 {
-            if status_response.status() == StatusCode::OK {
-                break;
-            }
-            assert_eq!(status_response.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(
-                status_response.headers().get("retry-after").and_then(|value| value.to_str().ok()),
-                Some("1")
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            status_response = client
-                .get(format!("http://{addr}/api/settings/system/status"))
-                .send()
-                .await
-                .expect("retry system status after privacy refresh");
-        }
+        let status_response = get_system_status_after_cold_retry(&client, addr).await;
         assert_eq!(status_response.status(), StatusCode::OK);
         let status_body = status_response
             .json::<serde_json::Value>()

@@ -2102,8 +2102,7 @@ mod serve_tests {
             .await
             .expect("server reached listener-ready hook");
 
-        for _ in 0..100 {
-            wait_for_admin_privacy_status_refresh(state.as_ref()).await;
+        for _ in 0..800 {
             if admin_privacy_status_cached(state.as_ref()).await.is_some() {
                 shutdown_tx.send(()).expect("signal server shutdown");
                 tokio::time::timeout(Duration::from_secs(2), &mut server)

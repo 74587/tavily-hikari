@@ -34,8 +34,9 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   100ms through operation admission and a connection-local busy timeout, then close explicitly at
   a cooperative completion boundary; cached readers immediately
   receive `stale` coverage while a refresh is in flight or deferred. Shutdown fences new refreshes
-  and waits for an active snapshot's explicit close. A true cold miss returns `503 Retry-After: 1`
-  without opening a request-owned SQLite transaction.
+  and waits for an active snapshot's explicit close. A deferred startup prewarm retries in the
+  background until it publishes last-good or shutdown fences it. A true cold miss returns
+  `503 Retry-After: 1` without opening a request-owned SQLite transaction.
 
 ## Reconciliation Terms
 

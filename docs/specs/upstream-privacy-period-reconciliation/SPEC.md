@@ -175,9 +175,9 @@
 - 系统设置页在“启用 Rebalance MCP”行只在活跃异常 session 数量大于 0 时显示 warning 图标，并跳转到隐藏管理页。
 - 系统状态页始终显示“活跃 `upstream_mcp` session”统计卡；数量大于 0 时使用 warning 语义，数量为 0 时使用 neutral/success 语义。
 - `/api/settings/system/privacy-status` 维持既有诊断字段并可添加 freshness 元数据。服务 ready 后以低优先级
-  预热 immutable last-good；有缓存的读取不得同步重建，在 refresh 或本地 SQLite 压力下直接返回
-  `200 stale`，真冷缓存返回 `503 Retry-After: 1`。请求 deadline 不得取消开放的 SQLite read snapshot。
-  优雅停机必须 fence 新 refresh，并等待已开始的 snapshot 显式 close。
+  预热 immutable last-good；defer 后后台重试至发布或停机。有缓存的读取不得同步重建，在 refresh 或本地
+  SQLite 压力下直接返回 `200 stale`，真冷缓存返回 `503 Retry-After: 1`。请求 deadline 不得取消开放的
+  SQLite read snapshot。优雅停机必须 fence 新 refresh，并等待已开始的 snapshot 显式 close。
 
 ## 接口契约（Interfaces & Contracts）
 
