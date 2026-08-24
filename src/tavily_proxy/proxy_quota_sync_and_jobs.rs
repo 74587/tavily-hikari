@@ -64,7 +64,7 @@ impl TavilyProxy {
             .key_store
             .upstream_privacy_status_from_snapshot(&mut session)
             .await;
-        let close = session.close().await;
+        let close = session.close_after_query(result.as_ref().err()).await;
         match (result, close) {
             (Ok(status), Ok(())) => Ok(status),
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -85,6 +85,14 @@ impl TavilyProxy {
         self.key_store
             .sqlite_runtime
             .discarded_connections_for_test(crate::store::SqliteOperation::AdminPrivacyRead)
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn admin_privacy_read_errors_for_test(&self) -> u64 {
+        self.key_store
+            .sqlite_runtime
+            .operation_errors_for_test(crate::store::SqliteOperation::AdminPrivacyRead)
     }
 
     #[cfg(debug_assertions)]

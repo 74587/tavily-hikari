@@ -192,6 +192,7 @@ async fn record_admin_alerts_last_good(
         .truncate(ADMIN_ALERTS_CACHE_CAPACITY);
 }
 
+#[cfg(test)]
 pub(crate) async fn admin_privacy_status_cached(
     state: &AppState,
 ) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
@@ -199,6 +200,16 @@ pub(crate) async fn admin_privacy_status_cached(
     let cache = cache.lock().await;
     let entry = cache.admin_privacy_status.last_good.as_ref()?;
     Some((entry.value.clone(), entry.observed_at))
+}
+
+pub(crate) async fn admin_privacy_status_last_good(
+    state: &AppState,
+) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
+    let cache = dashboard_overview_cache_for_state(state);
+    let cache = cache.lock().await;
+    let entry = cache.admin_privacy_status.last_good.as_ref()?;
+    (entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
+        .then(|| (entry.value.clone(), entry.observed_at))
 }
 
 pub(crate) async fn read_admin_privacy_status(
@@ -212,21 +223,25 @@ pub(crate) async fn read_admin_privacy_status(
         return AdminPrivacyStatusResponse::Fresh(entry.value.clone());
     }
 
-    start_admin_privacy_status_refresh_locked(state, &mut cache);
+    start_admin_privacy_status_refresh_locked(state.clone(), &mut cache);
     let controller = &cache.admin_privacy_status;
-    let Some(entry) = controller.last_good.as_ref() else {
-        return AdminPrivacyStatusResponse::Cold;
+    let response = if let Some(entry) = controller.last_good.as_ref() {
+        let mut status = entry.value.clone();
+        status.coverage = "stale".to_string();
+        status.observed_at = Some(entry.observed_at);
+        status.stale_reason = Some(
+            controller
+                .last_refresh_reason
+                .unwrap_or("refresh_in_flight")
+                .to_string(),
+        );
+        AdminPrivacyStatusResponse::Stale(status)
+    } else {
+        AdminPrivacyStatusResponse::Cold
     };
-    let mut status = entry.value.clone();
-    status.coverage = "stale".to_string();
-    status.observed_at = Some(entry.observed_at);
-    status.stale_reason = Some(
-        controller
-            .last_refresh_reason
-            .unwrap_or("refresh_in_flight")
-            .to_string(),
-    );
-    AdminPrivacyStatusResponse::Stale(status)
+    drop(cache);
+    prewarm_admin_privacy_status(state).await;
+    response
 }
 
 pub(crate) async fn start_admin_privacy_status_refresh(
@@ -327,7 +342,7 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
     }
     cache.admin_privacy_status.prewarm_task = Some(tokio::spawn(async move {
         loop {
-            if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+            if admin_privacy_status_last_good(state.as_ref()).await.is_some() {
                 return;
             }
             match start_admin_privacy_status_refresh(state.clone()).await {
@@ -429,16 +444,20 @@ pub(crate) async fn wait_for_admin_privacy_status_refresh(state: &AppState) {
 }
 
 #[cfg(test)]
-pub(crate) async fn prime_admin_privacy_status_for_test(state: Arc<AppState>) {
-    for _ in 0..100 {
-        prewarm_admin_privacy_status(state.clone()).await;
-        wait_for_admin_privacy_status_refresh(state.as_ref()).await;
-        if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+pub(crate) async fn wait_for_admin_privacy_status_last_good(state: &AppState) {
+    for _ in 0..700 {
+        if admin_privacy_status_last_good(state).await.is_some() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("admin privacy status prewarm did not publish last-good data");
+    panic!("admin privacy status refresh did not publish fresh last-good data");
+}
+
+#[cfg(test)]
+pub(crate) async fn prime_admin_privacy_status_for_test(state: Arc<AppState>) {
+    prewarm_admin_privacy_status(state.clone()).await;
+    wait_for_admin_privacy_status_last_good(state.as_ref()).await;
 }
 
 fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {

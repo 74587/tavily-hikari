@@ -11,6 +11,8 @@ use tracing::{debug, error, info, warn};
 
 const SQLITE_WORKLOAD_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_BUSY_TIMEOUT_MS: i64 = 5_000;
+const ADMIN_PRIVACY_READ_RUN_BUDGET: Duration = Duration::from_secs(2);
+const ADMIN_PRIVACY_READ_PROGRESS_HANDLER_OPS: i32 = 1_000;
 
 const MAINTENANCE_BULK_MAX_FOREGROUND_RPS: i64 = 5;
 const MAINTENANCE_BULK_CONTENTION_COOLDOWN: Duration = Duration::from_secs(5);
@@ -376,6 +378,18 @@ impl SqliteRuntime {
             .operations
             .get(&operation)
             .map(|metrics| metrics.discarded_connections)
+            .unwrap_or_default()
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn operation_errors_for_test(&self, operation: SqliteOperation) -> u64 {
+        self.inner
+            .workload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .operations
+            .get(&operation)
+            .map(|metrics| metrics.errors)
             .unwrap_or_default()
     }
 
@@ -846,6 +860,17 @@ impl SqliteRuntime {
         }
         snapshot.begin_wait = begin_started.elapsed();
         snapshot.started_at = Instant::now();
+        if matches!(operation, SqliteOperation::AdminPrivacyRead)
+            && let Err(error) = snapshot
+                .arm_cooperative_run_budget(ADMIN_PRIVACY_READ_RUN_BUDGET)
+                .await
+        {
+            let close = snapshot.close_after_query(Some(&error)).await;
+            return match close {
+                Ok(()) => Err(error),
+                Err(close_error) => Err(close_error),
+            };
+        }
         Ok(snapshot)
     }
 
@@ -1446,6 +1471,24 @@ impl Drop for SqliteOperationConnection {
 }
 
 impl SqliteReadSnapshot {
+    pub(crate) async fn arm_cooperative_run_budget(
+        &mut self,
+        run_budget: Duration,
+    ) -> Result<(), ProxyError> {
+        let deadline = Instant::now() + run_budget;
+        let mut handle = self.lock_handle().await.map_err(ProxyError::Database)?;
+        handle.set_progress_handler(ADMIN_PRIVACY_READ_PROGRESS_HANDLER_OPS, move || {
+            Instant::now() < deadline
+        });
+        Ok(())
+    }
+
+    async fn clear_cooperative_run_budget(&mut self) -> Result<(), ProxyError> {
+        let mut handle = self.lock_handle().await.map_err(ProxyError::Database)?;
+        handle.remove_progress_handler();
+        Ok(())
+    }
+
     pub(crate) async fn complete_query<T>(
         mut self,
         query_result: Result<T, sqlx::Error>,
@@ -1494,7 +1537,17 @@ impl SqliteReadSnapshot {
         }
     }
 
-    pub(crate) async fn close(mut self) -> Result<(), ProxyError> {
+    pub(crate) async fn close_after_query(
+        mut self,
+        query_error: Option<&ProxyError>,
+    ) -> Result<(), ProxyError> {
+        if let Err(error) = self.clear_cooperative_run_budget().await {
+            let conn = self.conn.take().expect("SQLite read snapshot connection");
+            conn.detach().close().await.ok();
+            self.runtime
+                .record_error(self.operation, self.pool_wait, self.begin_wait, &error);
+            return Err(error);
+        }
         let result = sqlx::query("ROLLBACK").execute(&mut *self).await;
         match result {
             Ok(_) => {
@@ -1511,13 +1564,22 @@ impl SqliteReadSnapshot {
                     );
                     return Err(err);
                 }
-                self.runtime.record_success(
-                    self.operation,
-                    self.pool_wait,
-                    self.begin_wait,
-                    self.started_at.elapsed(),
-                    0,
-                );
+                if let Some(error) = query_error {
+                    self.runtime.record_error(
+                        self.operation,
+                        self.pool_wait,
+                        self.begin_wait,
+                        error,
+                    );
+                } else {
+                    self.runtime.record_success(
+                        self.operation,
+                        self.pool_wait,
+                        self.begin_wait,
+                        self.started_at.elapsed(),
+                        0,
+                    );
+                }
                 Ok(())
             }
             Err(err) => {
@@ -1529,6 +1591,10 @@ impl SqliteReadSnapshot {
                 Err(err)
             }
         }
+    }
+
+    pub(crate) async fn close(self) -> Result<(), ProxyError> {
+        self.close_after_query(None).await
     }
 }
 
@@ -2354,6 +2420,47 @@ mod tests {
         ));
         assert!(started.elapsed() < Duration::from_millis(150));
         drop((third, second, first));
+    }
+
+    #[tokio::test]
+    async fn admin_privacy_read_run_budget_interrupts_before_discarding_its_session() {
+        let runtime = single_connection_runtime().await;
+        let mut session = runtime
+            .begin_read_snapshot(SqliteOperation::AdminPrivacyRead)
+            .await
+            .expect("privacy read session");
+        session
+            .arm_cooperative_run_budget(Duration::ZERO)
+            .await
+            .expect("install immediate read budget");
+        let query_error = sqlx::query_scalar::<_, i64>(
+            "WITH RECURSIVE counter(value) AS (VALUES(1) UNION ALL SELECT value + 1 FROM counter WHERE value < 1000000) SELECT SUM(value) FROM counter",
+        )
+        .fetch_one(&mut *session)
+        .await
+        .expect_err("the SQLite progress handler must interrupt an expired read budget");
+        let query_error = ProxyError::Database(query_error);
+        session
+            .close_after_query(Some(&query_error))
+            .await
+            .expect("interrupted session closes explicitly");
+        assert_eq!(
+            runtime.discarded_connections_for_test(SqliteOperation::AdminPrivacyRead),
+            0,
+            "cooperative interruption must not discard the SQLite connection"
+        );
+        assert_eq!(
+            runtime.operation_errors_for_test(SqliteOperation::AdminPrivacyRead),
+            1,
+            "an interrupted query must enter runtime workload error metrics"
+        );
+        runtime
+            .begin_read_snapshot(SqliteOperation::AdminPrivacyRead)
+            .await
+            .expect("next privacy session is clean")
+            .close()
+            .await
+            .expect("close next privacy session");
     }
 
     #[tokio::test]

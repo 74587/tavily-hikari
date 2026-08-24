@@ -871,6 +871,7 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
         .await
         .expect("hold schema lock for cold privacy status");
     let cold_started = std::time::Instant::now();
+    let cold_errors_before = cold_state.proxy.admin_privacy_read_errors_for_test();
     let cold = client
         .get(format!("http://{cold_addr}/api/settings/system/privacy-status"))
         .header(reqwest::header::COOKIE, &cold_cookie)
@@ -895,6 +896,10 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
         0,
         "a bounded SQLite BEGIN failure must restore its connection instead of discarding it"
     );
+    assert!(
+        cold_state.proxy.admin_privacy_read_errors_for_test() > cold_errors_before,
+        "a failed cold privacy refresh must enter the runtime workload error metrics"
+    );
     sqlx::query("ROLLBACK")
         .execute(&mut *cold_writer)
         .await
@@ -905,25 +910,13 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
         .verify_admin_privacy_read_connection_clean_for_test()
         .await
         .expect("the failed cold refresh must leave the next SQLite transaction clean");
-    let retry = client
+    wait_for_admin_privacy_status_last_good(cold_state.as_ref()).await;
+    let ready = client
         .get(format!("http://{cold_addr}/api/settings/system/privacy-status"))
         .header(reqwest::header::COOKIE, &cold_cookie)
         .send()
         .await
-        .expect("retry cold privacy status after pressure drains");
-    if retry.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        wait_for_admin_privacy_status_refresh(cold_state.as_ref()).await;
-    }
-    let ready = if retry.status() == reqwest::StatusCode::OK {
-        retry
-    } else {
-        client
-            .get(format!("http://{cold_addr}/api/settings/system/privacy-status"))
-            .header(reqwest::header::COOKIE, &cold_cookie)
-            .send()
-            .await
-            .expect("privacy status after cold refresh")
-    };
+        .expect("privacy status after autonomous cold refresh");
     assert_eq!(ready.status(), reqwest::StatusCode::OK);
     let ready_body: serde_json::Value = ready
         .json()

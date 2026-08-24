@@ -75,6 +75,9 @@
   shutdown fences it, without delaying readiness or competing with foreground work.
   The controller's `AdminPrivacyRead` snapshot acquire and `BEGIN` are bounded to 100ms, never
   enter maintenance-bulk admission, and explicitly close at a cooperative completion boundary.
+  Its complete diagnostic run is bounded to two seconds by SQLite's progress handler, which interrupts
+  only the active SQL statement and is cleared before the explicit rollback; HTTP and shutdown
+  never cancel the task while it owns a snapshot.
   HTTP only copies last-good data: a cached value, including one older than 60 seconds, returns
   additive `stale` coverage within 250ms while refresh is in flight or deferred; a true cold miss
   returns `503 Retry-After: 1` without canceling an open SQLite transaction. Shutdown fences new
