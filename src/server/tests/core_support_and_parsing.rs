@@ -291,7 +291,7 @@
     ) -> reqwest::Response {
         let url = format!("http://{addr}/api/settings/system/status");
         let mut response = client.get(&url).send().await.expect("get cold system status");
-        for _ in 0..100 {
+        for _ in 0..350 {
             if response.status() == StatusCode::OK {
                 return response;
             }

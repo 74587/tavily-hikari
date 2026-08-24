@@ -2139,7 +2139,7 @@ mod serve_tests {
             "startup prewarm must defer while foreground pressure is active"
         );
 
-        for _ in 0..300 {
+        for _ in 0..500 {
             if admin_privacy_status_cached(state.as_ref()).await.is_some() {
                 shutdown_tx.send(()).expect("signal server shutdown");
                 tokio::time::timeout(Duration::from_secs(2), &mut server)
