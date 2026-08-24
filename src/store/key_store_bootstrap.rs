@@ -680,6 +680,8 @@ impl KeyStore {
             forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
             #[cfg(debug_assertions)]
             dashboard_overview_read_pause: Arc::new(Mutex::new(None)),
+            #[cfg(debug_assertions)]
+            admin_privacy_read_pause: Arc::new(Mutex::new(None)),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
         };
         // Existing deployments may predate newly added observability control
@@ -782,6 +784,8 @@ impl KeyStore {
             forced_pending_claim_miss_log_ids: Mutex::new(HashSet::new()),
             #[cfg(debug_assertions)]
             dashboard_overview_read_pause: Arc::new(Mutex::new(None)),
+            #[cfg(debug_assertions)]
+            admin_privacy_read_pause: Arc::new(Mutex::new(None)),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(HashSet::new()),
         };
         instrument_db_operation(

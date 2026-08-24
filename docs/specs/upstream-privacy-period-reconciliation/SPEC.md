@@ -174,6 +174,10 @@
 - 页面展示今日对账收敛进度：账号至少一个标准成功账期、账期 terminal、Research terminal 三个比例，以及每 Key 的 pending Research、待查询 Project ID 和 reconciliation 冷却状态。
 - 系统设置页在“启用 Rebalance MCP”行只在活跃异常 session 数量大于 0 时显示 warning 图标，并跳转到隐藏管理页。
 - 系统状态页始终显示“活跃 `upstream_mcp` session”统计卡；数量大于 0 时使用 warning 语义，数量为 0 时使用 neutral/success 语义。
+- `/api/settings/system/privacy-status` 维持既有诊断字段并可添加 freshness 元数据。服务 ready 后以低优先级
+  预热 immutable last-good；defer 后后台重试至发布或停机。有缓存的读取不得同步重建，在 refresh 或本地
+  SQLite 压力下直接返回 `200 stale`，真冷缓存返回 `503 Retry-After: 1`。请求 deadline 不得取消开放的
+  SQLite read snapshot。优雅停机必须 fence 新 refresh，并等待已开始的 snapshot 显式 close。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -205,6 +209,9 @@
 - Given 多 Key、Research 等待、Retry-After、重启或 HA 接管，When 窗口结算，Then 最终只产生一条幂等 signed adjustment。
 - Given 退款或补扣，When 查询账户或未绑定 Token 的相关额度，Then 原业务窗口统计立即反映差额，S3 不增加次日额度。
 - Given 状态 API 与页面，When secret、官方 key 或 token 存在，Then 任何响应与 UI 都不显示完整敏感值。
+- Given privacy-status last-good 已过 60 秒且 SQLite refresh 受压或正在运行，When 管理员读取该接口，Then
+  在 250ms 内返回 `200 stale`，仅启动一个后台 refresh，且不丢弃 read-session connection；Given 无
+  last-good，Then 在同一预算内返回 `503 Retry-After: 1`。
 - Given reconciliation backlog 中存在 `rate_limited` 窗口，When 管理员查看系统状态页，Then 能区分上游 429、本地 usage 限流与其他重试，并能看到当前时段每个上游 Key 的绑定用户数与待查询 Project ID 数分布。
 - Given 近期窗口与旧 backlog 同时堆积，When reconciliation worker 选择候选窗口，Then 今日+昨日窗口优先进入 recent lane，且不会被老 backlog 长期饿死。
 - Given 同一上游 Key 的多个窗口同时到期且首次 `/usage` 查询收到 429 或本地 usage 限流，When reconciliation worker 执行，Then 该 Key 的到期窗口整体进入同一退避时间，本轮不再反复打同一个 Key，其他 Key 的候选仍可继续结算。

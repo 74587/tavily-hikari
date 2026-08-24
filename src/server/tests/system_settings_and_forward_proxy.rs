@@ -2754,11 +2754,7 @@ use super::upstream_support_and_manual_jobs::*;
             Some(1)
         );
 
-        let status_response = client
-            .get(format!("http://{addr}/api/settings/system/status"))
-            .send()
-            .await
-            .expect("get system status");
+        let status_response = get_system_status_after_cold_retry(&client, addr).await;
         assert_eq!(status_response.status(), StatusCode::OK);
         let status_body = status_response
             .json::<serde_json::Value>()

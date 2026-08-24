@@ -2664,6 +2664,9 @@ pub(crate) struct KeyStore {
     #[cfg(debug_assertions)]
     #[allow(dead_code)]
     pub(crate) dashboard_overview_read_pause: Arc<Mutex<Option<RequestStatsPostFlushPause>>>,
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) admin_privacy_read_pause: Arc<Mutex<Option<RequestStatsPostFlushPause>>>,
     // Lightweight failpoint registry used by integration tests to simulate a lost quota
     // subject lease after precheck but before settlement.
     pub(crate) forced_quota_subject_lock_loss_subjects: std::sync::Mutex<HashSet<String>>,
@@ -2673,6 +2676,7 @@ pub(crate) struct KeyStore {
 fn new_request_stats_test_pause() -> RequestStatsPostFlushPause {
     RequestStatsPostFlushPause {
         arrived: Arc::new(Notify::new()),
+        arrival_observed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         release: Arc::new(Notify::new()),
         released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
@@ -2683,7 +2687,11 @@ async fn wait_for_request_stats_test_pause_if_installed(
     slot: &Arc<Mutex<Option<RequestStatsPostFlushPause>>>,
 ) {
     if let Some(pause) = slot.lock().await.take() {
-        pause.arrived.notify_waiters();
+        // Retain the arrival signal when the request returns before the test waits.
+        pause
+            .arrival_observed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        pause.arrived.notify_one();
         while !pause.released.load(std::sync::atomic::Ordering::SeqCst) {
             pause.release.notified().await;
         }
@@ -2704,6 +2712,21 @@ impl KeyStore {
     #[allow(dead_code)]
     pub(crate) async fn wait_for_dashboard_overview_read_pause_if_installed(&self) {
         wait_for_request_stats_test_pause_if_installed(&self.dashboard_overview_read_pause).await;
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) async fn install_admin_privacy_read_pause(&self) -> RequestStatsPostFlushPause {
+        let pause = new_request_stats_test_pause();
+        let mut slot = self.admin_privacy_read_pause.lock().await;
+        *slot = Some(pause.clone());
+        pause
+    }
+
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) async fn wait_for_admin_privacy_read_pause_if_installed(&self) {
+        wait_for_request_stats_test_pause_if_installed(&self.admin_privacy_read_pause).await;
     }
 }
 
@@ -2796,6 +2819,36 @@ mod tests {
             sqlite_runtime_log_context("data/core.db", "startup", false, true),
             "path=data/core.db, mode=startup, read_only=false, create_if_missing=true"
         );
+    }
+
+    #[tokio::test]
+    async fn request_stats_test_pause_retains_one_arrival_permit() {
+        let pause = new_request_stats_test_pause();
+        let slot = Arc::new(tokio::sync::Mutex::new(Some(pause.clone())));
+        let paused_task = {
+            let slot = Arc::clone(&slot);
+            tokio::spawn(async move {
+                wait_for_request_stats_test_pause_if_installed(&slot).await;
+            })
+        };
+        while !pause
+            .arrival_observed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(Duration::from_millis(10), pause.wait_until_arrived())
+            .await
+            .expect("a late single waiter must consume the retained arrival permit");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), pause.wait_until_arrived())
+                .await
+                .is_err(),
+            "the pause must retain only one arrival permit"
+        );
+        pause.release();
+        paused_task.await.expect("paused task joins after release");
     }
 
     #[test]

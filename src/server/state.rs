@@ -51,7 +51,7 @@ struct CachedDashboardOverviewSnapshot {
     freshness: Arc<DashboardOverviewFreshness>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DashboardOverviewCacheState {
     cached: Option<CachedDashboardOverviewSnapshot>,
     loading: bool,
@@ -64,11 +64,13 @@ struct DashboardOverviewCacheState {
     last_freshness_probe_at: Option<tokio::time::Instant>,
     notify: Arc<tokio::sync::Notify>,
     admin_alerts: AdminAlertsReadCache,
-    admin_privacy_status: Option<AdminPrivacyStatusCacheEntry>,
+    admin_privacy_status: AdminPrivacyStatusController,
     #[cfg(test)]
     build_count: usize,
     #[cfg(test)]
     freshness_probe_count: usize,
+    #[cfg(test)]
+    admin_privacy_refresh_count: usize,
 }
 
 impl Default for DashboardOverviewCacheState {
@@ -85,11 +87,13 @@ impl Default for DashboardOverviewCacheState {
             last_freshness_probe_at: None,
             notify: Arc::new(tokio::sync::Notify::new()),
             admin_alerts: AdminAlertsReadCache::default(),
-            admin_privacy_status: None,
+            admin_privacy_status: AdminPrivacyStatusController::default(),
             #[cfg(test)]
             build_count: 0,
             #[cfg(test)]
             freshness_probe_count: 0,
+            #[cfg(test)]
+            admin_privacy_refresh_count: 0,
         }
     }
 }
@@ -122,6 +126,30 @@ struct AdminPrivacyStatusCacheEntry {
     value: tavily_hikari::UpstreamPrivacyStatus,
     observed_at: i64,
     stored_at: tokio::time::Instant,
+}
+
+#[derive(Debug, Default)]
+struct AdminPrivacyStatusController {
+    last_good: Option<AdminPrivacyStatusCacheEntry>,
+    refresh_in_flight: bool,
+    last_refresh_reason: Option<&'static str>,
+    refresh_task: Option<tokio::task::JoinHandle<()>>,
+    prewarm_task: Option<tokio::task::JoinHandle<()>>,
+    shutting_down: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdminPrivacyStatusRefreshStart {
+    Fresh,
+    Started,
+    InFlight,
+    Deferred { reason: &'static str },
+}
+
+pub(crate) enum AdminPrivacyStatusResponse {
+    Fresh(tavily_hikari::UpstreamPrivacyStatus),
+    Stale(tavily_hikari::UpstreamPrivacyStatus),
+    Cold,
 }
 
 const ADMIN_PRIVACY_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -164,49 +192,349 @@ async fn record_admin_alerts_last_good(
         .truncate(ADMIN_ALERTS_CACHE_CAPACITY);
 }
 
-pub(crate) async fn admin_privacy_status_last_good(
-    state: &AppState,
-) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
-    let cache = dashboard_overview_cache_for_state(state);
-    let cache = cache.lock().await;
-    let entry = cache.admin_privacy_status.as_ref()?;
-    (entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
-        .then(|| (entry.value.clone(), entry.observed_at))
-}
-
+#[cfg(test)]
 pub(crate) async fn admin_privacy_status_cached(
     state: &AppState,
 ) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
     let cache = dashboard_overview_cache_for_state(state);
     let cache = cache.lock().await;
-    let entry = cache.admin_privacy_status.as_ref()?;
+    let entry = cache.admin_privacy_status.last_good.as_ref()?;
     Some((entry.value.clone(), entry.observed_at))
+}
+
+pub(crate) async fn admin_privacy_status_last_good(
+    state: &AppState,
+) -> Option<(tavily_hikari::UpstreamPrivacyStatus, i64)> {
+    let cache = dashboard_overview_cache_for_state(state);
+    let cache = cache.lock().await;
+    let entry = cache.admin_privacy_status.last_good.as_ref()?;
+    (entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
+        .then(|| (entry.value.clone(), entry.observed_at))
+}
+
+pub(crate) async fn read_admin_privacy_status(
+    state: Arc<AppState>,
+) -> AdminPrivacyStatusResponse {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache.lock().await;
+    if let Some(entry) = cache.admin_privacy_status.last_good.as_ref()
+        && entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL
+    {
+        return AdminPrivacyStatusResponse::Fresh(entry.value.clone());
+    }
+
+    start_admin_privacy_status_refresh_locked(state.clone(), &mut cache);
+    let controller = &cache.admin_privacy_status;
+    let response = if let Some(entry) = controller.last_good.as_ref() {
+        let mut status = entry.value.clone();
+        status.coverage = "stale".to_string();
+        status.observed_at = Some(entry.observed_at);
+        status.stale_reason = Some(
+            controller
+                .last_refresh_reason
+                .unwrap_or("refresh_in_flight")
+                .to_string(),
+        );
+        AdminPrivacyStatusResponse::Stale(status)
+    } else {
+        AdminPrivacyStatusResponse::Cold
+    };
+    drop(cache);
+    prewarm_admin_privacy_status(state).await;
+    response
+}
+
+pub(crate) async fn start_admin_privacy_status_refresh(
+    state: Arc<AppState>,
+) -> AdminPrivacyStatusRefreshStart {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache.lock().await;
+    start_admin_privacy_status_refresh_locked(state, &mut cache)
+}
+
+fn start_admin_privacy_status_refresh_locked(
+    state: Arc<AppState>,
+    cache: &mut DashboardOverviewCacheState,
+) -> AdminPrivacyStatusRefreshStart {
+    if cache
+        .admin_privacy_status
+        .last_good
+        .as_ref()
+        .is_some_and(|entry| entry.stored_at.elapsed() <= ADMIN_PRIVACY_STATUS_CACHE_TTL)
+    {
+        return AdminPrivacyStatusRefreshStart::Fresh;
+    }
+    if cache.admin_privacy_status.refresh_in_flight {
+        return AdminPrivacyStatusRefreshStart::InFlight;
+    }
+    if cache.admin_privacy_status.shutting_down {
+        cache.admin_privacy_status.last_refresh_reason = Some("shutdown");
+        return AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" };
+    }
+    if let Some(reason) = state.proxy.admin_privacy_status_refresh_defer_reason() {
+        cache.admin_privacy_status.last_refresh_reason = Some(reason);
+        return AdminPrivacyStatusRefreshStart::Deferred { reason };
+    }
+
+    cache.admin_privacy_status.refresh_in_flight = true;
+    cache.admin_privacy_status.last_refresh_reason = Some("refresh_in_flight");
+    #[cfg(test)]
+    {
+        cache.admin_privacy_refresh_count = cache.admin_privacy_refresh_count.saturating_add(1);
+    }
+    let refresh_task = tokio::spawn(async move {
+        let result = state.proxy.upstream_privacy_status().await;
+        finish_admin_privacy_status_refresh(state.as_ref(), result).await;
+    });
+    cache.admin_privacy_status.refresh_task = Some(refresh_task);
+    AdminPrivacyStatusRefreshStart::Started
+}
+
+async fn finish_admin_privacy_status_refresh(
+    state: &AppState,
+    result: Result<tavily_hikari::UpstreamPrivacyStatus, tavily_hikari::ProxyError>,
+) {
+    let cache = dashboard_overview_cache_for_state(state);
+    let mut cache = cache.lock().await;
+    cache.admin_privacy_status.refresh_in_flight = false;
+    match result {
+        Ok(mut value) => {
+            let observed_at = state.proxy.backend_time().now_ts();
+            value.coverage = "ok".to_string();
+            value.observed_at = Some(observed_at);
+            value.stale_reason = None;
+            cache.admin_privacy_status.last_good = Some(AdminPrivacyStatusCacheEntry {
+                value,
+                observed_at,
+                stored_at: tokio::time::Instant::now(),
+            });
+            cache.admin_privacy_status.last_refresh_reason = None;
+        }
+        Err(error) => {
+            cache.admin_privacy_status.last_refresh_reason = Some(
+                if tavily_hikari::is_transient_sqlite_write_error(&error) || error.is_deferred() {
+                    "sqlite_pressure"
+                } else {
+                    "refresh_failed"
+                },
+            );
+            tracing::debug!(
+                component = "admin_read",
+                event = "privacy_status_refresh_deferred",
+                reason = cache.admin_privacy_status.last_refresh_reason.unwrap_or("unknown"),
+                "privacy status refresh completed without replacing last-good data"
+            );
+        }
+    }
+}
+
+fn emit_admin_privacy_status_prewarm_started() {
+    tracing::info!(
+        component = "startup",
+        event = "admin_privacy_status_prewarm_started",
+        "scheduled immutable privacy-status last-good prewarm"
+    );
+}
+
+fn emit_admin_privacy_status_prewarm_deferred(reason: &'static str) {
+    tracing::debug!(
+        component = "startup",
+        event = "admin_privacy_status_prewarm_deferred",
+        reason,
+        "deferred privacy-status prewarm before SQLite acquisition"
+    );
+}
+
+pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let mut cache = cache.lock().await;
+    if cache.admin_privacy_status.shutting_down
+        || cache
+            .admin_privacy_status
+            .prewarm_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    {
+        return;
+    }
+    cache.admin_privacy_status.prewarm_task = Some(tokio::spawn(async move {
+        loop {
+            if admin_privacy_status_last_good(state.as_ref()).await.is_some() {
+                return;
+            }
+            match start_admin_privacy_status_refresh(state.clone()).await {
+                AdminPrivacyStatusRefreshStart::Fresh => return,
+                AdminPrivacyStatusRefreshStart::Started => emit_admin_privacy_status_prewarm_started(),
+                // A prior prewarm iteration owns the singleflight refresh. Keep retrying for
+                // completion, but do not report another start for the same operation.
+                AdminPrivacyStatusRefreshStart::InFlight => {}
+                AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" } => return,
+                AdminPrivacyStatusRefreshStart::Deferred { reason } => {
+                    emit_admin_privacy_status_prewarm_deferred(reason);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }));
+}
+
+pub(crate) async fn shutdown_admin_privacy_status_refresh(state: &AppState) {
+    fence_admin_privacy_status_refresh(state).await;
+    let (prewarm_task, refresh_task) = {
+        let cache = dashboard_overview_cache_for_state(state);
+        let mut cache = cache.lock().await;
+        (
+            cache.admin_privacy_status.prewarm_task.take(),
+            cache.admin_privacy_status.refresh_task.take(),
+        )
+    };
+    if let Some(prewarm_task) = prewarm_task
+        && let Err(error) = prewarm_task.await
+    {
+        tracing::warn!(
+            component = "shutdown",
+            event = "admin_privacy_status_prewarm_join_failed",
+            error = %error,
+            "privacy-status prewarm ended before its cooperative boundary"
+        );
+    }
+    let Some(refresh_task) = refresh_task else {
+        return;
+    };
+
+    // A refresh owns an open immutable read snapshot until it reaches its
+    // explicit close boundary. Do not abort it during shutdown, because Drop
+    // must remain a fault-containment path rather than normal control flow.
+    if let Err(error) = refresh_task.await {
+        tracing::warn!(
+            component = "shutdown",
+            event = "admin_privacy_status_refresh_join_failed",
+            error = %error,
+            "privacy-status refresh ended before its cooperative close boundary"
+        );
+    }
+}
+
+pub(crate) async fn fence_admin_privacy_status_refresh(state: &AppState) {
+    let cache = dashboard_overview_cache_for_state(state);
+    cache.lock().await.admin_privacy_status.shutting_down = true;
 }
 
 #[cfg(test)]
 pub(crate) async fn expire_admin_privacy_status_last_good_for_test(state: &AppState) {
     let cache = dashboard_overview_cache_for_state(state);
     let mut cache = cache.lock().await;
-    if let Some(entry) = cache.admin_privacy_status.as_mut() {
+    if let Some(entry) = cache.admin_privacy_status.last_good.as_mut() {
         entry.stored_at = tokio::time::Instant::now() - ADMIN_PRIVACY_STATUS_CACHE_TTL;
     }
 }
 
-pub(crate) async fn record_admin_privacy_status_last_good(
-    state: &AppState,
-    mut value: tavily_hikari::UpstreamPrivacyStatus,
-) {
-    let observed_at = state.proxy.backend_time().now_ts();
-    value.coverage = "ok".to_string();
-    value.observed_at = Some(observed_at);
-    value.stale_reason = None;
+#[cfg(test)]
+pub(crate) async fn admin_privacy_refresh_count_for_test(state: &AppState) -> usize {
+    dashboard_overview_cache_for_state(state)
+        .lock()
+        .await
+        .admin_privacy_refresh_count
+}
+
+#[cfg(test)]
+pub(crate) async fn wait_for_admin_privacy_status_refresh(state: &AppState) {
     let cache = dashboard_overview_cache_for_state(state);
-    let mut cache = cache.lock().await;
-    cache.admin_privacy_status = Some(AdminPrivacyStatusCacheEntry {
-        value,
-        observed_at,
-        stored_at: tokio::time::Instant::now(),
-    });
+    for _ in 0..350 {
+        if !cache.lock().await.admin_privacy_status.refresh_in_flight {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("admin privacy status refresh did not finish");
+}
+
+#[cfg(test)]
+pub(crate) async fn wait_for_admin_privacy_status_last_good(state: &AppState) {
+    for _ in 0..700 {
+        if admin_privacy_status_last_good(state).await.is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("admin privacy status refresh did not publish fresh last-good data");
+}
+
+#[cfg(test)]
+pub(crate) async fn prime_admin_privacy_status_for_test(state: Arc<AppState>) {
+    prewarm_admin_privacy_status(state.clone()).await;
+    wait_for_admin_privacy_status_last_good(state.as_ref()).await;
+}
+
+#[cfg(test)]
+mod privacy_status_prewarm_logging_tests {
+    use super::{
+        emit_admin_privacy_status_prewarm_deferred, emit_admin_privacy_status_prewarm_started,
+    };
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, value: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("tracing buffer lock")
+                .extend_from_slice(value);
+            Ok(value.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn privacy_status_prewarm_events_keep_their_observability_contract() {
+        let writer = SharedWriter::default();
+        let buffer = writer.buffer.clone();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new("debug"))
+                .with_writer(writer)
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .finish(),
+        );
+        tracing::dispatcher::with_default(&dispatch, || {
+            emit_admin_privacy_status_prewarm_started();
+            emit_admin_privacy_status_prewarm_deferred("foreground_pressure");
+        });
+        let output = String::from_utf8(buffer.lock().expect("tracing buffer lock").clone())
+            .expect("utf8 tracing output");
+
+        assert!(output.contains("\"level\":\"INFO\""));
+        assert!(output.contains("\"event\":\"admin_privacy_status_prewarm_started\""));
+        assert!(output.contains("\"level\":\"DEBUG\""));
+        assert!(output.contains("\"event\":\"admin_privacy_status_prewarm_deferred\""));
+        assert!(output.contains("\"reason\":\"foreground_pressure\""));
+    }
 }
 
 fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {
@@ -1122,16 +1450,20 @@ fn wants_secure_cookie(headers: &HeaderMap) -> bool {
 }
 
 async fn is_admin_request(state: &AppState, headers: &HeaderMap) -> bool {
+    try_is_admin_request(state, headers).await.unwrap_or(false)
+}
+
+async fn try_is_admin_request(state: &AppState, headers: &HeaderMap) -> Result<bool, ProxyError> {
     if state.dev_open_admin {
-        return true;
+        return Ok(true);
     }
     if state.forward_auth_enabled && state.forward_auth.is_request_admin(headers) {
-        return true;
+        return Ok(true);
     }
     if state.builtin_admin.is_admin(headers) {
-        return true;
+        return Ok(true);
     }
-    resolve_admin_passkey_session(state, headers).await.is_some()
+    Ok(resolve_admin_passkey_session(state, headers).await?.is_some())
 }
 
 async fn require_full_master_write(state: &AppState) -> Result<(), (StatusCode, String)> {
@@ -1158,16 +1490,17 @@ async fn resolve_user_session(
 async fn resolve_admin_passkey_session(
     state: &AppState,
     headers: &HeaderMap,
-) -> Option<tavily_hikari::AdminPasskeySessionRecord> {
+) -> Result<Option<tavily_hikari::AdminPasskeySessionRecord>, ProxyError> {
     if !state.admin_passkey.is_configured() {
-        return None;
+        return Ok(None);
     }
-    let token = cookie_value(headers, ADMIN_PASSKEY_COOKIE_NAME)?;
-    let scope = state.admin_passkey.scope.as_ref()?;
-    match state.proxy.get_active_admin_passkey_session(scope, &token).await {
-        Ok(Some(session)) => Some(session),
-        _ => None,
-    }
+    let Some(token) = cookie_value(headers, ADMIN_PASSKEY_COOKIE_NAME) else {
+        return Ok(None);
+    };
+    let Some(scope) = state.admin_passkey.scope.as_ref() else {
+        return Ok(None);
+    };
+    state.proxy.get_active_admin_passkey_session(scope, &token).await
 }
 
 async fn admin_maintenance_actor(
@@ -1210,7 +1543,11 @@ async fn admin_maintenance_actor(
         return actor;
     }
 
-    if let Some(session) = resolve_admin_passkey_session(state, headers).await {
+    if let Some(session) = resolve_admin_passkey_session(state, headers)
+        .await
+        .ok()
+        .flatten()
+    {
         actor.actor_display_name = Some(
             session
                 .credential_id
@@ -1392,6 +1729,8 @@ async fn debug_is_admin(
     let builtin_admin = state.builtin_admin.is_admin(&headers);
     let admin_passkey = resolve_admin_passkey_session(state.as_ref(), &headers)
         .await
+        .ok()
+        .flatten()
         .is_some();
     let is_admin = state.dev_open_admin || forward_auth_admin || builtin_admin || admin_passkey;
     Ok(Json(IsAdminDebug {

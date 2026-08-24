@@ -93,6 +93,7 @@
         "store::alert_grouping_tests::",
         "store::sqlite_runtime::tests::",
         "store::tests::",
+        "tavily_proxy::privacy_status_phase_budget_tests::",
         "tavily_proxy::tests::",
         "tests::request_kind_and_core::parse_",
         "tests::proxy_affinity_and_summary::extract_",
@@ -687,6 +688,7 @@
       ],
       "include_prefixes": [
         "server::manual_trigger_tests::",
+        "server::privacy_status_prewarm_logging_tests::",
         "server::db_maintenance_gate_tests::",
         "server::version_detection_tests::",
         "server::tests::api_keys_and_registration::user_",

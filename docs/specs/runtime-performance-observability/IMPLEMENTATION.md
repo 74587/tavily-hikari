@@ -73,19 +73,24 @@
 - The workload window includes bounded derived-observability flushes. Server-pressure and rebalance
   audit defer/retry events stay DEBUG, while stale/recovered coverage changes and fixed transport
   categories are safe owner-facing diagnostics without SQL, request bodies, endpoints, or tokens.
-- Administrator privacy status uses one immutable 60-second last-good entry. Administrator alert
-  Events, Groups, and Catalog use a normalized exact-query cache with a five-minute cap; a bounded
-  read may return the matching stale entry, while a cold key returns `503 Retry-After: 1` rather
-  than waiting for a raw alert CTE. These fallback states expose coverage, observed time, and a
-  fixed stale reason only.
+- Administrator privacy status uses an AppState-owned immutable last-good controller with one
+  refresh flight. Ready startup schedules a non-blocking retrying prewarm; requests copy cached
+  data rather than building the status synchronously. An expired cached value returns fixed-reason
+  stale coverage while the controller refreshes or defers, and a true cold miss returns
+  `503 Retry-After: 1`. Administrator alert Events, Groups, and Catalog use a normalized
+  exact-query cache with a five-minute cap; a bounded read may return the matching stale entry,
+  while a cold key returns `503 Retry-After: 1` rather than waiting for a raw alert CTE.
 - Server-pressure rebuilds are source-fenced and hysteretic: ordinary deferred deltas do not start
   a rebuild, while overflow, lost coverage, or five minutes of continuous stale state may start at
   most one generation every five minutes. Rebuild slices remain bounded and replayable from the
   request-log source.
-- Privacy status now acquires a dedicated read snapshot within 100ms and constructs its full
-  immutable response on that one connection under the handler's 250ms bound. It bypasses
-  maintenance-bulk admission and returns the existing 60-second last-good result as additive stale
-  coverage, or cold `503 Retry-After: 1` on pressure.
+- Privacy status refresh acquires one dedicated read snapshot within 100ms and constructs its full
+  immutable result on that connection outside the HTTP path. Its `BEGIN` uses the connection-local
+  100ms busy timeout rather than task cancellation, restoring the connection to the pool on
+  contention. The refresh closes explicitly before its result is published, so request timeouts
+  never discard an open read snapshot. It bypasses
+  maintenance-bulk admission; cached reads return stale coverage during pressure or refresh, while
+  true cold reads return `503 Retry-After: 1`.
 - Server-pressure recovery allocates a staged generation, aggregates fixed-fence 500-row keyset
   slices, publishes once, and removes obsolete buckets in 25-row cleanup slices. Direct deltas and
   buffered tail replay always write the active generation, so source rebuilds do not amplify normal

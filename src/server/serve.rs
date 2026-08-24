@@ -12,6 +12,46 @@ pub async fn serve(
     linuxdo_oauth: LinuxDoOAuthOptions,
     linuxdo_credit: LinuxDoCreditOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    serve_with_shutdown(
+        addr,
+        proxy,
+        static_dir,
+        forward_auth,
+        admin_auth,
+        dev_open_admin,
+        usage_base,
+        api_key_ip_geo_origin,
+        ha_config,
+        linuxdo_oauth,
+        linuxdo_credit,
+        shutdown_signal(),
+        None,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_with_shutdown(
+    addr: SocketAddr,
+    proxy: TavilyProxy,
+    static_dir: Option<PathBuf>,
+    forward_auth: ForwardAuthConfig,
+    admin_auth: AdminAuthOptions,
+    dev_open_admin: bool,
+    usage_base: String,
+    api_key_ip_geo_origin: String,
+    ha_config: tavily_hikari::HaConfig,
+    linuxdo_oauth: LinuxDoOAuthOptions,
+    linuxdo_credit: LinuxDoCreditOptions,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ready: Option<tokio::sync::oneshot::Sender<Arc<AppState>>>,
+    #[cfg(test)] prewarm_gate: Option<(
+        tokio::sync::oneshot::Sender<Arc<AppState>>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let AdminAuthOptions {
         forward_auth_enabled,
         builtin_auth_enabled,
@@ -572,6 +612,20 @@ pub async fn serve(
         "tavily proxy listening"
     );
 
+    #[cfg(test)]
+    if let Some((prewarm_blocked, prewarm_gate)) = prewarm_gate {
+        let _ = prewarm_blocked.send(state.clone());
+        let _ = prewarm_gate.await;
+    }
+
+    // Privacy status is an owner-facing derived read model. It must populate
+    // last-good after readiness without delaying the listener or competing
+    // with foreground work; requests only ever copy the immutable result.
+    prewarm_owner_read_models_after_ready(state.clone()).await;
+    if let Some(ready) = ready {
+        let _ = ready.send(state.clone());
+    }
+
     // Always-on HA tasks must stay available on standby/recovery so health, role
     // refresh, and pull-sync keep working even while business traffic is fenced.
     // Start them after the dashboard singleflight prewarm: a cold restart must
@@ -585,6 +639,7 @@ pub async fn serve(
     let _ = spawn_post_ready_serving_tasks_for_status(state.clone(), &startup_ha_status);
 
     let shutdown_proxy = state.proxy.clone();
+    let shutdown_state = state.clone();
     let post_shutdown_state = state.clone();
     axum::serve(
         listener,
@@ -597,11 +652,13 @@ pub async fn serve(
             .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        shutdown.await;
+        fence_admin_privacy_status_refresh(shutdown_state.as_ref()).await;
         shutdown_proxy.begin_sqlite_maintenance_run_shutdown();
         shutdown_proxy.nudge_request_stats_flush().await;
     })
     .await?;
+    shutdown_admin_privacy_status_refresh(post_shutdown_state.as_ref()).await;
     if let Err(err) = post_shutdown_state
         .proxy
         .shutdown_request_stats_coalescer(Duration::from_secs(20))
@@ -1994,6 +2051,10 @@ async fn shutdown_signal() {
     );
 }
 
+async fn prewarm_owner_read_models_after_ready(state: Arc<AppState>) {
+    prewarm_admin_privacy_status(state).await;
+}
+
 const BODY_LIMIT: usize = 16 * 1024 * 1024; // 16 MiB 默认限制
 const DEFAULT_LOG_LIMIT: usize = 200;
 
@@ -2001,6 +2062,98 @@ const DEFAULT_LOG_LIMIT: usize = 200;
 mod serve_tests {
     use super::*;
     use tavily_hikari::DEFAULT_UPSTREAM;
+
+    #[tokio::test]
+    async fn listener_ready_hook_schedules_privacy_status_prewarm() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("privacy-status-ready-hook.db");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-privacy-status-ready-hook".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (prewarm_blocked_tx, prewarm_blocked_rx) = tokio::sync::oneshot::channel();
+        let (prewarm_gate_tx, prewarm_gate_rx) = tokio::sync::oneshot::channel();
+        let server = serve_with_shutdown(
+            "127.0.0.1:0".parse().expect("test socket address"),
+            proxy,
+            None,
+            ForwardAuthConfig::new(None, None, None, None),
+            AdminAuthOptions {
+                forward_auth_enabled: false,
+                builtin_auth_enabled: false,
+                builtin_auth_password: None,
+                builtin_auth_password_hash: None,
+                passkey_auth_enabled: false,
+                passkey_rp_id: None,
+                passkey_rp_origin: None,
+                passkey_challenge_ttl_secs: 300,
+                passkey_session_max_age_secs: 60 * 60,
+            },
+            false,
+            "http://127.0.0.1:58088".to_string(),
+            "https://api.country.is".to_string(),
+            tavily_hikari::HaConfig::default(),
+            LinuxDoOAuthOptions::disabled(),
+            LinuxDoCreditOptions::disabled(),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            Some(ready_tx),
+            Some((prewarm_blocked_tx, prewarm_gate_rx)),
+        );
+        tokio::pin!(server);
+        let state = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                blocked = prewarm_blocked_rx => blocked.expect("server reached prewarm gate"),
+                result = &mut server => panic!("server exited before listener-ready prewarm gate: {result:?}"),
+            }
+        })
+        .await
+        .expect("server reached listener-ready prewarm gate");
+        for _ in 0..6 {
+            state.proxy.record_foreground_activity();
+        }
+        assert!(
+            state.proxy.foreground_activity_rps() > 5,
+            "test must establish foreground pressure before startup prewarm"
+        );
+        prewarm_gate_tx.send(()).expect("release listener-ready prewarm");
+        let state = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                ready = ready_rx => ready.expect("server reported ready state"),
+                result = &mut server => panic!("server exited before listener-ready hook: {result:?}"),
+            }
+        })
+            .await
+            .expect("server reached listener-ready hook");
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            admin_privacy_status_cached(state.as_ref()).await.is_none(),
+            "startup prewarm must defer while foreground pressure is active"
+        );
+
+        for _ in 0..500 {
+            if admin_privacy_status_cached(state.as_ref()).await.is_some() {
+                shutdown_tx.send(()).expect("signal server shutdown");
+                tokio::time::timeout(Duration::from_secs(2), &mut server)
+                    .await
+                    .expect("server shuts down")
+                    .expect("server exits cleanly");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+        panic!("deferred listener-ready prewarm did not publish privacy-status last-good data");
+    }
 
     #[tokio::test]
     async fn ha_control_apply_refreshes_in_memory_admin_password_state() {
@@ -2191,6 +2344,110 @@ mod serve_tests {
             actor.actor_display_name.as_deref(),
             Some("admin-passkey:credential-actor")
         );
+    }
+
+    #[tokio::test]
+    async fn passkey_auth_pressure_returns_a_bounded_privacy_status_retry() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("passkey-privacy-status-pressure.db");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-passkey-privacy-status-pressure".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+        let scope = tavily_hikari::AdminPasskeyScope::new(
+            "node-passkey-privacy-status-pressure",
+            "admin.example.com",
+            "https://admin.example.com",
+        )
+        .expect("passkey scope");
+        let session = proxy
+            .create_admin_passkey_session(&scope, None, 120)
+            .await
+            .expect("create passkey session");
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: false,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            admin_passkey: AdminPasskeyOptions {
+                enabled: true,
+                rp_id: Some("admin.example.com".to_string()),
+                rp_origin: Some("https://admin.example.com".to_string()),
+                scope: Some(scope),
+                challenge_ttl_secs: 300,
+                session_max_age_secs: 120,
+            },
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
+            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+            dev_open_admin: false,
+            usage_base: "http://127.0.0.1:58088".to_string(),
+            api_key_ip_geo_origin: "https://api.country.is".to_string(),
+            dashboard_overview_cache: new_dashboard_overview_cache(),
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("{ADMIN_PASSKEY_COOKIE_NAME}={}", session.token))
+                .expect("cookie header should be valid"),
+        );
+        assert!(
+            try_is_admin_request(state.as_ref(), &headers)
+                .await
+                .expect("session is valid before pressure")
+        );
+        prime_admin_privacy_status_for_test(state.clone()).await;
+        assert!(
+            admin_privacy_status_cached(state.as_ref()).await.is_some(),
+            "the pressure path must prove a populated immutable last-good cannot leak"
+        );
+
+        let release_pool = Arc::new(tokio::sync::Notify::new());
+        let (pool_held_tx, pool_held_rx) = tokio::sync::oneshot::channel();
+        let pool_holder = {
+            let proxy = state.proxy.clone();
+            let release_pool = release_pool.clone();
+            tokio::spawn(async move { proxy.hold_sqlite_pool_until_for_test(pool_held_tx, release_pool).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), pool_held_rx)
+            .await
+            .expect("the app SQLite pool should be exhausted")
+            .expect("the pool holder should signal readiness");
+
+        let started = std::time::Instant::now();
+        let response = get_upstream_privacy_status(State(state), headers)
+            .await
+            .expect_err("passkey auth pressure must return a retry response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(
+            response.headers().get(CONTENT_TYPE).is_none(),
+            "a retry before authentication must not expose the cached status representation"
+        );
+        let retry_body = body::to_bytes(response.into_body(), BODY_LIMIT)
+            .await
+            .expect("read bounded retry body");
+        assert!(
+            retry_body.is_empty(),
+            "a retry before authentication must not expose cached privacy-status JSON"
+        );
+        release_pool.notify_one();
+        pool_holder
+            .await
+            .expect("pool holder joins")
+            .expect("pool holder releases cleanly");
     }
 
     #[tokio::test]

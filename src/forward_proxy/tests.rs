@@ -200,6 +200,8 @@ rule-providers:
             forced_pending_claim_miss_log_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             dashboard_overview_read_pause: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            #[cfg(debug_assertions)]
+            admin_privacy_read_pause: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             forced_quota_subject_lock_loss_subjects: std::sync::Mutex::new(
                 std::collections::HashSet::new(),
             ),

@@ -57,6 +57,7 @@ pub(crate) struct RequestLogRollupInput<'a> {
 #[derive(Debug, Clone)]
 pub struct RequestStatsPostFlushPause {
     pub(crate) arrived: Arc<Notify>,
+    pub(crate) arrival_observed: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) release: Arc<Notify>,
     pub(crate) released: Arc<std::sync::atomic::AtomicBool>,
 }

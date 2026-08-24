@@ -1,4 +1,9 @@
 impl TavilyProxy {
+    #[doc(hidden)]
+    pub fn admin_privacy_status_refresh_defer_reason(&self) -> Option<&'static str> {
+        self.key_store.admin_privacy_read_refresh_defer_reason()
+    }
+
     pub fn admit_admin_privacy_status(&self) -> SqliteAdmissionOutcome {
         // Compatibility surface only: privacy status owns its bounded read
         // session and must never re-enter maintenance-bulk admission.
