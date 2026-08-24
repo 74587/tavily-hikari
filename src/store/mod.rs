@@ -2817,6 +2817,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn request_stats_test_pause_retains_one_arrival_permit() {
+        let pause = new_request_stats_test_pause();
+        pause.arrived.notify_one();
+
+        tokio::time::timeout(Duration::from_millis(10), pause.wait_until_arrived())
+            .await
+            .expect("a late single waiter must consume the retained arrival permit");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), pause.wait_until_arrived())
+                .await
+                .is_err(),
+            "the pause must retain only one arrival permit"
+        );
+    }
+
     #[test]
     fn fold_request_rollup_rows_preserves_day_buckets_across_shared_five_minute_bucket() {
         let rows = vec![
