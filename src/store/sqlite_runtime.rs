@@ -815,8 +815,11 @@ impl SqliteRuntime {
             begin_wait: Duration::ZERO,
             started_at: Instant::now(),
             restore_busy_timeout,
+            cooperative_run_deadline: None,
             #[cfg(test)]
             cooperative_run_budget_for_test: None,
+            #[cfg(test)]
+            cooperative_run_budget_checks_remaining_for_test: None,
         };
         let begin_result = if matches!(operation, SqliteOperation::AdminPrivacyRead) {
             // Admin privacy refreshes are detached from the HTTP budget. Its
@@ -1275,8 +1278,11 @@ pub(crate) struct SqliteReadSnapshot {
     begin_wait: Duration,
     started_at: Instant,
     restore_busy_timeout: bool,
+    cooperative_run_deadline: Option<Instant>,
     #[cfg(test)]
     cooperative_run_budget_for_test: Option<Duration>,
+    #[cfg(test)]
+    cooperative_run_budget_checks_remaining_for_test: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1485,6 +1491,7 @@ impl SqliteReadSnapshot {
             Instant::now() < deadline
         });
         drop(handle);
+        self.cooperative_run_deadline = Some(deadline);
         #[cfg(test)]
         {
             self.cooperative_run_budget_for_test = Some(run_budget);
@@ -1497,9 +1504,39 @@ impl SqliteReadSnapshot {
         self.cooperative_run_budget_for_test
     }
 
+    pub(crate) fn ensure_cooperative_run_budget(&mut self) -> Result<(), ProxyError> {
+        #[cfg(test)]
+        if let Some(checks_remaining) = self
+            .cooperative_run_budget_checks_remaining_for_test
+            .as_mut()
+        {
+            if *checks_remaining == 0 {
+                return Err(ProxyError::Database(sqlx::Error::PoolTimedOut));
+            }
+            *checks_remaining = checks_remaining.saturating_sub(1);
+        }
+        if self
+            .cooperative_run_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(ProxyError::Database(sqlx::Error::PoolTimedOut));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_cooperative_run_budget_after_check_for_test(
+        &mut self,
+        checks_remaining: usize,
+    ) {
+        self.cooperative_run_budget_checks_remaining_for_test = Some(checks_remaining);
+    }
+
     async fn clear_cooperative_run_budget(&mut self) -> Result<(), ProxyError> {
         let mut handle = self.lock_handle().await.map_err(ProxyError::Database)?;
         handle.remove_progress_handler();
+        drop(handle);
+        self.cooperative_run_deadline = None;
         Ok(())
     }
 

@@ -71,13 +71,15 @@ reads:
   `503 Retry-After: 1` rather than starting a raw alert CTE.
 - Apply the same last-good boundary to the single-key privacy-status read. Keep the immutable
   successful snapshot for 60 seconds; warm pressure returns it as stale with the observation time,
-  while cold pressure fails fast with `503 Retry-After: 1`. The bounded read deadline is 250ms,
-  including operation admission and result construction.
-- Give privacy status its own read session rather than classifying it as maintenance bulk. Acquire
-  and begin its one immutable SQLite snapshot within 100ms, build every field on that same
-  connection, and release it before returning. Do not let one status field borrow a raw pool
-  connection after another field has already read the snapshot: that mixes generations and defeats
-  the cold-path bound.
+  while cold pressure fails fast with `503 Retry-After: 1`. The HTTP path is bounded to 250ms and,
+  after authentication, only copies last-good data rather than building status or awaiting refresh.
+- Give privacy status an AppState-owned controller and its own bounded background read operation,
+  rather than classifying it as maintenance bulk. Ready schedules a low-priority singleflight
+  prewarm; the worker acquires and begins one immutable SQLite snapshot, builds every field on that
+  snapshot, then explicitly closes it before publishing last-good. A two-second connection-local
+  progress handler stops the next cooperative SQLite boundary, while pressure defers the next
+  refresh phase. Do not cancel an open snapshot with an outer task timeout or let a later field
+  borrow a raw pool connection: both patterns risk transaction pollution or mixed generations.
 - Replace repeated window scans with a single bounded scan that derives all needed windows, then add
   a short manager-scoped TTL cache when settings and live stats can request the same window set in
   one admin refresh cycle.

@@ -2401,19 +2401,23 @@ mod serve_tests {
                 .await
                 .expect("session is valid before pressure")
         );
+        prime_admin_privacy_status_for_test(state.clone()).await;
+        assert!(
+            admin_privacy_status_cached(state.as_ref()).await.is_some(),
+            "the pressure path must prove a populated immutable last-good cannot leak"
+        );
 
-        let lock_pool = sqlx::SqlitePool::connect(&format!("sqlite://{db_str}"))
+        let release_pool = Arc::new(tokio::sync::Notify::new());
+        let (pool_held_tx, pool_held_rx) = tokio::sync::oneshot::channel();
+        let pool_holder = {
+            let proxy = state.proxy.clone();
+            let release_pool = release_pool.clone();
+            tokio::spawn(async move { proxy.hold_sqlite_pool_until_for_test(pool_held_tx, release_pool).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), pool_held_rx)
             .await
-            .expect("connect lock pool");
-        let mut writer = lock_pool.acquire().await.expect("acquire lock writer");
-        sqlx::query("BEGIN EXCLUSIVE")
-            .execute(&mut *writer)
-            .await
-            .expect("hold exclusive lock");
-        sqlx::query("CREATE TABLE passkey_privacy_status_pressure_lock (id INTEGER)")
-            .execute(&mut *writer)
-            .await
-            .expect("hold schema lock");
+            .expect("the app SQLite pool should be exhausted")
+            .expect("the pool holder should signal readiness");
 
         let started = std::time::Instant::now();
         let response = get_upstream_privacy_status(State(state), headers)
@@ -2428,11 +2432,22 @@ mod serve_tests {
             Some("1")
         );
         assert!(started.elapsed() < Duration::from_millis(250));
-
-        sqlx::query("ROLLBACK")
-            .execute(&mut *writer)
+        assert!(
+            response.headers().get(CONTENT_TYPE).is_none(),
+            "a retry before authentication must not expose the cached status representation"
+        );
+        let retry_body = body::to_bytes(response.into_body(), BODY_LIMIT)
             .await
-            .expect("release schema lock");
+            .expect("read bounded retry body");
+        assert!(
+            retry_body.is_empty(),
+            "a retry before authentication must not expose cached privacy-status JSON"
+        );
+        release_pool.notify_one();
+        pool_holder
+            .await
+            .expect("pool holder joins")
+            .expect("pool holder releases cleanly");
     }
 
     #[tokio::test]

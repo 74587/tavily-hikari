@@ -75,9 +75,11 @@
   shutdown fences it, without delaying readiness or competing with foreground work.
   The controller's `AdminPrivacyRead` snapshot acquire and `BEGIN` are bounded to 100ms, never
   enter maintenance-bulk admission, and explicitly close at a cooperative completion boundary.
-  Its complete diagnostic run is bounded to two seconds by SQLite's progress handler, which interrupts
-  only the active SQL statement and is cleared before the explicit rollback; HTTP and shutdown
-  never cancel the task while it owns a snapshot.
+  Its complete diagnostic run is bounded to two seconds by SQLite's progress handler and an
+  explicit check before every next SQLite phase. The handler interrupts the active statement; the
+  phase check prevents a series of short statements from extending the snapshot past its run budget.
+  Both are cleared before the explicit rollback; HTTP and shutdown never cancel the task while it
+  owns a snapshot.
   HTTP only copies last-good data: a cached value, including one older than 60 seconds, returns
   additive `stale` coverage within 250ms while refresh is in flight or deferred; a true cold miss
   returns `503 Retry-After: 1` without canceling an open SQLite transaction. Shutdown fences new
@@ -164,6 +166,7 @@
 - `cargo test log_catalog_and_dashboard_sse -- --nocapture`
 - `cargo test --bin tavily-hikari listener_ready_hook_schedules_privacy_status_prewarm -- --nocapture`
 - `cargo test --lib admin_privacy_read_run_budget_interrupts_before_discarding_its_session -- --nocapture`
+- `cargo test --lib privacy_status_stops_at_a_safe_boundary_and_closes_its_snapshot -- --nocapture`
 
 ## Notes
 

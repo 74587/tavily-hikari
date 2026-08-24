@@ -71,6 +71,34 @@ impl TavilyProxy {
         }
     }
 
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub async fn upstream_privacy_status_after_one_safe_boundary_for_test(
+        &self,
+    ) -> Result<UpstreamPrivacyStatus, ProxyError> {
+        let mut session = self.key_store.begin_admin_privacy_read_session().await?;
+        session.expire_cooperative_run_budget_after_check_for_test(1);
+        let result = self
+            .key_store
+            .upstream_privacy_status_from_snapshot(&mut session)
+            .await;
+        let close = session.close_after_query(result.as_ref().err()).await;
+        match (result, close) {
+            (Ok(status), Ok(())) => Ok(status),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn hold_sqlite_pool_until_for_test(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<(), ProxyError> {
+        self.key_store.hold_sqlite_pool_until_for_test(ready, release).await
+    }
+
     #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub async fn install_admin_privacy_read_pause_for_test(
@@ -2880,5 +2908,42 @@ fn normalize_quota_sync_fetch_error(err: ProxyError) -> ProxyError {
             QUOTA_SYNC_FETCH_TIMEOUT_SECS
         )),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod privacy_status_phase_budget_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn privacy_status_stops_at_a_safe_boundary_and_closes_its_snapshot() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("privacy-status-phase-budget.db");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-privacy-status-phase-budget".to_string()],
+            crate::DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+
+        let error = proxy
+            .upstream_privacy_status_after_one_safe_boundary_for_test()
+            .await
+            .expect_err("the real status builder must stop before its second SQLite phase");
+        assert!(matches!(
+            error,
+            ProxyError::Database(sqlx::Error::PoolTimedOut)
+        ));
+        assert_eq!(
+            proxy.admin_privacy_read_discards_for_test(),
+            0,
+            "phase-bound refresh aborts must close the snapshot without discarding it"
+        );
+        proxy
+            .verify_admin_privacy_read_connection_clean_for_test()
+            .await
+            .expect("the next privacy transaction is clean after a phase-bound refresh abort");
     }
 }

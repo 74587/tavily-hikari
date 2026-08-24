@@ -105,9 +105,11 @@ source when a usable persisted runtime already exists.
   one low-priority refresh runs or is deferred, and a true cold miss must return
   `503 Retry-After: 1`. A deferred startup prewarm retries in the background without consuming
   foreground capacity. A refresh must explicitly close its `AdminPrivacyRead` snapshot at a
-  cooperative completion boundary. Its two-second SQLite progress-handler run budget interrupts only
-  the active statement, is cleared before rollback, and reports the failed operation; an HTTP
-  deadline or graceful shutdown must never cancel an open SQLite transaction.
+  cooperative completion boundary. Its two-second SQLite run budget combines a progress handler for
+  the active statement with an explicit check before every next SQLite phase, so a series of short
+  statements cannot extend the snapshot past the budget. Both boundaries are cleared before
+  rollback and report the failed operation; an HTTP deadline or graceful shutdown must never cancel
+  an open SQLite transaction.
 - The pressure-bucket rebuild must compute its bounded source aggregates without an immediate write
   transaction. It may acquire SQLite's writer only for the final small bucket replacement; the
   upper-bound request-log id and buffered live-event replay preserve the handoff across those two

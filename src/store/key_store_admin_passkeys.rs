@@ -869,6 +869,22 @@ impl KeyStore {
         ))
     }
 
+    #[cfg(debug_assertions)]
+    pub(crate) async fn hold_sqlite_pool_until_for_test(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<(), ProxyError> {
+        let mut connections = Vec::with_capacity(crate::SQLITE_POOL_MAX_CONNECTIONS_DEFAULT as usize);
+        for _ in 0..crate::SQLITE_POOL_MAX_CONNECTIONS_DEFAULT {
+            connections.push(self.pool.acquire().await?);
+        }
+        let _ = ready.send(());
+        release.notified().await;
+        drop(connections);
+        Ok(())
+    }
+
     pub async fn revoke_admin_passkey_session(
         &self,
         scope: &AdminPasskeyScope,

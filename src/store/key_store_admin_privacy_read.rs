@@ -4,6 +4,7 @@
 async fn admin_privacy_meta_values(
     snapshot: &mut SqliteReadSnapshot,
 ) -> Result<StdHashMap<String, String>, ProxyError> {
+    snapshot.ensure_cooperative_run_budget()?;
     Ok(sqlx::query_as::<_, (String, String)>("SELECT key, value FROM meta")
         .fetch_all(&mut **snapshot)
         .await?
@@ -19,6 +20,7 @@ async fn admin_privacy_alert_source_fence(
     snapshot: &mut SqliteReadSnapshot,
     source_kind: &str,
 ) -> Result<Option<(i64, String)>, ProxyError> {
+    snapshot.ensure_cooperative_run_budget()?;
     let row = match source_kind {
         ALERT_SOURCE_AUTH_TOKEN_LOG => sqlx::query_as::<_, (i64, i64)>(
             r#"SELECT created_at, id
@@ -73,6 +75,7 @@ async fn admin_privacy_alert_projection_status(
     snapshot: &mut SqliteReadSnapshot,
     now: i64,
 ) -> Result<AlertProjectionStatus, ProxyError> {
+    snapshot.ensure_cooperative_run_budget()?;
     let (
         sources,
         observed_at,
@@ -109,6 +112,7 @@ async fn admin_privacy_alert_projection_status(
         "projecting"
     };
     if recent_coverage == "projecting" && stale_reason.is_none() {
+        snapshot.ensure_cooperative_run_budget()?;
         let incomplete_sources = sqlx::query_scalar::<_, String>(
             r#"SELECT source_kind
                  FROM observability.dashboard_alert_projection_state
@@ -188,6 +192,7 @@ impl KeyStore {
         )
         .unwrap_or(0)
             != 0;
+        snapshot.ensure_cooperative_run_budget()?;
         let active_upstream_mcp_sessions: i64 = sqlx::query_scalar(
             r#"SELECT COUNT(*)
                  FROM mcp_sessions
@@ -226,6 +231,7 @@ impl KeyStore {
         ];
 
         let observed_at = meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LAST_RUN_AT_V1);
+        snapshot.ensure_cooperative_run_budget()?;
         let has_eligible: bool = sqlx::query_scalar(
             r#"SELECT EXISTS(
                 SELECT 1
@@ -247,6 +253,7 @@ impl KeyStore {
         .bind(now)
         .fetch_one(&mut **snapshot)
         .await?;
+        snapshot.ensure_cooperative_run_budget()?;
         let oldest_period_end: Option<i64> = sqlx::query_scalar(
             r#"SELECT w.period_end
                  FROM upstream_reconciliation_work w
@@ -269,6 +276,7 @@ impl KeyStore {
         .fetch_optional(&mut **snapshot)
         .await?;
         let queue_estimate = if observed_at.is_some() {
+            snapshot.ensure_cooperative_run_budget()?;
             Some(
                 sqlx::query_scalar::<_, i64>(&format!(
                     r#"SELECT COUNT(*) FROM (
@@ -304,6 +312,7 @@ impl KeyStore {
                 .map(|period_end| now.saturating_sub(period_end).max(0)),
         };
 
+        snapshot.ensure_cooperative_run_budget()?;
         let retry_rows = sqlx::query_as::<_, (Option<String>, i64)>(
             r#"SELECT degraded_reason, COUNT(*)
                  FROM upstream_reconciliation_settlements
@@ -328,6 +337,7 @@ impl KeyStore {
             }
         }
 
+        snapshot.ensure_cooperative_run_budget()?;
         let bound_rows = sqlx::query_as::<_, (String, i64)>(
             r#"SELECT u.key_id, COUNT(DISTINCT CASE
                       WHEN u.billing_subject LIKE 'account:%' THEN SUBSTR(u.billing_subject, 9)
@@ -341,6 +351,7 @@ impl KeyStore {
         .bind(&period.code)
         .fetch_all(&mut **snapshot)
         .await?;
+        snapshot.ensure_cooperative_run_budget()?;
         let pending_project_rows = sqlx::query_as::<_, (String, i64)>(
             r#"SELECT u.key_id, COUNT(DISTINCT u.project_id) AS pending_project_ids
                  FROM upstream_reconciliation_usage u
@@ -356,6 +367,7 @@ impl KeyStore {
         .fetch_all(&mut **snapshot)
         .await?;
 
+        snapshot.ensure_cooperative_run_budget()?;
         let (observed_accounts, accounts_with_settled_period, fully_terminal_accounts, observed_periods, settled_periods, degraded_periods, pending_periods) =
             sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64)>(
                 r#"WITH windows AS (
@@ -383,6 +395,7 @@ impl KeyStore {
             .bind(day_window.end)
             .fetch_one(&mut **snapshot)
             .await?;
+        snapshot.ensure_cooperative_run_budget()?;
         let (research_total, research_terminal, research_pending) = sqlx::query_as::<_, (i64, i64, i64)>(
             r#"SELECT COUNT(DISTINCT r.request_id),
                        COUNT(DISTINCT CASE WHEN r.terminal_at IS NOT NULL THEN r.request_id END),
@@ -396,6 +409,7 @@ impl KeyStore {
         .bind(day_window.end)
         .fetch_one(&mut **snapshot)
         .await?;
+        snapshot.ensure_cooperative_run_budget()?;
         let key_rows = sqlx::query_as::<_, (String, i64, i64, i64)>(
             r#"SELECT u.key_id,
                        COUNT(DISTINCT CASE WHEN r.terminal_at IS NOT NULL THEN r.request_id END),
@@ -418,6 +432,7 @@ impl KeyStore {
         .bind(day_window.end)
         .fetch_all(&mut **snapshot)
         .await?;
+        snapshot.ensure_cooperative_run_budget()?;
         let backoffs = sqlx::query_as::<_, (String, i64, Option<String>)>(
             r#"SELECT key_id, cooldown_until, reason_code
                  FROM api_key_transient_backoffs
@@ -447,14 +462,17 @@ impl KeyStore {
             last_window_ended_at,
             last_window_terminal_delta,
             last_window_pending_delta,
-        ) = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>, i64, i64)>(
+        ) = {
+            snapshot.ensure_cooperative_run_budget()?;
+            sqlx::query_as::<_, (i64, Option<i64>, Option<i64>, i64, i64)>(
             r#"SELECT active_started_at, last_window_started_at, last_window_ended_at,
                        last_window_terminal_delta, last_window_pending_delta
                   FROM upstream_reconciliation_research_progress_window
                  WHERE id = 'local'"#,
         )
         .fetch_one(&mut **snapshot)
-        .await?;
+        .await?
+        };
         let complete_research_window = last_window_started_at.zip(last_window_ended_at);
         let (research_window_started_at, research_window_ended_at, research_window_seconds) =
             if let Some((started_at, ended_at)) = complete_research_window {
@@ -500,6 +518,7 @@ impl KeyStore {
                 }
             })
             .collect();
+        snapshot.ensure_cooperative_run_budget()?;
         let degraded_observed: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM (SELECT 1 FROM upstream_reconciliation_settlements \
              WHERE status IN ('degraded', 'shadow_degraded') LIMIT {})",
@@ -517,6 +536,7 @@ impl KeyStore {
             meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1).unwrap_or(0),
             meta_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1).unwrap_or(0),
         );
+        snapshot.ensure_cooperative_run_budget()?;
         let run_row = sqlx::query_as::<_, ReconciliationRunObservationRow>(
             r#"SELECT o.mode,
                       CASE WHEN p.completed != 0 THEN 'complete'
@@ -569,6 +589,7 @@ impl KeyStore {
             next_retry_at: run_row.next_retry_at,
             observed_at: (run_row.observed_at > 0).then_some(run_row.observed_at),
         };
+        snapshot.ensure_cooperative_run_budget()?;
         let (mode, activation_period_code, activation_period_start, legacy_active, paused_reason, transitioned_at) =
             sqlx::query_as::<_, (String, Option<String>, Option<i64>, i64, Option<String>, i64)>(
                 r#"SELECT mode, activation_period_code, activation_period_start, legacy_active,
@@ -582,6 +603,7 @@ impl KeyStore {
             ProxyError::Other("invalid persisted upstream reconciliation mode".to_string())
         })?;
         let dashboard_alert_projection = admin_privacy_alert_projection_status(snapshot, now).await?;
+        snapshot.ensure_cooperative_run_budget()?;
         let recent_adjustments = sqlx::query_as::<_, (String, String, String, String, i64, Option<String>, i64)>(
             r#"SELECT settlement_key, token_id, billing_subject, period_code, delta_credits,
                       degraded_reason, created_at
@@ -615,6 +637,7 @@ impl KeyStore {
         } else {
             activation_period_start
         };
+        snapshot.ensure_cooperative_run_budget()?;
         Ok(UpstreamPrivacyStatus {
             phase: controller_mode.as_str().to_string(),
             configured_project_id_mode: upstream_project_id_mode,
