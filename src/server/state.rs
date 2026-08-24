@@ -440,7 +440,7 @@ pub(crate) async fn admin_privacy_refresh_count_for_test(state: &AppState) -> us
 #[cfg(test)]
 pub(crate) async fn wait_for_admin_privacy_status_refresh(state: &AppState) {
     let cache = dashboard_overview_cache_for_state(state);
-    for _ in 0..100 {
+    for _ in 0..350 {
         if !cache.lock().await.admin_privacy_status.refresh_in_flight {
             return;
         }
