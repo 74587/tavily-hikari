@@ -328,6 +328,23 @@ async fn finish_admin_privacy_status_refresh(
     }
 }
 
+fn emit_admin_privacy_status_prewarm_started() {
+    tracing::info!(
+        component = "startup",
+        event = "admin_privacy_status_prewarm_started",
+        "scheduled immutable privacy-status last-good prewarm"
+    );
+}
+
+fn emit_admin_privacy_status_prewarm_deferred(reason: &'static str) {
+    tracing::debug!(
+        component = "startup",
+        event = "admin_privacy_status_prewarm_deferred",
+        reason,
+        "deferred privacy-status prewarm before SQLite acquisition"
+    );
+}
+
 pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
     let cache = dashboard_overview_cache_for_state(state.as_ref());
     let mut cache = cache.lock().await;
@@ -347,24 +364,13 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
             }
             match start_admin_privacy_status_refresh(state.clone()).await {
                 AdminPrivacyStatusRefreshStart::Fresh => return,
-                AdminPrivacyStatusRefreshStart::Started => {
-                    tracing::info!(
-                        component = "startup",
-                        event = "admin_privacy_status_prewarm_started",
-                        "scheduled immutable privacy-status last-good prewarm"
-                    );
-                }
+                AdminPrivacyStatusRefreshStart::Started => emit_admin_privacy_status_prewarm_started(),
                 // A prior prewarm iteration owns the singleflight refresh. Keep retrying for
                 // completion, but do not report another start for the same operation.
                 AdminPrivacyStatusRefreshStart::InFlight => {}
                 AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" } => return,
                 AdminPrivacyStatusRefreshStart::Deferred { reason } => {
-                    tracing::debug!(
-                        component = "startup",
-                        event = "admin_privacy_status_prewarm_deferred",
-                        reason,
-                        "deferred privacy-status prewarm before SQLite acquisition"
-                    );
+                    emit_admin_privacy_status_prewarm_deferred(reason);
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -458,6 +464,77 @@ pub(crate) async fn wait_for_admin_privacy_status_last_good(state: &AppState) {
 pub(crate) async fn prime_admin_privacy_status_for_test(state: Arc<AppState>) {
     prewarm_admin_privacy_status(state.clone()).await;
     wait_for_admin_privacy_status_last_good(state.as_ref()).await;
+}
+
+#[cfg(test)]
+mod privacy_status_prewarm_logging_tests {
+    use super::{
+        emit_admin_privacy_status_prewarm_deferred, emit_admin_privacy_status_prewarm_started,
+    };
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    struct SharedWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, value: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("tracing buffer lock")
+                .extend_from_slice(value);
+            Ok(value.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    #[test]
+    fn privacy_status_prewarm_events_keep_their_observability_contract() {
+        let writer = SharedWriter::default();
+        let buffer = writer.buffer.clone();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new("debug"))
+                .with_writer(writer)
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .finish(),
+        );
+        tracing::dispatcher::with_default(&dispatch, || {
+            emit_admin_privacy_status_prewarm_started();
+            emit_admin_privacy_status_prewarm_deferred("foreground_pressure");
+        });
+        let output = String::from_utf8(buffer.lock().expect("tracing buffer lock").clone())
+            .expect("utf8 tracing output");
+
+        assert!(output.contains("\"level\":\"INFO\""));
+        assert!(output.contains("\"event\":\"admin_privacy_status_prewarm_started\""));
+        assert!(output.contains("\"level\":\"DEBUG\""));
+        assert!(output.contains("\"event\":\"admin_privacy_status_prewarm_deferred\""));
+        assert!(output.contains("\"reason\":\"foreground_pressure\""));
+    }
 }
 
 fn new_dashboard_overview_cache() -> Arc<Mutex<DashboardOverviewCacheState>> {

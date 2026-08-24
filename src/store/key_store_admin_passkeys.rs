@@ -833,7 +833,11 @@ impl KeyStore {
         token: &str,
     ) -> Result<Option<AdminPasskeySessionRecord>, ProxyError> {
         let now = self.backend_time.now_ts();
-        let row = sqlx::query_as::<_, (String, Option<String>, i64, i64, Option<i64>)>(
+        let mut connection = self
+            .sqlite_runtime
+            .acquire_operation_connection(SqliteOperation::AdminRead)
+            .await?;
+        let row_result = sqlx::query_as::<_, (String, Option<String>, i64, i64, Option<i64>)>(
             r#"SELECT s.token, s.credential_id, s.created_at, s.expires_at, s.revoked_at
                FROM admin_passkey_sessions s
                LEFT JOIN admin_passkey_credentials c
@@ -848,8 +852,9 @@ impl KeyStore {
         .bind(token)
         .bind(&scope.id)
         .bind(now)
-        .fetch_optional(&self.pool)
-        .await?;
+        .fetch_optional(&mut *connection)
+        .await;
+        let row = connection.complete_query(row_result).await?;
 
         Ok(row.map(
             |(token, credential_id, created_at, expires_at, revoked_at)| {
@@ -1242,6 +1247,41 @@ mod admin_passkey_store_tests {
                 .await
                 .expect("expired session")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn active_passkey_session_lookup_uses_the_bounded_admin_read_connection() {
+        let (_temp, db_path) = temp_db_path("session-bounded-admin-read.db");
+        let store = KeyStore::new_with_time(&db_path, BackendTime::system())
+            .await
+            .expect("create store");
+        let session = store
+            .create_admin_passkey_session(&test_scope(), None, 120)
+            .await
+            .expect("create passkey session");
+
+        let first = store.pool.acquire().await.expect("hold first connection");
+        let second = store.pool.acquire().await.expect("hold second connection");
+        let third = store.pool.acquire().await.expect("hold third connection");
+        let started = std::time::Instant::now();
+        let error = store
+            .get_active_admin_passkey_session(&test_scope(), &session.token)
+            .await
+            .expect_err("pool exhaustion must bound passkey session lookup");
+        assert!(matches!(
+            error,
+            ProxyError::Database(sqlx::Error::PoolTimedOut)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(150));
+        drop((third, second, first));
+
+        assert!(
+            store
+                .get_active_admin_passkey_session(&test_scope(), &session.token)
+                .await
+                .expect("connection must remain reusable after bounded lookup")
+                .is_some()
         );
     }
 

@@ -33,6 +33,8 @@
 immutable last-good 的观测时间，`staleReason` 只使用固定的本地分类。服务启动后异步预热该
 last-good；有缓存时请求不得同步重建，refresh 或本地压力下直接返回 `200 stale`。无缓存时返回
 `503 Retry-After: 1`，且不会因为 HTTP deadline 取消开放 SQLite transaction。
+上述 `200 stale` 与无缓存 `503` 均须在 250ms 内完成；响应只读取 immutable last-good 或在没有
+last-good 时作出有界冷启动判定，不等待完整 SQLite read-model rebuild。
 
 响应不得包含 HMAC secret、官方 API key、完整 Hikari token 或客户端原始 `X-Project-ID`。
 
