@@ -162,6 +162,8 @@
 - `cargo test --lib store::tests::perf_logs_are_info_level_and_include_memory_budget_fields -- --nocapture`
 - `cargo test alerts_and_ha -- --nocapture`
 - `cargo test log_catalog_and_dashboard_sse -- --nocapture`
+- `cargo test --bin tavily-hikari listener_ready_hook_schedules_privacy_status_prewarm -- --nocapture`
+- `cargo test --lib admin_privacy_read_run_budget_interrupts_before_discarding_its_session -- --nocapture`
 
 ## Notes
 

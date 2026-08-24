@@ -793,6 +793,7 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
     let warm_body: serde_json::Value = warm.json().await.expect("warm privacy status json");
     assert!(warm_body.get("dailyReconciliationProgress").is_some());
     assert!(warm_body.get("retryBuckets").is_some());
+    let refresh_count_before = admin_privacy_refresh_count_for_test(state.as_ref()).await;
     expire_admin_privacy_status_last_good_for_test(state.as_ref()).await;
 
     let held = match state.proxy.admit_dashboard_rollup_integrity() {
@@ -815,6 +816,16 @@ async fn admin_privacy_status_uses_a_dedicated_read_session_outside_bulk_admissi
             .get("staleReason")
             .and_then(|value| value.as_str())
             .is_some()
+    );
+    assert_eq!(
+        stale_body.get("staleReason").and_then(|value| value.as_str()),
+        Some("refresh_in_flight"),
+        "the controller must start the detached read while bulk work is held"
+    );
+    assert_eq!(
+        admin_privacy_refresh_count_for_test(state.as_ref()).await,
+        refresh_count_before + 1,
+        "bulk admission must not defer the privacy-status singleflight refresh"
     );
     drop(held);
     wait_for_admin_privacy_status_refresh(state.as_ref()).await;

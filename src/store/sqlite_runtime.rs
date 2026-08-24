@@ -815,6 +815,8 @@ impl SqliteRuntime {
             begin_wait: Duration::ZERO,
             started_at: Instant::now(),
             restore_busy_timeout,
+            #[cfg(test)]
+            cooperative_run_budget_for_test: None,
         };
         let begin_result = if matches!(operation, SqliteOperation::AdminPrivacyRead) {
             // Admin privacy refreshes are detached from the HTTP budget. Its
@@ -1273,6 +1275,8 @@ pub(crate) struct SqliteReadSnapshot {
     begin_wait: Duration,
     started_at: Instant,
     restore_busy_timeout: bool,
+    #[cfg(test)]
+    cooperative_run_budget_for_test: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -1480,7 +1484,17 @@ impl SqliteReadSnapshot {
         handle.set_progress_handler(ADMIN_PRIVACY_READ_PROGRESS_HANDLER_OPS, move || {
             Instant::now() < deadline
         });
+        drop(handle);
+        #[cfg(test)]
+        {
+            self.cooperative_run_budget_for_test = Some(run_budget);
+        }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn cooperative_run_budget_for_test(&self) -> Option<Duration> {
+        self.cooperative_run_budget_for_test
     }
 
     async fn clear_cooperative_run_budget(&mut self) -> Result<(), ProxyError> {
@@ -2429,6 +2443,11 @@ mod tests {
             .begin_read_snapshot(SqliteOperation::AdminPrivacyRead)
             .await
             .expect("privacy read session");
+        assert_eq!(
+            session.cooperative_run_budget_for_test(),
+            Some(ADMIN_PRIVACY_READ_RUN_BUDGET),
+            "admin privacy snapshots install the production two-second run budget"
+        );
         session
             .arm_cooperative_run_budget(Duration::ZERO)
             .await
