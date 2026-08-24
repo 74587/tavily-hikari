@@ -311,13 +311,16 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
                 return;
             }
             match start_admin_privacy_status_refresh(state.clone()).await {
-                AdminPrivacyStatusRefreshStart::Started | AdminPrivacyStatusRefreshStart::InFlight => {
+                AdminPrivacyStatusRefreshStart::Started => {
                     tracing::info!(
                         component = "startup",
                         event = "admin_privacy_status_prewarm_started",
                         "scheduled immutable privacy-status last-good prewarm"
                     );
                 }
+                // A prior prewarm iteration owns the singleflight refresh. Keep retrying for
+                // completion, but do not report another start for the same operation.
+                AdminPrivacyStatusRefreshStart::InFlight => {}
                 AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" } => return,
                 AdminPrivacyStatusRefreshStart::Deferred { reason } => {
                     tracing::debug!(
