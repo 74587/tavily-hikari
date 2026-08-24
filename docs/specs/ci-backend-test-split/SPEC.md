@@ -67,6 +67,46 @@
 
 ## 功能与行为规格（Functional/Behavior Spec）
 
+### Current execution contract
+
+- `Backend Shard Plan` does not depend on `web-assets`. It restores an exact, input-keyed v2 backend bundle
+  when available; a hit skips system setup, Rust setup, Cargo caches, and compilation, then still verifies
+  manifest ownership, uploads the bundle, and exports at most 16 non-empty lanes. A miss compiles all
+  backend targets once with the `ci-test` profile and a minimal web fixture.
+- The exact bundle cache key includes platform, toolchain, profile/linker, Cargo configuration, backend
+  source and tests, fixture generator, and shard manifest. The runner's SHA-256 verification remains
+  mandatory after either cache restoration or fresh assembly. The separate `ci-test` target cache remains a
+  cold-build dependency fallback and never replaces the bundle checksum verification.
+- A shard may own a parent test prefix minus a child prefix only when the runner proves both
+  libtest substring selectors resolve to their respective starts-with sets inside that parent.
+  It then runs one serial parent process with `--skip <child-prefix>`; otherwise it falls back to
+  exact test names. Serial shards retain one process and one test thread for their selected group.
+- Tests that demonstrate SQLite pool contention in a two-thread filter process use dedicated serial exact
+  shards. Their parent shard excludes only the full test name, so the verifier still requires every test to
+  have exactly one owner.
+- Each `Backend Test Lane` checks out the source tree at the default workspace path, downloads the
+  self-contained bundle, verifies executable checksums while loading it, and executes its assigned
+  shards in order. Checkout exists only for tests that resolve `CARGO_MANIFEST_DIR` at compile time;
+  a lane does not install Bun, Rust, Cargo caches, or system development packages, and never
+  recompiles the test bundle.
+- The bundle writer emits only checksum-addressed artifact format 2. Readers keep format 1 support
+  while cached artifacts age out. One executable or support binary is stored once and referenced by
+  coverage-target metadata.
+- `build.rs` accepts `TAVILY_HIKARI_WEB_DIST_DIR`; the unset value remains `web/dist`. CI materializes
+  its minimal fixture at a stable profile-local path and only rewrites files when their content changes,
+  preserving Cargo fingerprints across cache hits. The frontend asset job validates every path required by
+  the fixture, including HTML shells, `version.json`, favicon, and branded assets.
+- Shards carry positive `estimated_seconds`. Lane generation uses stable LPT ordering: descending
+  estimate, shard ID for ties, and the currently lightest lane for placement. Estimates are rounded
+  from native shard observations with enough headroom for ordinary variance; a semantic split must
+  update the affected estimates as part of the same coverage-preserving change.
+- `prepare-artifacts` emits elapsed markers for executable compilation, test-list discovery, and
+  bundle staging. These markers are diagnostic evidence for CI tuning only; they do not create a
+  required check or automatically reject a run.
+- `Backend Tests` remains the stable owner-facing aggregate check. Its five-minute objective is
+  measured from `Backend Shard Plan.startedAt` through `Backend Tests.completedAt`; it is not a
+  workflow-wide timeout or an automated performance gate.
+
 ### Core flows
 
 - PR1：
@@ -117,6 +157,15 @@
 - Given 比较“调优前后耗时”
   When 统计最近成功 runs 的 job wall time
   Then 应使用 job `startedAt/completedAt` 而不是 run `createdAt/updatedAt`，并证明关键路径明显下降。
+
+- Given a backend artifact is downloaded by a lane
+  When the loader resolves an executable or support binary
+  Then its SHA-256 must equal its manifest key, and a checksum mismatch must fail before tests run.
+
+- Given a developer needs complete backend coverage outside CI
+  When they run `run-all` or `run-shard`
+  Then the runner defaults to the documented low-resource bounds; selection of a heavy execution
+  target remains outside the repository contract.
 
 ## 验收清单（Acceptance checklist）
 
