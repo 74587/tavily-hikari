@@ -2686,7 +2686,8 @@ async fn wait_for_request_stats_test_pause_if_installed(
     slot: &Arc<Mutex<Option<RequestStatsPostFlushPause>>>,
 ) {
     if let Some(pause) = slot.lock().await.take() {
-        pause.arrived.notify_waiters();
+        // Retain the arrival signal when the request returns before the test waits.
+        pause.arrived.notify_one();
         while !pause.released.load(std::sync::atomic::Ordering::SeqCst) {
             pause.release.notified().await;
         }
