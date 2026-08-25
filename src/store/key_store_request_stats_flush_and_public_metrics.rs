@@ -404,6 +404,12 @@ impl KeyStore {
             }
         };
 
+        if flush_result.is_ok() {
+            #[cfg(test)]
+            request_stats_coalescer
+                .wait_for_post_flush_pause_if_installed()
+                .await;
+        }
         {
             let mut state = request_stats_coalescer.state.lock().await;
             state.flushing = false;
@@ -430,10 +436,6 @@ impl KeyStore {
             }
             request_stats_coalescer.flushed.notify_waiters();
         }
-        #[cfg(test)]
-        request_stats_coalescer
-            .wait_for_post_flush_pause_if_installed()
-            .await;
         Ok(())
     }
 
