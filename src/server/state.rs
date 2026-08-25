@@ -136,6 +136,10 @@ struct AdminPrivacyStatusController {
     refresh_task: Option<tokio::task::JoinHandle<()>>,
     prewarm_task: Option<tokio::task::JoinHandle<()>>,
     shutting_down: bool,
+    #[cfg(test)]
+    prewarm_deferred: Arc<Notify>,
+    #[cfg(test)]
+    last_good_published: Arc<Notify>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +204,30 @@ pub(crate) async fn admin_privacy_status_cached(
     let cache = cache.lock().await;
     let entry = cache.admin_privacy_status.last_good.as_ref()?;
     Some((entry.value.clone(), entry.observed_at))
+}
+
+#[cfg(test)]
+pub(crate) async fn admin_privacy_status_prewarm_deferred_signal_for_test(
+    state: &AppState,
+) -> Arc<Notify> {
+    dashboard_overview_cache_for_state(state)
+        .lock()
+        .await
+        .admin_privacy_status
+        .prewarm_deferred
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) async fn admin_privacy_status_last_good_published_signal_for_test(
+    state: &AppState,
+) -> Arc<Notify> {
+    dashboard_overview_cache_for_state(state)
+        .lock()
+        .await
+        .admin_privacy_status
+        .last_good_published
+        .clone()
 }
 
 pub(crate) async fn admin_privacy_status_last_good(
@@ -309,6 +337,11 @@ async fn finish_admin_privacy_status_refresh(
                 stored_at: tokio::time::Instant::now(),
             });
             cache.admin_privacy_status.last_refresh_reason = None;
+            #[cfg(test)]
+            cache
+                .admin_privacy_status
+                .last_good_published
+                .notify_waiters();
         }
         Err(error) => {
             cache.admin_privacy_status.last_refresh_reason = Some(
@@ -370,6 +403,13 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
                 AdminPrivacyStatusRefreshStart::InFlight => {}
                 AdminPrivacyStatusRefreshStart::Deferred { reason: "shutdown" } => return,
                 AdminPrivacyStatusRefreshStart::Deferred { reason } => {
+                    #[cfg(test)]
+                    dashboard_overview_cache_for_state(state.as_ref())
+                        .lock()
+                        .await
+                        .admin_privacy_status
+                        .prewarm_deferred
+                        .notify_waiters();
                     emit_admin_privacy_status_prewarm_deferred(reason);
                 }
             }

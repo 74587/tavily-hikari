@@ -798,25 +798,59 @@ async fn admin_summary_does_not_start_a_slow_background_flush() {
 
     let flush_arrived = pause.arrived.clone().notified_owned();
     proxy.nudge_request_stats_flush().await;
-    // The worker's production slice remains wall-clock bounded to 50ms, but
-    // CI can spend more than one scheduler second starting a fresh SQLite
-    // worker after this test is launched alongside the neighboring admin cases.
+    // This bounds worker startup only. Completion is synchronized below with
+    // the coalescer's owned lifecycle state rather than this arrival deadline.
     tokio::time::timeout(Duration::from_secs(5), flush_arrived)
         .await
         .expect("explicit background flush reached post-flush pause");
+    assert!(
+        proxy
+            .key_store
+            .request_stats_coalescer
+            .state
+            .lock()
+            .await
+            .flushing,
+        "post-flush pause must retain flush ownership until the worker is released"
+    );
+    let summary_while_flush_paused = proxy
+        .summary()
+        .await
+        .expect("summary during background flush");
+    assert_eq!(
+        summary_while_flush_paused.total_requests, 1,
+        "summary reads must observe the durable data committed by the explicit flush"
+    );
+    assert!(
+        proxy
+            .key_store
+            .request_stats_coalescer
+            .state
+            .lock()
+            .await
+            .flushing,
+        "summary reads must not complete or replace the paused background flush"
+    );
 
-    pause
-        .released
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    pause.release.notify_waiters();
+    pause.release();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        proxy.wait_until_request_stats_flush_finishes_for_test(),
+    )
+    .await
+    .expect("explicit background flush leaves its owned lifecycle state");
 
     let summary_after = proxy
-        .summary()
+        .summary_without_flush()
         .await
         .expect("summary after background flush");
     assert_eq!(summary_after.total_requests, 1);
     assert_eq!(summary_after.success_count, 1);
 
+    proxy
+        .shutdown_request_stats_coalescer(Duration::from_secs(2))
+        .await
+        .expect("stop request-stats worker before test cleanup");
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

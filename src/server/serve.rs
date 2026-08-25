@@ -2123,6 +2123,15 @@ mod serve_tests {
             state.proxy.foreground_activity_rps() > 5,
             "test must establish foreground pressure before startup prewarm"
         );
+        let prewarm_deferred = admin_privacy_status_prewarm_deferred_signal_for_test(
+            state.as_ref(),
+        )
+        .await
+        .notified_owned();
+        let last_good_published =
+            admin_privacy_status_last_good_published_signal_for_test(state.as_ref())
+                .await
+                .notified_owned();
         prewarm_gate_tx.send(()).expect("release listener-ready prewarm");
         let state = tokio::time::timeout(Duration::from_secs(2), async {
             tokio::select! {
@@ -2133,26 +2142,25 @@ mod serve_tests {
             .await
             .expect("server reached listener-ready hook");
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::timeout(Duration::from_secs(1), prewarm_deferred)
+            .await
+            .expect("startup prewarm observed foreground pressure");
         assert!(
             admin_privacy_status_cached(state.as_ref()).await.is_none(),
             "startup prewarm must defer while foreground pressure is active"
         );
-
-        for _ in 0..500 {
-            if admin_privacy_status_cached(state.as_ref()).await.is_some() {
-                shutdown_tx.send(()).expect("signal server shutdown");
-                tokio::time::timeout(Duration::from_secs(2), &mut server)
-                    .await
-                    .expect("server shuts down")
-                    .expect("server exits cleanly");
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let _ = shutdown_tx.send(());
-        let _ = server.await;
-        panic!("deferred listener-ready prewarm did not publish privacy-status last-good data");
+        tokio::time::timeout(Duration::from_secs(2), last_good_published)
+            .await
+            .expect("deferred listener-ready prewarm published privacy-status last-good data");
+        assert!(
+            admin_privacy_status_cached(state.as_ref()).await.is_some(),
+            "deferred listener-ready prewarm must publish privacy-status last-good data"
+        );
+        shutdown_tx.send(()).expect("signal server shutdown");
+        tokio::time::timeout(Duration::from_secs(2), &mut server)
+            .await
+            .expect("server shuts down")
+            .expect("server exits cleanly");
     }
 
     #[tokio::test]
