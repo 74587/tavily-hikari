@@ -1,6 +1,7 @@
 use super::core_support_and_parsing::*;
 use super::upstream_support_and_manual_jobs::*;
 use super::*;
+use futures_util::FutureExt;
 
 #[tokio::test]
 async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_local_backoff() {
@@ -81,6 +82,7 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
         usage_base: format!("http://{address}"),
         api_key_ip_geo_origin: "https://api.country.is".to_string(),
         dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
     });
     sqlx::query(
         r#"INSERT INTO meta (key, value) VALUES
@@ -121,6 +123,7 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
                 _job_execution_gate: None,
             },
             None,
+            false,
         )
         .await
     );
@@ -136,6 +139,152 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
         "a low-pressure recovery worker must not turn an eligible shadow terminal into an empty backoff completion"
     );
 
+    drop(state);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn reconciliation_foreground_defer_releases_scheduler_reconciliation_turn() {
+    let db_path = temp_db_path("reconciliation-foreground-dispatch-release");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-foreground-dispatch-release".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create reconciliation proxy");
+    let (_addr, state) = spawn_builtin_keys_admin_server_with_state(
+        proxy,
+        "reconciliation-foreground-dispatch-release-password",
+    )
+    .await;
+    for _ in 0..6 {
+        state.proxy.record_foreground_activity();
+    }
+    assert!(
+        state.proxy.foreground_activity_rps() > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS,
+        "fixture establishes foreground pressure before reconciliation starts"
+    );
+
+    let queued = state
+        .proxy
+        .scheduled_job_enqueue("upstream_reconciliation", "auto", None, 1)
+        .await
+        .expect("enqueue reconciliation representative");
+    let claim = state
+        .proxy
+        .scheduled_job_mark_running(queued.job_id)
+        .await
+        .expect("claim reconciliation representative")
+        .expect("representative becomes running");
+    let controller = remote_attempt_admission_for_state(state.as_ref());
+    let turn = controller
+        .reserve_aged_reconciliation_turn()
+        .expect("scheduler reserves the aged reconciliation turn");
+
+    assert!(
+        run_manual_claimed_job(
+            state.clone(),
+            "upstream_reconciliation".to_string(),
+            None,
+            ClaimedScheduledJob {
+                job_id: claim.id,
+                claim_generation: claim.claim_generation,
+                _job_execution_gate: None,
+            },
+            Some(turn),
+            false,
+        )
+        .await,
+        "typed foreground defer persists a representative"
+    );
+    assert!(
+        !controller.reconciliation_turn_required(),
+        "a defer before HTTP releases the fairness turn"
+    );
+    drop(
+        controller
+            .reserve_aged_reconciliation_turn()
+            .expect("a deferred reconciliation turn permits later automatic work"),
+    );
+
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM scheduled_jobs WHERE job_type = 'upstream_reconciliation' ORDER BY id",
+    )
+    .fetch_all(&connect_sqlite_test_pool(&db_str).await)
+    .await
+    .expect("read deferred reconciliation lifecycle");
+    assert_eq!(statuses, vec!["success", "queued"]);
+
+    drop(state);
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn aged_reconciliation_turn_allows_other_remote_local_preparation() {
+    let db_path = temp_db_path("reconciliation-turn-does-not-serialize-preparation");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-reconciliation-turn-does-not-serialize-preparation".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("create reconciliation proxy");
+    let (_addr, state) = spawn_builtin_keys_admin_server_with_state(
+        proxy,
+        "reconciliation-turn-does-not-serialize-preparation-password",
+    )
+    .await;
+    let now = state.proxy.backend_time().now_ts();
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let reconciliation = state
+        .proxy
+        .scheduled_job_enqueue_at("upstream_reconciliation", "auto", None, 1, now - 121)
+        .await
+        .expect("enqueue aged reconciliation representative");
+    sqlx::query("UPDATE scheduled_jobs SET queued_at = ?, available_at = ? WHERE id = ?")
+        .bind(now - 121)
+        .bind(now - 121)
+        .bind(reconciliation.job_id)
+        .execute(&pool)
+        .await
+        .expect("age reconciliation representative");
+    let geo_refresh = state
+        .proxy
+        .scheduled_job_enqueue("forward_proxy_geo_refresh", "auto", None, 1)
+        .await
+        .expect("enqueue a second automatic remote job");
+
+    let (reconciliation_job, turn) = dequeue_next_scheduled_job(state.as_ref())
+        .await
+        .expect("claim the aged reconciliation representative")
+        .expect("aged reconciliation is scheduled");
+    assert_eq!(reconciliation_job.id, reconciliation.job_id);
+    let turn = turn.expect("aged reconciliation owns the fairness turn");
+
+    let (other_remote_job, other_turn) = dequeue_next_scheduled_job(state.as_ref())
+        .await
+        .expect("schedule another remote job while reconciliation prepares locally")
+        .expect("the second remote job is not serialized behind local projection");
+    assert_eq!(other_remote_job.id, geo_refresh.job_id);
+    assert!(
+        other_turn.is_none(),
+        "only the aged reconciliation representative owns the fairness turn"
+    );
+    let controller = remote_attempt_admission_for_state(state.as_ref());
+    assert!(
+        controller.acquire_attempt().now_or_never().is_none(),
+        "an automatic remote job may prepare locally but waits for the aged reconciliation lease"
+    );
+    let request_lease = turn
+        .acquire_attempt()
+        .await
+        .expect("the matching reconciliation turn acquires the next outbound HTTP lease");
+    drop(request_lease);
+
+    drop(turn);
     drop(state);
     let _ = std::fs::remove_file(db_path);
 }
@@ -184,6 +333,7 @@ async fn reconciliation_scheduler_preserves_unclassified_terminal_errors() {
             _job_execution_gate: None,
         },
         None,
+        false,
     )
     .await;
     assert!(!succeeded, "unclassified run failures must remain observable");
@@ -340,6 +490,7 @@ async fn ha_gc_real_worker_wakes_an_eligible_channel_before_a_legacy_defer() {
         usage_base: "http://127.0.0.1:58088".to_string(),
         api_key_ip_geo_origin: "https://api.country.is".to_string(),
         dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
     });
 
     let initial = state
@@ -529,6 +680,7 @@ async fn ha_gc_productive_continuation_lock_defers_to_stale_reaper() {
         usage_base: "http://127.0.0.1:58088".to_string(),
         api_key_ip_geo_origin: "https://api.country.is".to_string(),
         dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
     });
     assert!(
         tokio::time::timeout(
@@ -664,6 +816,7 @@ async fn request_logs_gc_handoff_preserves_error_and_defers_to_stale_reaper() {
         usage_base: "http://127.0.0.1:58088".to_string(),
         api_key_ip_geo_origin: "https://api.country.is".to_string(),
         dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
     });
     assert!(
         !tokio::time::timeout(
@@ -1276,6 +1429,7 @@ async fn compute_signatures_tracks_recent_alert_summary_changes() {
         usage_base: "http://127.0.0.1:58088".to_string(),
         api_key_ip_geo_origin: "https://api.country.is".to_string(),
         dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
     });
 
     let (before_sig, _) = compute_signatures(&state)

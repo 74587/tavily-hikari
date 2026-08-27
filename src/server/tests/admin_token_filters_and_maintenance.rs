@@ -209,6 +209,7 @@ use super::upstream_support_and_manual_jobs::*;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
         let app = Router::new()
@@ -242,7 +243,7 @@ use super::upstream_support_and_manual_jobs::*;
     }
 
     #[tokio::test]
-    async fn maintenance_worker_limits_remote_io_jobs_to_one_active_run() {
+    async fn maintenance_worker_limits_remote_http_attempts_to_one_active_request() {
         let db_path = temp_db_path("maintenance-worker-remote-io-slot");
         let db_str = db_path.to_string_lossy().to_string();
         let proxy = TavilyProxy::with_endpoint(
@@ -279,10 +280,11 @@ use super::upstream_support_and_manual_jobs::*;
             usage_base: format!("http://{upstream_addr}"),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
         spawn_maintenance_worker(state.clone());
 
-        let first_job_id = enqueue_scheduled_job(
+        let _first_job_id = enqueue_scheduled_job(
             state.as_ref(),
             "quota_sync",
             Some(&first_key_id),
@@ -290,7 +292,7 @@ use super::upstream_support_and_manual_jobs::*;
         )
         .await
         .expect("enqueue first quota sync");
-        let second_job_id = enqueue_scheduled_job(
+        let _second_job_id = enqueue_scheduled_job(
             state.as_ref(),
             "quota_sync",
             Some(&second_key_id),
@@ -299,38 +301,23 @@ use super::upstream_support_and_manual_jobs::*;
         .await
         .expect("enqueue second quota sync");
 
-        let running_snapshot_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let first_attempt_deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
-            let rows: Vec<(i64, String)> =
-                sqlx::query_as("SELECT id, status FROM scheduled_jobs ORDER BY id ASC")
-                    .fetch_all(&pool)
-                    .await
-                    .expect("fetch scheduled job statuses");
-            let running_count = rows.iter().filter(|(_, status)| status == "running").count();
-            let queued_count = rows.iter().filter(|(_, status)| status == "queued").count();
-            let first_status = rows
-                .iter()
-                .find(|(id, _)| *id == first_job_id)
-                .map(|(_, status)| status.as_str());
-            let second_status = rows
-                .iter()
-                .find(|(id, _)| *id == second_job_id)
-                .map(|(_, status)| status.as_str());
-            if hits.load(Ordering::SeqCst) == 1
-                && running_count == 1
-                && queued_count == 1
-                && first_status == Some("running")
-                && second_status == Some("queued")
-            {
+            if hits.load(Ordering::SeqCst) == 1 {
                 break;
             }
             assert!(
-                std::time::Instant::now() < running_snapshot_deadline,
-                "expected one running quota job and one queued quota job, rows={rows:?}, hits={}",
+                std::time::Instant::now() < first_attempt_deadline,
+                "expected exactly one blocked upstream request before releasing the remote lease, hits={}",
                 hits.load(Ordering::SeqCst)
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "local preparation may run concurrently, but only one HTTP attempt may hold the lease"
+        );
 
         release_tx.send(true).expect("release blocking usage server");
         let completion_deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -349,6 +336,177 @@ use super::upstream_support_and_manual_jobs::*;
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    }
+
+    #[tokio::test]
+    async fn manual_quota_sync_bypasses_an_aged_reconciliation_turn() {
+        let db_path = temp_db_path("manual-quota-sync-aged-reconciliation-turn");
+        let db_str = db_path.to_string_lossy().to_string();
+        let proxy = TavilyProxy::with_endpoint(
+            vec!["tvly-ok".to_string()],
+            DEFAULT_UPSTREAM,
+            &db_str,
+        )
+        .await
+        .expect("proxy created");
+        let pool = connect_sqlite_test_pool(&db_str).await;
+        let key_id: String = sqlx::query_scalar("SELECT id FROM api_keys WHERE api_key = 'tvly-ok'")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch quota key");
+        let upstream_addr = spawn_usage_mock_server().await;
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: true,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            admin_passkey: AdminPasskeyOptions::disabled(),
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
+            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+            dev_open_admin: true,
+            usage_base: format!("http://{upstream_addr}"),
+            api_key_ip_geo_origin: "https://api.country.is".to_string(),
+            dashboard_overview_cache: new_dashboard_overview_cache(),
+            remote_attempt_admission: new_remote_attempt_admission(),
+        });
+        let controller = remote_attempt_admission_for_state(state.as_ref());
+        let reconciliation_turn = controller
+            .reserve_aged_reconciliation_turn()
+            .expect("aged reconciliation owns the next automatic lease");
+        let job_id = enqueue_scheduled_job(
+            state.as_ref(),
+            "quota_sync/manual",
+            Some(&key_id),
+            TRIGGER_SOURCE_MANUAL,
+        )
+        .await
+        .expect("enqueue manual quota sync");
+        let (job, turn) = dequeue_next_scheduled_job(state.as_ref())
+            .await
+            .expect("dequeue manual quota sync")
+            .expect("manual quota sync is available");
+        assert_eq!(job.id, job_id);
+        assert!(turn.is_none(), "manual work does not consume the reconciliation turn");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run_queued_scheduled_job(state.clone(), job, turn),
+        )
+        .await
+        .expect("manual quota sync must bypass the automatic reconciliation turn");
+
+        assert_eq!(
+            state
+                .proxy
+                .scheduled_job_by_id(job_id)
+                .await
+                .expect("read manual quota sync")
+                .expect("manual quota sync row")
+                .status,
+            "success"
+        );
+        assert!(
+            controller.reconciliation_turn_required(),
+            "manual quota sync does not consume the aged reconciliation turn"
+        );
+        drop(reconciliation_turn);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    }
+
+    #[tokio::test]
+    async fn manual_geo_refresh_bypasses_an_aged_reconciliation_turn() {
+        let db_path = temp_db_path("manual-geo-refresh-aged-reconciliation-turn");
+        let db_str = db_path.to_string_lossy().to_string();
+        let geo_addr = spawn_api_key_geo_mock_server().await;
+        let proxy_addr = spawn_fake_forward_proxy_with_body(
+            StatusCode::OK,
+            "ip=1.1.1.1\nloc=US\ncolo=LAX\n".to_string(),
+        )
+        .await;
+        let proxy_url = format!("http://{proxy_addr}");
+        let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+            .await
+            .expect("proxy created");
+        proxy
+            .update_forward_proxy_settings(
+                ForwardProxySettings {
+                    proxy_urls: vec![proxy_url.clone()],
+                    subscription_urls: Vec::new(),
+                    subscription_update_interval_secs: 3600,
+                    insert_direct: false,
+                    egress_socks5_enabled: false,
+                    egress_socks5_url: String::new(),
+                },
+                false,
+            )
+            .await
+            .expect("configure test forward proxy");
+        let state = Arc::new(AppState {
+            proxy,
+            static_dir: None,
+            forward_auth: ForwardAuthConfig::new(None, None, None, None),
+            forward_auth_enabled: true,
+            builtin_admin: BuiltinAdminAuth::new(false, None, None),
+            admin_passkey: AdminPasskeyOptions::disabled(),
+            linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+            linuxdo_credit: LinuxDoCreditOptions::disabled(),
+            ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+            dev_open_admin: true,
+            usage_base: DEFAULT_UPSTREAM.to_string(),
+            api_key_ip_geo_origin: format!("http://{geo_addr}/geo"),
+            dashboard_overview_cache: new_dashboard_overview_cache(),
+            remote_attempt_admission: new_remote_attempt_admission(),
+        });
+        let controller = remote_attempt_admission_for_state(state.as_ref());
+        let reconciliation_turn = controller
+            .reserve_aged_reconciliation_turn()
+            .expect("aged reconciliation owns the next automatic lease");
+        let job_id = enqueue_scheduled_job(
+            state.as_ref(),
+            "forward_proxy_geo_refresh",
+            None,
+            TRIGGER_SOURCE_MANUAL,
+        )
+        .await
+        .expect("enqueue manual geo refresh");
+        let (job, turn) = dequeue_next_scheduled_job(state.as_ref())
+            .await
+            .expect("dequeue manual geo refresh")
+            .expect("manual geo refresh is available");
+        assert_eq!(job.id, job_id);
+        assert!(turn.is_none(), "manual work does not consume the reconciliation turn");
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run_queued_scheduled_job(state.clone(), job, turn),
+        )
+        .await
+        .expect("manual geo refresh must bypass the automatic reconciliation turn");
+
+        assert_eq!(
+            state
+                .proxy
+                .scheduled_job_by_id(job_id)
+                .await
+                .expect("read manual geo refresh")
+                .expect("manual geo refresh row")
+                .status,
+            "success"
+        );
+        assert!(
+            controller.reconciliation_turn_required(),
+            "manual geo refresh does not consume the aged reconciliation turn"
+        );
+        drop(reconciliation_turn);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -387,6 +545,7 @@ use super::upstream_support_and_manual_jobs::*;
             usage_base: format!("http://{upstream_addr}"),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
         spawn_maintenance_worker(state.clone());
 

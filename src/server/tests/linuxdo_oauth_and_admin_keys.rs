@@ -438,6 +438,7 @@ use tavily_hikari::UpstreamProjectIdMode;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
         let app = Router::new()
@@ -708,9 +709,23 @@ use tavily_hikari::UpstreamProjectIdMode;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
-        run_linuxdo_user_status_sync_job(state.clone()).await;
+        let controller = remote_attempt_admission_for_state(state.as_ref());
+        let reconciliation_turn = controller
+            .reserve_aged_reconciliation_turn()
+            .expect("aged reconciliation reserves the next automatic HTTP lease");
+        let mut sync = tokio::spawn(run_linuxdo_user_status_sync_job(state.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut sync)
+                .await
+                .is_err(),
+            "scheduler-triggered LinuxDo sync must wait behind the aged reconciliation turn"
+        );
+        drop(reconciliation_turn);
+        sync.await
+            .expect("LinuxDo scheduler task completes after reconciliation releases its turn");
 
         let pool = connect_sqlite_test_pool(&db_str).await;
         let (new_ciphertext, new_nonce, trust_level, attempted_at, success_at, sync_error) =
@@ -830,6 +845,7 @@ use tavily_hikari::UpstreamProjectIdMode;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
         run_linuxdo_user_status_sync_job(state.clone()).await;
@@ -935,6 +951,7 @@ use tavily_hikari::UpstreamProjectIdMode;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
         run_linuxdo_user_status_sync_job(state.clone()).await;
@@ -1056,6 +1073,7 @@ use tavily_hikari::UpstreamProjectIdMode;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
         run_linuxdo_user_status_sync_job(state.clone()).await;
@@ -1126,6 +1144,7 @@ use tavily_hikari::UpstreamProjectIdMode;
             usage_base: "http://127.0.0.1:58088".to_string(),
             api_key_ip_geo_origin: "https://api.country.is".to_string(),
             dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
         });
 
         run_linuxdo_user_status_sync_job(state.clone()).await;

@@ -61,11 +61,12 @@ use tavily_hikari::{
     ForwardProxyHourlyBucketResponse, ForwardProxyStatsResponse,
     ForwardProxyWeightHourlyBucketResponse, JobLog, LogFacetOption, OAuthAccountProfile,
     PaginatedAlertEvents, PaginatedAlertGroups, PendingBillingSettleOutcome, ProxyError,
-    ProxyRequest, ProxyResponse, ProxySummary, QUOTA_SYNC_JOB_TIMEOUT_SECS, RequestLogBodiesRecord,
-    RequestLogRecord, RequestLogsCatalog, RequestLogsCursor, RequestLogsCursorDirection,
-    RequestLogsCursorPage, RequestLogsGcOptions, StickyCreditsWindow, TavilyProxy,
-    TokenHourlyBucket, TokenHourlyRequestVerdict, TokenLogBillingFilter, TokenLogRecord,
-    TokenLogsCursorPage, TokenQuotaVerdict, TokenRequestKindOption, TokenSummary, TokenUsageBucket,
+    ProxyRequest, ProxyResponse, ProxySummary, QUOTA_SYNC_JOB_TIMEOUT_SECS, QueuedScheduledJob,
+    ReconciliationTurn, RemoteAttemptAdmissionController, RequestLogBodiesRecord, RequestLogRecord,
+    RequestLogsCatalog, RequestLogsCursor, RequestLogsCursorDirection, RequestLogsCursorPage,
+    RequestLogsGcOptions, StickyCreditsWindow, TavilyProxy, TokenHourlyBucket,
+    TokenHourlyRequestVerdict, TokenLogBillingFilter, TokenLogRecord, TokenLogsCursorPage,
+    TokenQuotaVerdict, TokenRequestKindOption, TokenSummary, TokenUsageBucket,
     TrustedClientIpSettings, UNBOUND_TOKEN_MONTHLY_BROKEN_LIMIT_DEFAULT,
     USER_MONTHLY_BROKEN_LIMIT_DEFAULT, UserTokenLookup, analyze_mcp_attempt,
     canonical_request_kind_key_for_filter, classify_token_request_kind,
@@ -84,7 +85,7 @@ use tokio::signal;
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 #[cfg(test)]
 use tokio::sync::Notify;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tokio_util::io::{ReaderStream, StreamReader};
 include!("state.rs");
 include!("schedulers.rs");

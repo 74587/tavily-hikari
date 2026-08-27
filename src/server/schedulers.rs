@@ -17,6 +17,8 @@ use tavily_hikari::{
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::Ordering;
 use tokio::time::Instant;
+
+include!("schedulers_remote_attempt.rs");
 fn random_delay_secs(max_inclusive: u64) -> u64 {
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -75,6 +77,7 @@ const DASHBOARD_ALERT_PROJECTION_IDLE_OBSERVATION_SECS: i64 = 60;
 const DASHBOARD_ALERT_PROJECTION_INITIAL_DELAY_SECS: u64 = 30;
 const AUTH_TOKEN_LOGS_ALERT_INDEX_ENSURE_RETRY_DELAY_SECS: i64 = 5 * 60;
 const SCHEDULED_JOB_WAIT_WARN_SECS: i64 = 5 * 60;
+const RECONCILIATION_REMOTE_TURN_WAIT_SECS: i64 = 120;
 const SCHEDULED_JOB_WAIT_WARN_SAMPLE_SECS: u64 = 5 * 60;
 static REQUEST_LOGS_GC_ZERO_PROGRESS_STREAK: AtomicU64 = AtomicU64::new(0);
 static SCHEDULED_JOB_QUEUE_WAIT_WARN_WINDOWS: OnceLock<StdMutex<HashMap<String, Instant>>> =
@@ -317,53 +320,6 @@ async fn claim_scheduled_job(
     }
 }
 
-async fn sync_key_quota_with_db_job_gate(
-    state: &AppState,
-    key_id: &str,
-    source: &str,
-) -> Result<(i64, i64), ProxyError> {
-    let secret = {
-        let _maintenance = acquire_db_maintenance_read_gate().await;
-        state.proxy.quota_sync_api_key_secret(key_id).await?
-    };
-    let result = tokio::time::timeout(
-        Duration::from_secs(QUOTA_SYNC_JOB_TIMEOUT_SECS),
-        state
-            .proxy
-            .fetch_usage_quota_for_sync_secret(&secret, &state.usage_base, key_id),
-    )
-    .await;
-
-    let (limit, remaining) = match result {
-        Ok(Ok(quota)) => quota,
-        Ok(Err(err)) => {
-            let _job_execution_gate = acquire_db_job_execution_gate_for_state(state).await;
-            let _maintenance = acquire_db_maintenance_read_gate().await;
-            state.proxy.record_quota_sync_usage_error(key_id, &err).await?;
-            return Err(err);
-        }
-        Err(_) => {
-            let err = ProxyError::Other(format!(
-                "quota_sync timed out after {}s",
-                QUOTA_SYNC_JOB_TIMEOUT_SECS
-            ));
-            let _job_execution_gate = acquire_db_job_execution_gate_for_state(state).await;
-            let _maintenance = acquire_db_maintenance_read_gate().await;
-            state.proxy.record_quota_sync_usage_error(key_id, &err).await?;
-            return Err(err);
-        }
-    };
-
-    let _job_execution_gate = acquire_db_job_execution_gate_for_state(state).await;
-    let _maintenance = acquire_db_maintenance_read_gate().await;
-    state
-        .proxy
-        .record_quota_sync_result(key_id, limit, remaining, source)
-        .await?;
-
-    Ok((limit, remaining))
-}
-
 #[cfg(test)]
 fn next_local_daily_run_after(now: DateTime<Local>, hour: u32, minute: u32) -> DateTime<Local> {
     now + chrono::Duration::from_std(
@@ -391,6 +347,10 @@ fn scheduled_job_uses_remote_io(job_type: &str) -> bool {
     REMOTE_IO_SCHEDULED_JOB_TYPES.contains(&job_type)
 }
 
+fn scheduled_job_is_manual_remote(job: &QueuedScheduledJob) -> bool {
+    job.trigger_source == TRIGGER_SOURCE_MANUAL
+}
+
 fn scheduled_job_uses_db_execution_gate(job_type: &str) -> bool {
     job_type != "upstream_reconciliation"
 }
@@ -407,22 +367,58 @@ fn upstream_reconciliation_does_not_wait_for_db_execution_gate() {
 
 async fn dequeue_next_scheduled_job(
     state: &AppState,
-) -> Result<Option<(JobLog, Option<tokio::sync::OwnedSemaphorePermit>)>, ProxyError> {
+) -> Result<Option<(JobLog, Option<ReconciliationTurn>)>, ProxyError> {
     let candidates = state.proxy.fetch_queued_scheduled_jobs(16).await?;
     if candidates.is_empty() {
         return Ok(None);
     }
 
+    let controller = remote_attempt_admission_for_state(state);
     let mut selected = None;
-    let mut remote_io_permit = None;
+    let mut reconciliation_turn = None;
+
+    // A manual maintenance request retains its existing priority over the
+    // automatic reconciliation fairness turn. Neither branch reserves the
+    // outbound lease: local work can overlap until a real HTTP request starts.
+    if let Some(manual_remote) = candidates
+        .iter()
+        .find(|candidate| {
+            scheduled_job_uses_remote_io(&candidate.job_type)
+                && scheduled_job_is_manual_remote(candidate)
+        })
+        .cloned()
+    {
+        selected = Some(manual_remote);
+    }
+
+    if selected.is_none()
+        && let Some(aged_reconciliation) = state
+            .proxy
+            .fetch_aged_queued_scheduled_job_by_type(
+                "upstream_reconciliation",
+                RECONCILIATION_REMOTE_TURN_WAIT_SECS,
+            )
+            .await?
+        && let Some(turn) = controller.reserve_aged_reconciliation_turn()
+    {
+        reconciliation_turn = Some(turn);
+        selected = Some(aged_reconciliation);
+    }
+
     for candidate in candidates {
+        if selected.is_some() {
+            break;
+        }
         if scheduled_job_uses_remote_io(&candidate.job_type) {
-            if let Some(permit) = try_acquire_maintenance_remote_io_slot_for_state(state) {
-                remote_io_permit = Some(permit);
-                selected = Some(candidate);
-                break;
+            if candidate.job_type == "upstream_reconciliation"
+                && controller.reconciliation_turn_required()
+            {
+                // The aged representative already owns the next fairness turn.
+                // Other remote jobs may still perform their local preparation.
+                continue;
             }
-            continue;
+            selected = Some(candidate);
+            break;
         }
 
         selected = Some(candidate);
@@ -430,9 +426,9 @@ async fn dequeue_next_scheduled_job(
     }
 
     if selected.is_none() {
-        // The remote-I/O slot is intentionally single-filed. Do not let an
-        // arbitrarily long remote queue hide eligible local maintenance behind
-        // the first dequeue page while that slot is busy.
+        // Do not let an arbitrarily long remote queue hide eligible local
+        // maintenance behind the first dequeue page while an aged
+        // reconciliation turn is already in progress.
         selected = state
             .proxy
             .fetch_next_queued_scheduled_job_excluding_types(&REMOTE_IO_SCHEDULED_JOB_TYPES)
@@ -476,7 +472,7 @@ async fn dequeue_next_scheduled_job(
     }
 
     match state.proxy.scheduled_job_mark_running(candidate.id).await? {
-        Some(job) => Ok(Some((job, remote_io_permit))),
+        Some(job) => Ok(Some((job, reconciliation_turn))),
         None => Ok(None),
     }
 }
@@ -484,10 +480,11 @@ async fn dequeue_next_scheduled_job(
 async fn run_queued_scheduled_job(
     state: Arc<AppState>,
     job: JobLog,
-    remote_io_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    reconciliation_turn: Option<ReconciliationTurn>,
 ) {
     let job_type = job.job_type.clone();
     let key_id = job.key_id.clone();
+    let manual_remote_attempt = job.trigger_source == TRIGGER_SOURCE_MANUAL;
     let claimed_job = ClaimedScheduledJob {
         job_id: job.id,
         claim_generation: job.claim_generation,
@@ -498,7 +495,8 @@ async fn run_queued_scheduled_job(
         job_type.clone(),
         key_id.clone(),
         claimed_job,
-        remote_io_permit,
+        reconciliation_turn,
+        manual_remote_attempt,
     )
     .await;
 }
@@ -661,12 +659,13 @@ fn spawn_maintenance_worker(state: Arc<AppState>) {
         let wake = maintenance_worker_wake_for_state(state.as_ref());
         loop {
             match dequeue_next_scheduled_job(state.as_ref()).await {
-                Ok(Some((job, remote_io_permit))) => {
-                    if let Some(remote_io_permit) = remote_io_permit {
+                Ok(Some((job, reconciliation_turn))) => {
+                    let remote_io_job = scheduled_job_uses_remote_io(&job.job_type);
+                    if remote_io_job || reconciliation_turn.is_some() {
                         let run_state = state.clone();
                         let run_wake = wake.clone();
                         tokio::spawn(async move {
-                            run_queued_scheduled_job(run_state, job, Some(remote_io_permit)).await;
+                            run_queued_scheduled_job(run_state, job, reconciliation_turn).await;
                             run_wake.notify_one();
                         });
                     } else {
@@ -1586,12 +1585,18 @@ async fn run_linuxdo_user_status_sync_job_with_source(
         return;
     };
 
-    run_linuxdo_user_status_sync_claimed_job(state, claimed_job).await;
+    run_linuxdo_user_status_sync_claimed_job(
+        state,
+        claimed_job,
+        trigger_source == TRIGGER_SOURCE_MANUAL,
+    )
+    .await;
 }
 
 async fn run_linuxdo_user_status_sync_claimed_job(
     state: Arc<AppState>,
     mut claimed_job: ClaimedScheduledJob,
+    manual_remote_attempt: bool,
 ) -> bool {
     if claimed_job._job_execution_gate.is_none() {
         claimed_job._job_execution_gate =
@@ -1705,8 +1710,16 @@ async fn run_linuxdo_user_status_sync_claimed_job(
                 continue;
             }
         };
+        let profile_result = fetch_linuxdo_profile_from_refresh_token_with_remote_attempt_admission(
+            &client,
+            cfg,
+            &refresh_token,
+            &remote_attempt_admission_for_state(state.as_ref()),
+            manual_remote_attempt,
+        )
+        .await;
         let (profile, token_payload) =
-            match fetch_linuxdo_profile_from_refresh_token(&client, cfg, &refresh_token).await {
+            match profile_result {
                 Ok(result) => result,
                 Err(err) => {
                     let message = err.to_string();
@@ -2074,6 +2087,10 @@ async fn post_linuxdo_credit_system_full_refund(
         &order.out_trade_no,
         &money,
     );
+    let remote_attempt = remote_attempt_admission_for_state(state)
+        .acquire_attempt()
+        .await
+        .map_err(str::to_string)?;
     let response = reqwest::Client::new()
         .post(endpoint)
         .form(&params)
@@ -2082,6 +2099,7 @@ async fn post_linuxdo_credit_system_full_refund(
         .map_err(|err| err.to_string())?;
     let status = response.status();
     let text = response.text().await.map_err(|err| err.to_string())?;
+    drop(remote_attempt);
     if !status.is_success() {
         return Err(format!("refund endpoint returned {status}: {text}"));
     }
@@ -2412,12 +2430,18 @@ async fn run_forward_proxy_geo_refresh_job_with_source(
         return;
     };
 
-    run_forward_proxy_geo_refresh_claimed_job(state, claimed_job).await;
+    run_forward_proxy_geo_refresh_claimed_job(
+        state,
+        claimed_job,
+        trigger_source == TRIGGER_SOURCE_MANUAL,
+    )
+    .await;
 }
 
 async fn run_forward_proxy_geo_refresh_claimed_job(
     state: Arc<AppState>,
     claimed_job: ClaimedScheduledJob,
+    manual_remote_attempt: bool,
 ) -> bool {
     let ClaimedScheduledJob {
         job_id,
@@ -2426,11 +2450,16 @@ async fn run_forward_proxy_geo_refresh_claimed_job(
     } = claimed_job;
     drop(_job_execution_gate);
 
-    let candidates = match state
+    let candidates_result = state
         .proxy
-        .resolve_forward_proxy_geo_refresh_candidates(&state.api_key_ip_geo_origin, true)
-        .await
-    {
+        .resolve_forward_proxy_geo_refresh_candidates_with_remote_attempt_admission(
+            &state.api_key_ip_geo_origin,
+            true,
+            Some(remote_attempt_admission_for_state(state.as_ref())),
+            manual_remote_attempt,
+        )
+        .await;
+    let candidates = match candidates_result {
         Ok(candidates) => candidates,
         Err(err) => {
             let _ = state
@@ -2477,7 +2506,8 @@ async fn run_manual_claimed_job(
     job_type: String,
     key_id: Option<String>,
     mut claimed_job: ClaimedScheduledJob,
-    mut remote_io_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    reconciliation_turn: Option<ReconciliationTurn>,
+    manual_remote_attempt: bool,
 ) -> bool {
     if job_type == "ha_outbox_gc" {
         return run_ha_outbox_gc_claimed_job(state, claimed_job).await;
@@ -2552,7 +2582,12 @@ async fn run_manual_claimed_job(
         };
     }
     if job_type == LINUXDO_USER_STATUS_SYNC_JOB_TYPE {
-        return run_linuxdo_user_status_sync_claimed_job(state, claimed_job).await;
+        return run_linuxdo_user_status_sync_claimed_job(
+            state,
+            claimed_job,
+            manual_remote_attempt,
+        )
+        .await;
     }
     if job_type == DASHBOARD_ROLLUP_INTEGRITY_JOB_TYPE {
         return run_dashboard_rollup_integrity_claimed_job(state, claimed_job).await;
@@ -2590,7 +2625,14 @@ async fn run_manual_claimed_job(
             } else {
                 "quota_sync/manual"
             };
-            match sync_key_quota_with_db_job_gate(state.as_ref(), &key_id, source).await {
+            match sync_key_quota_with_db_job_gate(
+                state.as_ref(),
+                &key_id,
+                source,
+                manual_remote_attempt,
+            )
+            .await
+            {
                 Ok((limit, remaining)) => {
                     finish(state, "success", format!("limit={limit} remaining={remaining}")).await
                 }
@@ -2620,9 +2662,10 @@ async fn run_manual_claimed_job(
         }
         "upstream_reconciliation" => {
             drop(_job_execution_gate);
+            let remote_attempt_admission = remote_attempt_admission_for_state(state.as_ref());
             let foreground_rps = state.proxy.foreground_activity_rps();
             if foreground_rps > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS {
-                return defer_reconciliation_for_sqlite_admission(
+                let deferred = defer_reconciliation_for_sqlite_admission(
                     &state,
                     job_id,
                     claim_generation,
@@ -2630,6 +2673,7 @@ async fn run_manual_claimed_job(
                     state.proxy.backend_time().now_ts().saturating_add(30),
                 )
                 .await;
+                return deferred;
             }
             match state
                 .proxy
@@ -2637,7 +2681,9 @@ async fn run_manual_claimed_job(
                 .await
             {
                 Ok(()) => {}
-                Err(ProxyError::StaleClaim { .. }) => return false,
+                Err(ProxyError::StaleClaim { .. }) => {
+                    return false;
+                }
                 Err(error) if tavily_hikari::is_transient_sqlite_write_error(&error) => {
                     tracing::debug!(
                         component = "reconciliation",
@@ -2647,7 +2693,7 @@ async fn run_manual_claimed_job(
                         err = %error,
                         "reconciliation retained its claim while low-pressure recovery could not start"
                     );
-                    return defer_reconciliation_for_sqlite_admission(
+                    let deferred = defer_reconciliation_for_sqlite_admission(
                         &state,
                         job_id,
                         claim_generation,
@@ -2655,16 +2701,22 @@ async fn run_manual_claimed_job(
                         state.proxy.backend_time().now_ts().saturating_add(30),
                     )
                     .await;
+                    return deferred;
                 }
-                Err(error) => return finish(state, "error", error.to_string()).await,
+                Err(error) => {
+                    let finished = finish(state, "error", error.to_string()).await;
+                    return finished;
+                }
             }
             let run_result = state
                 .proxy
-                .run_upstream_reconciliation_once_claimed_outcome_with_remote_io_permit(
+                .run_upstream_reconciliation_once_claimed_outcome_with_remote_attempt_turn(
                     &state.usage_base,
                     job_id,
                     claim_generation,
-                    remote_io_permit.take(),
+                    Some(remote_attempt_admission.clone()),
+                    reconciliation_turn,
+                    manual_remote_attempt,
                 )
                 .await;
             persist_claimed_reconciliation_run(state, job_id, claim_generation, run_result).await
@@ -2720,6 +2772,7 @@ async fn run_manual_claimed_job(
                     claim_generation,
                     _job_execution_gate: None,
                 },
+                manual_remote_attempt,
             )
             .await
         },
