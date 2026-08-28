@@ -1245,17 +1245,6 @@ impl KeyStore {
             .sqlite_runtime
             .begin_reconciliation_read(ReconciliationReadKind::ResearchCandidates)
             .await?;
-        #[cfg(test)]
-        if self
-            .sqlite_runtime
-            .take_reconciliation_research_read_failure_for_test()
-        {
-            let injected_result: Result<
-                Vec<crate::models::UpstreamReconciliationResearchCandidate>,
-                sqlx::Error,
-            > = Err(sqlx::Error::PoolTimedOut);
-            return session.complete_query_or_defer(injected_result).await;
-        }
         let rows_result = sqlx::query_as::<_, (String, String, String, String, String, i64, i64, i64, i64)>(
             r#"
             WITH pending AS (
@@ -1318,6 +1307,33 @@ impl KeyStore {
                 }
             })
             .collect())
+    }
+    pub(crate) async fn has_due_upstream_reconciliation_research(&self) -> Result<bool, ProxyError> {
+        let now = self.backend_time.now_ts();
+        let mut session = self
+            .sqlite_runtime
+            .begin_reconciliation_read(ReconciliationReadKind::ResearchCandidates)
+            .await?;
+        #[cfg(test)]
+        if self.sqlite_runtime.take_reconciliation_research_read_failure_for_test() {
+            let injected_result = Err::<i64, _>(sqlx::Error::PoolTimedOut);
+            return session.complete_query_or_defer(injected_result).await.map(|_| false);
+        }
+        let due_result = sqlx::query_scalar::<_, i64>(r#"
+            SELECT EXISTS(
+                SELECT 1 FROM upstream_reconciliation_research r
+                JOIN upstream_reconciliation_usage u
+                  ON u.token_id = r.token_id AND u.period_code = r.period_code
+                WHERE r.terminal_at IS NULL AND COALESCE(r.next_poll_at, 0) <= ?
+                GROUP BY r.request_id
+                HAVING MAX(u.period_end) <= ?
+                LIMIT 1
+            )
+            "#)
+        .bind(now).bind(now)
+        .fetch_one(&mut *session)
+        .await;
+        Ok(session.complete_query_or_defer(due_result).await? != 0)
     }
 
     pub(crate) async fn record_upstream_reconciliation_research_poll(
