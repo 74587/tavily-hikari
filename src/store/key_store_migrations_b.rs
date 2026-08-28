@@ -1050,7 +1050,7 @@ impl KeyStore {
     }
 
     pub(crate) async fn generate_unique_key_id(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
     ) -> Result<String, ProxyError> {
         loop {
             let candidate = nanoid!(4);
@@ -1058,7 +1058,7 @@ impl KeyStore {
                 "SELECT id FROM api_keys WHERE id = ? LIMIT 1",
             )
             .bind(&candidate)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(&mut *tx)
             .await?;
 
             if exists.is_none() {

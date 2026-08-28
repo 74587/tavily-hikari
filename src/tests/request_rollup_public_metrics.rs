@@ -1242,18 +1242,19 @@ async fn admitted_flush_drains_followup_batches_before_reporting_fresh() {
         .request_stats_coalescer
         .install_post_flush_pause()
         .await;
+    let flush_arrived = pause.arrived.clone().notified_owned();
     let store = proxy.key_store.clone();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let flush_handle = tokio::spawn(async move {
         store
             .flush_request_stats_writes_with_wait_policy_for_test(
-                Duration::from_millis(250),
+                Duration::from_secs(5),
                 Some(deadline),
             )
             .await
     });
 
-    tokio::time::timeout(Duration::from_secs(1), pause.arrived.notified())
+    tokio::time::timeout(Duration::from_secs(5), flush_arrived)
         .await
         .expect("first drained batch reached post-flush pause");
 

@@ -23,6 +23,16 @@ struct RequestLogBodyRetentionDecision {
 }
 
 #[derive(Clone, Copy)]
+struct ApiKeyUpsertInput<'a> {
+    group: Option<&'a str>,
+    registration_ip: Option<&'a str>,
+    registration_region: Option<&'a str>,
+    proxy_affinity: Option<&'a forward_proxy::ForwardProxyAffinityRecord>,
+    hint_only_proxy_affinity: bool,
+    deadline: std::time::Instant,
+}
+
+#[derive(Clone, Copy)]
 struct RequestLogBodyRetentionDecisionMode {
     include_debug_shared: bool,
     include_heavy_usage: bool,
@@ -1621,51 +1631,71 @@ impl KeyStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let input = ApiKeyUpsertInput {
+            group: normalized_group.as_deref(),
+            registration_ip: normalized_registration_ip.as_deref(),
+            registration_region: normalized_registration_region.as_deref(),
+            proxy_affinity,
+            hint_only_proxy_affinity,
+            deadline: std::time::Instant::now() + API_KEY_UPSERT_RETRY_BUDGET,
+        };
         let mut retry_idx = 0usize;
 
         loop {
             match self
-                .add_or_undelete_key_with_status_in_group_once(
-                    api_key,
-                    normalized_group.as_deref(),
-                    normalized_registration_ip.as_deref(),
-                    normalized_registration_region.as_deref(),
-                    proxy_affinity,
-                    hint_only_proxy_affinity,
-                )
+                .add_or_undelete_key_with_status_in_group_once(api_key, input)
                 .await
             {
                 Ok(result) => return Ok(result),
                 Err(err)
                     if is_transient_sqlite_write_error(&err)
-                        && retry_idx < API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS.len() =>
+                        && retry_idx < API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS.len()
+                        && std::time::Instant::now() < input.deadline =>
                 {
-                    let backoff_ms = API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS[retry_idx];
+                    let remaining = input
+                        .deadline
+                        .saturating_duration_since(std::time::Instant::now());
+                    let backoff = Duration::from_millis(
+                        API_KEY_UPSERT_TRANSIENT_RETRY_BACKOFF_MS[retry_idx],
+                    )
+                    .min(remaining);
+                    if backoff.is_zero() {
+                        return Err(ProxyError::Deferred {
+                            operation: "admin_api_key_mutation",
+                            reason: "sqlite_contention".to_string(),
+                        });
+                    }
                     retry_idx += 1;
                     let key_preview = preview_key(api_key);
                     eprintln!(
                         "api key upsert transient sqlite error (api_key_preview={}, attempt={}, backoff={}ms): {}",
-                        key_preview, retry_idx, backoff_ms, err
+                        key_preview,
+                        retry_idx,
+                        backoff.as_millis(),
+                        err
                     );
-                    self.backend_time
-                        .sleep(Duration::from_millis(backoff_ms))
-                        .await;
+                    self.backend_time.sleep(backoff).await;
+                }
+                Err(err) if is_transient_sqlite_write_error(&err) => {
+                    return Err(ProxyError::Deferred {
+                        operation: "admin_api_key_mutation",
+                        reason: "sqlite_contention".to_string(),
+                    });
                 }
                 Err(err) => return Err(err),
             }
         }
     }
 
-    pub(crate) async fn add_or_undelete_key_with_status_in_group_once(
+    async fn add_or_undelete_key_with_status_in_group_once(
         &self,
         api_key: &str,
-        group: Option<&str>,
-        registration_ip: Option<&str>,
-        registration_region: Option<&str>,
-        proxy_affinity: Option<&forward_proxy::ForwardProxyAffinityRecord>,
-        hint_only_proxy_affinity: bool,
+        input: ApiKeyUpsertInput<'_>,
     ) -> Result<(String, ApiKeyUpsertStatus), ProxyError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate_before(SqliteOperation::AdminMutation, input.deadline)
+            .await?;
         let now = self.backend_time.now_ts();
 
         let operation_result: Result<(String, ApiKeyUpsertStatus), ProxyError> = async {
@@ -1685,15 +1715,15 @@ impl KeyStore {
                 let existing_has_registration_metadata =
                     existing_registration_ip.is_some() || existing_registration_region.is_some();
                 let should_refresh_registration =
-                    registration_ip.is_some() || registration_region.is_some();
+                    input.registration_ip.is_some() || input.registration_region.is_some();
                 let should_persist_proxy_affinity =
-                    !hint_only_proxy_affinity || !existing_has_registration_metadata;
+                    !input.hint_only_proxy_affinity || !existing_has_registration_metadata;
 
                 let mut assignments = Vec::new();
                 if deleted_at.is_some() {
                     assignments.push("deleted_at = NULL".to_string());
                 }
-                if group.is_some() && existing_empty {
+                if input.group.is_some() && existing_empty {
                     assignments.push("group_name = ?".to_string());
                 }
                 if should_refresh_registration {
@@ -1708,21 +1738,21 @@ impl KeyStore {
                     query.push_str(&assignments.join(", "));
                     query.push_str(" WHERE id = ?");
                     let mut sql = sqlx::query(&query);
-                    if let Some(group) = group
+                    if let Some(group) = input.group
                         && existing_empty
                     {
                         sql = sql.bind(group);
                     }
                     if should_refresh_registration {
-                        sql = sql.bind(registration_ip);
+                        sql = sql.bind(input.registration_ip);
                     }
                     if should_refresh_registration {
-                        sql = sql.bind(registration_region);
+                        sql = sql.bind(input.registration_region);
                     }
                     sql.bind(&id).execute(&mut *tx).await?;
                 }
                 if should_persist_proxy_affinity
-                    && let Some(proxy_affinity) = proxy_affinity
+                    && let Some(proxy_affinity) = input.proxy_affinity
                 {
                     sqlx::query(
                         r#"
@@ -1766,15 +1796,15 @@ impl KeyStore {
             )
             .bind(&id)
             .bind(api_key)
-            .bind(group)
-            .bind(registration_ip)
-            .bind(registration_region)
+            .bind(input.group)
+            .bind(input.registration_ip)
+            .bind(input.registration_region)
             .bind(STATUS_ACTIVE)
             .bind(now)
             .bind(now)
             .execute(&mut *tx)
             .await?;
-            if let Some(proxy_affinity) = proxy_affinity {
+            if let Some(proxy_affinity) = input.proxy_affinity {
                 sqlx::query(
                     r#"
                     INSERT INTO forward_proxy_key_affinity (key_id, primary_proxy_key, secondary_proxy_key, updated_at)
@@ -1797,13 +1827,13 @@ impl KeyStore {
 
         match operation_result {
             Ok(result) => {
-                tx.commit().await?;
+                tx.finish(Ok(())).await?;
                 Ok(result)
             }
-            Err(err) => {
-                tx.rollback().await.ok();
-                Err(err)
-            }
+            Err(err) => match tx.finish(Err(err)).await {
+                Err(err) => Err(err),
+                Ok(()) => unreachable!("rolling back a failed API key mutation must return its error"),
+            },
         }
     }
 

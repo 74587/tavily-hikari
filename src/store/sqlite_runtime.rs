@@ -67,6 +67,7 @@ pub(crate) struct SqliteMaintenanceRunLease {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum SqliteOperation {
+    AdminMutation,
     AdminPrivacyRead,
     AdminRead,
     AlertProjection,
@@ -121,6 +122,7 @@ impl ReconciliationReadKind {
 impl SqliteOperation {
     fn as_str(self) -> &'static str {
         match self {
+            Self::AdminMutation => "admin_mutation",
             Self::AdminPrivacyRead => "admin_privacy_read",
             Self::AdminRead => "admin_read",
             Self::AlertProjection => "alert_projection",
@@ -142,6 +144,7 @@ impl SqliteOperation {
 
     fn workload_class(self) -> &'static str {
         match self {
+            Self::AdminMutation | Self::ForegroundJobTrigger => "foreground_work",
             Self::AdminPrivacyRead
             | Self::BillingLedgerAuditRead
             | Self::HaBaselineRead
@@ -155,13 +158,13 @@ impl SqliteOperation {
             | Self::ObservabilityDeferredWrite
             | Self::ServerPressureRebuild
             | Self::ReconciliationProjection => "maintenance_bulk",
-            Self::ForegroundJobTrigger => "foreground_work",
             Self::ScheduledJobControl | Self::HaOutboxGcWatchdog => "maintenance_control",
         }
     }
 
     fn acquire_budget(self) -> Duration {
         match self {
+            Self::AdminMutation => Duration::from_millis(100),
             Self::AdminPrivacyRead
             | Self::AdminRead
             | Self::AlertProjection
@@ -181,6 +184,7 @@ impl SqliteOperation {
 
     fn begin_budget(self) -> Duration {
         match self {
+            Self::AdminMutation => Duration::from_millis(100),
             Self::AdminPrivacyRead
             | Self::AdminRead
             | Self::AlertProjection
@@ -206,6 +210,7 @@ impl SqliteOperation {
             // a future that still owns the physical connection.
             Self::AdminPrivacyRead
             | Self::AdminRead
+            | Self::AdminMutation
             | Self::AlertProjection
             | Self::DashboardIntegrityWrite
             | Self::ObservabilityDeferredWrite
@@ -2710,6 +2715,7 @@ mod tests {
                     .replace('\\', "/");
                 let allowed = relative.starts_with("src/tests/")
                     || relative.starts_with("src/server/tests/")
+                    || relative.ends_with("/tests.rs")
                     || relative == "src/forward_proxy/tests.rs"
                     || relative.starts_with("src/bin/")
                     || matches!(

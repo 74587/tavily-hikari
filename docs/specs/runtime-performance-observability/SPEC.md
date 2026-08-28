@@ -45,6 +45,9 @@
   cooperative source-read calls/elapsed/deadline/defer/discard，以及明确标为 process/cgroup aggregate 的
   write-byte delta。窗口轮转时只可采样已配置 core/observability DB 与 WAL 的文件状态；不得 checkpoint、扫描
   数据目录、记录 SQL、参数或请求正文。
+- `AdminMutation` is a foreground SQLite workload operation. It reports bounded acquire, begin,
+  hold, error, and connection-level cache-write metrics independently from background writes;
+  transient exhaustion remains a retryable HTTP outcome rather than a five-second hidden wait.
 - `ha_outbox_gc_watchdog` 是短 `maintenance_control` state read，按同一窗口归因；它不输出逐次
   INFO/WARN，也不收集或输出 outbox inventory。
 - 内存字段同时报告 cgroup `anon/file/swap` 与进程 `RssAnon/RssFile/VmSwap`，避免把文件页缓存

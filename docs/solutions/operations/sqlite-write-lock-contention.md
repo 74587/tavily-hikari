@@ -37,6 +37,12 @@ related_specs:
 - Transport observations are persisted as fixed, redacted categories with their observation time.
   Later non-transport runs preserve that diagnostic while retryable state remains independent;
   only a terminal compare/active result clears the retryable outcome.
+- An administrator mutation is foreground work when the HTTP request itself is its only durable
+  command. Route its acquire and immediate transaction through a dedicated runtime operation with
+  a short total retry window. On exhausted SQLite contention, return a retryable response instead
+  of inheriting the pool or connection's five-second default wait; a single-key create uses
+  `503 Retry-After: 1`, while a batch keeps its explicit per-item failure result. Never pretend the
+  mutation was accepted.
 - Derived pressure rebuilds are hysteretic and source-fenced. A transient deferred flush is not a
   rebuild trigger; overflow, coverage loss, or five minutes of stale state starts at most one
   bounded rebuild generation every five minutes.

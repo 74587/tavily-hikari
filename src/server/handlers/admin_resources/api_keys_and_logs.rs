@@ -183,7 +183,7 @@ async fn create_api_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CreateKeyRequest>,
-) -> Result<(StatusCode, Json<CreateKeyResponse>), StatusCode> {
+) -> Result<Response<Body>, StatusCode> {
     if !is_admin_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -233,7 +233,10 @@ async fn create_api_key(
         )
         .await
     {
-        Ok((id, _)) => Ok((StatusCode::CREATED, Json(CreateKeyResponse { id }))),
+        Ok((id, _)) => Ok((StatusCode::CREATED, Json(CreateKeyResponse { id })).into_response()),
+        Err(err) if err.is_deferred() || tavily_hikari::is_transient_sqlite_write_error(&err) => {
+            Ok((StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")]).into_response())
+        }
         Err(err) => {
             eprintln!("create api key error: {err}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
