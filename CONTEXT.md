@@ -6,8 +6,10 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 
 ## SQLite Workload Terms
 
-- `foreground work`: request-path reads and writes. It may use the application pool directly, but it
-  reports activity and bounded waits so background work can yield before consuming its capacity.
+- `foreground work`: request-path reads and writes, including administrator mutations whose request
+  is the durable command. It uses an operation-specific bounded SQLite acquire and writer wait, so
+  contention returns a retryable result rather than inheriting SQLite's default wait or competing
+  indefinitely with background work.
 - `maintenance control`: short durable queue metadata work such as claim, finish, continuation, and
   stale recovery. It has a fixed short pool/writer budget enforced by `SqliteRuntime`, never
   changes the database busy-timeout pragma, and never carries scans or remote I/O. A transient

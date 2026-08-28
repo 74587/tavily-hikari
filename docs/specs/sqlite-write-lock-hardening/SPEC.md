@@ -100,6 +100,12 @@ source when a usable persisted runtime already exists.
   writer. They enter instance-owned bounded deferred queues; pressure deltas are replayable from
   request logs, while a rejected rebalance audit records explicit stale coverage without changing
   MCP success or billing truth. Every deferred flush uses `SqliteRuntime` operation budgets.
+- Administrator API-key creation and undelete are foreground durable commands. Their SQLite
+  acquire, `BEGIN IMMEDIATE`, and connection-local busy wait use the `AdminMutation` runtime
+  operation and one bounded retry window. Exhausted transient contention returns a retryable
+  typed defer; the single-key endpoint maps it to `503 Retry-After: 1`, while batch callers retain
+  their existing explicit per-item failure result. Neither path waits for SQLite's default busy
+  timeout or reports a false successful mutation.
 - Administrator privacy-status reads use one AppState-owned last-good controller. HTTP handlers
   only copy its immutable value: an expired cached value must return additive stale coverage while
   one low-priority refresh runs or is deferred, and a true cold miss must return

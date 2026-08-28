@@ -43,6 +43,53 @@ async fn scheduled_job_start_respects_control_transaction_budget_under_sqlite_wr
 }
 
 #[tokio::test]
+async fn admin_api_key_mutation_yields_to_sqlite_writer_and_recovers() {
+    let db_path = temp_db_path("admin-api-key-mutation-sqlite-lock");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(Vec::<String>::new(), DEFAULT_UPSTREAM, &db_str)
+        .await
+        .expect("proxy created");
+    let release =
+        hold_sqlite_write_lock_for_test_for(&proxy.key_store.pool, Duration::from_millis(500))
+            .await;
+
+    let started = Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_millis(350),
+        proxy.add_or_undelete_key_with_status("tvly-admin-mutation-contention"),
+    )
+    .await
+    .expect("admin key mutation must yield inside its foreground budget")
+    .expect_err("held SQLite writer lock must defer the key mutation");
+    assert!(
+        matches!(
+            error,
+            ProxyError::Deferred {
+                operation: "admin_api_key_mutation",
+                ref reason,
+            } if reason == "sqlite_contention"
+        ),
+        "expected a typed API key mutation defer, got {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(350),
+        "admin key mutation must not inherit SQLite's default five-second wait (elapsed={:?})",
+        started.elapsed()
+    );
+
+    release.await.expect("release writer lock");
+    let (_, status) = proxy
+        .add_or_undelete_key_with_status("tvly-admin-mutation-contention")
+        .await
+        .expect("admin key mutation recovers after the writer lock releases");
+    assert_eq!(status, ApiKeyUpsertStatus::Created);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+#[tokio::test]
 async fn scheduled_job_enqueue_reuses_ha_gc_representative_under_writer_lock() {
     let db_path = temp_db_path("scheduled-job-enqueue-ha-gc-writer-lock");
     let db_str = db_path.to_string_lossy().to_string();
