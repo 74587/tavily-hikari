@@ -658,30 +658,35 @@ async fn admin_summary_never_flushes_pending_request_stats_from_the_read_path() 
         "the read path must not start a request-stats flush"
     );
 
+    // Register before waking the worker so this synchronization cannot depend
+    // on Notify timing while the CI host is busy.
+    let pause_arrived = pause.arrived.clone().notified_owned();
     proxy.nudge_request_stats_flush().await;
-    tokio::time::timeout(Duration::from_secs(5), pause.arrived.notified())
+    tokio::time::timeout(Duration::from_secs(5), pause_arrived)
         .await
         .expect("background flush starts within its nominal cadence");
     pause
         .released
         .store(true, std::sync::atomic::Ordering::SeqCst);
     pause.release.notify_waiters();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if proxy
-                .summary_without_flush()
-                .await
-                .expect("durable summary after background flush")
-                .total_requests
-                == 1
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    // Polling summary here turns the assertion itself into foreground SQLite
+    // pressure and can keep the maintenance writer deferred. The worker's
+    // own completion condition is the synchronization boundary instead.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.wait_until_request_stats_flush_finishes_for_test(),
+    )
     .await
-    .expect("background flush persists the pending delta");
+    .expect("background flush finishes after the pause is released");
+    assert_eq!(
+        proxy
+            .summary_without_flush()
+            .await
+            .expect("durable summary after background flush")
+            .total_requests,
+        1,
+        "background flush persists the pending delta"
+    );
 
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
