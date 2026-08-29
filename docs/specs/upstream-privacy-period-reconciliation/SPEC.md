@@ -373,6 +373,23 @@ PR: include
 
 ![Reconciliation transport failure on mobile](./assets/current/reconciliation-transport-0bf773d8-mobile-393x852.png)
 
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- story_id_or_title: `Admin/Modules/SystemStatusModule/MissingEligibleUpstreamKey`
+- scenario: marked comparison of retry reason distribution before and after the missing-key diagnostic
+- requested_viewport: `desktop`
+- viewport_strategy: `storybook-viewport`
+- capture_scope: `browser-viewport`
+- margin_policy: `trim_only`
+- evidence_surface: `page`
+- evidence_note: Current `89fd4b3e` adds a distinct `missing eligible upstream key` count (`0` to
+  `7`) without changing the surrounding retry counters or administrator controls.
+- submission_gate: `approved`
+
+PR: include
+
+![Missing eligible upstream key diagnostic comparison](./assets/current/reconciliation-retry-difference-89fd4b3e-desktop.jpg)
+
 ## Related PRs
 
 - None
