@@ -119,6 +119,9 @@
 - Every attempted work generation ends as exactly one typed result. `settled`, `no_adjustment`, and
   compare-mode `observed` are terminal. `upstream_429`, `transport_failure`, `semantic_failure`, and
   `local_pressure` are retryable and keep independent durable streaks and retry deadlines.
+- `missing_eligible_upstream_key` is a durable nonterminal input condition, not a semantic or
+  transport failure. It keeps work incomplete with a fixed 15-minute retry and is exposed only as
+  an aggregate administrator diagnostic.
 - Transport failures store only a fixed local observation category: `connect`, `timeout`,
   `response_body`, `invalid_endpoint`, `credentials_or_database`, or `unknown`. They never expose
   endpoint text, response bodies, credentials, or database errors through run observation, and they
@@ -134,7 +137,9 @@
   state and schedules one 30-second representative; it cannot overwrite a main transport failure,
   terminal outcome, completed generation, or billing truth. Research selection uses the v21
   `(next_poll_at, key_id, request_id)` cursor and covering index: at most 80 rows are read and at
-  most four are selected per key. The cursor is accepted only after the claimed page boundary.
+  most four are selected per key. A remote Research timeout writes a normalized retry before
+  returning `research_budget`; the cursor and sweep marker are accepted atomically only after the
+  full claimed page has durable outcomes.
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）

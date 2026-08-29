@@ -123,7 +123,7 @@ impl TavilyProxy {
     ) -> Result<ResearchCursorAcceptance, ProxyError> {
         match self
             .key_store
-            .accept_upstream_reconciliation_research_cursor(cursor, wrapped, claimed_job)
+            .accept_upstream_reconciliation_research_page(cursor, wrapped, claimed_job, true)
             .await
         {
             Ok(()) => Ok(ResearchCursorAcceptance::Accepted),
