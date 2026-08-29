@@ -19,6 +19,11 @@ pub(crate) const RECONCILIATION_OUTCOME_TRANSPORT_FAILURE: &str = "transport_fai
 pub(crate) const RECONCILIATION_OUTCOME_SEMANTIC_FAILURE: &str = "semantic_failure";
 pub(crate) const RECONCILIATION_OUTCOME_MISSING_ELIGIBLE_UPSTREAM_KEY: &str =
     "missing_eligible_upstream_key";
+pub(crate) const RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET: &str =
+    "remote_attempt_budget";
+pub(crate) const RECONCILIATION_RETRY_REASON_GENERATION_CHANGED: &str = "generation_changed";
+pub(crate) const RECONCILIATION_OUTCOME_REMOTE_ATTEMPT_BUDGET: &str =
+    "remote_attempt_budget";
 pub(crate) const RECONCILIATION_OUTCOME_LOCAL_PRESSURE: &str = "local_pressure";
 pub(crate) const META_KEY_UPSTREAM_RECONCILIATION_WORK_PROJECTION_COMPLETE_V1: &str =
     "upstream_reconciliation_work_projection_complete_v1";
@@ -70,9 +75,6 @@ pub(crate) struct ReconciliationWorkFence {
     pub(crate) claimed_job: Option<(i64, i64)>,
 }
 
-
-
-
 fn upstream_reconciliation_shadow_ready(settings: &SystemSettings) -> bool {
     settings.upstream_project_id_mode == UpstreamProjectIdMode::AccessToken
         && settings.api_rebalance_enabled
@@ -91,6 +93,12 @@ pub(crate) fn classify_reconciliation_retry_reason(reason: Option<&str>) -> &'st
     }
     if reason == RECONCILIATION_RETRY_REASON_MISSING_ELIGIBLE_UPSTREAM_KEY {
         return RECONCILIATION_RETRY_REASON_MISSING_ELIGIBLE_UPSTREAM_KEY;
+    }
+    if reason == RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET {
+        return RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET;
+    }
+    if reason == RECONCILIATION_RETRY_REASON_GENERATION_CHANGED {
+        return RECONCILIATION_RETRY_REASON_GENERATION_CHANGED;
     }
     if reason.starts_with("usage http error 429 ") {
         return RECONCILIATION_RETRY_REASON_UPSTREAM_429;
@@ -2090,6 +2098,8 @@ impl KeyStore {
                 now,
             )
             .await?;
+            self.clear_reconciliation_key_observations(&mut tx, candidate)
+                .await?;
             tx.finish(Ok(())).await?;
             return Ok(true);
         }
@@ -2122,6 +2132,8 @@ impl KeyStore {
                 now,
             )
             .await?;
+            self.clear_reconciliation_key_observations(&mut tx, candidate)
+                .await?;
             tx.finish(Ok(())).await?;
             return Ok(false);
         }
@@ -2235,6 +2247,8 @@ impl KeyStore {
             now,
         )
         .await?;
+        self.clear_reconciliation_key_observations(&mut tx, candidate)
+            .await?;
         tx.finish(Ok(())).await?;
         Ok(true)
     }
@@ -2347,6 +2361,8 @@ impl KeyStore {
                 now,
             )
             .await?;
+            self.clear_reconciliation_key_observations(&mut tx, candidate)
+                .await?;
             tx.finish(Ok(())).await?;
             return Ok(true);
         }
@@ -2379,6 +2395,8 @@ impl KeyStore {
                 now,
             )
             .await?;
+            self.clear_reconciliation_key_observations(&mut tx, candidate)
+                .await?;
             tx.finish(Ok(())).await?;
             return Ok(false);
         }
@@ -2437,6 +2455,8 @@ impl KeyStore {
             now,
         )
         .await?;
+        self.clear_reconciliation_key_observations(&mut tx, candidate)
+            .await?;
         tx.finish(Ok(())).await?;
         Self::emit_shadow_adjustment_written_log(
             started_at.elapsed().as_millis() as u64,

@@ -18,6 +18,11 @@ struct ReconciliationRunObservationRow {
     transport_failure: i64,
     semantic_failure: i64,
     local_pressure: i64,
+    partial_key_observations: i64,
+    multi_key_pending: i64,
+    remote_attempt_budget_defers: i64,
+    resumed_runs: i64,
+    terminal_runs: i64,
     last_transport_kind: Option<String>,
     last_transport_kind_at: Option<i64>,
     last_retryable_outcome: Option<String>,
@@ -41,6 +46,11 @@ pub(crate) struct ReconciliationRunObservationWrite {
     pub(crate) transport_failure: i64,
     pub(crate) semantic_failure: i64,
     pub(crate) local_pressure: i64,
+    pub(crate) partial_key_observations: i64,
+    pub(crate) multi_key_pending: i64,
+    pub(crate) remote_attempt_budget_defers: i64,
+    pub(crate) resumed_runs: i64,
+    pub(crate) terminal_runs: i64,
     pub(crate) last_transport_kind: Option<&'static str>,
     pub(crate) last_retryable_outcome: Option<&'static str>,
     pub(crate) continuation_reason: Option<&'static str>,
@@ -215,8 +225,13 @@ impl KeyStore {
             .begin_scheduled_job_control()
             .await?;
         let result = async {
-            let research_defer = reason == "research_read_budget";
-            let local_backoff_until = if research_defer {
+            let preserve_retry_state = matches!(
+                reason,
+                "research_read_budget"
+                    | RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET
+                    | RECONCILIATION_RETRY_REASON_GENERATION_CHANGED
+            );
+            let local_backoff_until = if preserve_retry_state {
                 sqlx::query_scalar::<_, String>(
                     "SELECT value FROM meta WHERE key = ? LIMIT 1",
                 )
@@ -256,12 +271,18 @@ impl KeyStore {
                     claim_generation,
                 });
             }
-            if research_defer {
+            if preserve_retry_state {
                 sqlx::query(
                     r#"UPDATE upstream_reconciliation_run_observation
-                       SET continuation_reason = ?, next_retry_at = ?, observed_at = ?
+                       SET last_retryable_outcome = CASE
+                               WHEN ? = 'remote_attempt_budget' THEN ?
+                               ELSE last_retryable_outcome
+                           END,
+                           continuation_reason = ?, next_retry_at = ?, observed_at = ?
                        WHERE id = 'local'"#,
                 )
+                .bind(reason)
+                .bind(reason)
                 .bind(reason)
                 .bind(available_at)
                 .bind(now)
@@ -368,10 +389,14 @@ impl KeyStore {
                    no_adjustment_count = ?, observed_count = ?, upstream_429_count = ?,
                    transport_failure_count = ?, semantic_failure_count = ?,
                    local_pressure_count = ?,
+                   partial_key_observation_count = ?, multi_key_pending_count = ?,
+                   remote_attempt_budget_defer_count = ?, resumed_run_count = ?,
+                   terminal_run_count = ?,
                    last_transport_kind = COALESCE(?, last_transport_kind),
                    last_transport_kind_at = COALESCE(?, last_transport_kind_at),
                    last_retryable_outcome = CASE
-                       WHEN ? IN ('upstream_429', 'transport_failure', 'semantic_failure', 'local_pressure')
+                       WHEN ? IN ('upstream_429', 'transport_failure', 'semantic_failure',
+                                  'local_pressure', 'remote_attempt_budget')
                            THEN ?
                        WHEN ? IN ('settled', 'no_adjustment', 'observed')
                            THEN NULL
@@ -394,6 +419,11 @@ impl KeyStore {
         .bind(observation.transport_failure)
         .bind(observation.semantic_failure)
         .bind(observation.local_pressure)
+        .bind(observation.partial_key_observations)
+        .bind(observation.multi_key_pending)
+        .bind(observation.remote_attempt_budget_defers)
+        .bind(observation.resumed_runs)
+        .bind(observation.terminal_runs)
         .bind(observation.last_transport_kind)
         .bind(observation.last_transport_kind.map(|_| now))
         .bind(observation.last_retryable_outcome)
@@ -433,6 +463,11 @@ impl KeyStore {
                           o.transport_failure_count AS transport_failure,
                           o.semantic_failure_count AS semantic_failure,
                           o.local_pressure_count AS local_pressure,
+                          o.partial_key_observation_count AS partial_key_observations,
+                          o.multi_key_pending_count AS multi_key_pending,
+                          o.remote_attempt_budget_defer_count AS remote_attempt_budget_defers,
+                          o.resumed_run_count AS resumed_runs,
+                          o.terminal_run_count AS terminal_runs,
                           o.last_transport_kind,
                           o.last_transport_kind_at,
                           o.last_retryable_outcome,
@@ -469,6 +504,11 @@ impl KeyStore {
             transport_failure: row.transport_failure,
             semantic_failure: row.semantic_failure,
             local_pressure: row.local_pressure,
+            partial_key_observations: row.partial_key_observations,
+            multi_key_pending: row.multi_key_pending,
+            remote_attempt_budget_defers: row.remote_attempt_budget_defers,
+            resumed_runs: row.resumed_runs,
+            terminal_runs: row.terminal_runs,
             last_transport_kind: row.last_transport_kind,
             last_transport_kind_at: row.last_transport_kind_at,
             last_retryable_outcome: row.last_retryable_outcome,
