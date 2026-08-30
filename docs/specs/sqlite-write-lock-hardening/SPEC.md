@@ -316,7 +316,8 @@ source when a usable persisted runtime already exists.
   any remote request; they must acquire admission and release it before remote I/O. Three consecutive
   rounds with eligible candidates but no remote attempt and exhausted local budget enter a persisted
   short local backoff with one delayed representative job. Only actual upstream 429 attempts enter
-  the persisted `2/5/10/30` minute remote backoff and honor `Retry-After`.
+  the persisted `5/10/20/30` minute cooldown for the affected `period_reconciliation` key and honor
+  `Retry-After`; a cooldown never gates healthy keys.
 - Reconciliation's main settlement pass owns the first remote-attempt budget. Research terminal
   polling is permitted only after the main pass (or when no eligible main candidate exists), and
   all remote requests plus their durable bookkeeping are bounded by the same per-run deadline.
@@ -493,11 +494,12 @@ PR: none
 - Reconciliation candidate-query timeouts are recorded as local pressure rather than an empty
   queue, and successful remote observations are finalized within the reserved write tail even when
   a later candidate exhausts the request budget.
-- Reconciliation completion markers, run statistics, and local/global pressure state share one
-  bounded post-processing deadline. SQLite contention may produce an explicit persistence timeout,
-  but must not leave the worker waiting past the run budget or report a durable success without
-  recording the state transition; the deadline must end before the scheduler's outer timeout so
-  cancellation cannot race the controlled timeout path.
+- Reconciliation completion markers, run statistics, local-pressure state, and affected-Key cooldown
+  state share one bounded post-processing deadline. SQLite contention may produce an explicit
+  persistence timeout, but must not leave the worker waiting past the run budget or report a durable
+  success without recording the state transition; the deadline must end before the scheduler's outer
+  timeout so cancellation cannot race the controlled timeout path. Legacy global-backoff metadata is
+  compatibility-only and is never a live reconciliation gate.
 - Reconciliation preparation source reads use one fresh native SQLite progress-handler session per
   statement rather than cancellation of the awaiting task. Recent/backlog candidates, candidate and
   billed-credit hydrate, Research candidates, and historical projection source pages have a 250ms
@@ -506,6 +508,8 @@ PR: none
   mandatory before returning a connection to the pool.
 - A remote admission lease describes only one outbound HTTP attempt. It is not a broad maintenance
   permit and must be released before reconciliation finalization or other SQLite work.
+- A reconciliation 429 records only the affected Key cooldown and its claim-fenced continuation;
+  the legacy global-backoff metadata is never consulted as a SQLite or scheduler gate.
 - Research selection is a bounded indexed source read: one page contains at most 80 due rows and
   advances its `(next_poll_at, key_id, request_id)` cursor only after a claim-fenced acceptance
   transaction. A read deadline, cancellation, or stale claim leaves the cursor and work unchanged.

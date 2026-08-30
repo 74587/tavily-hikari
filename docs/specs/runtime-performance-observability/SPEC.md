@@ -73,7 +73,7 @@
   state unchanged; a separately throttled observation heartbeat maintains recent-tail liveness.
   Sidecar Dashboard aggregation returns only scalar counts and the bounded top-group page, never an
   unbounded payload collection.
-- 事务污染、stale claim recovery、连续零进展、预算耗尽和全局退避只在进入、升级或恢复时告警。
+- 事务污染、stale claim recovery、连续零进展、预算耗尽和逐 Key cooldown 只在进入、升级或恢复时告警；遗留 global-backoff meta 不作为 live 状态。
 - HA GC 低压恢复、SLO deadline、最老可删事件年龄与真实删除率必须可从管理员状态和聚合日志
   还原；sequence span 仅作趋势估算，不作为库存或 ETA。
 - Request-log GC admission and an unsealed-day retention guard are DEBUG-level typed outcomes. They
@@ -82,6 +82,9 @@
 - 对账主结算必须先于 Research sweep；本地预算压力与 upstream 429 必须分开记录，且最终
   远端观察、结算和状态落盘都必须受同一轮预算约束。HA GC 正常进展继续按通道 60 秒聚合，
   不能恢复逐片 WARN。
+- Reconciliation 429 state is scoped to the affected `period_reconciliation` Key. Non-cooling Keys
+  remain eligible; an all-Key cooldown reports the earliest retry time. Legacy global-backoff meta
+  is compatibility data only and cannot gate work or representative wake.
 - Privacy status owns an AppState-owned immutable last-good controller. After ready it starts one
   low-priority prewarm; deferred prewarm retries in the background until last-good is published or
   shutdown fences it, without delaying readiness or competing with foreground work.

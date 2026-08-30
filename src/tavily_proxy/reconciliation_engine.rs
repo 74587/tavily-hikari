@@ -24,11 +24,13 @@ struct ReconciliationRunResult {
     other_retry_windows: i64,
     key_backoff_window_count: i64,
     skipped_by_key_backoff: i64,
+    earliest_key_cooldown_until: Option<i64>,
+    key_cooldown_deferred: bool,
     attempted_candidate_count: i64,
     main_remote_request_count: i64,
+    main_remote_budget_deferred: bool,
     budget_exhausted: bool,
     remote_attempt_limit_reached: bool,
-    max_retry_after_until: Option<i64>,
     hydrate_ms: i64,
     first_remote_ms: Option<i64>,
     remote_ms: i64,
@@ -175,14 +177,10 @@ impl TavilyProxy {
                 .api_key_transient_backoff_state(key_id, Self::RECONCILIATION_BACKOFF_SCOPE)
                 .await?
                 .map(|state| state.retry_after_secs));
-        let retry_after_secs = requested_until
-            .map(|until| until.saturating_sub(now).max(1))
-            .unwrap_or_else(|| match prior_retry_after_secs {
-                None | Some(0) => 300,
-                Some(1..=300) => 600,
-                Some(301..=600) => 1200,
-                _ => 1800,
-            });
+        let retry_after_secs = ReconciliationEngine::reconciliation_retry_delay_secs(
+            prior_retry_after_secs,
+            requested_until.map(|until| until.saturating_sub(now)),
+        );
         let cooldown_until = now.saturating_add(retry_after_secs);
         let arm = ApiKeyTransientBackoffArm {
             key_id,
@@ -210,6 +208,7 @@ struct ReconciliationRemoteAttemptContext<'a> {
     remote_attempt_admission: Option<&'a Arc<RemoteAttemptAdmissionController>>,
     reconciliation_turn: Option<&'a crate::ReconciliationTurn>,
     manual_remote_attempt: bool,
+    attempt_deadline: Option<std::time::Instant>,
 }
 
 /// A stable, non-sensitive classification for failures before a reconciliation
@@ -244,20 +243,61 @@ impl TransportFailureKind {
             ProxyError::Http(error) if error.is_timeout() => Self::Timeout,
             ProxyError::Http(error) if error.is_connect() => Self::Connect,
             ProxyError::Http(_) => Self::ResponseBody,
+            ProxyError::Other(message)
+                if message == ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR =>
+            {
+                Self::Timeout
+            }
             _ => Self::Unknown,
         }
     }
 }
 
 impl ReconciliationRemoteAttemptContext<'_> {
-    async fn acquire(self) -> Result<Option<crate::RemoteAttemptLease>, &'static str> {
-        match (self.reconciliation_turn, self.remote_attempt_admission) {
-        (Some(turn), _) => turn.acquire_attempt().await.map(Some),
-        (None, Some(controller)) if self.manual_remote_attempt => {
-            controller.acquire_manual_attempt().await.map(Some)
+    fn deadline_remaining(self) -> Option<std::time::Duration> {
+        self.attempt_deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+    }
+
+    fn request_timeout(self) -> std::time::Duration {
+        self.attempt_deadline
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .min(std::time::Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS))
+                    .max(std::time::Duration::from_millis(1))
+            })
+            .unwrap_or_else(|| std::time::Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS))
+    }
+
+    fn with_attempt_deadline(self, deadline: std::time::Instant) -> Self {
+        Self {
+            attempt_deadline: Some(deadline),
+            ..self
         }
-        (None, Some(controller)) => controller.acquire_reconciliation_attempt().await.map(Some),
-        (None, None) => Ok(None),
+    }
+
+    async fn acquire(self) -> Result<Option<crate::RemoteAttemptLease>, &'static str> {
+        let acquire = async {
+            match (self.reconciliation_turn, self.remote_attempt_admission) {
+                (Some(turn), _) => turn.acquire_attempt().await.map(Some),
+                (None, Some(controller)) if self.manual_remote_attempt => {
+                    controller.acquire_manual_attempt().await.map(Some)
+                }
+                (None, Some(controller)) => {
+                    controller.acquire_reconciliation_attempt().await.map(Some)
+                }
+                (None, None) => Ok(None),
+            }
+        };
+        match self.attempt_deadline {
+            Some(deadline) => tokio::time::timeout(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+                acquire,
+            )
+            .await
+            .map_err(|_| ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON)?,
+            None => acquire.await,
         }
     }
 }
@@ -265,16 +305,52 @@ impl ReconciliationRemoteAttemptContext<'_> {
 impl ReconciliationEngine {
     const MAX_REMOTE_ATTEMPTS: i64 = 2;
     const DEFER_RETRY_DELAY_SECS: i64 = 30;
+    const REMOTE_ATTEMPT_ADMISSION_OPERATION: &'static str = "reconciliation_remote_attempt";
+    const REMOTE_ATTEMPT_STALE_TURN_REASON: &'static str = "reconciliation_turn_stale";
+    const REMOTE_ATTEMPT_BUDGET_REASON: &'static str = "remote_attempt_budget";
+    const REMOTE_REQUEST_DEADLINE_ERROR: &'static str = "reconciliation remote request deadline exceeded";
     // The compatibility one-shot API has no durable representative job.
     const ONE_SHOT_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+    fn reconciliation_retry_ladder_secs(prior_retry_after_secs: Option<i64>) -> i64 {
+        match prior_retry_after_secs {
+            None | Some(0) => 300,
+            Some(1..=300) => 600,
+            Some(301..=600) => 1200,
+            _ => 1800,
+        }
+    }
+
+    fn reconciliation_retry_delay_secs(
+        prior_retry_after_secs: Option<i64>,
+        requested_retry_after_secs: Option<i64>,
+    ) -> i64 {
+        let ladder_secs = Self::reconciliation_retry_ladder_secs(prior_retry_after_secs);
+        requested_retry_after_secs
+            .map(|seconds| seconds.max(1))
+            .unwrap_or_default()
+            .max(ladder_secs)
+    }
+
     fn deferred(proxy: &TavilyProxy, reason: &'static str) -> ClaimedReconciliationRunOutcome {
-        ClaimedReconciliationRunOutcome::Deferred {
+        Self::deferred_at(
+            proxy,
             reason,
-            retry_at: proxy
+            proxy
                 .backend_time()
                 .now_ts()
                 .saturating_add(Self::DEFER_RETRY_DELAY_SECS),
+        )
+    }
+
+    fn deferred_at(
+        _proxy: &TavilyProxy,
+        reason: &'static str,
+        retry_at: i64,
+    ) -> ClaimedReconciliationRunOutcome {
+        ClaimedReconciliationRunOutcome::Deferred {
+            reason,
+            retry_at,
         }
     }
 
@@ -284,6 +360,33 @@ impl ReconciliationEngine {
             ProxyError::Deferred { operation, reason }
                 if *operation == "reconciliation_projection" && reason == "projection_read_budget"
         )
+    }
+
+    fn remote_attempt_admission_error(reason: &'static str) -> ProxyError {
+        ProxyError::Deferred {
+            operation: Self::REMOTE_ATTEMPT_ADMISSION_OPERATION,
+            reason: reason.to_string(),
+        }
+    }
+
+    fn remote_attempt_admission_reason(error: &ProxyError) -> Option<&str> {
+        match error {
+            ProxyError::Deferred { operation, reason }
+                if *operation == Self::REMOTE_ATTEMPT_ADMISSION_OPERATION =>
+            {
+                Some(reason.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn remote_attempt_is_deferred(error: &ProxyError) -> bool {
+        Self::remote_attempt_admission_reason(error).is_some()
+    }
+
+    fn remote_attempt_is_stale(error: &ProxyError) -> bool {
+        Self::remote_attempt_admission_reason(error)
+            == Some(Self::REMOTE_ATTEMPT_STALE_TURN_REASON)
     }
 
     fn post_process_exhaustion_is_deferred(error: &ProxyError) -> bool {
@@ -457,6 +560,19 @@ impl ReconciliationEngine {
         matches!(
             err,
             ProxyError::Http(_) | ProxyError::Database(_) | ProxyError::InvalidEndpoint { .. }
+        ) || matches!(
+            err,
+            ProxyError::Other(message) if message == Self::REMOTE_REQUEST_DEADLINE_ERROR
+        )
+    }
+
+    fn is_remote_request_timeout(err: &ProxyError) -> bool {
+        matches!(
+            err,
+            ProxyError::Http(error) if error.is_timeout()
+        ) || matches!(
+            err,
+            ProxyError::Other(message) if message == Self::REMOTE_REQUEST_DEADLINE_ERROR
         )
     }
 
@@ -502,6 +618,7 @@ impl ReconciliationEngine {
         )
     }
 
+    #[cfg(test)]
     fn clears_upstream_429(outcome: ReconciliationOutcome) -> bool {
         Self::clears_local_pressure(outcome)
     }
@@ -668,6 +785,46 @@ mod reconciliation_engine_tests {
             "unknown"
         );
     }
+
+    #[test]
+    fn remote_admission_failures_are_typed_without_becoming_transport_or_semantic() {
+        let stale = ReconciliationEngine::remote_attempt_admission_error(
+            ReconciliationEngine::REMOTE_ATTEMPT_STALE_TURN_REASON,
+        );
+        assert!(ReconciliationEngine::remote_attempt_is_deferred(&stale));
+        assert!(ReconciliationEngine::remote_attempt_is_stale(&stale));
+        assert_eq!(
+            ReconciliationEngine::remote_attempt_admission_reason(&stale),
+            Some(ReconciliationEngine::REMOTE_ATTEMPT_STALE_TURN_REASON)
+        );
+        assert!(!ReconciliationEngine::is_transport_failure(&stale));
+
+        let budget = ReconciliationEngine::remote_attempt_admission_error(
+            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+        );
+        assert!(ReconciliationEngine::remote_attempt_is_deferred(&budget));
+        assert!(!ReconciliationEngine::remote_attempt_is_stale(&budget));
+    }
+
+    #[test]
+    fn retry_after_never_shortens_the_key_cooldown_ladder() {
+        assert_eq!(
+            ReconciliationEngine::reconciliation_retry_delay_secs(None, Some(1)),
+            300
+        );
+        assert_eq!(
+            ReconciliationEngine::reconciliation_retry_delay_secs(Some(300), Some(1)),
+            600
+        );
+        assert_eq!(
+            ReconciliationEngine::reconciliation_retry_delay_secs(None, Some(600)),
+            600
+        );
+        assert_eq!(
+            ReconciliationEngine::reconciliation_retry_delay_secs(Some(600), Some(1)),
+            1200
+        );
+    }
 }
 
 impl ReconciliationOutcome {
@@ -708,19 +865,51 @@ impl TavilyProxy {
             )
         })?;
         let url = build_path_prefixed_url(&base, "/usage");
-        let remote_attempt = remote_attempt
+        let remote_attempt_context = remote_attempt;
+        let remote_attempt = remote_attempt_context
             .acquire()
             .await
-            .map_err(|reason| (ProxyError::Other(reason.to_string()), None))?;
-        let response = self
+            .map_err(|reason| (ReconciliationEngine::remote_attempt_admission_error(reason), None))?;
+        let request_timeout = remote_attempt_context.request_timeout();
+        let request_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outbound = self
             .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                request_started.store(true, std::sync::atomic::Ordering::Relaxed);
                 client
                     .get(url.clone())
                     .header("Authorization", format!("Bearer {secret}"))
                     .header("X-Project-ID", project_id)
-                    .timeout(Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS))
-            })
-            .await
+                    .timeout(request_timeout)
+            });
+        let response_result = match remote_attempt_context.deadline_remaining() {
+            Some(remaining) if remaining.is_zero() => {
+                drop(remote_attempt);
+                return Err((
+                    ReconciliationEngine::remote_attempt_admission_error(
+                        ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                    ),
+                    None,
+                ));
+            }
+            Some(remaining) => match tokio::time::timeout(remaining, outbound).await {
+                Ok(result) => result,
+                Err(_) => {
+                    drop(remote_attempt);
+                    let error = if request_started.load(std::sync::atomic::Ordering::Relaxed) {
+                        ProxyError::Other(
+                            ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR.to_string(),
+                        )
+                    } else {
+                        ReconciliationEngine::remote_attempt_admission_error(
+                            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                        )
+                    };
+                    return Err((error, None));
+                }
+            },
+            None => outbound.await,
+        };
+        let response = response_result
             .map(|(response, _)| response)
             .map_err(|err| (err, None))?;
         let status = response.status();
@@ -783,18 +972,50 @@ impl TavilyProxy {
         })?;
         let path = format!("/research/{}", urlencoding::encode(request_id));
         let url = build_path_prefixed_url(&base, &path);
-        let remote_attempt = remote_attempt
+        let remote_attempt_context = remote_attempt;
+        let remote_attempt = remote_attempt_context
             .acquire()
             .await
-            .map_err(|reason| (ProxyError::Other(reason.to_string()), None))?;
-        let response = self
+            .map_err(|reason| (ReconciliationEngine::remote_attempt_admission_error(reason), None))?;
+        let request_timeout = remote_attempt_context.request_timeout();
+        let request_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outbound = self
             .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                request_started.store(true, std::sync::atomic::Ordering::Relaxed);
                 client
                     .get(url.clone())
                     .header("Authorization", format!("Bearer {secret}"))
-                    .timeout(Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS))
-            })
-            .await
+                    .timeout(request_timeout)
+            });
+        let response_result = match remote_attempt_context.deadline_remaining() {
+            Some(remaining) if remaining.is_zero() => {
+                drop(remote_attempt);
+                return Err((
+                    ReconciliationEngine::remote_attempt_admission_error(
+                        ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                    ),
+                    None,
+                ));
+            }
+            Some(remaining) => match tokio::time::timeout(remaining, outbound).await {
+                Ok(result) => result,
+                Err(_) => {
+                    drop(remote_attempt);
+                    let error = if request_started.load(std::sync::atomic::Ordering::Relaxed) {
+                        ProxyError::Other(
+                            ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR.to_string(),
+                        )
+                    } else {
+                        ReconciliationEngine::remote_attempt_admission_error(
+                            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                        )
+                    };
+                    return Err((error, None));
+                }
+            },
+            None => outbound.await,
+        };
+        let response = response_result
             .map(|(response, _)| response)
             .map_err(|err| (err, None))?;
         let status = response.status();

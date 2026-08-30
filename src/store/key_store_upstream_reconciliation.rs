@@ -15,12 +15,14 @@ pub(crate) const RECONCILIATION_OUTCOME_SETTLED: &str = "settled";
 pub(crate) const RECONCILIATION_OUTCOME_NO_ADJUSTMENT: &str = "no_adjustment";
 pub(crate) const RECONCILIATION_OUTCOME_OBSERVED: &str = "observed";
 pub(crate) const RECONCILIATION_OUTCOME_UPSTREAM_429: &str = "upstream_429";
+pub(crate) const RECONCILIATION_OUTCOME_KEY_COOLDOWN: &str = "key_cooldown";
 pub(crate) const RECONCILIATION_OUTCOME_TRANSPORT_FAILURE: &str = "transport_failure";
 pub(crate) const RECONCILIATION_OUTCOME_SEMANTIC_FAILURE: &str = "semantic_failure";
 pub(crate) const RECONCILIATION_OUTCOME_MISSING_ELIGIBLE_UPSTREAM_KEY: &str =
     "missing_eligible_upstream_key";
 pub(crate) const RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET: &str =
     "remote_attempt_budget";
+pub(crate) const RECONCILIATION_RETRY_REASON_KEY_COOLDOWN: &str = "key_cooldown";
 pub(crate) const RECONCILIATION_RETRY_REASON_GENERATION_CHANGED: &str = "generation_changed";
 pub(crate) const RECONCILIATION_OUTCOME_REMOTE_ATTEMPT_BUDGET: &str =
     "remote_attempt_budget";
@@ -39,8 +41,6 @@ pub(crate) struct UpstreamReconciliationRunAdmissionState {
     pub(crate) claim_current: bool,
     pub(crate) shadow_ready: bool,
     pub(crate) mode: ReconciliationMode,
-    pub(crate) global_backoff_level: i64,
-    pub(crate) global_backoff_until: i64,
     pub(crate) local_backoff_level: i64,
     pub(crate) local_backoff_until: i64,
 }
@@ -97,6 +97,9 @@ pub(crate) fn classify_reconciliation_retry_reason(reason: Option<&str>) -> &'st
     if reason == RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET {
         return RECONCILIATION_RETRY_REASON_REMOTE_ATTEMPT_BUDGET;
     }
+    if reason == RECONCILIATION_RETRY_REASON_KEY_COOLDOWN {
+        return RECONCILIATION_RETRY_REASON_KEY_COOLDOWN;
+    }
     if reason == RECONCILIATION_RETRY_REASON_GENERATION_CHANGED {
         return RECONCILIATION_RETRY_REASON_GENERATION_CHANGED;
     }
@@ -145,14 +148,12 @@ impl KeyStore {
                 r#"
             SELECT key, value
             FROM meta
-            WHERE key IN (?, ?, ?, ?, ?, ?, ?)
+            WHERE key IN (?, ?, ?, ?, ?)
             "#,
         )
         .bind(META_KEY_UPSTREAM_PROJECT_ID_MODE_V1)
         .bind(META_KEY_API_REBALANCE_ENABLED_V1)
         .bind(META_KEY_REBALANCE_MCP_ENABLED_V1)
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1)
-        .bind(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1)
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1)
         .bind(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1)
             .fetch_all(&mut *conn)
@@ -188,8 +189,6 @@ impl KeyStore {
             mode: ReconciliationMode::parse(&mode).ok_or_else(|| {
                 ProxyError::Other("invalid persisted upstream reconciliation mode".to_string())
             })?,
-            global_backoff_level: value_i64(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1),
-            global_backoff_until: value_i64(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1),
             local_backoff_level: value_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_LEVEL_V1),
             local_backoff_until: value_i64(META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1),
         })
@@ -613,7 +612,20 @@ impl KeyStore {
                 w.next_attempt_at,
                 w.period_end + 600,
                 CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
-                     THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+                     THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END,
+                COALESCE((
+                    SELECT MIN(b.cooldown_until)
+                    FROM api_key_transient_backoffs b
+                    WHERE b.scope = 'period_reconciliation'
+                      AND b.cooldown_until > ?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM upstream_reconciliation_usage u
+                          WHERE u.token_id = w.token_id
+                            AND u.period_code = w.period_code
+                            AND u.key_id = b.key_id
+                      )
+                ), 0)
             ))
             FROM upstream_reconciliation_work w
             LEFT JOIN upstream_reconciliation_settlements s
@@ -631,6 +643,7 @@ impl KeyStore {
               )
             "#,
         )
+        .bind(now)
         .bind(now)
         .fetch_one(&mut *conn)
         .await?;
@@ -672,13 +685,6 @@ impl KeyStore {
         }) else {
             return Ok(None);
         };
-        let (_, _, global_until) = Self::reconciliation_backoff_state_locked(
-            &mut conn,
-            META_KEY_UPSTREAM_RECONCILIATION_PRESSURE_STREAK_V1,
-            META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1,
-            META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_UNTIL_V1,
-        )
-        .await?;
         let (_, _, local_until) = Self::reconciliation_backoff_state_locked(
             &mut conn,
             META_KEY_UPSTREAM_RECONCILIATION_LOCAL_PRESSURE_STREAK_V1,
@@ -686,7 +692,7 @@ impl KeyStore {
             META_KEY_UPSTREAM_RECONCILIATION_LOCAL_BACKOFF_UNTIL_V1,
         )
         .await?;
-        Ok(Some(pending_at.max(global_until).max(local_until).max(now)))
+        Ok(Some(pending_at.max(local_until).max(now)))
         }
         .await;
         let close = conn.close().await;
@@ -935,6 +941,7 @@ impl KeyStore {
         }
     }
 
+    #[cfg(test)]
     async fn update_upstream_reconciliation_global_backoff_inner(
         &self,
         pressure: bool,
@@ -1009,6 +1016,7 @@ impl KeyStore {
         Ok((streak, level, until))
     }
 
+    #[cfg(test)]
     pub(crate) async fn update_upstream_reconciliation_global_backoff(
         &self,
         pressure: bool,
@@ -1020,23 +1028,6 @@ impl KeyStore {
             now,
             retry_after_until,
             None,
-        )
-        .await
-    }
-
-    pub(crate) async fn update_upstream_reconciliation_global_backoff_claimed(
-        &self,
-        pressure: bool,
-        now: i64,
-        retry_after_until: Option<i64>,
-        job_id: i64,
-        claim_generation: i64,
-    ) -> Result<(i64, i64, i64), ProxyError> {
-        self.update_upstream_reconciliation_global_backoff_inner(
-            pressure,
-            now,
-            retry_after_until,
-            Some((job_id, claim_generation)),
         )
         .await
     }
@@ -1419,13 +1410,34 @@ impl KeyStore {
             .push_bind(now)
             .push(r#"
               AND w.work_generation > w.completed_generation
-              AND MAX(
-                  w.next_attempt_at,
-                  CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
-                       THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
-              ) <= "#)
+              AND (
+                  MAX(
+                      w.next_attempt_at,
+                      CASE WHEN s.status IN ('pending', 'waiting', 'rate_limited')
+                           THEN COALESCE(s.next_attempt_at, 0) ELSE 0 END
+                  ) <= "#)
             .push_bind(now)
-            .push(" ");
+            .push(r#"
+                  OR (
+                      s.status = 'rate_limited'
+                      AND s.degraded_reason = 'upstream429'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM upstream_reconciliation_usage healthy_usage
+                          WHERE healthy_usage.token_id = w.token_id
+                            AND healthy_usage.period_code = w.period_code
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM api_key_transient_backoffs cooling_backoff
+                                WHERE cooling_backoff.key_id = healthy_usage.key_id
+                                  AND cooling_backoff.scope = 'period_reconciliation'
+                                  AND cooling_backoff.cooldown_until > "#)
+            .push_bind(now)
+            .push(r#"
+                            )
+                      )
+                  )
+              ) "#);
         match scope {
             ReconciliationCandidateScope::Recent { start, end } => {
                 query

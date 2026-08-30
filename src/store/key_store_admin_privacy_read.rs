@@ -544,6 +544,9 @@ impl KeyStore {
         ))
         .fetch_one(&mut **snapshot)
         .await?;
+        // Keep the legacy global 429 fields readable for rolling compatibility,
+        // but they are diagnostic history only. Per-key cooldowns below remain
+        // the only actionable reconciliation retry state.
         let (global_pressure_streak, global_backoff_level, global_backoff_until) = (
             meta_i64(META_KEY_UPSTREAM_RECONCILIATION_PRESSURE_STREAK_V1).unwrap_or(0),
             meta_i64(META_KEY_UPSTREAM_RECONCILIATION_BACKOFF_LEVEL_V1).unwrap_or(0),

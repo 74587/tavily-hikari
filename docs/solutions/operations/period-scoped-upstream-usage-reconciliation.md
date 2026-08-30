@@ -8,8 +8,9 @@ run. Research remains an independent, globally single-concurrent sweep. When due
 preparation, it reserves two seconds for the later Research sweep and two seconds
 for main durable finalization before it starts main remote work; the reserve may preclude a second slow main
 request. Without due Research, main settlement retains its normal remote envelope. Research exhaustion is
-diagnostic follow-up, not primary local pressure. Local-pressure backoff (`30/60/120/300s`) is separate from upstream-429 backoff
-(`2/5/10/30m`); non-429 failures do not reset the remote circuit. A current claim that reaches a
+diagnostic follow-up, not primary local pressure. Local-pressure backoff (`30/60/120/300s`) is separate from the
+per-key upstream-429 cooldown (`5/10/20/30m`); a 429 only cools the affected `period_reconciliation` key,
+and non-429 failures do not reset that key's cooldown. A current claim that reaches a
 low-foreground recovery window clears only its local-pressure state before trying the engine again;
 if SQLite is still pressured, that attempt durably defers again. This preserves foreground yielding
 without letting a stale local backoff consume the whole recovery tail.
@@ -219,14 +220,17 @@ Operators need to know whether exact reconciliation is active or merely configur
 This is why Tavily Hikari ships a dedicated `System Status` admin page instead of hiding the state
 inside logs.
 
-## Global upstream pressure backoff
+## Key-scoped upstream cooldown
 
-When candidates exist but a run settles none and at least half of its attempts are upstream 429s,
-preserve the per-key cooldown records but also persist a run-level pressure streak. After three
-consecutive pressure runs, skip further candidate work for 2, 5, 10, then 30 minutes; successful
-settlement or a lower pressure ratio clears the state. Emit per-key cooldowns at DEBUG and reserve
-WARN for entering, escalating, or recovering the global state so diagnosis does not become the
-dominant write or log workload.
+An upstream `429` belongs to the `period_reconciliation` Key that returned it. Persist one cooldown
+for that Key using the existing `5/10/20/30` minute ladder, honoring a later `Retry-After`, and
+leave other Keys eligible. A run that finds every otherwise eligible Key cooling down does no HTTP
+work and returns a claim-fenced deferred outcome at the earliest cooldown expiry; it does not turn
+the condition into a run-wide circuit or a semantic failure.
+
+The legacy global-backoff meta remains readable for rolling compatibility, but it is not a live
+engine gate, representative wake source, or administrator blocker. Keep per-Key cooldown events at
+DEBUG and reserve state-transition logs for entering, escalating, and recovering the affected Key.
 
 Run reconciliation in a remote-I/O concurrency class with a total wall-clock budget. Before each
 new upstream request, verify that enough budget remains for the request deadline; a timeout around
@@ -239,10 +243,11 @@ page, an exact `hasEligible` existence check, and the oldest candidate age. The 
 uses nullable, explicitly bounded estimates so an unobserved queue is not reported as zero and a
 multi-item queue is not collapsed into a boolean. Keep historical degraded visibility as a separate
 indexed existence probe instead of deriving it from a current-day metric. After three rounds with no
-remote attempt and exhausted local budget, persist a short local backoff without changing remote
-429 state. Only actual upstream 429 attempts advance the global `2/5/10/30` minute backoff and honor
-a later Retry-After; a real remote attempt or successful settlement clears the relevant state. Keep
-normal per-key 429 logs at DEBUG and reserve state-transition logs for enter, escalation, and recovery.
+remote attempt and exhausted local budget, persist a short local backoff without changing any Key
+cooldown. Only an actual upstream 429 attempt advances the affected Key's `5/10/20/30` minute
+cooldown and honors a later Retry-After; a real remote attempt or successful settlement clears only
+the recovered Key state. Keep normal per-Key 429 logs at DEBUG and reserve state-transition logs for
+enter, escalation, and recovery.
 
 Main settlement must start before terminal-research polling. Hydrate the bounded candidate page,
 key/cooldown state, and Research eligibility in the two-second local preparation budget. If Research is due,
