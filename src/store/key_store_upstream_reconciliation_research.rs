@@ -10,6 +10,11 @@ pub(crate) struct UpstreamReconciliationResearchCursor {
 #[derive(Debug)]
 pub(crate) struct UpstreamReconciliationResearchCandidatePage {
     pub(crate) candidates: Vec<crate::models::UpstreamReconciliationResearchCandidate>,
+    pub(crate) cooled_due_count: i64,
+    pub(crate) earliest_cooldown_until: Option<i64>,
+    pub(crate) start_cursor: UpstreamReconciliationResearchCursor,
+    pub(crate) candidate_cursors:
+        std::collections::HashMap<String, UpstreamReconciliationResearchCursor>,
     pub(crate) next_cursor: Option<UpstreamReconciliationResearchCursor>,
     pub(crate) wrapped: bool,
 }
@@ -18,10 +23,38 @@ impl UpstreamReconciliationResearchCandidatePage {
     pub(crate) fn empty() -> Self {
         Self {
             candidates: Vec::new(),
+            cooled_due_count: 0,
+            earliest_cooldown_until: None,
+            start_cursor: UpstreamReconciliationResearchCursor {
+                next_poll_at: -1,
+                key_id: String::new(),
+                request_id: String::new(),
+            },
+            candidate_cursors: std::collections::HashMap::new(),
             next_cursor: None,
             wrapped: false,
         }
     }
+}
+
+pub(crate) enum UpstreamReconciliationResearchDrainPoll<'a> {
+    Terminal,
+    Pending {
+        next_poll_at: i64,
+        outcome: &'a str,
+        error_kind: Option<&'a str>,
+    },
+}
+
+pub(crate) struct UpstreamReconciliationResearchDrainCommit<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) expected_cursor: &'a UpstreamReconciliationResearchCursor,
+    pub(crate) accepted_cursor: &'a UpstreamReconciliationResearchCursor,
+    pub(crate) wrapped: bool,
+    pub(crate) poll: UpstreamReconciliationResearchDrainPoll<'a>,
+    pub(crate) key_backoff: Option<ApiKeyTransientBackoffArm<'a>>,
+    pub(crate) job_id: i64,
+    pub(crate) claim_generation: i64,
 }
 
 impl KeyStore {
@@ -44,14 +77,22 @@ impl KeyStore {
             return session.complete_query_or_defer(injected_result).await.map(|_| {
                 UpstreamReconciliationResearchCandidatePage {
                     candidates: Vec::new(),
+                    cooled_due_count: 0,
+                    earliest_cooldown_until: None,
+                    start_cursor: UpstreamReconciliationResearchCursor {
+                        next_poll_at: -1,
+                        key_id: String::new(),
+                        request_id: String::new(),
+                    },
+                    candidate_cursors: std::collections::HashMap::new(),
                     next_cursor: None,
                     wrapped: false,
                 }
             });
         }
 
-        let cursor_result = sqlx::query_as::<_, (i64, String, String)>(
-            "SELECT cursor_next_poll_at, cursor_key_id, cursor_request_id
+        let cursor_result = sqlx::query_as::<_, (i64, String, String, i64)>(
+            "SELECT cursor_next_poll_at, cursor_key_id, cursor_request_id, updated_at
              FROM upstream_reconciliation_research_scan_state WHERE id = 'local'",
         )
         .fetch_one(&mut *session)
@@ -60,28 +101,54 @@ impl KeyStore {
             Ok(cursor) => cursor,
             Err(error) => {
                 return session
-                    .complete_query_or_defer::<(i64, String, String)>(Err(error))
+                    .complete_query_or_defer::<(i64, String, String, i64)>(Err(error))
                     .await
                     .map(|_| unreachable!("a failed cursor read cannot complete"));
             }
         };
+        let start_cursor = UpstreamReconciliationResearchCursor {
+            next_poll_at: cursor.0,
+            key_id: cursor.1.clone(),
+            request_id: cursor.2.clone(),
+        };
         let page_limit = limit.clamp(1, 80);
         let mut raw_rows = Vec::new();
-        let mut wrapped = false;
+        let force_wrap = cursor.0 != -1 && now.saturating_sub(cursor.3) >= 300;
+        let mut wrapped = force_wrap;
         for pass in 0..2 {
-            let (cursor_next_poll_at, cursor_key_id, cursor_request_id) = if pass == 1 {
+            let (cursor_next_poll_at, cursor_key_id, cursor_request_id) = if pass == 1 || force_wrap {
                 wrapped = true;
                 (-1_i64, String::new(), String::new())
             } else {
-                cursor.clone()
+                (cursor.0, cursor.1.clone(), cursor.2.clone())
             };
             let raw_result = sqlx::query_as::<_, (String, String, String, String, i64, i64)>(
                 r#"
                 SELECT r.request_id, r.token_id, r.key_id, r.period_code,
                        r.next_poll_at, r.poll_attempt_count
-                  FROM upstream_reconciliation_research r
+                 FROM upstream_reconciliation_research r
                  WHERE r.terminal_at IS NULL
                    AND r.next_poll_at <= ?
+                   AND EXISTS (
+                       SELECT 1 FROM upstream_reconciliation_usage eligible_u
+                        INDEXED BY idx_upstream_reconciliation_usage_window_mode
+                        WHERE eligible_u.token_id = r.token_id
+                          AND eligible_u.period_code = r.period_code
+                          AND eligible_u.period_end <= ?
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM upstream_reconciliation_usage future_u
+                        INDEXED BY idx_upstream_reconciliation_usage_window_mode
+                        WHERE future_u.token_id = r.token_id
+                          AND future_u.period_code = r.period_code
+                          AND future_u.period_end > ?
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM api_key_transient_backoffs b
+                        WHERE b.key_id = r.key_id
+                          AND b.scope = 'period_reconciliation'
+                          AND b.cooldown_until > ?
+                   )
                    AND (
                        r.next_poll_at > ?
                        OR (r.next_poll_at = ? AND r.key_id > ?)
@@ -91,6 +158,9 @@ impl KeyStore {
                  LIMIT ?
                 "#,
             )
+            .bind(now)
+            .bind(now)
+            .bind(now)
             .bind(now)
             .bind(cursor_next_poll_at)
             .bind(cursor_next_poll_at)
@@ -131,6 +201,7 @@ impl KeyStore {
                         r.poll_attempt_count
                       FROM upstream_reconciliation_research r
                       JOIN upstream_reconciliation_usage u
+                        INDEXED BY idx_upstream_reconciliation_usage_window_mode
                         ON u.token_id = r.token_id AND u.period_code = r.period_code
                      WHERE r.terminal_at IS NULL AND r.request_id IN ("#,
             );
@@ -148,6 +219,7 @@ impl KeyStore {
                        h.billing_subject, h.period_end, h.poll_attempt_count,
                        CASE WHEN EXISTS (
                           SELECT 1 FROM upstream_reconciliation_usage prior_u
+                            INDEXED BY idx_upstream_reconciliation_usage_subject_mode_period
                           JOIN upstream_reconciliation_settlements prior_s
                             ON prior_s.settlement_key = 'v1:' || prior_u.token_id || ':' || prior_u.period_code
                          WHERE prior_u.billing_subject = h.billing_subject
@@ -189,6 +261,48 @@ impl KeyStore {
                 }
             }
         };
+        let cooled_due_result = if raw_rows.is_empty() {
+            Some(sqlx::query_as::<_, (Option<i64>, i64)>(
+                "SELECT b.cooldown_until, 1
+                   FROM api_key_transient_backoffs b
+                  WHERE b.scope = 'period_reconciliation' AND b.cooldown_until > ?
+                    AND EXISTS (
+                        SELECT 1 FROM upstream_reconciliation_research r
+                         WHERE r.key_id = b.key_id AND r.terminal_at IS NULL
+                           AND r.next_poll_at <= ?
+                           AND EXISTS (SELECT 1 FROM upstream_reconciliation_usage eligible_u
+                                       INDEXED BY idx_upstream_reconciliation_usage_window_mode
+                                       WHERE eligible_u.token_id = r.token_id
+                                         AND eligible_u.period_code = r.period_code
+                                         AND eligible_u.period_end <= ?)
+                           AND NOT EXISTS (SELECT 1 FROM upstream_reconciliation_usage future_u
+                                           INDEXED BY idx_upstream_reconciliation_usage_window_mode
+                                           WHERE future_u.token_id = r.token_id
+                                             AND future_u.period_code = r.period_code
+                                             AND future_u.period_end > ?)
+                         LIMIT 1)
+                  ORDER BY b.cooldown_until LIMIT 1",
+            )
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .fetch_optional(&mut *session)
+                .await)
+        } else {
+            None
+        };
+        let (earliest_cooldown_until, cooled_due_count) = match cooled_due_result {
+            Some(Ok(Some(value))) => value,
+            Some(Ok(None)) => (None, 0),
+            Some(Err(error)) => {
+                return session
+                    .complete_query_or_defer::<i64>(Err(error))
+                    .await
+                    .map(|_| unreachable!("a failed cooldown count cannot complete"));
+            }
+            None => (None, 0),
+        };
         let mut selected_per_key = std::collections::HashMap::<String, usize>::new();
         let mut candidates = rows
             .into_iter()
@@ -221,6 +335,19 @@ impl KeyStore {
             )
             .collect::<Vec<_>>();
         candidates.truncate(page_limit as usize);
+        let candidate_cursors = raw_rows
+            .iter()
+            .map(|(request_id, _, key_id, _, next_poll_at, _)| {
+                (
+                    request_id.clone(),
+                    UpstreamReconciliationResearchCursor {
+                        next_poll_at: *next_poll_at,
+                        key_id: key_id.clone(),
+                        request_id: request_id.clone(),
+                    },
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         let next_cursor = raw_rows.last().map(
             |(_, _, key_id, _, next_poll_at, _)| UpstreamReconciliationResearchCursor {
                 next_poll_at: *next_poll_at,
@@ -232,13 +359,161 @@ impl KeyStore {
             },
         );
         let result = session
-            .complete_query_or_defer(Ok::<_, sqlx::Error>((candidates, next_cursor, wrapped)))
+            .complete_query_or_defer(Ok::<_, sqlx::Error>((
+                candidates,
+                candidate_cursors,
+                next_cursor,
+                wrapped,
+                cooled_due_count,
+                earliest_cooldown_until,
+            )))
             .await?;
         Ok(UpstreamReconciliationResearchCandidatePage {
             candidates: result.0,
-            next_cursor: result.1,
-            wrapped: result.2,
+            cooled_due_count: result.4,
+            earliest_cooldown_until: result.5,
+            start_cursor,
+            candidate_cursors: result.1,
+            next_cursor: result.2,
+            wrapped: result.3,
         })
+    }
+
+    pub(crate) async fn commit_upstream_reconciliation_research_drain(
+        &self,
+        commit: UpstreamReconciliationResearchDrainCommit<'_>,
+    ) -> Result<bool, ProxyError> {
+        let now = self.backend_time.now_ts();
+        let mut transaction = self.begin_reconciliation_control().await?;
+        let claimed_job = Some((commit.job_id, commit.claim_generation));
+        if !Self::reconciliation_claim_is_current_locked(&mut transaction, claimed_job).await? {
+            transaction.rollback().await?;
+            return Err(ProxyError::StaleClaim {
+                job_id: commit.job_id,
+                claim_generation: commit.claim_generation,
+            });
+        }
+        let cursor_matches: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM upstream_reconciliation_research_scan_state \
+             WHERE id = 'local' AND cursor_next_poll_at = ? AND cursor_key_id = ? \
+             AND cursor_request_id = ?)",
+        )
+        .bind(commit.expected_cursor.next_poll_at)
+        .bind(&commit.expected_cursor.key_id)
+        .bind(&commit.expected_cursor.request_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if cursor_matches == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+
+        match commit.poll {
+            UpstreamReconciliationResearchDrainPoll::Terminal => {
+                let changed = sqlx::query(
+                    "UPDATE upstream_reconciliation_research SET terminal_at = ?, \
+                     last_polled_at = ?, next_poll_at = 0, \
+                     poll_attempt_count = poll_attempt_count + 1, \
+                     last_poll_outcome = 'terminal', last_poll_error_kind = NULL, updated_at = ? \
+                     WHERE request_id = ? AND terminal_at IS NULL",
+                )
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .bind(commit.request_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+                if changed > 0 {
+                    sqlx::query(
+                        "INSERT INTO meta (key, value) VALUES (?, ?) \
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    )
+                    .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_TERMINAL_AT_V1)
+                    .bind(now.to_string())
+                    .execute(&mut *transaction)
+                    .await?;
+                }
+            }
+            UpstreamReconciliationResearchDrainPoll::Pending {
+                next_poll_at,
+                outcome,
+                error_kind,
+            } => {
+                sqlx::query(
+                    "UPDATE upstream_reconciliation_research SET last_polled_at = ?, \
+                     next_poll_at = ?, poll_attempt_count = poll_attempt_count + 1, \
+                     last_poll_outcome = ?, last_poll_error_kind = ?, updated_at = ? \
+                     WHERE request_id = ? AND terminal_at IS NULL",
+                )
+                .bind(now)
+                .bind(next_poll_at)
+                .bind(outcome)
+                .bind(error_kind)
+                .bind(now)
+                .bind(commit.request_id)
+                .execute(&mut *transaction)
+                .await?;
+            }
+        }
+
+        if let Some(arm) = commit.key_backoff {
+            sqlx::query(
+                "INSERT INTO api_key_transient_backoffs (key_id, scope, cooldown_until, \
+                 retry_after_secs, reason_code, source_request_log_id, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key_id, scope) DO UPDATE SET \
+                 cooldown_until = MAX(api_key_transient_backoffs.cooldown_until, excluded.cooldown_until), \
+                 retry_after_secs = CASE WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until \
+                 THEN excluded.retry_after_secs ELSE api_key_transient_backoffs.retry_after_secs END, \
+                 reason_code = CASE WHEN excluded.cooldown_until >= api_key_transient_backoffs.cooldown_until \
+                 THEN COALESCE(excluded.reason_code, api_key_transient_backoffs.reason_code) \
+                 ELSE api_key_transient_backoffs.reason_code END, updated_at = MAX(api_key_transient_backoffs.updated_at, excluded.updated_at)",
+            )
+            .bind(arm.key_id)
+            .bind(arm.scope)
+            .bind(arm.cooldown_until)
+            .bind(arm.retry_after_secs)
+            .bind(arm.reason_code)
+            .bind(arm.source_request_log_id)
+            .bind(arm.now)
+            .bind(arm.now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let wrapped = commit.wrapped
+            || commit.expected_cursor.next_poll_at == -1
+            || (
+                commit.accepted_cursor.next_poll_at,
+                commit.accepted_cursor.key_id.as_str(),
+                commit.accepted_cursor.request_id.as_str(),
+            ) < (
+                commit.expected_cursor.next_poll_at,
+                commit.expected_cursor.key_id.as_str(),
+                commit.expected_cursor.request_id.as_str(),
+            );
+        sqlx::query(
+            "UPDATE upstream_reconciliation_research_scan_state SET cursor_next_poll_at = ?, \
+             cursor_key_id = ?, cursor_request_id = ?, \
+             updated_at = CASE WHEN ? THEN ? ELSE updated_at END WHERE id = 'local'",
+        )
+        .bind(commit.accepted_cursor.next_poll_at)
+        .bind(&commit.accepted_cursor.key_id)
+        .bind(&commit.accepted_cursor.request_id)
+        .bind(wrapped)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(META_KEY_UPSTREAM_RECONCILIATION_LAST_RESEARCH_SWEEP_AT_V1)
+        .bind(now.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.finish(Ok(())).await?;
+        Ok(true)
     }
 
     #[cfg(test)]

@@ -201,6 +201,7 @@ capture_reconciliation_state() {
   local target_path="$2"
   local fixture_token_id="testbox-reconciliation-shadow-token"
   local fixture_period_code="testbox-reconciliation-shadow-period"
+  local fixture_research_request_id="testbox-reconciliation-research-request"
   local projection_p95=0
   if [[ "$(sqlite3 "$database_path" "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'upstream_reconciliation_projection_state');")" == "1" ]]; then
     projection_p95="$(sqlite3 "$database_path" "SELECT COALESCE(transaction_p95_ms, 0) FROM upstream_reconciliation_projection_state WHERE id = 'local';")"
@@ -220,6 +221,13 @@ capture_reconciliation_state() {
           FROM upstream_reconciliation_work
          WHERE token_id = '$fixture_token_id'
            AND period_code = '$fixture_period_code'
+      ), 0),
+      COALESCE((SELECT COUNT(*) FROM upstream_reconciliation_research WHERE terminal_at IS NOT NULL), 0),
+      COALESCE((SELECT COUNT(*) FROM upstream_reconciliation_research WHERE terminal_at IS NULL), 0),
+      COALESCE((
+        SELECT terminal_at IS NOT NULL
+          FROM upstream_reconciliation_research
+         WHERE request_id = '$fixture_research_request_id'
       ), 0)
     FROM upstream_reconciliation_work;
   " > "$target_path"
@@ -301,6 +309,60 @@ ON CONFLICT(token_id, key_id, period_code) DO UPDATE SET
   first_used_at = excluded.first_used_at,
   last_used_at = excluded.last_used_at,
   updated_at = excluded.updated_at;
+INSERT INTO upstream_reconciliation_usage (
+  token_id, key_id, period_code, project_id, billing_subject, settlement_mode,
+  period_start, period_end, request_count, first_used_at, last_used_at, updated_at
+) VALUES (
+  'testbox-reconciliation-research-token',
+  (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key'),
+  'testbox-reconciliation-research-period',
+  'testbox-reconciliation-research-project',
+  'token:testbox-reconciliation-research-token', 'shadow',
+  unixepoch() - 1800, unixepoch() - 601, 1,
+  unixepoch() - 1800, unixepoch() - 601, unixepoch() - 601
+)
+ON CONFLICT(token_id, key_id, period_code) DO UPDATE SET
+  project_id = excluded.project_id,
+  billing_subject = excluded.billing_subject,
+  settlement_mode = excluded.settlement_mode,
+  period_start = excluded.period_start,
+  period_end = excluded.period_end,
+  request_count = excluded.request_count,
+  first_used_at = excluded.first_used_at,
+  last_used_at = excluded.last_used_at,
+  updated_at = excluded.updated_at;
+INSERT INTO upstream_reconciliation_research (
+  request_id, token_id, key_id, period_code, created_at, terminal_at,
+  last_polled_at, next_poll_at, poll_attempt_count, last_poll_outcome,
+  last_poll_error_kind, updated_at
+) VALUES (
+  'testbox-reconciliation-research-request',
+  'testbox-reconciliation-research-token',
+  (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key'),
+  'testbox-reconciliation-research-period', unixepoch() - 601, NULL,
+  NULL, -1, 0, NULL, NULL, unixepoch() - 601
+)
+ON CONFLICT(request_id) DO UPDATE SET
+  token_id = excluded.token_id,
+  key_id = excluded.key_id,
+  period_code = excluded.period_code,
+  created_at = excluded.created_at,
+  terminal_at = NULL,
+  last_polled_at = NULL,
+  next_poll_at = -1,
+  poll_attempt_count = 0,
+  last_poll_outcome = NULL,
+  last_poll_error_kind = NULL,
+  updated_at = excluded.updated_at;
+DELETE FROM api_key_transient_backoffs
+ WHERE key_id = (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key')
+   AND scope = 'period_reconciliation';
+UPDATE upstream_reconciliation_research_scan_state
+   SET cursor_next_poll_at = -1,
+       cursor_key_id = '',
+       cursor_request_id = '',
+       updated_at = 0
+ WHERE id = 'local';
 SQL
 
   # Older baselines predate the controller table. When the copied schema
@@ -349,6 +411,14 @@ SQL
          AND usage.key_id = (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key')
          AND usage.settlement_mode = 'shadow'
          AND work.completed_generation < work.work_generation
+    ) AND EXISTS (
+      SELECT 1 FROM upstream_reconciliation_research
+       WHERE request_id = 'testbox-reconciliation-research-request'
+         AND terminal_at IS NULL AND next_poll_at = -1
+    ) AND NOT EXISTS (
+      SELECT 1 FROM api_key_transient_backoffs
+       WHERE key_id = (SELECT id FROM api_keys WHERE api_key = 'tvly-load-key')
+         AND scope = 'period_reconciliation'
     )
       THEN 1 ELSE 0 END;
   ")"
@@ -555,7 +625,8 @@ def read_reconciliation_state(path):
     keys = (
         "terminal", "settled", "noAdjustment", "observed",
         "projectionTransactionP95Ms", "billingAdjustmentCount", "billingAdjustmentSum",
-        "fixtureNoAdjustmentTerminal",
+        "fixtureNoAdjustmentTerminal", "researchTerminal", "researchPending",
+        "fixtureResearchTerminal",
     )
     return dict(zip(keys, values, strict=True))
 
@@ -602,6 +673,7 @@ def structured_field(line, field, value):
 
 sqlite_transient_lock_retries = sum(
     structured_field(line, "event", "sqlite_transient_write_retry")
+    or ("transient sqlite error" in line and "attempt=" in line)
     for line in sqlite_lock_lines
 )
 sqlite_typed_lock_deferrals = sum(
@@ -666,6 +738,12 @@ summary = {
         "before": reconciliation_before,
         "after": reconciliation_after,
         "terminalDelta": reconciliation_after["terminal"] - reconciliation_before["terminal"],
+        "researchTerminalDelta": (
+            reconciliation_after["researchTerminal"] - reconciliation_before["researchTerminal"]
+        ),
+        "researchPendingDelta": (
+            reconciliation_after["researchPending"] - reconciliation_before["researchPending"]
+        ),
     },
 }
 (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -893,6 +971,12 @@ if candidate["reconciliation"]["terminalDelta"] <= 0:
     raise SystemExit("candidate reconciliation produced no terminal outcome")
 if not candidate["reconciliation"]["after"]["fixtureNoAdjustmentTerminal"]:
     raise SystemExit("candidate did not complete the deterministic shadow reconciliation fixture")
+if candidate["reconciliation"]["researchTerminalDelta"] <= 0:
+    raise SystemExit("candidate Research drain produced no terminal outcome")
+if candidate["reconciliation"]["researchPendingDelta"] > 0:
+    raise SystemExit("candidate Research pending backlog grew during the comparison")
+if not candidate["reconciliation"]["after"]["fixtureResearchTerminal"]:
+    raise SystemExit("candidate did not complete the deterministic Research drain fixture")
 projection_p95 = candidate["reconciliation"]["after"]["projectionTransactionP95Ms"]
 if projection_p95 <= 0 or projection_p95 >= 100:
     raise SystemExit(
