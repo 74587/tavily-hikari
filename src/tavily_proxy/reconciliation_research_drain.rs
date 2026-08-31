@@ -16,6 +16,10 @@ static RESEARCH_DRAIN_RESUMES: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 static RESEARCH_DRAIN_BACKLOG_OPEN: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
+static RESEARCH_DRAIN_UNAVAILABLE: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+static RESEARCH_DRAIN_CREDENTIALS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimedResearchDrainOutcome {
@@ -36,6 +40,9 @@ pub enum ClaimedResearchDrainOutcome {
 impl TavilyProxy {
     const RESEARCH_DRAIN_INTERVAL_SECS: i64 = 5;
     const RESEARCH_DRAIN_DEFER_SECS: i64 = 30;
+    const RESEARCH_CREDENTIALS_BACKOFF_SCOPE: &'static str =
+        "reconciliation_research_credentials";
+    const RESEARCH_CREDENTIALS_COOLDOWN_SECS: i64 = 6 * 60 * 60;
 
     fn observe_research_drain_outcome(
         now: i64,
@@ -72,6 +79,8 @@ impl TavilyProxy {
                 pending = RESEARCH_DRAIN_PENDING.swap(0, Ordering::Relaxed),
                 retries = RESEARCH_DRAIN_RETRIES.swap(0, Ordering::Relaxed),
                 cooldown_skips = RESEARCH_DRAIN_COOLDOWN_SKIPS.swap(0, Ordering::Relaxed),
+                unavailable = RESEARCH_DRAIN_UNAVAILABLE.swap(0, Ordering::Relaxed),
+                credentials_cooling = RESEARCH_DRAIN_CREDENTIALS.swap(0, Ordering::Relaxed),
                 defers = RESEARCH_DRAIN_DEFERS.swap(0, Ordering::Relaxed),
                 resumes = RESEARCH_DRAIN_RESUMES.swap(0, Ordering::Relaxed),
                 backlog_open = RESEARCH_DRAIN_BACKLOG_OPEN.load(Ordering::Relaxed),
@@ -79,6 +88,46 @@ impl TavilyProxy {
             );
         }
         outcome
+    }
+
+    async fn record_one_shot_research_credentials(
+        &self,
+        candidate: &crate::models::UpstreamReconciliationResearchCandidate,
+        outcome: ResearchPollOutcome,
+        now: i64,
+        cooling_keys: &mut std::collections::HashSet<String>,
+        earliest_cooldown_until: &mut Option<i64>,
+    ) -> Result<(), ProxyError> {
+        let error_kind = if matches!(outcome, ResearchPollOutcome::MissingLocalSecret) {
+            "missing_local_secret"
+        } else {
+            "credentials"
+        };
+        let cooldown_until = now.saturating_add(Self::RESEARCH_CREDENTIALS_COOLDOWN_SECS);
+        self.key_store
+            .arm_api_key_transient_backoff(crate::store::ApiKeyTransientBackoffArm {
+                key_id: &candidate.key_id,
+                scope: Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE,
+                cooldown_until,
+                retry_after_secs: Self::RESEARCH_CREDENTIALS_COOLDOWN_SECS,
+                reason_code: Some(error_kind),
+                source_request_log_id: None,
+                now,
+            })
+            .await?;
+        cooling_keys.insert(candidate.key_id.clone());
+        *earliest_cooldown_until = Some(
+            earliest_cooldown_until
+                .map_or(cooldown_until, |current| current.min(cooldown_until)),
+        );
+        self.key_store
+            .record_upstream_reconciliation_research_poll(
+                &candidate.request_id,
+                cooldown_until,
+                "retry",
+                Some(error_kind),
+            )
+            .await
     }
 
     pub async fn run_upstream_reconciliation_research_drain_claimed(
@@ -150,7 +199,7 @@ impl TavilyProxy {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let cooldowns = self
+        let mut cooldowns = self
             .key_store
             .list_active_api_key_transient_backoffs(
                 &key_ids,
@@ -158,6 +207,24 @@ impl TavilyProxy {
                 now,
             )
             .await?;
+        for (key_id, state) in self
+            .key_store
+            .list_active_api_key_transient_backoffs(
+                &key_ids,
+                Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE,
+                now,
+            )
+            .await?
+        {
+            cooldowns
+                .entry(key_id)
+                .and_modify(|current| {
+                    if state.cooldown_until > current.cooldown_until {
+                        *current = state;
+                    }
+                })
+                .or_insert(state);
+        }
         let earliest_cooldown = cooldowns.values().map(|state| state.cooldown_until).min();
         let Some(candidate) = page
             .candidates
@@ -187,7 +254,7 @@ impl TavilyProxy {
             attempt_deadline: Some(request_deadline),
         };
         let result = self
-            .fetch_upstream_research_terminal(
+            .fetch_upstream_research_poll(
                 &candidate.key_id,
                 usage_base,
                 &candidate.request_id,
@@ -195,14 +262,20 @@ impl TavilyProxy {
             )
             .await;
         let mut key_backoff = None;
+        let mut clear_key_backoff_scope = None;
         let (poll, terminal, pending, retries) = match result {
-            Ok(true) => (
+            Ok(ResearchPollOutcome::Terminal) => {
+                clear_key_backoff_scope = Some(Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE);
+                (
                 crate::store::UpstreamReconciliationResearchDrainPoll::Terminal,
                 1,
                 0,
                 0,
-            ),
-            Ok(false) => (
+                )
+            }
+            Ok(ResearchPollOutcome::Pending) => {
+                clear_key_backoff_scope = Some(Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE);
+                (
                 crate::store::UpstreamReconciliationResearchDrainPoll::Pending {
                     next_poll_at: now.saturating_add(120),
                     outcome: "pending",
@@ -211,7 +284,48 @@ impl TavilyProxy {
                 0,
                 1,
                 0,
+                )
+            }
+            Ok(ResearchPollOutcome::Unavailable) => (
+                {
+                    RESEARCH_DRAIN_UNAVAILABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::store::UpstreamReconciliationResearchDrainPoll::Unavailable {
+                        error_kind: "not_found",
+                    }
+                },
+                0,
+                0,
+                0,
             ),
+            Ok(outcome @ (ResearchPollOutcome::Credentials | ResearchPollOutcome::MissingLocalSecret)) => {
+                RESEARCH_DRAIN_CREDENTIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let missing_secret = matches!(outcome, ResearchPollOutcome::MissingLocalSecret);
+                let error_kind = if missing_secret {
+                    "missing_local_secret"
+                } else {
+                    "credentials"
+                };
+                let cooldown_until = now.saturating_add(Self::RESEARCH_CREDENTIALS_COOLDOWN_SECS);
+                key_backoff = Some(crate::store::ApiKeyTransientBackoffArm {
+                    key_id: &candidate.key_id,
+                    scope: Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE,
+                    cooldown_until,
+                    retry_after_secs: Self::RESEARCH_CREDENTIALS_COOLDOWN_SECS,
+                    reason_code: Some(error_kind),
+                    source_request_log_id: None,
+                    now,
+                });
+                (
+                    crate::store::UpstreamReconciliationResearchDrainPoll::Pending {
+                        next_poll_at: cooldown_until,
+                        outcome: "retry",
+                        error_kind: Some(error_kind),
+                    },
+                    0,
+                    0,
+                    1,
+                )
+            }
             Err((error, _)) if ReconciliationEngine::remote_attempt_is_deferred(&error) => {
                 if ReconciliationEngine::remote_attempt_is_stale(&error) {
                     return Ok(Self::observe_research_drain_outcome(
@@ -266,11 +380,14 @@ impl TavilyProxy {
                 )
             }
             Err((error, _)) => {
-                let (next_poll_at, error_kind) = if ReconciliationEngine::is_remote_request_timeout(&error) {
-                    (now.saturating_add(Self::research_retry_delay_secs(candidate.poll_attempt_count)), "timeout")
+                let error_kind = if ReconciliationEngine::is_remote_request_timeout(&error) {
+                    "timeout"
+                } else if matches!(&error, ProxyError::UsageHttp { status, .. } if status.is_server_error()) {
+                    "response_body"
                 } else {
-                    (now.saturating_add(Self::research_retry_delay_secs(candidate.poll_attempt_count)), RECONCILIATION_RETRY_REASON_OTHER)
+                    TransportFailureKind::from_proxy_error(&error).as_str()
                 };
+                let next_poll_at = now.saturating_add(Self::research_retry_delay_secs(candidate.poll_attempt_count));
                 (
                     crate::store::UpstreamReconciliationResearchDrainPoll::Pending {
                         next_poll_at,
@@ -293,6 +410,7 @@ impl TavilyProxy {
                     wrapped: page.wrapped,
                     poll,
                     key_backoff,
+                    clear_key_backoff_scope,
                     job_id,
                     claim_generation,
                 },

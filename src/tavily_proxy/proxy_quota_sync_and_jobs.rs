@@ -310,7 +310,7 @@ impl TavilyProxy {
                 break;
             }
             let research_result = self
-                .fetch_upstream_research_terminal(
+                .fetch_upstream_research_poll(
                     &candidate.key_id,
                     usage_base,
                     &candidate.request_id,
@@ -382,11 +382,20 @@ impl TavilyProxy {
                     budget_exhausted = true;
                     break;
                 }
-                Ok(true) => {
+                Ok(ResearchPollOutcome::Terminal) => {
                     let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
                         budget_exhausted = true;
                         break;
+                    }
+                    if claimed_job.is_none() {
+                        self.key_store
+                            .clear_api_key_transient_backoff_scope(
+                                &candidate.key_id,
+                                Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE,
+                                now,
+                            )
+                            .await?;
                     }
                     match claimed_job {
                         Some((job_id, claim_generation)) => {
@@ -415,11 +424,20 @@ impl TavilyProxy {
                         period_code = %candidate.period_code,
                     );
                 }
-                Ok(false) => {
+                Ok(ResearchPollOutcome::Pending) => {
                     let remaining = request_deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
                         budget_exhausted = true;
                         break;
+                    }
+                    if claimed_job.is_none() {
+                        self.key_store
+                            .clear_api_key_transient_backoff_scope(
+                                &candidate.key_id,
+                                Self::RESEARCH_CREDENTIALS_BACKOFF_SCOPE,
+                                now,
+                            )
+                            .await?;
                     }
                     match claimed_job {
                         Some((job_id, claim_generation)) => {
@@ -446,6 +464,35 @@ impl TavilyProxy {
                         }
                     }
                     pending += 1;
+                }
+                Ok(ResearchPollOutcome::Unavailable) => {
+                    if claimed_job.is_some() {
+                        return Err(ProxyError::Other(
+                            "durable Research drain must handle unavailable polls".to_string(),
+                        ));
+                    }
+                    self.key_store
+                        .mark_upstream_reconciliation_research_unavailable(
+                            &candidate.request_id,
+                            "not_found",
+                        )
+                        .await?;
+                }
+                Ok(outcome @ (ResearchPollOutcome::Credentials | ResearchPollOutcome::MissingLocalSecret)) => {
+                    if claimed_job.is_some() {
+                        return Err(ProxyError::Other(
+                            "durable Research drain must handle credential polls".to_string(),
+                        ));
+                    }
+                    self.record_one_shot_research_credentials(
+                        &candidate,
+                        outcome,
+                        now,
+                        &mut cooling_keys,
+                        &mut earliest_cooldown_until,
+                    )
+                    .await?;
+                    retries += 1;
                 }
                 Err((err, retry_after)) => {
                     let reason = if matches!(
