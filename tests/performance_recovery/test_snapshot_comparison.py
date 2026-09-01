@@ -92,6 +92,14 @@ class SnapshotComparisonTests(unittest.TestCase):
         self.assertIn("egress_socks5_enabled = 0", COMPARISON)
         self.assertIn("testbox-reconciliation-shadow-token", COMPARISON)
         self.assertIn("testbox-reconciliation-shadow-period", COMPARISON)
+        self.assertIn("tvly-reconciliation-fixture-key", COMPARISON)
+        self.assertIn("api_key_low_quota_depletions", COMPARISON)
+        self.assertIn("API rebalance excludes it from foreground selection", COMPARISON)
+        self.assertIn("Reconciliation fetches its persisted secret directly", COMPARISON)
+        self.assertIn(
+            "TAVILY_API_KEYS: tvly-load-key,tvly-reconciliation-fixture-key",
+            COMPARISON,
+        )
         self.assertIn("snapshot reconciliation fixture preparation failed", COMPARISON)
         self.assertIn("testbox-reconciliation-research-request", COMPARISON)
         self.assertIn("DELETE FROM api_key_transient_backoffs", COMPARISON)

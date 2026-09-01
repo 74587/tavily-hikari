@@ -27,7 +27,7 @@ struct DashboardOverviewFreshness {
     dashboard_api_key_lifecycle_signature: [i64; 3],
     dashboard_quarantine_lifecycle_signature: [i64; 3],
     dashboard_exhausted_lifecycle_signature: [i64; 3],
-    dashboard_quota_charge_token: [i64; 6],
+    dashboard_quota_charge_token: [i64; 5],
     dashboard_stale_key_count: i64,
     forward_proxy: Option<(i64, i64)>,
     exhausted_keys: Vec<String>,
@@ -44,6 +44,25 @@ struct DashboardOverviewFreshness {
     request_log_retention_days: i64,
     hourly_window_anchor: i64,
     retention_since: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DashboardBuildReason {
+    Cold,
+    RequestStatsDirty,
+    AlertProjectionDirty,
+    SafetyProbeChanged,
+}
+
+impl DashboardBuildReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Cold => "cold",
+            Self::RequestStatsDirty => "request_stats_dirty",
+            Self::AlertProjectionDirty => "alert_projection_dirty",
+            Self::SafetyProbeChanged => "safety_probe_changed",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,8 +82,11 @@ struct DashboardOverviewCacheState {
     built_alert_projection_generation: Option<u64>,
     last_refresh_requested_at: Option<tokio::time::Instant>,
     last_freshness_probe_at: Option<tokio::time::Instant>,
+    last_build_reason: Option<DashboardBuildReason>,
     notify: Arc<tokio::sync::Notify>,
     admin_alerts: AdminAlertsReadCache,
+    admin_alerts_prewarm_in_flight: bool,
+    admin_alerts_prewarm_not_before: Option<tokio::time::Instant>,
     admin_privacy_status: AdminPrivacyStatusController,
     #[cfg(test)]
     build_count: usize,
@@ -86,8 +108,11 @@ impl Default for DashboardOverviewCacheState {
             built_alert_projection_generation: None,
             last_refresh_requested_at: None,
             last_freshness_probe_at: None,
+            last_build_reason: None,
             notify: Arc::new(tokio::sync::Notify::new()),
             admin_alerts: AdminAlertsReadCache::default(),
+            admin_alerts_prewarm_in_flight: false,
+            admin_alerts_prewarm_not_before: None,
             admin_privacy_status: AdminPrivacyStatusController::default(),
             #[cfg(test)]
             build_count: 0,
@@ -101,6 +126,27 @@ impl Default for DashboardOverviewCacheState {
 
 const ADMIN_ALERTS_CACHE_CAPACITY: usize = 64;
 const ADMIN_ALERTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const ADMIN_ALERTS_PREWARM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl DashboardOverviewCacheState {
+    fn try_start_admin_alerts_prewarm(&mut self, now: tokio::time::Instant) -> bool {
+        if self.admin_alerts_prewarm_in_flight
+            || self
+                .admin_alerts_prewarm_not_before
+                .is_some_and(|not_before| now < not_before)
+        {
+            return false;
+        }
+
+        self.admin_alerts_prewarm_in_flight = true;
+        self.admin_alerts_prewarm_not_before = Some(now + ADMIN_ALERTS_PREWARM_MIN_INTERVAL);
+        true
+    }
+
+    fn finish_admin_alerts_prewarm(&mut self) {
+        self.admin_alerts_prewarm_in_flight = false;
+    }
+}
 
 #[derive(Debug, Clone)]
 enum AdminAlertsReadCacheValue {
@@ -195,6 +241,70 @@ async fn record_admin_alerts_last_good(
         .admin_alerts
         .entries
         .truncate(ADMIN_ALERTS_CACHE_CAPACITY);
+}
+
+fn default_admin_alert_cache_key(kind: &str) -> String {
+    serde_json::to_string(&(
+        kind,
+        Option::<&str>::None,
+        Option::<i64>::None,
+        Option::<i64>::None,
+        Option::<&str>::None,
+        Option::<&str>::None,
+        Option::<&str>::None,
+        Vec::<String>::new(),
+        1_i64,
+        20_i64,
+    ))
+    .expect("default admin Alerts cache key fields are serializable")
+}
+
+pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    {
+        let mut cache = cache.lock().await;
+        if !cache.try_start_admin_alerts_prewarm(tokio::time::Instant::now()) {
+            return;
+        }
+    }
+    tokio::spawn(async move {
+        if let Ok(catalog) = state.proxy.admin_alert_catalog().await {
+            record_admin_alerts_last_good(
+                state.as_ref(),
+                "catalog".to_string(),
+                AdminAlertsReadCacheValue::Catalog(catalog),
+            )
+            .await;
+        }
+        if let Ok(events) = state
+            .proxy
+            .admin_alert_events_page(None, None, None, None, None, None, &[], 1, 20)
+            .await
+        {
+            record_admin_alerts_last_good(
+                state.as_ref(),
+                default_admin_alert_cache_key("events"),
+                AdminAlertsReadCacheValue::Events(events),
+            )
+            .await;
+        }
+        if let Ok(groups) = state
+            .proxy
+            .admin_alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
+            .await
+        {
+            record_admin_alerts_last_good(
+                state.as_ref(),
+                default_admin_alert_cache_key("groups"),
+                AdminAlertsReadCacheValue::Groups(groups),
+            )
+            .await;
+        }
+        dashboard_overview_cache_for_state(state.as_ref())
+            .lock()
+            .await
+            .finish_admin_alerts_prewarm();
+    });
 }
 
 #[cfg(test)]
@@ -505,6 +615,32 @@ pub(crate) async fn wait_for_admin_privacy_status_last_good(state: &AppState) {
 pub(crate) async fn prime_admin_privacy_status_for_test(state: Arc<AppState>) {
     prewarm_admin_privacy_status(state.clone()).await;
     wait_for_admin_privacy_status_last_good(state.as_ref()).await;
+}
+
+#[cfg(test)]
+mod admin_alerts_prewarm_tests {
+    use super::{ADMIN_ALERTS_PREWARM_MIN_INTERVAL, DashboardOverviewCacheState};
+
+    #[test]
+    fn admin_alerts_prewarm_coalesces_projection_updates_for_one_minute() {
+        let mut cache = DashboardOverviewCacheState::default();
+        let now = tokio::time::Instant::now();
+
+        assert!(cache.try_start_admin_alerts_prewarm(now));
+        assert!(
+            !cache.try_start_admin_alerts_prewarm(now),
+            "an in-flight prewarm must remain singleflight"
+        );
+
+        cache.finish_admin_alerts_prewarm();
+        assert!(
+            !cache.try_start_admin_alerts_prewarm(
+                now + ADMIN_ALERTS_PREWARM_MIN_INTERVAL - std::time::Duration::from_secs(1)
+            ),
+            "a busy projection must not restart the full admin cache warmup every slice"
+        );
+        assert!(cache.try_start_admin_alerts_prewarm(now + ADMIN_ALERTS_PREWARM_MIN_INTERVAL));
+    }
 }
 
 #[cfg(test)]

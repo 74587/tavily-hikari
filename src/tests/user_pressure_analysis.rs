@@ -8,7 +8,10 @@ async fn wait_for_server_pressure_totals(
     expected_success: i64,
     expected_failure: i64,
 ) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // A healthy flush starts after the one-second debounce. Each of the first
+    // two bounded SQLite defers waits five seconds before retrying; leave a
+    // small scheduler margin for that supported recovery path.
+    let result = tokio::time::timeout(Duration::from_secs(13), async {
         loop {
             let (success_count, failure_count): (i64, i64) = sqlx::query_as(
                 r#"
@@ -26,8 +29,13 @@ async fn wait_for_server_pressure_totals(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("deferred pressure buckets should converge within the test budget");
+    .await;
+    if result.is_err() {
+        let diagnostics = proxy
+            .observability_deferred_writer_diagnostics_for_test()
+            .await;
+        panic!("deferred pressure buckets should converge within the test budget: {diagnostics:?}");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -405,11 +413,6 @@ async fn analysis_pressure_snapshot_live_local_mcp_logs_update_server_buckets() 
     let now = manual_clock.now_ts();
     manual_clock.set_now_ts(now);
     let headers: [String; 0] = [];
-    let pressure_flush_complete = proxy
-        .server_pressure_flush_completed_notifier_for_test()
-        .await
-        .notified_owned();
-
     let request_log_id = proxy
         .record_local_request_log_without_key_with_diagnostics(
             Some(&token.id),
@@ -434,10 +437,7 @@ async fn analysis_pressure_snapshot_live_local_mcp_logs_update_server_buckets() 
         )
         .await
         .expect("record local mcp request log");
-
-    tokio::time::timeout(Duration::from_secs(3), pressure_flush_complete)
-        .await
-        .expect("deferred pressure writer should drain the live local mcp log");
+    wait_for_server_pressure_totals(&proxy, 1, 0).await;
 
     let canonical_rows: i64 = sqlx::query_scalar(
         r#"
@@ -1094,7 +1094,9 @@ async fn observability_deferred_writer_requeues_pressure_deltas_after_writer_con
     .expect("create proxy");
     let now = manual_clock.now_ts();
     let lock_handle =
-        hold_sqlite_write_lock_for_test_for(&proxy.key_store.pool, Duration::from_millis(350))
+        // The writer intentionally debounces one second before its first
+        // flush. Keep the lock across that boundary to exercise requeue.
+        hold_sqlite_write_lock_for_test_for(&proxy.key_store.pool, Duration::from_millis(1_500))
             .await;
 
     let received_at = std::time::Instant::now();
@@ -1107,7 +1109,7 @@ async fn observability_deferred_writer_requeues_pressure_deltas_after_writer_con
         "request-path pressure observation must not wait for SQLite writer"
     );
 
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let (queued, stale, _, _, _) = proxy
                 .observability_deferred_writer_snapshot_for_test()
@@ -1124,22 +1126,7 @@ async fn observability_deferred_writer_requeues_pressure_deltas_after_writer_con
         .await
         .expect("held SQLite writer lock releases cleanly");
 
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let bucket_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM observability.server_pressure_buckets WHERE bucket_kind IN ('five_minute', 'hour')",
-            )
-            .fetch_one(&proxy.key_store.pool)
-            .await
-            .expect("count asynchronously flushed pressure buckets");
-            if bucket_count == 2 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("requeued deltas flush after the writer becomes available");
+    wait_for_server_pressure_totals(&proxy, 1, 0).await;
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -1342,6 +1329,66 @@ async fn rebalance_audit_writer_is_best_effort_and_payload_bounded() {
         .observability_deferred_writer_snapshot_for_test()
         .await;
     assert!(audit_stale, "dropped audit coverage is explicit");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn observability_deferred_writer_uses_one_worker_for_mixed_audit_and_pressure() {
+    let (backend_time, manual_clock) = crate::BackendTime::manual_from_ts(1_700_500_000);
+    let db_path = temp_db_path("observability-deferred-writer-mixed-owner");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_options_and_time(
+        Vec::<String>::new(),
+        DEFAULT_UPSTREAM,
+        &db_str,
+        TavilyProxyOptions::from_database_path(&db_str),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let now = manual_clock.now_ts();
+
+    proxy
+        .record_server_pressure_event(None, now, OUTCOME_SUCCESS)
+        .await
+        .expect("enqueue pressure without waiting for SQLite");
+    assert!(
+        proxy
+            .enqueue_rebalance_audit(RebalanceAuditEntry {
+                auth_token_id: None,
+                method: Method::POST,
+                path: "/mcp".to_string(),
+                request_body: br#"{\"jsonrpc\":\"2.0\"}"#.to_vec(),
+                response_status: StatusCode::OK,
+                tavily_status_code: Some(200),
+                response_body: br#"{\"result\":{}}"#.to_vec(),
+                result_status: OUTCOME_SUCCESS.to_string(),
+                failure_kind: None,
+                proxy_session_id: Some("mixed-observability-owner".to_string()),
+                routing_subject_hash: None,
+                fallback_reason: Some("affinity_rebalanced".to_string()),
+            })
+            .await
+    );
+    assert_eq!(
+        proxy.observability_deferred_worker_starts_for_test().await,
+        1,
+        "mixed queues share the same debounced worker before either write starts"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(4),
+        proxy.wait_for_rebalance_audits_idle_for_test(),
+    )
+    .await
+    .expect("shared worker drains the audit batch");
+    wait_for_server_pressure_totals(&proxy, 2, 0).await;
+    assert_eq!(
+        proxy.observability_deferred_worker_starts_for_test().await,
+        1,
+        "the audit-derived pressure delta stays with the active worker"
+    );
 
     let _ = std::fs::remove_file(db_path);
 }

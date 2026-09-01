@@ -64,13 +64,6 @@ impl KeyStore {
             .try_admit_maintenance_bulk(SqliteOperation::AlertProjection)
     }
 
-    pub(crate) fn try_admit_admin_alert_read(
-        &self,
-    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
-        self.sqlite_runtime
-            .try_admit_maintenance_bulk(SqliteOperation::AdminRead)
-    }
-
     async fn alert_projection_source_state(
         &self,
         lane: AlertProjectionLane,
@@ -445,6 +438,19 @@ impl KeyStore {
         };
         match self.advance_admitted_alert_projection_slice().await {
             Ok(outcome) => Ok(outcome),
+            Err(ProxyError::Deferred { .. }) => {
+                // The bounded source read owns an SQLite-native deadline.
+                // Its cursor has not committed, so report the result as a
+                // normal slice defer instead of escalating it to scheduler
+                // failure logging.
+                self.sqlite_runtime.record_deferred(
+                    SqliteOperation::AlertProjection,
+                    SqliteAdmissionDeferReason::QueryDeadline,
+                );
+                Ok(AlertProjectionSliceOutcome::Deferred {
+                    reason: SqliteAdmissionDeferReason::QueryDeadline,
+                })
+            }
             Err(err) if crate::is_transient_sqlite_write_error(&err) => {
                 // No cursor update has committed, so a later scheduler wake
                 // can replay this exact fenced page. Treat all bounded slice
@@ -476,12 +482,10 @@ impl KeyStore {
             Err(_) => return Ok(false),
         };
         let now = self.backend_time.now_ts();
-        let mut tx = self
+        let rows_affected = self
             .sqlite_runtime
-            .begin_immediate(SqliteOperation::AlertProjection)
-            .await?;
-        let mut rows_affected = 0;
-        let result = async {
+            .run_owned_immediate(SqliteOperation::AlertProjection, move |tx| {
+                Box::pin(async move {
             let changed = sqlx::query(
                 r#"UPDATE observability.dashboard_alert_projection_state
                        SET observed_at = ?, stale_reason = NULL
@@ -490,13 +494,12 @@ impl KeyStore {
             )
             .bind(now)
             .bind(now.saturating_sub(ALERT_PROJECTION_STALE_SECS / 2))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-            rows_affected = changed.rows_affected();
-            Ok::<(), ProxyError>(())
-        }
-        .await;
-        tx.finish(result).await?;
+                    Ok::<_, ProxyError>(changed.rows_affected())
+                })
+            })
+            .await?;
         Ok(rows_affected > 0)
     }
 
@@ -657,12 +660,13 @@ impl KeyStore {
     ) -> Result<(), ProxyError> {
         let next_cursor = next_cursor
             .unwrap_or_else(|| (state.cursor_occurred_at, state.cursor_row_sort_id.clone()));
-        let mut tx = self
-            .sqlite_runtime
-            .begin_immediate(SqliteOperation::AlertProjection)
-            .await?;
-        let result = async {
-            for row in rows {
+        let state = state.clone();
+        let fence = fence.cloned();
+        let rows = rows.to_vec();
+        self.sqlite_runtime
+            .run_owned_immediate(SqliteOperation::AlertProjection, move |tx| {
+                Box::pin(async move {
+            for row in &rows {
                 let payload_json = serde_json::to_string(row).map_err(|err| {
                     ProxyError::Other(format!("serialize alert projection event: {err}"))
                 })?;
@@ -682,15 +686,15 @@ impl KeyStore {
                 .bind(&row.row_sort_id)
                 .bind(payload_json)
                 .bind(observed_at)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
             let (fence_occurred_at, fence_row_sort_id, phase) = if complete {
                 (None, None, "idle")
             } else {
-                let (occurred_at, row_sort_id) = fence.ok_or_else(|| {
-                    ProxyError::Other("alert projection slice is missing source fence".to_string())
-                })?;
+                    let (occurred_at, row_sort_id) = fence.as_ref().ok_or_else(|| {
+                        ProxyError::Other("alert projection slice is missing source fence".to_string())
+                    })?;
                 (Some(*occurred_at), Some(row_sort_id.clone()), "catching_up")
             };
             let changed = match state.lane {
@@ -709,7 +713,7 @@ impl KeyStore {
                 .bind(observed_at)
                 .bind(&state.source_kind)
                 .bind(state.generation)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?,
                 AlertProjectionLane::History => sqlx::query(
                     r#"UPDATE observability.dashboard_alert_projection_history_state
@@ -725,7 +729,7 @@ impl KeyStore {
                 .bind(phase)
                 .bind(&state.source_kind)
                 .bind(state.generation)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?,
             };
             if changed.rows_affected() != 1 {
@@ -734,9 +738,9 @@ impl KeyStore {
                 ));
             }
             Ok::<(), ProxyError>(())
-        }
-        .await;
-        tx.finish(result).await
+                })
+            })
+            .await
     }
 
     pub(crate) async fn alert_projection_status(&self) -> Result<AlertProjectionStatus, ProxyError> {
@@ -757,7 +761,7 @@ impl KeyStore {
                    ON history.source_kind = tail.source_kind"#,
         )
         .bind(now.saturating_sub(ALERT_PROJECTION_STALE_SECS))
-        .fetch_one(&mut *conn)
+            .fetch_one(&mut *conn)
         .await;
         let (
             sources,
@@ -978,11 +982,10 @@ impl KeyStore {
         let payload = serde_json::to_string(summary).map_err(|err| {
             ProxyError::Other(format!("serialize materialized recent alert summary: {err}"))
         })?;
-        let mut tx = self
-            .sqlite_runtime
-            .begin_immediate(SqliteOperation::AlertProjection)
-            .await?;
-        let result = async {
+        let computed_at = self.backend_time.now_ts();
+        self.sqlite_runtime
+            .run_owned_immediate(SqliteOperation::AlertProjection, move |tx| {
+                Box::pin(async move {
             sqlx::query(
                 r#"INSERT INTO observability.dashboard_alert_projection_recent_summaries
                     (window_hours, source_generation, computed_at, summary_json)
@@ -994,14 +997,14 @@ impl KeyStore {
             )
             .bind(window_hours)
             .bind(source_generation)
-            .bind(self.backend_time.now_ts())
+            .bind(computed_at)
             .bind(payload)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
             Ok::<(), ProxyError>(())
-        }
-        .await;
-        tx.finish(result).await
+                })
+            })
+            .await
     }
 
     fn apply_alert_projection_status(
@@ -1055,7 +1058,12 @@ impl KeyStore {
             request_kinds: &[],
         };
         let (top_groups, grouped_count) = self
-            .fetch_projected_alert_group_page(filters, 1, 10)
+            .fetch_projected_alert_group_page_for_operation(
+                filters,
+                1,
+                10,
+                SqliteOperation::AlertProjection,
+            )
             .await?;
         let mut grouped_count_windows = Vec::with_capacity(3);
         for window_hours in [1_i64, 24, 24 * 7] {
@@ -1072,7 +1080,11 @@ impl KeyStore {
             let grouped_count = if window_hours == clamped_window_hours {
                 grouped_count
             } else {
-                self.fetch_projected_alert_group_count(grouped_filters).await?
+                self.fetch_projected_alert_group_count_for_operation(
+                    grouped_filters,
+                    SqliteOperation::AlertProjection,
+                )
+                .await?
             };
             grouped_count_windows.push(RecentAlertsGroupedWindowCount {
                 window_hours,

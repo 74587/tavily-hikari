@@ -201,7 +201,10 @@ async fn reconciliation_research_drain_stale_claim_does_not_commit_cursor_or_res
             },
         )
         .await;
-    assert!(matches!(accepted, Err(ProxyError::StaleClaim { .. })));
+    assert!(matches!(
+        accepted,
+        Ok(crate::store::ResearchDrainCommitReceipt::StaleClaim)
+    ));
     let row: (Option<i64>, i64) = sqlx::query_as(
         "SELECT terminal_at, poll_attempt_count FROM upstream_reconciliation_research \
          WHERE request_id = 'stale-drain-request'",
@@ -645,12 +648,13 @@ async fn reconciliation_research_not_found_is_unavailable_without_repoll_wake() 
         .expect("persist unavailable Research outcome");
     assert!(matches!(
         outcome,
-        ClaimedResearchDrainOutcome::Completed {
+        ClaimedResearchDrainOutcome::Persisted {
             polled: 1,
             terminal: 0,
             pending: 0,
             retries: 0,
-            next_at: None,
+            unavailable: 1,
+            credentials_cooling: 0,
         }
     ));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -797,12 +801,13 @@ async fn reconciliation_research_missing_secret_uses_key_scoped_cooldown_without
         .expect("persist missing-secret cooldown");
     assert!(matches!(
         outcome,
-        ClaimedResearchDrainOutcome::Completed {
+        ClaimedResearchDrainOutcome::Persisted {
             polled: 1,
             terminal: 0,
             pending: 0,
             retries: 1,
-            ..
+            unavailable: 0,
+            credentials_cooling: 1,
         }
     ));
     assert_eq!(

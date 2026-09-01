@@ -23,6 +23,14 @@ static RESEARCH_DRAIN_CREDENTIALS: std::sync::atomic::AtomicI64 =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimedResearchDrainOutcome {
+    Persisted {
+        polled: i64,
+        terminal: i64,
+        pending: i64,
+        retries: i64,
+        unavailable: i64,
+        credentials_cooling: i64,
+    },
     Completed {
         polled: i64,
         terminal: i64,
@@ -52,6 +60,18 @@ impl TavilyProxy {
         use std::sync::atomic::Ordering;
 
         let (polled, terminal, pending, retries, deferred, backlog_open) = match &outcome {
+            ClaimedResearchDrainOutcome::Persisted {
+                polled,
+                terminal,
+                pending,
+                retries,
+                unavailable,
+                credentials_cooling,
+            } => {
+                RESEARCH_DRAIN_UNAVAILABLE.fetch_add(*unavailable, Ordering::Relaxed);
+                RESEARCH_DRAIN_CREDENTIALS.fetch_add(*credentials_cooling, Ordering::Relaxed);
+                (*polled, *terminal, *pending, *retries, 0, 1)
+            }
             ClaimedResearchDrainOutcome::Completed {
                 polled,
                 terminal,
@@ -148,14 +168,10 @@ impl TavilyProxy {
                 if ReconciliationEngine::projection_read_budget_is_deferred(&error)
                     || is_transient_sqlite_write_error(&error) =>
             {
-                return Ok(Self::observe_research_drain_outcome(
-                    now,
-                    ClaimedResearchDrainOutcome::Deferred {
+                return Ok(ClaimedResearchDrainOutcome::Deferred {
                         reason: "research_drain_budget",
                         retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
-                    },
-                    0,
-                ));
+                    });
             }
             Err(error) => return Err(error),
         };
@@ -163,14 +179,10 @@ impl TavilyProxy {
             let retry_at = page
                 .earliest_cooldown_until
                 .unwrap_or_else(|| now.saturating_add(Self::RESEARCH_DRAIN_INTERVAL_SECS));
-            return Ok(Self::observe_research_drain_outcome(
-                now,
-                ClaimedResearchDrainOutcome::Deferred {
+            return Ok(ClaimedResearchDrainOutcome::Deferred {
                     reason: "key_cooldown",
                     retry_at,
-                },
-                page.cooled_due_count,
-            ));
+                });
         }
         if page.candidates.is_empty() {
             let minimum_next_at = now.saturating_add(Self::RESEARCH_DRAIN_INTERVAL_SECS);
@@ -179,17 +191,13 @@ impl TavilyProxy {
                 .upstream_reconciliation_research_drain_available_at()
                 .await?
                 .map(|available_at| available_at.max(minimum_next_at));
-            return Ok(Self::observe_research_drain_outcome(
-                now,
-                ClaimedResearchDrainOutcome::Completed {
+            return Ok(ClaimedResearchDrainOutcome::Completed {
                     polled: 0,
                     terminal: 0,
                     pending: 0,
                     retries: 0,
                     next_at,
-                },
-                0,
-            ));
+                });
         }
 
         let key_ids = page
@@ -231,15 +239,11 @@ impl TavilyProxy {
             .iter()
             .find(|candidate| !cooldowns.contains_key(&candidate.key_id))
         else {
-            return Ok(Self::observe_research_drain_outcome(
-                now,
-                ClaimedResearchDrainOutcome::Deferred {
+            return Ok(ClaimedResearchDrainOutcome::Deferred {
                     reason: "key_cooldown",
                     retry_at: earliest_cooldown
                         .unwrap_or_else(|| now.saturating_add(Self::RESEARCH_DRAIN_INTERVAL_SECS)),
-                },
-                cooldowns.len() as i64,
-            ));
+                });
         };
         let accepted_cursor = page
             .candidate_cursors
@@ -287,18 +291,14 @@ impl TavilyProxy {
                 )
             }
             Ok(ResearchPollOutcome::Unavailable) => (
-                {
-                    RESEARCH_DRAIN_UNAVAILABLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    crate::store::UpstreamReconciliationResearchDrainPoll::Unavailable {
-                        error_kind: "not_found",
-                    }
+                crate::store::UpstreamReconciliationResearchDrainPoll::Unavailable {
+                    error_kind: "not_found",
                 },
                 0,
                 0,
                 0,
             ),
             Ok(outcome @ (ResearchPollOutcome::Credentials | ResearchPollOutcome::MissingLocalSecret)) => {
-                RESEARCH_DRAIN_CREDENTIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let missing_secret = matches!(outcome, ResearchPollOutcome::MissingLocalSecret);
                 let error_kind = if missing_secret {
                     "missing_local_secret"
@@ -328,20 +328,12 @@ impl TavilyProxy {
             }
             Err((error, _)) if ReconciliationEngine::remote_attempt_is_deferred(&error) => {
                 if ReconciliationEngine::remote_attempt_is_stale(&error) {
-                    return Ok(Self::observe_research_drain_outcome(
-                        now,
-                        ClaimedResearchDrainOutcome::StaleClaim,
-                        0,
-                    ));
+                    return Ok(ClaimedResearchDrainOutcome::StaleClaim);
                 }
-                return Ok(Self::observe_research_drain_outcome(
-                    now,
-                    ClaimedResearchDrainOutcome::Deferred {
+                return Ok(ClaimedResearchDrainOutcome::Deferred {
                         reason: "research_drain_budget",
                         retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
-                    },
-                    0,
-                ));
+                    });
             }
             Err((ProxyError::UsageHttp { status, .. }, retry_after))
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
@@ -400,7 +392,12 @@ impl TavilyProxy {
                 )
             }
         };
-        let accepted = self
+        let unavailable = matches!(
+            &poll,
+            crate::store::UpstreamReconciliationResearchDrainPoll::Unavailable { .. }
+        );
+        let credentials_backoff = key_backoff.is_some();
+        let receipt = self
             .key_store
             .commit_upstream_reconciliation_research_drain(
                 crate::store::UpstreamReconciliationResearchDrainCommit {
@@ -416,24 +413,16 @@ impl TavilyProxy {
                 },
             )
             .await;
-        match accepted {
-            Ok(true) => {}
-            Ok(false) => {
-                return Ok(Self::observe_research_drain_outcome(
-                    now,
-                    ClaimedResearchDrainOutcome::Deferred {
+        match receipt {
+            Ok(crate::store::ResearchDrainCommitReceipt::Accepted { .. }) => {}
+            Ok(crate::store::ResearchDrainCommitReceipt::Deferred { retry_at }) => {
+                return Ok(ClaimedResearchDrainOutcome::Deferred {
                         reason: "research_drain_budget",
-                        retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
-                    },
-                    0,
-                ));
+                        retry_at,
+                    });
             }
-            Err(ProxyError::StaleClaim { .. }) => {
-                return Ok(Self::observe_research_drain_outcome(
-                    now,
-                    ClaimedResearchDrainOutcome::StaleClaim,
-                    0,
-                ));
+            Ok(crate::store::ResearchDrainCommitReceipt::StaleClaim) | Err(ProxyError::StaleClaim { .. }) => {
+                return Ok(ClaimedResearchDrainOutcome::StaleClaim);
             }
             Err(error) => return Err(error),
         }
@@ -444,21 +433,15 @@ impl TavilyProxy {
             pending,
             retries,
         );
-        let next_at = self
-            .key_store
-            .upstream_reconciliation_research_drain_available_at()
-            .await?
-            .map(|available_at| {
-                available_at.max(now.saturating_add(Self::RESEARCH_DRAIN_INTERVAL_SECS))
-            });
         Ok(Self::observe_research_drain_outcome(
             now,
-            ClaimedResearchDrainOutcome::Completed {
+            ClaimedResearchDrainOutcome::Persisted {
                 polled: 1,
                 terminal,
                 pending,
                 retries,
-                next_at,
+                unavailable: i64::from(unavailable),
+                credentials_cooling: i64::from(credentials_backoff),
             },
             cooldowns.len() as i64,
         ))

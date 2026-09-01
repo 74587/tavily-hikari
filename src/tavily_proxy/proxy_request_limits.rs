@@ -23,7 +23,7 @@ impl TavilyProxy {
         &self,
         bounds: SummaryWindowBounds,
         stale_key_count: i64,
-    ) -> Result<(DashboardQuotaChargeSnapshot, [i64; 6]), ProxyError> {
+    ) -> Result<(DashboardQuotaChargeSnapshot, [i64; 5]), ProxyError> {
         let token = self
             .key_store
             .fetch_dashboard_quota_charge_token(
@@ -32,6 +32,19 @@ impl TavilyProxy {
                 bounds.today_end,
             )
             .await?;
+
+        self.dashboard_quota_charge_snapshot_for_token(bounds, token).await
+    }
+
+    /// Builds or serves a quota-charge snapshot for an already-read bounded
+    /// watermark. Dashboard freshness can pass its token here so a changed
+    /// probe does not immediately issue the same token query again.
+    async fn dashboard_quota_charge_snapshot_for_token(
+        &self,
+        bounds: SummaryWindowBounds,
+        token: [i64; 5],
+    ) -> Result<(DashboardQuotaChargeSnapshot, [i64; 5]), ProxyError> {
+        let stale_key_count = token[3];
 
         loop {
             let waiter = {
@@ -178,7 +191,7 @@ impl TavilyProxy {
         stale_key_count: i64,
         month_quota_charge_start: i64,
         today_end: i64,
-    ) -> Result<[i64; 6], ProxyError> {
+    ) -> Result<[i64; 5], ProxyError> {
         self.key_store
             .fetch_dashboard_quota_charge_token(
                 stale_key_count,
@@ -1207,7 +1220,28 @@ impl TavilyProxy {
             [i64; 19],
             [i64; 10],
             i64,
-            [i64; 6],
+            [i64; 5],
+        ),
+        ProxyError,
+    > {
+        self.dashboard_overview_read_components_with_quota_token_at(now, None)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn dashboard_overview_read_components_with_quota_token_at(
+        &self,
+        now: chrono::DateTime<Local>,
+        quota_token: Option<[i64; 5]>,
+    ) -> Result<
+        (
+            SummaryWindows,
+            ProxySummary,
+            DashboardHourlyRequestWindow,
+            [i64; 19],
+            [i64; 10],
+            i64,
+            [i64; 5],
         ),
         ProxyError,
     > {
@@ -1220,7 +1254,12 @@ impl TavilyProxy {
         let month_start = start_of_local_month_utc_ts(now);
         let month_period_end = crate::shift_local_month_start_utc_ts(month_start, 1);
         let previous_month_start = previous_local_month_start_utc_ts(now);
-        let month_quota_charge_start = start_of_month(now.with_timezone(&Utc)).timestamp();
+        let month_quota_charge_start = quota_token
+            .map(|token| token[4])
+            .unwrap_or_else(|| start_of_month(now.with_timezone(&Utc)).timestamp());
+        // The token intentionally excludes the moving end of today's window.
+        // A 60-second probe with no new sample must retain last-good instead
+        // of rebuilding solely because wall clock time advanced.
         let today_end = now.with_timezone(&Utc).timestamp().saturating_add(1);
         let today_period_end = next_local_day_start_utc_ts(today_start);
         let today_elapsed = today_end.saturating_sub(today_start);
@@ -1241,9 +1280,12 @@ impl TavilyProxy {
         let hot_active_since = now_ts.saturating_sub(2 * 60 * 60);
         let hot_stale_before = now_ts.saturating_sub(15 * 60);
         let cold_stale_before = now_ts.saturating_sub(24 * 60 * 60);
-        let stale_key_count = self
-            .dashboard_stale_key_count(hot_active_since, hot_stale_before, cold_stale_before)
-            .await?;
+        let stale_key_count = match quota_token {
+            Some(token) => token[3],
+            None => self
+                .dashboard_stale_key_count(hot_active_since, hot_stale_before, cold_stale_before)
+                .await?,
+        };
         let local_bucket_start =
             now.timestamp() - now.timestamp().rem_euclid(DASHBOARD_HOURLY_BUCKET_SECS);
         let (
@@ -1262,9 +1304,12 @@ impl TavilyProxy {
                 DASHBOARD_HOURLY_RETAINED_BUCKETS,
             )
             .await?;
-        let (quota_charge, dashboard_quota_charge_token) = self
-            .dashboard_quota_charge_snapshot_with_token(bounds, stale_key_count)
-            .await?;
+        let (quota_charge, dashboard_quota_charge_token) = match quota_token {
+            Some(token) => self.dashboard_quota_charge_snapshot_for_token(bounds, token).await?,
+            None => self
+                .dashboard_quota_charge_snapshot_with_token(bounds, stale_key_count)
+                .await?,
+        };
         summary_windows.today.quota_charge.upstream_actual_credits =
             quota_charge.today.upstream_actual_credits;
         summary_windows.today.quota_charge.sampled_key_count = quota_charge.today.sampled_key_count;
