@@ -1,16 +1,16 @@
 import { expect, test } from 'bun:test'
 
+import { Window } from 'happy-dom'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
 const REQUIRED_ICON_SIZES = ['64x64', '96x96', '128x128', '144x144', '152x152', '167x167', '180x180', '192x192', '256x256', '384x384', '512x512', '1024x1024']
-const HASHED_ICON_PATTERN = /^pwa\/(?:public|admin)(?:-maskable-\d+|-\d+|-touch-icon)-[a-f0-9]{12}\.png$/
+const HASHED_ICON_PATTERN = /^pwa\/(?:public|admin)(?:-maskable-\d+|-\d+)-[a-f0-9]{12}\.png$/
 
 type IconGraph = {
   any: Record<string, string>
   maskable: Record<string, string>
-  touch: string
 }
 
 type PwaGraph = {
@@ -27,7 +27,7 @@ type AssetGraph = {
 }
 
 function iconPaths(graph: IconGraph): string[] {
-  return [...Object.values(graph.any), ...Object.values(graph.maskable), graph.touch]
+  return [...Object.values(graph.any), ...Object.values(graph.maskable)]
 }
 
 function assertHashedIcon(distDir: string, relativePath: string): void {
@@ -63,10 +63,11 @@ test('built asset graph keeps public and admin identities separated', () => {
   expect(graph.admin.files).not.toContain('index.html')
 
   for (const identity of [graph.public, graph.admin]) {
-    expect(identity.precacheFiles).toContain(identity.manifest)
+    expect(identity.precacheFiles).toEqual(identity.files)
+    expect(identity.precacheFiles).not.toContain(identity.manifest)
     for (const iconPath of iconPaths(identity.icons)) {
       assertHashedIcon(distDir, iconPath)
-      expect(identity.precacheFiles).toContain(iconPath)
+      expect(identity.precacheFiles).not.toContain(iconPath)
     }
   }
 
@@ -77,7 +78,7 @@ test('built asset graph keeps public and admin identities separated', () => {
   expect(graph.admin.precacheFiles).not.toContain(graph.public.manifest)
 })
 
-test('built manifests expose full icon coverage and maskable entries', () => {
+test('built manifests expose stable identities, full icon coverage, and maskable entries', () => {
   const build = readAssetGraph()
   if (!build) {
     expect(true).toBe(true)
@@ -105,7 +106,7 @@ test('built manifests expose full icon coverage and maskable entries', () => {
     expect(expected.graph.manifest).toBe(identity === 'public' ? 'manifest.webmanifest' : 'manifest-admin.webmanifest')
 
     const manifestIconPaths = manifest.icons.map((icon) => icon.src.slice(1)).sort()
-    expect(manifestIconPaths).toEqual(iconPaths(expected.graph.icons).filter((iconPath) => !iconPath.includes('touch-icon')).sort())
+    expect(manifestIconPaths).toEqual(iconPaths(expected.graph.icons).sort())
     for (const iconPath of manifestIconPaths) {
       assertHashedIcon(build.distDir, iconPath)
     }
@@ -137,12 +138,17 @@ test('built HTML points to the matching manifest without a legacy touch-icon ove
     ['admin.html', 'manifest-admin.webmanifest'],
   ]) {
     const html = fs.readFileSync(path.join(build.distDir, htmlFile), 'utf8')
-    expect(html).toContain(`rel="manifest" href="/${manifestPath}"`)
-    expect(html).not.toContain('apple-touch-icon')
+    const parserWindow = new Window()
+    const document = new parserWindow.DOMParser().parseFromString(html, 'text/html')
+    const manifestLinks = document.querySelectorAll('link[rel~="manifest"]')
+    expect(manifestLinks.length).toBe(1)
+    expect(manifestLinks[0]?.getAttribute('href')).toBe(`/${manifestPath}`)
+    expect(document.querySelectorAll('link[rel~="apple-touch-icon"]').length).toBe(0)
   }
+  expect(fs.existsSync(path.join(build.distDir, 'assets/apple-touch-icon.png'))).toBe(false)
 })
 
-test('built service workers wait for explicit update activation after precache', () => {
+test('built service workers precache only the application shell and wait for explicit activation', () => {
   const build = readAssetGraph()
   if (!build) {
     expect(true).toBe(true)
@@ -158,14 +164,17 @@ test('built service workers wait for explicit update activation after precache',
     expect(source).not.toContain('await self.skipWaiting();')
     expect(source).not.toContain('self.clients.claim()')
     expect(source).toContain("cache.addAll(PRECACHE_URLS.map((url) => new Request(new URL(url, self.location.origin), { cache: 'reload' }))")
-    expect(source).toContain(`/${identity.manifest}`)
+    expect(source).not.toContain(`/${identity.manifest}`)
     for (const precachedFile of identity.precacheFiles) {
       expect(source).toContain(`/${precachedFile}`)
+    }
+    for (const iconPath of iconPaths(identity.icons)) {
+      expect(source).not.toContain(`/${iconPath}`)
     }
   }
 })
 
-test('built service workers reload their own manifest and icon URLs during installation', async () => {
+test('built service workers keep manifests and icons out of installation precache', async () => {
   const build = readAssetGraph()
   if (!build) {
     expect(true).toBe(true)
@@ -178,10 +187,7 @@ test('built service workers reload their own manifest and icon URLs during insta
     waitUntil: (promise: Promise<unknown>) => void
   }
 
-  for (const [identity, otherIdentity] of [
-    [build.graph.public, build.graph.admin],
-    [build.graph.admin, build.graph.public],
-  ]) {
+  for (const identity of [build.graph.public, build.graph.admin]) {
     const source = fs.readFileSync(path.join(build.distDir, identity.serviceWorker), 'utf8')
     const listeners = new Map<string, (event: WorkerEvent) => void>()
     const requests: Request[] = []
@@ -227,11 +233,83 @@ test('built service workers reload their own manifest and icon URLs during insta
     await installPromise
 
     expect(requests.length).toBeGreaterThan(0)
+    expect(requests.length).toBe(identity.precacheFiles.length)
     expect(requestOptions).toHaveLength(requests.length)
     expect(requestOptions.every((options) => options.cache === 'reload')).toBe(true)
     const requestPaths = requests.map((request) => new URL(request.url).pathname)
-    expect(requestPaths).toContain(`/${identity.manifest}`)
-    expect(requestPaths).not.toContain(`/${otherIdentity.manifest}`)
+    expect(requestPaths).toEqual(identity.precacheFiles.map((fileName) => `/${fileName}`))
+    expect(requestPaths).not.toContain(`/${identity.manifest}`)
+    for (const iconPath of iconPaths(identity.icons)) {
+      expect(requestPaths).not.toContain(`/${iconPath}`)
+    }
+  }
+})
+
+test('built service workers leave manifests and icons on the network path', async () => {
+  const build = readAssetGraph()
+  if (!build) {
+    expect(true).toBe(true)
+    return
+  }
+
+  type FetchWorkerEvent = {
+    request: Request
+    respondWith: (response: Promise<Response>) => void
+  }
+
+  for (const identity of [build.graph.public, build.graph.admin]) {
+    const source = fs.readFileSync(path.join(build.distDir, identity.serviceWorker), 'utf8')
+    const listeners = new Map<string, (event: FetchWorkerEvent) => void>()
+    let cacheMatchCalls = 0
+    const networkRequests: Request[] = []
+    const cache = {
+      match: async () => {
+        cacheMatchCalls += 1
+        return new Response('stale-cache')
+      },
+      put: async () => undefined,
+    }
+    const workerSelf = {
+      location: { origin: 'https://hikari.test' },
+      addEventListener(type: string, listener: (event: FetchWorkerEvent) => void) {
+        listeners.set(type, listener)
+      },
+    }
+    const workerCaches = {
+      open: async () => cache,
+    }
+    const workerFetch = async (request: Request) => {
+      networkRequests.push(request)
+      return new Response('network-response')
+    }
+
+    new Function('self', 'caches', 'Request', 'Response', 'fetch', source)(
+      workerSelf,
+      workerCaches,
+      Request,
+      Response,
+      workerFetch,
+    )
+    const fetchListener = listeners.get('fetch')
+    expect(fetchListener).toBeDefined()
+
+    for (const requestPath of [`/${identity.manifest}`, `/${iconPaths(identity.icons)[0]}`]) {
+      let responsePromise: Promise<Response> | null = null
+      fetchListener?.({
+        request: new Request(`https://hikari.test${requestPath}`),
+        respondWith: (response) => {
+          responsePromise = response
+        },
+      })
+      expect(responsePromise).not.toBeNull()
+      expect(await responsePromise?.then((response) => response.text())).toBe('network-response')
+    }
+
+    expect(cacheMatchCalls).toBe(0)
+    expect(networkRequests.map((request) => new URL(request.url).pathname)).toEqual([
+      `/${identity.manifest}`,
+      `/${iconPaths(identity.icons)[0]}`,
+    ])
   }
 })
 

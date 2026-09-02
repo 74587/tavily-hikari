@@ -364,7 +364,7 @@ def make_mono_square_icon(mark: Image.Image) -> Image.Image:
     return canvas
 
 
-def export_static_assets(public_dir: Path) -> None:
+def export_static_assets(public_dir: Path, *, include_apple_touch_icon: bool = False) -> None:
     assets_dir = public_dir / ASSETS_DIR_NAME
     mark_seed = load_rgba(REFERENCE_DIR / "approved-mark-raster.png")
 
@@ -401,7 +401,8 @@ def export_static_assets(public_dir: Path) -> None:
     save_resized(mark_light, 16, assets_dir / "favicon-16x16.png")
     save_resized(mark_light, 32, assets_dir / "favicon-32x32.png")
     save_resized(mark_light, 48, assets_dir / "favicon-48x48.png")
-    save_resized(launcher_light, 180, assets_dir / "apple-touch-icon.png")
+    if include_apple_touch_icon:
+        save_resized(launcher_light, 180, assets_dir / "apple-touch-icon.png")
 
     write_theme_svg(
         asset_path("relay-mesh-mark-light.png"),
@@ -484,7 +485,7 @@ def export_static_assets(public_dir: Path) -> None:
 
 def main() -> None:
     export_static_assets(WEB_PUBLIC_DIR)
-    export_static_assets(DOCS_PUBLIC_DIR)
+    export_static_assets(DOCS_PUBLIC_DIR, include_apple_touch_icon=True)
     print(f"[brand] generated relay mesh assets into {WEB_PUBLIC_DIR} and {DOCS_PUBLIC_DIR}")
 
 

@@ -14,7 +14,7 @@
 - 让已在线访问过相应页面的用户在离线时仍可打开公共首页、用户控制台与管理员后台的页面壳。
 - 所有业务数据请求、SSE、MCP、登录提交与保存/操作在离线时都保持明确失败语义，不伪造成功，不回显旧快照。
 - 非管理员不注册 admin service worker、不看到 admin manifest 安装入口、不在 public SW cache 中形成 admin 壳页长期缓存。
-- 将 public/admin 双身份 PWA 的图标、touch icon 与站点 favicon 收口到 repo-local 的经批准 Relay Mesh lockup/icon 导出链，不改变 identity/scope/start_url。
+- 将 public/admin 双身份 PWA 的 regular/maskable 图标与站点 favicon 收口到 repo-local 的经批准 Relay Mesh lockup/icon 导出链，不改变 identity/scope/start_url；产品 App 不生成 Apple touch icon，docs-site 的独立图标不在本合同内。
 - 安装元数据必须可重新验证：manifest 保持稳定 identity，图标 URL 随最终内容哈希变化，HTML 与 service worker 不得把旧 manifest 或旧安装图标固定在缓存链路中。
 - 将完整 Relay Mesh lockup 的副标语固定为 `KEY POOL · BALANCE. ROUTE.`；完整 lockup 只在可用品牌容器宽度不小于 `260px` 时显示，较窄容器统一使用无副标语 compact 版本。
 - 补齐测试、Storybook 状态、浏览器离线验证与视觉证据，并将合同冻结到本 spec。
@@ -39,7 +39,6 @@
 - `web/public/assets/relay-mesh-mark*.{png,svg}`
 - `web/public/assets/linuxdo-logo.svg`
 - `web/public/assets/favicon-*.png`
-- `web/public/assets/apple-touch-icon.png`
 - `web/src/*main.tsx`
 - `web/src/api/runtime.ts`
 - `web/src/components/**`
@@ -94,10 +93,10 @@
 
 - `id`、`scope` 与 `start_url` 是稳定的 identity 合同：public 固定为 `/`，admin 固定为 `/admin/`；`/admin` 仍由入口路由归一到 `/admin/`。
 - 各 HTML shell 只声明自身对应的 manifest，不声明 `rel="apple-touch-icon"`。在 WebKit 中 legacy `apple-touch-icon` 会优先于 manifest 图标，因此不能让它成为未重新验证的第二套安装元数据来源。
-- PWA PNG 必须以最终 PNG 字节的短 SHA-256 摘要命名，例如 `pwa/admin-1024-<content-hash>.png` 与 `pwa/admin-touch-icon-<content-hash>.png`；manifest 只能引用当前导出的 URL。图标 artwork 继续使用已批准的 Relay Mesh light/dark icon，不在本轮重新设计。
+- PWA regular/maskable PNG 必须以最终 PNG 字节的短 SHA-256 摘要命名，例如 `pwa/admin-1024-<content-hash>.png` 与 `pwa/admin-maskable-512-<content-hash>.png`；manifest 只能引用当前导出的 URL。图标 artwork 继续使用已批准的 Relay Mesh light/dark icon，不在本轮重新设计。
 - 方形 launcher、maskable 与 mono 图标必须按可见前景边界居中；批准稿透明画布中的 padding 不得把 mark 推离图标画布中心。
 - HTML shell、两个 manifest、两个 service worker 与 `version.json` 必须使用 `no-cache, must-revalidate`；带内容哈希的 `pwa/*.png` 使用 `public, max-age=31536000, immutable`。
-- 每个 identity 的 service worker 必须 precache 自己的 manifest 与自己引用的图标，并使用绕过 HTTP cache 的请求完成安装；public/admin 不得互相 precache manifest 或图标。页面注册 worker 时使用 `updateViaCache: 'none'`。
+- Service Worker 不得预缓存或 cache-first 固化 manifest、regular 图标、maskable 图标或产品 Apple 图标路径；只预缓存当前 identity 的应用壳及其构建依赖。manifest 与图标请求必须留在普通网络路径，分别遵守 metadata revalidation 与内容哈希 immutable 缓存。public/admin 不得互相预缓存 manifest 或图标；页面注册 worker 时使用 `updateViaCache: 'none'`。
 
 ### 平台更新边界
 
@@ -148,8 +147,6 @@
 - `web/dist/sw-admin.js`
 - `web/dist/pwa/public-*-<content-hash>.png`
 - `web/dist/pwa/admin-*-<content-hash>.png`
-- `web/dist/pwa/public-touch-icon-<content-hash>.png`
-- `web/dist/pwa/admin-touch-icon-<content-hash>.png`
 - `web/public/assets/relay-mesh-lockup*.png`
 - `web/public/assets/relay-mesh-icon*.png`
 - `web/public/assets/relay-mesh-mark*.{png,svg}`
@@ -248,9 +245,13 @@
   When post-build 写入 HTML shell meta、`version.json` 与两个 service worker
   Then 五个 HTML shell、两个 worker 与 `version.json` 携带新版本，旧 shell 仍可离线运行，且 worker cache identity 发生变化。
 
-- Given public 或 admin 的安装图标内容发生变化
+- Given public 或 admin 的 regular/maskable 安装图标内容发生变化
   When post-build 生成 PWA 产物
-  Then 对应 manifest 的图标 URL 必须包含新内容哈希，旧 URL 不得被 manifest 继续引用，且该 identity 的 worker precache 必须包含当前 manifest 与当前图标 URL。
+  Then 对应 manifest 的图标 URL 必须包含新内容哈希，旧 URL 不得被 manifest 继续引用，且该 identity 的 worker precache 不得包含 manifest 或当前图标 URL。
+
+- Given 已安装 V1 的 Chromium Android/WebAPK 或 desktop Chromium identity
+  When 同一 origin 发布 V2 manifest 与 content-hashed 图标并执行正常启动/更新检查
+  Then 在 waiting worker 激活前后都能取得 V2 manifest 与图标，`id`、`scope`、`start_url` 保持稳定，无需卸载或重新安装。
 
 - Given 浏览器请求 HTML、manifest、service worker、version metadata 或内容哈希 PWA 图标
   When Rust 静态服务返回资源

@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 
 import { Database } from "bun:sqlite";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
@@ -11,6 +11,29 @@ import { createServer } from "node:net";
 import { chromium } from "playwright-core";
 
 const USER_SESSION_COOKIE_NAME = "hikari_user_session";
+
+type InstallMetadata = {
+  id: string;
+  scope: string;
+  startUrl: string;
+  iconPath: string;
+  iconByteLength: number;
+  manifestCacheControl: string | null;
+  iconCacheControl: string | null;
+};
+
+type ManifestIcon = {
+  src: string;
+  sizes: string;
+  purpose?: string;
+};
+
+type ManifestPayload = {
+  id: string;
+  scope: string;
+  start_url: string;
+  icons: ManifestIcon[];
+};
 
 function log(message: string) {
   console.log(`[pwa-offline-e2e] ${message}`);
@@ -190,6 +213,32 @@ function stageStaticRelease(repoRoot: string, tempRoot: string, releaseId: strin
   return staticDir;
 }
 
+function rewriteManifestIconForRelease(
+  staticDir: string,
+  manifestName: string,
+  sourceIconPath: string,
+  identityPrefix: "public" | "admin",
+) {
+  const manifestPath = path.join(staticDir, manifestName);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ManifestPayload;
+  const targetIcon = manifest.icons.find((icon) => icon.sizes === "192x192" && !icon.purpose);
+  if (!targetIcon) {
+    throw new Error(`unable to prepare ${manifestName} release fixture icon`);
+  }
+
+  const sourcePath = path.join(staticDir, sourceIconPath);
+  const sourceBytes = readFileSync(sourcePath);
+  const digest = createHash("sha256").update(sourceBytes).digest("hex").slice(0, 12);
+  const nextRelativePath = `pwa/${identityPrefix}-192-${digest}.png`;
+  if (targetIcon.src === `/${nextRelativePath}`) {
+    throw new Error(`release fixture did not change ${manifestName} icon URL`);
+  }
+
+  copyFileSync(sourcePath, path.join(staticDir, nextRelativePath));
+  targetIcon.src = `/${nextRelativePath}`;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 function switchStaticRelease(staticDir: string, releaseId: string) {
   writeFileSync(
     path.join(staticDir, "version.json"),
@@ -204,6 +253,32 @@ function switchStaticRelease(staticDir: string, releaseId: string) {
     );
     if (next === source) throw new Error(`failed to rewrite version marker for ${htmlName}`);
     writeFileSync(htmlPath, next);
+  }
+  if (releaseId === "release-b") {
+    // Reuse the other approved identity's PNG as a deterministic V2 fixture without changing production artwork.
+    const publicManifest = JSON.parse(
+      readFileSync(path.join(staticDir, "manifest.webmanifest"), "utf8"),
+    ) as ManifestPayload;
+    const adminManifest = JSON.parse(
+      readFileSync(path.join(staticDir, "manifest-admin.webmanifest"), "utf8"),
+    ) as ManifestPayload;
+    const publicSourceIcon = publicManifest.icons.find((icon) => icon.sizes === "192x192" && !icon.purpose);
+    const adminSourceIcon = adminManifest.icons.find((icon) => icon.sizes === "192x192" && !icon.purpose);
+    if (!publicSourceIcon || !adminSourceIcon) {
+      throw new Error("release fixture manifests are missing regular 192x192 icons");
+    }
+    rewriteManifestIconForRelease(
+      staticDir,
+      "manifest.webmanifest",
+      adminSourceIcon.src.replace(/^\//, ""),
+      "public",
+    );
+    rewriteManifestIconForRelease(
+      staticDir,
+      "manifest-admin.webmanifest",
+      publicSourceIcon.src.replace(/^\//, ""),
+      "admin",
+    );
   }
   for (const workerName of ["sw-public.js", "sw-admin.js"]) {
     const workerPath = path.join(staticDir, workerName);
@@ -297,17 +372,34 @@ async function waitForServiceWorker(page: import("playwright-core").Page) {
 }
 
 async function waitForController(page: import("playwright-core").Page, scriptName: string) {
-  await page.waitForFunction(
-    (expectedScript) => navigator.serviceWorker.controller?.scriptURL.endsWith(expectedScript) === true,
-    scriptName,
-    { timeout: 20_000 },
-  );
+  try {
+    await page.waitForFunction(
+      (expectedScript) => navigator.serviceWorker.controller?.scriptURL.endsWith(expectedScript) === true,
+      scriptName,
+      { timeout: 20_000 },
+    );
+  } catch (error) {
+    const state = await page.evaluate(async () => ({
+      url: location.href,
+      controller: navigator.serviceWorker.controller?.scriptURL ?? null,
+      registrations: (await navigator.serviceWorker.getRegistrations()).map((registration) => ({
+        scope: registration.scope,
+        active: registration.active?.scriptURL ?? null,
+        activeState: registration.active?.state ?? null,
+        waiting: registration.waiting?.scriptURL ?? null,
+        waitingState: registration.waiting?.state ?? null,
+      })),
+    }));
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; worker state: ${JSON.stringify(state)}`);
+  }
 }
 
 async function waitForActiveRegistration(page: import("playwright-core").Page, scope: string) {
   await page.waitForFunction(
     async (expectedScope) => {
-      const registration = await navigator.serviceWorker.getRegistration(expectedScope);
+      const registration = (await navigator.serviceWorker.getRegistrations()).find(
+        (candidate) => new URL(candidate.scope).pathname === expectedScope,
+      );
       return registration?.active?.state === "activated" && registration.waiting === null;
     },
     scope,
@@ -343,6 +435,98 @@ async function assertText(page: import("playwright-core").Page, text: string) {
 
 async function readBuildVersion(page: import("playwright-core").Page): Promise<string | null> {
   return await page.locator('meta[name="tavily-hikari-build-version"]').getAttribute("content");
+}
+
+async function readInstallMetadata(
+  page: import("playwright-core").Page,
+  manifestPath: string,
+): Promise<InstallMetadata> {
+  return await page.evaluate(async (url) => {
+    const manifestResponse = await fetch(url);
+    if (!manifestResponse.ok) {
+      throw new Error(`manifest request failed with ${manifestResponse.status}`);
+    }
+    const manifest = await manifestResponse.json() as ManifestPayload;
+    const icon = manifest.icons.find((entry) => entry.sizes === "192x192" && !entry.purpose);
+    if (!icon) throw new Error("manifest does not expose a regular 192x192 icon");
+    const iconResponse = await fetch(icon.src);
+    if (!iconResponse.ok) {
+      throw new Error(`icon request failed with ${iconResponse.status}`);
+    }
+    const iconByteLength = (await iconResponse.arrayBuffer()).byteLength;
+    return {
+      id: manifest.id,
+      scope: manifest.scope,
+      startUrl: manifest.start_url,
+      iconPath: icon.src,
+      iconByteLength,
+      manifestCacheControl: manifestResponse.headers.get("cache-control"),
+      iconCacheControl: iconResponse.headers.get("cache-control"),
+    };
+  }, manifestPath);
+}
+
+function assertUpdatedInstallMetadata(
+  identity: string,
+  previous: InstallMetadata,
+  current: InstallMetadata,
+) {
+  for (const [field, expected, actual] of [
+    ["id", previous.id, current.id],
+    ["scope", previous.scope, current.scope],
+    ["start_url", previous.startUrl, current.startUrl],
+  ] as const) {
+    if (expected !== actual) {
+      throw new Error(`${identity} manifest ${field} changed from ${expected} to ${actual}`);
+    }
+  }
+  if (previous.iconPath === current.iconPath) {
+    throw new Error(`${identity} V2 manifest kept the V1 icon URL ${current.iconPath}`);
+  }
+  if (current.iconByteLength <= 0) {
+    throw new Error(`${identity} V2 icon response was empty`);
+  }
+  if (current.manifestCacheControl !== "no-cache, must-revalidate") {
+    throw new Error(`${identity} manifest cache policy was ${current.manifestCacheControl}`);
+  }
+  if (current.iconCacheControl !== "public, max-age=31536000, immutable") {
+    throw new Error(`${identity} icon cache policy was ${current.iconCacheControl}`);
+  }
+}
+
+async function waitForAppUpdate(
+  page: import("playwright-core").Page,
+  registrationScope: string,
+) {
+  await page.evaluate(async (scope) => {
+    const registration = (await navigator.serviceWorker.getRegistrations()).find(
+      (candidate) => new URL(candidate.scope).pathname === scope,
+    );
+    if (!registration) throw new Error(`${scope} service worker registration missing`);
+    await registration.update();
+  }, registrationScope);
+  await page.waitForSelector(".update-banner", { state: "visible", timeout: 20_000 });
+  await page.waitForFunction(
+    () => document.querySelector<HTMLButtonElement>(".update-banner-actions button")?.ariaBusy !== "true",
+    undefined,
+    { timeout: 20_000 },
+  );
+}
+
+async function activateWaitingAppUpdate(
+  page: import("playwright-core").Page,
+  scriptName: string,
+  identity: string,
+) {
+  const updateOutcome = await Promise.race([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }).then(() => "reloaded" as const),
+    page.waitForSelector(".update-banner-failed", { state: "visible", timeout: 15_000 }).then(() => "failed" as const),
+    page.locator(".update-banner-actions button").first().click().then(() => new Promise<never>(() => {})),
+  ]);
+  if (updateOutcome === "failed") {
+    throw new Error(`${identity} app-shell update entered activation-failed instead of reloading`);
+  }
+  await waitForController(page, scriptName);
 }
 
 function seedLinuxDoUserSession(dbPath: string): string {
@@ -434,6 +618,7 @@ async function main() {
     if (initialBuildVersion !== "release-a") {
       throw new Error(`initial public shell reported ${initialBuildVersion}, expected release-a`);
     }
+    const publicV1Metadata = await readInstallMetadata(publicPage, "/manifest.webmanifest");
 
     log("verifying the release-a shell remains usable offline before an update");
     await setOffline(publicPage, true);
@@ -445,34 +630,77 @@ async function main() {
     }
     await setOffline(publicPage, false);
 
-    log("verifying an explicit app-shell update activates and reloads");
-    switchStaticRelease(staticDir, "release-b");
-    await publicPage.evaluate(async () => {
-      const registration = await navigator.serviceWorker.getRegistration("/");
-      if (!registration) throw new Error("public service worker registration missing");
-      await registration.update();
+    const adminAuthContext = await browser.newContext({
+      baseURL: baseUrl,
+      serviceWorkers: "allow",
     });
-    await publicPage.waitForSelector(".update-banner", { state: "visible", timeout: 20_000 });
-    await publicPage.waitForFunction(
-      () => document.querySelector<HTMLButtonElement>(".update-banner-actions button")?.ariaBusy !== "true",
-      undefined,
-      { timeout: 20_000 },
-    );
-    const updateOutcome = await Promise.race([
-      publicPage.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }).then(() => "reloaded" as const),
-      publicPage.waitForSelector(".update-banner-failed", { state: "visible", timeout: 15_000 }).then(() => "failed" as const),
-      publicPage.locator(".update-banner-actions button").first().click().then(() => new Promise<never>(() => {})),
-    ]);
-    if (updateOutcome === "failed") {
-      throw new Error("public app-shell update entered activation-failed instead of reloading");
+    const adminLoginPage = await adminAuthContext.newPage();
+    log("opening admin login");
+    await adminLoginPage.goto(`${baseUrl}/login`, { waitUntil: "domcontentloaded" });
+    await waitForSelector(adminLoginPage, "#admin-password-input");
+    await adminLoginPage.reload({ waitUntil: "domcontentloaded" });
+    await adminLoginPage.fill("#admin-password-input", "pw-e2e-admin");
+    log("signing into admin shell");
+    await adminLoginPage.click("button[type=submit]");
+    await adminLoginPage.waitForURL(/\/admin/, { timeout: 15_000 });
+    await waitForSelector(adminLoginPage, ".admin-shell-content");
+    const adminCookies = await adminAuthContext.cookies();
+    await adminAuthContext.close();
+
+    const adminContext = await browser.newContext({
+      baseURL: baseUrl,
+      serviceWorkers: "allow",
+    });
+    await adminContext.addCookies(adminCookies);
+    const adminPage = await adminContext.newPage();
+    await adminPage.goto(`${baseUrl}/admin/`, { waitUntil: "domcontentloaded" });
+    await waitForSelector(adminPage, ".admin-shell-content");
+    await waitForServiceWorker(adminPage);
+    await waitForActiveRegistration(adminPage, "/admin/");
+    await adminPage.reload({ waitUntil: "domcontentloaded" });
+    await waitForSelector(adminPage, ".admin-shell-content");
+    await waitForController(adminPage, "/sw-admin.js");
+    const adminRegistrationState = await adminPage.evaluate(async () => {
+      const registration = (await navigator.serviceWorker.getRegistrations()).find(
+        (candidate) => new URL(candidate.scope).pathname === "/admin/",
+      );
+      return {
+        active: registration?.active?.state ?? null,
+        waiting: registration?.waiting?.state ?? null,
+        bannerVisible: document.querySelector(".update-banner") !== null,
+      };
+    });
+    if (adminRegistrationState.active !== "activated" || adminRegistrationState.waiting !== null || adminRegistrationState.bannerVisible) {
+      throw new Error(`admin first-install lifecycle mismatch: ${JSON.stringify(adminRegistrationState)}`);
     }
-    await waitForController(publicPage, "/sw-public.js");
+    const adminV1Metadata = await readInstallMetadata(adminPage, "/manifest-admin.webmanifest");
+
+    log("verifying the release-a admin shell remains usable offline before an update");
+    await setOffline(adminPage, true);
+    await adminPage.goto(`${baseUrl}/admin/`, { waitUntil: "domcontentloaded" });
+    await assertText(adminPage, "Admin shell loaded offline");
+    await setOffline(adminPage, false);
+    await waitForController(adminPage, "/sw-admin.js");
+
+    log("switching the same origin to release-b install metadata");
+    switchStaticRelease(staticDir, "release-b");
+
+    log("verifying the public V1 registration can read V2 manifest and icon before activation");
+    await waitForAppUpdate(publicPage, "/");
+    const publicV2BeforeActivation = await readInstallMetadata(publicPage, "/manifest.webmanifest");
+    assertUpdatedInstallMetadata("public", publicV1Metadata, publicV2BeforeActivation);
+    await activateWaitingAppUpdate(publicPage, "/sw-public.js", "public");
+    const publicV2Metadata = await readInstallMetadata(publicPage, "/manifest.webmanifest");
+    assertUpdatedInstallMetadata("public", publicV1Metadata, publicV2Metadata);
+    if (publicV2Metadata.iconPath !== publicV2BeforeActivation.iconPath) {
+      throw new Error("public V2 icon URL changed while activating the update");
+    }
     const publicCacheKeys = await publicPage.evaluate(() => caches.keys());
     if (!publicCacheKeys.some((key) => key.endsWith("e2e-release-b"))) {
       throw new Error(`updated public cache missing: ${publicCacheKeys.join(", ")}`);
     }
 
-    log("verifying offline public shell");
+    log("verifying offline public shell after the V2 update");
     await setOffline(publicPage, true);
     await publicPage.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
     await assertText(publicPage, "Offline shell loaded");
@@ -485,6 +713,27 @@ async function main() {
       }
     }
     await publicContext.close();
+
+    log("verifying the admin V1 registration can read V2 manifest and icon before activation");
+    await waitForAppUpdate(adminPage, "/admin/");
+    const adminV2BeforeActivation = await readInstallMetadata(adminPage, "/manifest-admin.webmanifest");
+    assertUpdatedInstallMetadata("admin", adminV1Metadata, adminV2BeforeActivation);
+    await activateWaitingAppUpdate(adminPage, "/sw-admin.js", "admin");
+    const adminV2Metadata = await readInstallMetadata(adminPage, "/manifest-admin.webmanifest");
+    assertUpdatedInstallMetadata("admin", adminV1Metadata, adminV2Metadata);
+    if (adminV2Metadata.iconPath !== adminV2BeforeActivation.iconPath) {
+      throw new Error("admin V2 icon URL changed while activating the update");
+    }
+    const adminCacheKeys = await adminPage.evaluate(() => caches.keys());
+    if (!adminCacheKeys.some((key) => key.endsWith("e2e-release-b"))) {
+      throw new Error(`updated admin cache missing: ${adminCacheKeys.join(", ")}`);
+    }
+
+    log("verifying offline admin shell after the V2 update");
+    await setOffline(adminPage, true);
+    await adminPage.goto(`${baseUrl}/admin/`, { waitUntil: "domcontentloaded" });
+    await assertText(adminPage, "Admin shell loaded offline");
+    await adminContext.close();
 
     const userContext = await browser.newContext({
       baseURL: baseUrl,
@@ -507,41 +756,6 @@ async function main() {
     await userConsolePage.goto(`${baseUrl}/console`, { waitUntil: "domcontentloaded" });
     await assertText(userConsolePage, "Console structure is available");
     await userContext.close();
-
-    const adminContext = await browser.newContext({
-      baseURL: baseUrl,
-      serviceWorkers: "allow",
-    });
-    const adminLoginPage = await adminContext.newPage();
-    log("opening admin login");
-    await adminLoginPage.goto(`${baseUrl}/login`, { waitUntil: "domcontentloaded" });
-    await waitForSelector(adminLoginPage, "#admin-password-input");
-    await waitForServiceWorker(adminLoginPage);
-    await adminLoginPage.reload({ waitUntil: "domcontentloaded" });
-    await waitForController(adminLoginPage, "/sw-public.js");
-    await adminLoginPage.fill("#admin-password-input", "pw-e2e-admin");
-    log("signing into admin shell");
-    await adminLoginPage.click("button[type=submit]");
-    await adminLoginPage.waitForURL(/\/admin/, { timeout: 15_000 });
-    await waitForSelector(adminLoginPage, ".admin-shell-content");
-    await waitForServiceWorker(adminLoginPage);
-    await waitForActiveRegistration(adminLoginPage, "/admin/");
-    const adminRegistrationState = await adminLoginPage.evaluate(async () => {
-      const registration = await navigator.serviceWorker.getRegistration("/admin/");
-      return {
-        active: registration?.active?.state ?? null,
-        waiting: registration?.waiting?.state ?? null,
-        bannerVisible: document.querySelector(".update-banner") !== null,
-      };
-    });
-    if (adminRegistrationState.active !== "activated" || adminRegistrationState.waiting !== null || adminRegistrationState.bannerVisible) {
-      throw new Error(`admin first-install lifecycle mismatch: ${JSON.stringify(adminRegistrationState)}`);
-    }
-
-    log("verifying offline admin shell");
-    await setOffline(adminLoginPage, true);
-    await adminLoginPage.goto(`${baseUrl}/admin/`, { waitUntil: "domcontentloaded" });
-    await assertText(adminLoginPage, "Admin shell loaded offline");
 
     log("PWA offline browser E2E passed");
   } finally {

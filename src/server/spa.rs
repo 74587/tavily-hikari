@@ -23,7 +23,14 @@ fn is_content_hashed_pwa_asset(file_name: &str) -> bool {
     let Some(digest) = digest_with_extension.strip_suffix(".png") else {
         return false;
     };
-    (stem.starts_with("public-") || stem.starts_with("admin-"))
+    let is_generated_icon = ["public-", "admin-"].iter().any(|prefix| {
+        let Some(size) = stem.strip_prefix(prefix) else {
+            return false;
+        };
+        let size = size.strip_prefix("maskable-").unwrap_or(size);
+        !size.is_empty() && size.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    is_generated_icon
         && digest.len() == 12
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -194,9 +201,10 @@ mod pwa_cache_tests {
             Some("public, max-age=31536000, immutable")
         );
         assert_eq!(
-            response_cache_control("pwa/admin-touch-icon-0123456789ab.png"),
+            response_cache_control("pwa/admin-maskable-512-0123456789ab.png"),
             Some("public, max-age=31536000, immutable")
         );
+        assert_eq!(response_cache_control("pwa/admin-touch-icon-0123456789ab.png"), None);
         assert_eq!(response_cache_control("pwa/admin-1024.png"), None);
         assert_eq!(response_cache_control("pwa/admin-1024-0123456789abc.png"), None);
         assert_eq!(response_cache_control("assets/admin-1024-0123456789ab.png"), None);
