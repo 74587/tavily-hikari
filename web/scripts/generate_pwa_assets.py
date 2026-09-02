@@ -79,7 +79,7 @@ def write_hashed_png(stem: str, image: Any) -> str:
     return relative_path
 
 
-def draw_icon(prefix: str, source_file: Path) -> dict[str, dict[str, str] | str]:
+def draw_icon(prefix: str, source_file: Path) -> dict[str, dict[str, str]]:
     base = Image.open(source_file).convert("RGBA")
     output_any: dict[str, str] = {}
     output_maskable: dict[str, str] = {}
@@ -97,14 +97,9 @@ def draw_icon(prefix: str, source_file: Path) -> dict[str, dict[str, str] | str]
             base.resize((size, size), Image.Resampling.LANCZOS),
         )
         output_maskable[str(size)] = rel
-    touch_rel = write_hashed_png(
-        f"{prefix}-touch-icon",
-        base.resize((180, 180), Image.Resampling.LANCZOS),
-    )
     return {
         "any": output_any,
         "maskable": output_maskable,
-        "touch": touch_rel,
     }
 
 
@@ -120,20 +115,6 @@ def load_build_version() -> str:
     return version.strip()
 
 
-def collect_icon_files(icons: dict[str, dict[str, str] | str]) -> list[str]:
-    output: list[str] = []
-    any_icons = icons.get("any")
-    maskable_icons = icons.get("maskable")
-    touch_icon = icons.get("touch")
-    if isinstance(any_icons, dict):
-        output.extend(any_icons.values())
-    if isinstance(maskable_icons, dict):
-        output.extend(maskable_icons.values())
-    if isinstance(touch_icon, str):
-        output.append(touch_icon)
-    return normalize(output)
-
-
 def make_manifest(
     identity_id: str,
     name: str,
@@ -142,7 +123,7 @@ def make_manifest(
     scope: str,
     theme_color: str,
     background_color: str,
-    icons: dict[str, dict[str, str] | str],
+    icons: dict[str, dict[str, str]],
 ) -> dict[str, Any]:
     icon_entries: list[dict[str, str]] = []
     any_icons = icons["any"]
@@ -320,12 +301,10 @@ def main() -> None:
     admin_source_icon = WEB_ROOT / "public" / "assets" / "relay-mesh-icon-dark.png"
     public_icons = draw_icon(prefix="public", source_file=public_source_icon)
     admin_icons = draw_icon(prefix="admin", source_file=admin_source_icon)
-    public_icon_files = collect_icon_files(public_icons)
-    admin_icon_files = collect_icon_files(admin_icons)
     public_manifest_path = "manifest.webmanifest"
     admin_manifest_path = "manifest-admin.webmanifest"
-    public_precache_files = normalize(public_files + [public_manifest_path] + public_icon_files)
-    admin_precache_files = normalize(admin_files + [admin_manifest_path] + admin_icon_files)
+    public_precache_files = normalize(public_files)
+    admin_precache_files = normalize(admin_files)
 
     public_manifest = make_manifest(
         identity_id="/",

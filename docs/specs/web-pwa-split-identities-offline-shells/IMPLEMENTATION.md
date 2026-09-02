@@ -3,14 +3,14 @@
 ## 当前实现状态
 
 - 状态：已完成（含 Relay Mesh 品牌接入、可恢复 PWA 更新提示与安装图标更新交付修复；待 Safari / iOS 手工补验）
-- 分支：`th/fix-pwa-admin-icon-update`
+- 分支：`th/fix-pwa-installed-icon-update`
 
 ## 实现决策
 
 - 采用现有 Vite multipage 构建，新增 build manifest 输出与 post-build 脚本。
 - 通过生成脚本构造 public/admin 两套 asset graph、manifest、service worker 与图标，不引入单 manifest 注入式 PWA 插件。
-- manifest 继续作为支持平台的安装元数据来源：public/admin 分别固定 `id=/` 与 `id=/admin/`，HTML 只声明匹配 manifest，移除会在 WebKit 中优先覆盖 manifest 的 `apple-touch-icon` link。
-- PWA PNG 以最终字节的 12 位 SHA-256 摘要命名；manifest 与对应 worker 只引用自己的当前 URL。metadata 资源要求重新验证，哈希图标使用 immutable 缓存；worker precache 使用 `cache: 'reload'`，页面注册使用 `updateViaCache: 'none'`。
+- manifest 继续作为支持平台的安装元数据来源：public/admin 分别固定 `id=/` 与 `id=/admin/`，产品 HTML 只声明匹配 manifest，移除会在 WebKit 中优先覆盖 manifest 的 `apple-touch-icon` link；docs-site 保留自己的独立图标入口。
+- PWA regular/maskable PNG 以最终字节的 12 位 SHA-256 摘要命名；manifest 与对应 worker 只引用自己的当前 URL。metadata 资源要求重新验证，哈希图标使用 immutable 缓存；worker 只 precache 应用壳依赖并使用 `cache: 'reload'`，页面注册使用 `updateViaCache: 'none'`。
 - 品牌导出器按 mark 的可见 alpha 边界放置方形 launcher、maskable 与 mono 图标，避免批准稿透明画布 padding 造成前景偏移；CI 逐一检查 Web 与 docs-site 导出物的可见边界中心。
 - 品牌资产采用单一矢量 lockup 母版：Roboto Condensed weight 400 的预实例化静态字体固定为 reviewed tagline outline 的来源；完整 SVG 保存该不可变 outline，并以两组路径哈希防止不同主机的字体栅格化或意外编辑改写母版。完整版保持既有 `1000 × 310` 横向轮廓，右侧主字标与副标语作为两行文字块共享 Relay Mesh mark 的光学中轴；`KEY POOL · BALANCE. ROUTE.` 保留字间点并使用一条连续渐变，而非分段色块或竖线。Web 与 docs-site 的完整/compact SVG 与 PNG 均从母版稳定导出，favicon、launcher icon 与 PWA identity 保持既有合同。
 - `BrandLockup` 以 `full | compact | responsive` 三态统一公共首页、用户控制台、后台、登录、暂停注册和 404；`responsive` 以 `260px` 的实际容器宽度为门槛选择完整或 compact。Rspress `Layout.navTitle` 复用同一主题与容器查询合同，但作为导航 utility 位固定为 `180px`，因此稳定选择 compact 版本。
@@ -23,7 +23,7 @@
 - `/api/version.frontend` 变化只触发 `registration.update()`，不直接展示可更新提示；安装/缓存中的中间态继续静默，只有 waiting worker 已 ready 或用户触发后的失败态才展示 banner。
 - 更新横幅的“当前版本”现在由当前 HTML shell 的 `tavily-hikari-build-version` meta 标记提供；“目标版本”会在初始版本探测、waiting worker ready、以及失败重试态重新向 `/api/version` 校准，避免回退到 `latest` 或把服务器版本误认成当前页版本。
 - `write-version.mjs` 支持 `WEB_DIST_DIR`，在五个 HTML shell 中注入 HTML 转义后的版本、写入 `version.json`；PWA 生成器校验该 JSON 并把版本纳入两个 worker 的 cache identity，不改写 hashed assets、asset graph 或 web manifest。
-- Chromium 离线 E2E 直接断言初始 release shell 的 HTML meta 版本，并在切换到新 worker 前验证旧 shell 离线可用，覆盖纯版本更新的真实缓存生命周期。
+- Chromium 离线 E2E 直接断言初始 release shell 的 HTML meta 版本，并在同一浏览器 registration 的 public/admin V1→V2 切换中，于 waiting worker 激活前后验证 V2 manifest/icon、稳定 identity、缓存头与旧 shell 离线可用，覆盖真实缓存生命周期。
 - 更新提示由共享 runtime/hook 与 `UpdateAvailableBanner` 承载，覆盖 public、console、login、registration-paused 与 admin app shell。
 - 管理员登录页将更新提示提升为页头后的页面级状态：桌面宽度独立于 `36rem` 登录表单，移动端保持操作按钮同行且无横向溢出；提示标题、版本信息和操作按钮按阅读优先级分层。
 - 用户触发激活后以 `controllerchange` 或 waiting worker 的 `activated` 状态确认成功；后者使用单次 reload guard 兼容浏览器漏发当前页接管事件的情况。
@@ -109,9 +109,9 @@
   - `AdminLogin`
 - `web/src/api/runtime.ts` 统一将浏览器裸网络失败归一为离线错误消息，减少 `Failed to fetch` 直出。
 - Relay Mesh 品牌接入包括：
-  - `web/scripts/generate_relay_mesh_brand_assets.py` 基于批准稿导出透明底 `lockup / mark / icon` 资产，以及 light/dark/mono 变体与 favicon/touch icon
-  - `web/scripts/generate_pwa_assets.py` 从 `relay-mesh-icon-light.png` / `relay-mesh-icon-dark.png` 导出 public/admin 两套全尺寸 PWA PNG、maskable 图标、touch icon 与 manifest 主题字段
-  - `web/scripts/generate_pwa_assets.py` 将每个图标的最终 PNG 内容摘要写入 URL，并将相应 manifest 纳入对应 service worker precache；public/admin 产物不互相引用
+  - `web/scripts/generate_relay_mesh_brand_assets.py` 基于批准稿导出透明底 `lockup / mark / icon` 资产，以及 light/dark/mono 变体与站点 favicon；docs-site 单独保留自己的 Apple touch icon
+  - `web/scripts/generate_pwa_assets.py` 从 `relay-mesh-icon-light.png` / `relay-mesh-icon-dark.png` 导出 public/admin 两套 regular/maskable 全尺寸 PWA PNG 与 manifest 主题字段
+  - `web/scripts/generate_pwa_assets.py` 将每个 regular/maskable 图标的最终 PNG 内容摘要写入 URL；对应 manifest 与图标不进入 service worker precache，public/admin 产物不互相引用
   - `BrandLockup` 组件统一 public home、console header、admin shell、login、registration-paused 与 404 fallback 的显式品牌位，并按主题切换 lockup 亮/暗版
   - `docs-site/rspress.config.ts` 与 `docs-site/docs/public/*` 接入同一套文档站品牌入口，并补上主题感知 favicon
   - 2026-06-27 follow-up 将 public/docs-site 品牌导出物迁到各自 `public/assets/` 目录，HTML shell、组件引用与 Rust 静态合同统一改为 `/assets/*`
@@ -152,6 +152,7 @@
 - 2026-07-08: 将更新检测从 PublicHome 局部版本比较升级为共享 PWA update runtime；新 worker precache 完成后进入 waiting，用户确认时才激活并 reload。
 - 2026-07-31: 管理员登录页更新提示移至全局页头下方，采用页头级宽度并修正移动端按钮同行、信息层级和横向溢出。
 - 2026-09-01: 修复安装图标更新交付链：manifest 增加稳定 identity `id`，PNG URL 使用内容哈希，HTML 移除 legacy `apple-touch-icon` 覆盖，metadata/图标缓存策略分离，并让对应 service worker 重新验证自己的 manifest 与图标。
+- 2026-09-02: 修正安装元数据仍被旧 worker cache-first 固化的问题；产品 PWA worker 只预缓存应用壳，manifest/regular/maskable 图标走普通网络路径，并以同源 Chromium public/admin V1→V2 产物更新测试覆盖 waiting 前后的读取。
 
 ## 已知未完成验证
 
@@ -161,7 +162,7 @@
 
 - Status: 已完成（快车道）
 - Created: 2026-06-24
-- Last: 2026-09-01
+- Last: 2026-09-02
 
 ## 实现里程碑（Milestones / Delivery checklist）
 

@@ -53,8 +53,10 @@ does not prove that the admin registration is performing an update.
   approved mark, not by the transparent source canvas; otherwise source padding shifts the
   installed artwork even when the artwork itself has not changed.
 - Serve HTML, manifests, workers, and version metadata with revalidation while serving content-hashed
-  icon files as immutable assets. Precache the matching manifest and icon URLs with cache-reloading
-  requests, and register the worker with `updateViaCache: 'none'`.
+  regular/maskable icon files as immutable assets. Keep manifests and install icons out of the
+  service worker precache and cache-first path so an already-active V1 worker cannot hide V2
+  installation metadata before its replacement activates. Register the worker with
+  `updateViaCache: 'none'`.
 - Treat existing iOS/iPadOS Web Clips and browsers without manifest metadata synchronization as a
   platform limitation. The site cannot force-migrate their installed icon, and reinstalling is not the
   normal update mechanism.

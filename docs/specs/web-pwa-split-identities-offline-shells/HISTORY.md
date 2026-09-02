@@ -17,6 +17,7 @@
 - 2026-08-18: 前端版本身份从 Vite 编译期 define 收敛到 HTML shell meta、`version.json` 与版本化 service worker cache；纯版本发布只改变尾部动态产物，旧 shell 继续支持离线回退。
 - 2026-09-01: 修复安装元数据与图标更新链：为 public/admin manifest 固定身份，移除会覆盖 manifest 的 legacy touch-icon HTML 声明，改用内容哈希图标 URL，并让静态缓存与 service worker 更新遵循可重新验证的 metadata / immutable asset 边界。
 - 2026-09-01: 修正方形品牌图标按透明源画布居中导致的前景偏移；导出器改按可见 mark 边界居中，并加入 Web 与 docs-site 图标几何门禁。
+- 2026-09-02: 修正旧 worker 通过 cache-first 隐藏新安装元数据的问题；产品 PWA worker 只预缓存应用壳，manifest 与 regular/maskable 图标走普通网络路径，并以同源 Chromium public/admin V1→V2 产物更新测试覆盖 waiting 前后的读取。
 
 ## 变更记录（Change log）
 
