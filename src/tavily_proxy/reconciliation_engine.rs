@@ -208,6 +208,9 @@ struct ReconciliationRemoteAttemptContext<'a> {
     remote_attempt_admission: Option<&'a Arc<RemoteAttemptAdmissionController>>,
     reconciliation_turn: Option<&'a crate::ReconciliationTurn>,
     manual_remote_attempt: bool,
+    /// Research drain turns lease contention into a durable short defer. It
+    /// never spends the whole remote preparation budget waiting locally.
+    try_remote_attempt: bool,
     attempt_deadline: Option<std::time::Instant>,
 }
 
@@ -290,6 +293,13 @@ impl ReconciliationRemoteAttemptContext<'_> {
     }
 
     async fn acquire(self) -> Result<Option<crate::RemoteAttemptLease>, &'static str> {
+        if self.try_remote_attempt {
+            return match (self.reconciliation_turn, self.remote_attempt_admission) {
+                (Some(turn), _) => turn.try_acquire_attempt().map(Some),
+                (None, Some(controller)) => controller.try_acquire_automatic_attempt().map(Some),
+                (None, None) => Ok(None),
+            };
+        }
         let acquire = async {
             match (self.reconciliation_turn, self.remote_attempt_admission) {
                 (Some(turn), _) => turn.acquire_attempt().await.map(Some),
@@ -884,15 +894,6 @@ impl TavilyProxy {
             .map_err(|reason| (ReconciliationEngine::remote_attempt_admission_error(reason), None))?;
         let request_timeout = remote_attempt_context.request_timeout();
         let request_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let outbound = self
-            .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
-                request_started.store(true, std::sync::atomic::Ordering::Relaxed);
-                client
-                    .get(url.clone())
-                    .header("Authorization", format!("Bearer {secret}"))
-                    .header("X-Project-ID", project_id)
-                    .timeout(request_timeout)
-            });
         let response_result = match remote_attempt_context.deadline_remaining() {
             Some(remaining) if remaining.is_zero() => {
                 drop(remote_attempt);
@@ -903,23 +904,51 @@ impl TavilyProxy {
                     None,
                 ));
             }
-            Some(remaining) => match tokio::time::timeout(remaining, outbound).await {
-                Ok(result) => result,
-                Err(_) => {
-                    drop(remote_attempt);
-                    let error = if request_started.load(std::sync::atomic::Ordering::Relaxed) {
-                        ProxyError::Other(
-                            ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR.to_string(),
-                        )
-                    } else {
-                        ReconciliationEngine::remote_attempt_admission_error(
-                            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
-                        )
-                    };
-                    return Err((error, None));
+            Some(remaining) => {
+                let request_lease = remote_attempt.as_ref();
+                let outbound = self
+                    .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                        if let Some(lease) = request_lease {
+                            lease.mark_request_started();
+                        }
+                        request_started.store(true, std::sync::atomic::Ordering::Relaxed);
+                        client
+                            .get(url.clone())
+                            .header("Authorization", format!("Bearer {secret}"))
+                            .header("X-Project-ID", project_id)
+                            .timeout(request_timeout)
+                    });
+                match tokio::time::timeout(remaining, outbound).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let error = if request_started.load(std::sync::atomic::Ordering::Relaxed) {
+                            ProxyError::Other(
+                                ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR.to_string(),
+                            )
+                        } else {
+                            ReconciliationEngine::remote_attempt_admission_error(
+                                ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                            )
+                        };
+                        return Err((error, None));
+                    }
                 }
-            },
-            None => outbound.await,
+            }
+            None => {
+                let request_lease = remote_attempt.as_ref();
+                self.send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                    if let Some(lease) = request_lease {
+                        lease.mark_request_started();
+                    }
+                    request_started.store(true, std::sync::atomic::Ordering::Relaxed);
+                    client
+                        .get(url.clone())
+                        .header("Authorization", format!("Bearer {secret}"))
+                        .header("X-Project-ID", project_id)
+                        .timeout(request_timeout)
+                })
+                .await
+            }
         };
         let response = response_result
             .map(|(response, _)| response)
@@ -993,14 +1022,6 @@ impl TavilyProxy {
             .map_err(|reason| (ReconciliationEngine::remote_attempt_admission_error(reason), None))?;
         let request_timeout = remote_attempt_context.request_timeout();
         let request_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let outbound = self
-            .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
-                request_started.store(true, std::sync::atomic::Ordering::Relaxed);
-                client
-                    .get(url.clone())
-                    .header("Authorization", format!("Bearer {secret}"))
-                    .timeout(request_timeout)
-            });
         let response_result = match remote_attempt_context.deadline_remaining() {
             Some(remaining) if remaining.is_zero() => {
                 drop(remote_attempt);
@@ -1011,23 +1032,49 @@ impl TavilyProxy {
                     None,
                 ));
             }
-            Some(remaining) => match tokio::time::timeout(remaining, outbound).await {
-                Ok(result) => result,
-                Err(_) => {
-                    drop(remote_attempt);
-                    let error = if request_started.load(std::sync::atomic::Ordering::Relaxed) {
-                        ProxyError::Other(
-                            ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR.to_string(),
-                        )
-                    } else {
-                        ReconciliationEngine::remote_attempt_admission_error(
-                            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
-                        )
-                    };
-                    return Err((error, None));
+            Some(remaining) => {
+                let request_lease = remote_attempt.as_ref();
+                let outbound = self
+                    .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                        if let Some(lease) = request_lease {
+                            lease.mark_request_started();
+                        }
+                        request_started.store(true, std::sync::atomic::Ordering::Relaxed);
+                        client
+                            .get(url.clone())
+                            .header("Authorization", format!("Bearer {secret}"))
+                            .timeout(request_timeout)
+                    });
+                match tokio::time::timeout(remaining, outbound).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let error = if request_started.load(std::sync::atomic::Ordering::Relaxed) {
+                            ProxyError::Other(
+                                ReconciliationEngine::REMOTE_REQUEST_DEADLINE_ERROR.to_string(),
+                            )
+                        } else {
+                            ReconciliationEngine::remote_attempt_admission_error(
+                                ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                            )
+                        };
+                        return Err((error, None));
+                    }
                 }
-            },
-            None => outbound.await,
+            }
+            None => {
+                let request_lease = remote_attempt.as_ref();
+                self.send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                    if let Some(lease) = request_lease {
+                        lease.mark_request_started();
+                    }
+                    request_started.store(true, std::sync::atomic::Ordering::Relaxed);
+                    client
+                        .get(url.clone())
+                        .header("Authorization", format!("Bearer {secret}"))
+                        .timeout(request_timeout)
+                })
+                .await
+            }
         };
         let response = response_result
             .map(|(response, _)| response)
