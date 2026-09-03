@@ -106,4 +106,12 @@ cgroup. They cannot attribute write amplification to one SQLite statement.
   paths; a stale generation or claim cannot consume observations from another run.
 - Admin Alerts reads use their own bounded read session: a 100ms acquire and a 250ms native SQLite
   deadline over one snapshot. Exact-key last-good data may be served stale; a cold key returns
-  `503 Retry-After: 1` and never falls back to the raw CTE path.
+  `503 Retry-After: 1` and never falls back to the raw CTE path. The canonical catalog, events
+  page `1/20`, and groups page `1/20` keys are owned by an AppState background warm controller;
+  it performs one bounded `AdminAlertsCacheWarm` read per slice only when two pool connections are
+  already idle, foreground activity is at most five requests per second, and recent contention is
+  clear. Before this admission check, the controller may ask the runtime to grow a lazy pool within
+  the same bounded budget; failure to establish two idle connections defers the slice. It stages all
+  three values behind one projection-generation fence and publishes them together. A deferred warm
+  retries at `5s`, `5s`, then `30s`; a generation change re-arms one warm without allowing HTTP to
+  trigger a rebuild.

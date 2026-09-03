@@ -296,6 +296,36 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
     let admin_password = "alerts-dashboard-default-window-password";
     let (admin_addr, dashboard_state) =
         spawn_builtin_keys_admin_server_with_state(proxy, admin_password).await;
+    let canonical_catalog = projection_proxy
+        .admin_alert_catalog()
+        .await
+        .expect("build canonical alert catalog fixture");
+    super::super::record_admin_alerts_last_good(
+        dashboard_state.as_ref(),
+        "catalog".to_string(),
+        super::super::AdminAlertsReadCacheValue::Catalog(canonical_catalog),
+    )
+    .await;
+    let canonical_events = projection_proxy
+        .admin_alert_events_page(None, None, None, None, None, None, &[], 1, 20)
+        .await
+        .expect("build canonical alert events fixture");
+    super::super::record_admin_alerts_last_good(
+        dashboard_state.as_ref(),
+        super::super::default_admin_alert_cache_key("events"),
+        super::super::AdminAlertsReadCacheValue::Events(canonical_events),
+    )
+    .await;
+    let canonical_groups = projection_proxy
+        .admin_alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
+        .await
+        .expect("build canonical alert groups fixture");
+    super::super::record_admin_alerts_last_good(
+        dashboard_state.as_ref(),
+        super::super::default_admin_alert_cache_key("groups"),
+        super::super::AdminAlertsReadCacheValue::Groups(canonical_groups),
+    )
+    .await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -696,6 +726,15 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
     let cookie = find_cookie_pair(login.headers(), BUILTIN_ADMIN_COOKIE_NAME)
         .expect("admin session cookie");
 
+    let cold = client
+        .get(format!("http://{admin_addr}/api/alerts/catalog"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("cold alerts catalog");
+    assert_eq!(cold.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(cold.headers().get("retry-after").and_then(|v| v.to_str().ok()), Some("1"));
+
     let mut projection_ready = false;
     for _ in 0..64 {
         state
@@ -714,6 +753,17 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
         }
     }
     assert!(projection_ready, "empty projection must complete before warming admin cache");
+    let catalog = state
+        .proxy
+        .admin_alert_catalog()
+        .await
+        .expect("build canonical catalog for the warm-cache fixture");
+    super::super::record_admin_alerts_last_good(
+        state.as_ref(),
+        "catalog".to_string(),
+        super::super::AdminAlertsReadCacheValue::Catalog(catalog),
+    )
+    .await;
     let warm = client
         .get(format!("http://{admin_addr}/api/alerts/catalog"))
         .header(reqwest::header::COOKIE, &cookie)
@@ -721,10 +771,14 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
         .await
         .expect("warm alerts catalog");
     assert_eq!(warm.status(), reqwest::StatusCode::OK);
+    let warm_body: serde_json::Value = warm.json().await.expect("warm alerts json");
+    assert_eq!(warm_body.get("coverage"), None);
+    assert_eq!(warm_body.get("staleReason"), None);
 
     // Alerts no longer depend on a maintenance-bulk permit. The native,
     // connection-local read deadline is the pressure boundary that selects
     // an exact-key last-good response.
+    super::super::mark_dashboard_overview_alert_projection_dirty(state.as_ref()).await;
     state.proxy.force_next_admin_alert_read_deadline_for_test();
     let stale = client
         .get(format!("http://{admin_addr}/api/alerts/catalog"))
@@ -737,7 +791,7 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
     assert_eq!(stale_body.get("coverage").and_then(|v| v.as_str()), Some("stale"));
     assert_eq!(
         stale_body.get("staleReason").and_then(|v| v.as_str()),
-        Some("sqlite_pressure")
+        Some("projection_refresh")
     );
 
     state.proxy.force_next_admin_alert_read_deadline_for_test();
@@ -749,6 +803,51 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
         .expect("cold alerts page");
     assert_eq!(cold.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(cold.headers().get("retry-after").and_then(|v| v.to_str().ok()), Some("1"));
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn admin_alerts_canonical_read_waits_for_history_projection_coverage() {
+    let db_path = temp_db_path("admin-alerts-history-coverage");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-admin-alerts-history-coverage".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    // Drain the empty sidecar so the recent lane is healthy before isolating
+    // the history lane. This mirrors the scheduler's normal catch-up path.
+    for _ in 0..64 {
+        proxy
+            .advance_dashboard_alert_projection_scheduler_step()
+            .await
+            .expect("advance alert projection");
+        if proxy.admin_alert_catalog().await.is_ok() {
+            break;
+        }
+    }
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_history_state SET phase = 'catching_up'",
+    )
+    .execute(&pool)
+    .await
+    .expect("hold history projection in catch-up");
+
+    let result = proxy.admin_alert_catalog().await;
+    assert!(
+        matches!(
+            result,
+            Err(tavily_hikari::ProxyError::Deferred { operation, ref reason })
+                if operation == "admin_alerts_read" && reason == "history_projection_catching_up"
+        ),
+        "canonical admin reads must not publish while history is incomplete: {result:?}"
+    );
+
     let _ = std::fs::remove_file(db_path);
 }
 
@@ -1195,9 +1294,30 @@ async fn alerts_and_dashboard_recent_alerts_include_api_key_exhausted_and_job_fa
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert!(direct_alerts.is_some(), "direct admin alerts read did not become ready");
+    let canonical_groups = proxy
+        .admin_alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
+        .await
+        .expect("canonical groups fixture");
 
     let admin_password = "alerts-dashboard-api-key-exhausted-job-failed-password";
-    let admin_addr = spawn_builtin_keys_admin_server(proxy, admin_password).await;
+    let (admin_addr, state) =
+        spawn_builtin_keys_admin_server_with_state(proxy, admin_password).await;
+    let canonical_events = direct_alerts
+        .as_ref()
+        .expect("canonical events fixture")
+        .clone();
+    super::super::record_admin_alerts_last_good(
+        state.as_ref(),
+        super::super::default_admin_alert_cache_key("events"),
+        super::super::AdminAlertsReadCacheValue::Events(canonical_events),
+    )
+    .await;
+    super::super::record_admin_alerts_last_good(
+        state.as_ref(),
+        super::super::default_admin_alert_cache_key("groups"),
+        super::super::AdminAlertsReadCacheValue::Groups(canonical_groups),
+    )
+    .await;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
