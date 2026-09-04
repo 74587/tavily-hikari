@@ -33,7 +33,7 @@ async fn get_alert_catalog(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, axum::response::Response> {
-    if !is_admin_request(state.as_ref(), &headers).await {
+    if !is_admin_cache_aware_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 
@@ -123,7 +123,7 @@ async fn get_alert_events(
     RawQuery(raw_query): RawQuery,
     Query(q): Query<AlertsQuery>,
 ) -> Result<axum::response::Response, axum::response::Response> {
-    if !is_admin_request(state.as_ref(), &headers).await {
+    if !is_admin_cache_aware_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 
@@ -187,6 +187,7 @@ async fn get_alert_events(
         );
         return Err(alerts_sqlite_pressure_response());
     }
+    state.proxy.record_foreground_activity();
     match state.proxy.admin_alert_events_page(
             alert_type,
             since,
@@ -227,7 +228,7 @@ async fn get_alert_groups(
     RawQuery(raw_query): RawQuery,
     Query(q): Query<AlertsQuery>,
 ) -> Result<axum::response::Response, axum::response::Response> {
-    if !is_admin_request(state.as_ref(), &headers).await {
+    if !is_admin_cache_aware_request(state.as_ref(), &headers).await {
         return Err(StatusCode::FORBIDDEN.into_response());
     }
 
@@ -291,6 +292,7 @@ async fn get_alert_groups(
         );
         return Err(alerts_sqlite_pressure_response());
     }
+    state.proxy.record_foreground_activity();
     match state.proxy.admin_alert_groups_page(
             alert_type,
             since,

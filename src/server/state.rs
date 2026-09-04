@@ -1145,9 +1145,16 @@ async fn db_maintenance_http_gate(
 fn db_maintenance_gated_path(path: &str) -> bool {
     path == "/mcp"
         || path.starts_with("/mcp/")
-        || path.starts_with("/api/")
+        || (path.starts_with("/api/") && !admin_alerts_cache_aware_path(path))
         || path == "/auth/linuxdo"
         || path.starts_with("/auth/linuxdo/")
+}
+
+fn admin_alerts_cache_aware_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/alerts/catalog" | "/api/alerts/events" | "/api/alerts/groups"
+    )
 }
 
 #[cfg(test)]
@@ -1155,11 +1162,15 @@ mod db_maintenance_gate_tests {
     use super::db_maintenance_gated_path;
 
     #[test]
-    fn maintenance_gate_only_covers_db_backed_routes() {
+    fn maintenance_gate_leaves_alerts_to_cache_aware_foreground_measurement() {
         assert!(db_maintenance_gated_path("/api/jobs"));
         assert!(db_maintenance_gated_path("/mcp"));
         assert!(db_maintenance_gated_path("/auth/linuxdo/callback"));
 
+        assert!(!db_maintenance_gated_path("/api/alerts/catalog"));
+        assert!(!db_maintenance_gated_path("/api/alerts/events"));
+        assert!(!db_maintenance_gated_path("/api/alerts/groups"));
+        assert!(db_maintenance_gated_path("/api/alerts/future-db-route"));
         assert!(!db_maintenance_gated_path("/health"));
         assert!(!db_maintenance_gated_path("/admin"));
         assert!(!db_maintenance_gated_path("/assets/admin.js"));
@@ -1966,16 +1977,54 @@ async fn is_admin_request(state: &AppState, headers: &HeaderMap) -> bool {
 }
 
 async fn try_is_admin_request(state: &AppState, headers: &HeaderMap) -> Result<bool, ProxyError> {
+    match classify_admin_request_authentication(state, headers, false).await {
+        AdminRequestAuthentication::InMemory(is_admin) => Ok(is_admin),
+        AdminRequestAuthentication::PasskeyLookup(result) => result,
+    }
+}
+
+async fn is_admin_cache_aware_request(state: &AppState, headers: &HeaderMap) -> bool {
+    match classify_admin_request_authentication(state, headers, true).await {
+        AdminRequestAuthentication::InMemory(is_admin) => is_admin,
+        AdminRequestAuthentication::PasskeyLookup(result) => result.unwrap_or(false),
+    }
+}
+
+enum AdminRequestAuthentication {
+    InMemory(bool),
+    PasskeyLookup(Result<bool, ProxyError>),
+}
+
+async fn classify_admin_request_authentication(
+    state: &AppState,
+    headers: &HeaderMap,
+    record_passkey_foreground_activity: bool,
+) -> AdminRequestAuthentication {
     if state.dev_open_admin {
-        return Ok(true);
+        return AdminRequestAuthentication::InMemory(true);
     }
     if state.forward_auth_enabled && state.forward_auth.is_request_admin(headers) {
-        return Ok(true);
+        return AdminRequestAuthentication::InMemory(true);
     }
     if state.builtin_admin.is_admin(headers) {
-        return Ok(true);
+        return AdminRequestAuthentication::InMemory(true);
     }
-    Ok(resolve_admin_passkey_session(state, headers).await?.is_some())
+    if state.admin_passkey.is_configured()
+        && cookie_value(headers, ADMIN_PASSKEY_COOKIE_NAME).is_some()
+    {
+        if record_passkey_foreground_activity {
+            // Canonical Alert payloads are cache-only, but a passkey session
+            // lookup is real bounded SQLite work. Record it before acquiring
+            // the connection so the warmer cannot race the lookup.
+            state.proxy.record_foreground_activity();
+        }
+        return AdminRequestAuthentication::PasskeyLookup(
+            resolve_admin_passkey_session(state, headers)
+                .await
+                .map(|session| session.is_some()),
+        );
+    }
+    AdminRequestAuthentication::InMemory(false)
 }
 
 async fn require_full_master_write(state: &AppState) -> Result<(), (StatusCode, String)> {
