@@ -772,39 +772,58 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
         }
     }
     assert!(projection_ready, "empty projection must complete before warming admin cache");
-    let catalog = state
-        .proxy
-        .admin_alert_catalog()
-        .await
-        .expect("build canonical catalog for the warm-cache fixture");
-    super::super::record_admin_alerts_last_good(
-        state.as_ref(),
-        "catalog".to_string(),
-        super::super::AdminAlertsReadCacheValue::Catalog(catalog),
-    )
-    .await;
-    let events = state
-        .proxy
-        .admin_alert_events_page(None, None, None, None, None, None, &[], 1, 20)
-        .await
-        .expect("build canonical events for the warm-cache fixture");
-    super::super::record_admin_alerts_last_good(
-        state.as_ref(),
-        super::super::default_admin_alert_cache_key("events"),
-        super::super::AdminAlertsReadCacheValue::Events(events),
-    )
-    .await;
-    let groups = state
-        .proxy
-        .admin_alert_groups_page(None, None, None, None, None, None, &[], 1, 20)
-        .await
-        .expect("build canonical groups for the warm-cache fixture");
-    super::super::record_admin_alerts_last_good(
-        state.as_ref(),
-        super::super::default_admin_alert_cache_key("groups"),
-        super::super::AdminAlertsReadCacheValue::Groups(groups),
-    )
-    .await;
+    state.proxy.force_next_admin_alert_read_deadline_for_test();
+    super::super::prewarm_admin_alerts(state.clone()).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
+            let cache = cache_handle.lock().await;
+            if cache.admin_alerts_prewarm_defers > 0 {
+                assert!(
+                    cache.admin_alerts.entries.iter().all(|entry| !entry.canonical),
+                    "a deferred projected read must not publish a partial canonical generation"
+                );
+                break;
+            }
+            drop(cache);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the forced bounded warm read defers");
+
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
+            let cache = cache_handle.lock().await;
+            let complete_generation = cache
+                .admin_alerts
+                .entries
+                .iter()
+                .filter(|entry| entry.canonical)
+                .all(|entry| entry.generation == cache.alert_projection_generation)
+                && [
+                    "catalog".to_string(),
+                    super::super::default_admin_alert_cache_key("events"),
+                    super::super::default_admin_alert_cache_key("groups"),
+                ]
+                .into_iter()
+                .all(|key| {
+                    cache
+                        .admin_alerts
+                        .entries
+                        .iter()
+                        .any(|entry| entry.canonical && entry.key == key)
+                });
+            if complete_generation {
+                break;
+            }
+            drop(cache);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the background warmer retries a bounded read and publishes all canonical keys");
     for route in ["catalog", "events", "groups"] {
         let warm = client
             .get(format!("http://{admin_addr}/api/alerts/{route}"))
@@ -871,6 +890,197 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
         state.proxy.foreground_activity_rps() > foreground_before_fallback,
         "a noncanonical Alerts fallback must account for its database read"
     );
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slices() {
+    let db_path = temp_db_path("admin-alerts-durable-warm-fence");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-admin-alerts-durable-warm-fence".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let (_, state) = spawn_builtin_keys_admin_server_with_state(
+        proxy,
+        "admin-alerts-durable-warm-fence-password",
+    )
+    .await;
+
+    let mut projection_ready = false;
+    for _ in 0..64 {
+        state
+            .proxy
+            .advance_dashboard_alert_projection_scheduler_step()
+            .await
+            .expect("complete the empty alert projection before warming the admin cache");
+        if state.proxy.admin_alert_catalog().await.is_ok() {
+            projection_ready = true;
+            break;
+        }
+    }
+    assert!(projection_ready, "empty projection must complete before warming admin cache");
+
+    super::super::prewarm_admin_alerts(state.clone()).await;
+    let initial_last_good = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
+            let cache = cache_handle.lock().await;
+            let canonical = cache
+                .admin_alerts
+                .entries
+                .iter()
+                .filter(|entry| entry.canonical)
+                .map(|entry| (entry.key.clone(), entry.generation, entry.stored_at))
+                .collect::<Vec<_>>();
+            if canonical.len() == 3 && !cache.admin_alerts_prewarm_in_flight {
+                break (cache.alert_projection_generation, canonical);
+            }
+            drop(cache);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial background warmer publishes canonical last-good values");
+
+    super::super::rearm_admin_alerts_prewarm_for_test(state.as_ref()).await;
+    let pause = super::super::install_admin_alerts_warm_after_catalog_pause_for_test(state.as_ref())
+        .await;
+    super::super::prewarm_admin_alerts(state.clone()).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        pause.wait_until_arrived(),
+    )
+    .await
+    .expect("the retry reaches the catalog-to-events pause");
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let changed = sqlx::query(
+        "UPDATE observability.dashboard_alert_projection_history_state SET generation = generation + 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("commit a durable history projection generation between warm slices");
+    assert_eq!(changed.rows_affected(), 3);
+    {
+        let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
+        let cache = cache_handle.lock().await;
+        assert_eq!(
+            cache.alert_projection_generation, initial_last_good.0,
+            "the scheduler has not yet propagated the durable projection commit into memory"
+        );
+    }
+    pause.release();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
+            let cache = cache_handle.lock().await;
+            if cache.admin_alerts_prewarm_defers > 0 {
+                let canonical = cache
+                    .admin_alerts
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.canonical)
+                    .map(|entry| (entry.key.clone(), entry.generation, entry.stored_at))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    canonical, initial_last_good.1,
+                    "a durable generation change must discard staged values and retain last-good"
+                );
+                assert_eq!(cache.alert_projection_generation, initial_last_good.0);
+                break;
+            }
+            drop(cache);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the durable fence mismatch defers the canonical warm");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn admin_alerts_warm_defers_before_final_fence_when_pressure_arrives_between_slices() {
+    let db_path = temp_db_path("admin-alerts-final-fence-pressure");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-admin-alerts-final-fence-pressure".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let (_, state) = spawn_builtin_keys_admin_server_with_state(
+        proxy,
+        "admin-alerts-final-fence-pressure-password",
+    )
+    .await;
+
+    let mut projection_ready = false;
+    for _ in 0..64 {
+        state
+            .proxy
+            .advance_dashboard_alert_projection_scheduler_step()
+            .await
+            .expect("complete the empty alert projection before warming the admin cache");
+        if state.proxy.admin_alert_catalog().await.is_ok() {
+            projection_ready = true;
+            break;
+        }
+    }
+    assert!(projection_ready, "empty projection must complete before warming admin cache");
+
+    super::super::rearm_admin_alerts_prewarm_for_test(state.as_ref()).await;
+    let pause = super::super::install_admin_alerts_warm_before_projection_fence_pause_for_test(
+        state.as_ref(),
+    )
+    .await;
+    super::super::prewarm_admin_alerts(state.clone()).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        pause.wait_until_arrived(),
+    )
+    .await
+    .expect("the retry reaches the groups-to-fence pause");
+
+    state.proxy.force_next_admin_alert_read_deadline_for_test();
+    for _ in 0..6 {
+        state.proxy.record_foreground_activity();
+    }
+    assert!(
+        state.proxy.foreground_activity_rps() > 5,
+        "fixture establishes pressure after the groups slice"
+    );
+    pause.release();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
+            let cache = cache_handle.lock().await;
+            if cache.admin_alerts_prewarm_defers > 0 {
+                break;
+            }
+            drop(cache);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pressure before the final fence defers the canonical warm");
+
+    assert!(
+        state
+            .proxy
+            .admin_alerts_canonical_warm_projection_fence()
+            .await
+            .is_err(),
+        "the deferred warmer must not consume the final fence read budget"
+    );
+
     let _ = std::fs::remove_file(db_path);
 }
 

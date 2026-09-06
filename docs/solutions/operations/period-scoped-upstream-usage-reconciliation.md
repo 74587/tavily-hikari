@@ -48,14 +48,20 @@ transitions are claim-fenced and keep raw upstream details out of durable observ
 
 For a period that maps to more than one eligible upstream key, persist each successful key observation
 by work generation before requesting another key. Advance that generation only for a logical usage
-revision or current Key-set change: storage replay, timestamp refresh, and an equal logical payload
-must retain partial observations. Read missing keys in deterministic order and cap each main run at two
+revision or current Key-set change, including a removed Key: storage replay, timestamp refresh, and
+an equal logical payload must retain partial observations. Read missing keys in deterministic order
+and cap each main run at two
 remote requests. If keys remain, write `remote_attempt_budget` and use the current claim to create or
 reuse one durable 30-second continuation; this must not write a semantic failure, transport or 429
 state, local-pressure state, or billing truth. Sum usage and enter the existing compare/active terminal
 path only after all current-generation key observations are present. Delete local observations
 atomically only with terminal completion, and fence both observation writes and continuations by claim
 generation.
+The scheduled-job `attempt` is part of that fence: a controlled pre-request retry records an error for
+the current claim and creates one continuation at `attempt + 1`, while finalization rejects any stale
+`(job_id, claim_generation, attempt)` tuple. This makes retry injection deterministic in tests without
+issuing an upstream request and prevents a late first attempt from reopening work after the continuation
+has claimed it.
 
 ## Activation controller
 
