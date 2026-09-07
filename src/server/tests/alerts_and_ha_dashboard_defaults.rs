@@ -2,7 +2,57 @@ use super::*;
 use super::core_support_and_parsing::*;
 use super::linuxdo_oauth_and_admin_keys::*;
 use super::upstream_support_and_manual_jobs::*;
+use std::sync::{Arc, Mutex};
 use tavily_hikari::SqliteAdmissionOutcome;
+use tracing::{Event, Subscriber, field};
+use tracing_subscriber::{layer::{Context, Layer, SubscriberExt}, registry::LookupSpan};
+
+#[derive(Clone)]
+struct AlertPerfEventLayer {
+    events: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl<S> Layer<S> for AlertPerfEventLayer
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = AlertPerfEventVisitor::default();
+        event.record(&mut visitor);
+        if let (Some(event_name), Some(phase)) = (visitor.event, visitor.phase) {
+            self.events
+                .lock()
+                .expect("alert perf event lock")
+                .push((event_name, phase));
+        }
+    }
+}
+
+#[derive(Default)]
+struct AlertPerfEventVisitor {
+    event: Option<String>,
+    phase: Option<String>,
+}
+
+impl field::Visit for AlertPerfEventVisitor {
+    fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
+        self.record(field, format!("{value:?}").trim_matches('"').to_string());
+    }
+
+    fn record_str(&mut self, field: &field::Field, value: &str) {
+        self.record(field, value.to_string());
+    }
+}
+
+impl AlertPerfEventVisitor {
+    fn record(&mut self, field: &field::Field, value: String) {
+        match field.name() {
+            "event" => self.event = Some(value),
+            "phase" => self.phase = Some(value),
+            _ => {}
+        }
+    }
+}
 
 #[tokio::test]
 async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_stays_24h() {
@@ -695,6 +745,128 @@ async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_s
             .pointer("/recentAlerts/topGroups/0/type")
             .and_then(|value| value.as_str()),
         Some("upstream_key_blocked")
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn admin_alerts_canonical_events_use_bounded_projection_reads() {
+    let db_path = temp_db_path("admin-alerts-indexed-events");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-admin-alerts-indexed-events".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let payload = serde_json::json!({
+        "source_kind": "auth_token_log",
+        "source_id": "alert-source-1",
+        "row_sort_id": "alert-sort-1",
+        "alert_type": "upstream_rate_limited_429",
+        "occurred_at": 1_700_000_000_i64,
+        "token_id": "token-1",
+        "key_id": "key-1",
+        "request_log_id": null,
+        "method": "POST",
+        "path": "/mcp",
+        "query": null,
+        "request_kind_key": "tavily_search",
+        "request_kind_label": "Tavily Search",
+        "request_kind_detail": "POST /mcp",
+        "result_status": "error",
+        "failure_kind": "upstream_rate_limited_429",
+        "error_message": "HTTP 429",
+        "counts_business_quota": true,
+        "user_id": "user-1",
+        "user_display_name": "Test User",
+        "user_username": "tester",
+        "reason_code": null,
+        "reason_summary": null,
+        "reason_detail": null,
+        "job_id": null,
+        "job_type": null,
+        "job_trigger_source": null,
+        "job_status": null,
+        "job_attempt": null,
+        "job_message": null,
+        "job_queued_at": null,
+        "job_started_at": null,
+        "job_finished_at": null
+    })
+    .to_string();
+    sqlx::query(
+        r#"INSERT INTO observability.dashboard_alert_projection_events
+               (source_kind, source_id, occurred_at, row_sort_id, payload_json, projected_at)
+           VALUES ('auth_token_log', 'alert-source-1', 1700000000, 'alert-sort-1', ?, 1700000000)"#,
+    )
+    .bind(payload)
+    .execute(&pool)
+    .await
+    .expect("seed projected alert event");
+
+    let plan_rows = sqlx::query(
+        r#"EXPLAIN QUERY PLAN
+             SELECT source_kind, source_id, occurred_at, row_sort_id, payload_json
+               FROM observability.dashboard_alert_projection_events
+              ORDER BY occurred_at DESC, row_sort_id DESC
+              LIMIT 20 OFFSET 0"#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("explain canonical event page");
+    let plan = plan_rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("detail").ok())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        plan.contains("idx_dashboard_alert_projection_events_time"),
+        "canonical Events page must use its time index: {plan}"
+    );
+
+    let count_plan_rows = sqlx::query(
+        r#"EXPLAIN QUERY PLAN
+             SELECT COUNT(*)
+               FROM observability.dashboard_alert_projection_events"#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("explain canonical event count");
+    let count_plan = count_plan_rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("detail").ok())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        count_plan.contains("idx_dashboard_alert_projection_events_time"),
+        "canonical Events count must use a covering time index: {count_plan}"
+    );
+
+    let log_events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(AlertPerfEventLayer {
+        events: Arc::clone(&log_events),
+    });
+    let log_guard = tracing::subscriber::set_default(subscriber);
+    let events = proxy
+        .admin_alert_events_page_for_cache_warm(1, 20)
+        .await
+        .expect("indexed canonical event page");
+    drop(log_guard);
+    assert_eq!(events.total, 1);
+    assert_eq!(events.items.len(), 1);
+    assert_eq!(events.items[0].id, "auth_token_log:alert-source-1");
+    assert_eq!(events.items[0].alert_type, "upstream_rate_limited_429");
+    let logs = log_events.lock().expect("alert perf event lock");
+    assert!(
+        logs.iter().any(|(event, phase)| {
+            event == "alerts_projection_indexed" && phase == "canonical_events_indexed"
+        }),
+        "canonical warm call must emit its indexed execution phase: {logs:?}"
     );
 
     let _ = std::fs::remove_file(db_path);

@@ -1127,6 +1127,17 @@ impl KeyStore {
         per_page: i64,
         operation: SqliteOperation,
     ) -> Result<PaginatedAlertEvents, ProxyError> {
+        // The canonical warm key has no filters and always requests the first
+        // twenty rows. Keep that hot path on the projection table's time
+        // index. Filtered administrator reads still use the CTE because their
+        // join semantics are part of the public API contract.
+        if operation == SqliteOperation::AdminAlertsCacheWarm
+            && page == 1
+            && per_page == 20
+            && filters.is_unfiltered()
+        {
+            return self.fetch_default_projected_alert_events_page().await;
+        }
         let started = Instant::now();
         let page = page.max(1);
         let per_page = per_page.clamp(1, 100);
@@ -1159,13 +1170,11 @@ impl KeyStore {
         let rows = self
             .fetch_alert_query_rows_for_operation(query, AlertReadSource::Projected, operation)
             .await?;
-        let items = rows
-            .into_iter()
-            .map(Self::decode_alert_event_projection_row)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter_map(Self::build_alert_event_from_projection)
-            .collect::<Vec<_>>();
+        let items = Self::build_alert_event_items(
+            rows.into_iter()
+                .map(Self::decode_alert_event_projection_row)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         emit_perf_log(
             DbLogStatus::Info,
             "admin_read",
@@ -1186,6 +1195,70 @@ impl KeyStore {
             page,
             per_page,
         })
+    }
+
+    async fn fetch_default_projected_alert_events_page(
+        &self,
+    ) -> Result<PaginatedAlertEvents, ProxyError> {
+        let started = Instant::now();
+        let operation = SqliteOperation::AdminAlertsCacheWarm;
+        let mut session = self
+            .begin_admin_alerts_read_session_for_operation(operation)
+            .await?;
+        let result = async {
+            // COUNT(*) is deliberately independent from payload decoding. It
+            // can use the projection table without evaluating JSON for every
+            // historical row.
+            let total_result = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM observability.dashboard_alert_projection_events",
+            )
+            .fetch_one(&mut *session)
+            .await;
+            let total = session.query(total_result).await?;
+
+            // occurred_at/row_sort_id is the projection's covering order for
+            // the canonical page. Only the compact identity columns and the
+            // already-materialized payload are read from SQLite.
+            let rows_result = sqlx::query(
+                r#"SELECT source_kind, source_id, occurred_at, row_sort_id, payload_json
+                     FROM observability.dashboard_alert_projection_events
+                    ORDER BY occurred_at DESC, row_sort_id DESC
+                    LIMIT 20 OFFSET 0"#,
+            )
+            .fetch_all(&mut *session)
+            .await;
+            let rows = session.query(rows_result).await?;
+            let items = Self::build_alert_event_items(
+                rows.into_iter()
+                    .map(Self::decode_default_alert_event_projection_row)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            Ok::<_, ProxyError>(PaginatedAlertEvents {
+                items,
+                total,
+                page: 1,
+                per_page: 20,
+            })
+        }
+        .await;
+        let finish_result = session.finish().await;
+        finish_result?;
+        let value = result?;
+        emit_perf_log(
+            DbLogStatus::Info,
+            "admin_read",
+            "alerts_projection_indexed",
+            started.elapsed(),
+            PerfLogScope {
+                route: Some("/api/alerts/events"),
+                scope: Some("alerts"),
+                phase: Some("canonical_events_indexed"),
+                page_size: Some(20),
+                row_count: Some(value.items.len()),
+                ..Default::default()
+            },
+        );
+        Ok(value)
     }
 
     async fn fetch_alert_event_projection_page(
@@ -2163,6 +2236,23 @@ impl KeyStore {
         })
     }
 
+    fn decode_default_alert_event_projection_row(
+        row: sqlx::sqlite::SqliteRow,
+    ) -> Result<AlertEventProjectionRow, ProxyError> {
+        let payload_json = row.try_get::<String, _>("payload_json")?;
+        let mut projection = serde_json::from_str::<AlertEventProjectionRow>(&payload_json)
+            .map_err(|_| ProxyError::Other("invalid alert projection payload".to_string()))?;
+
+        // The ordering and source identity columns are authoritative for the
+        // indexed read. Reapply them so a stale payload cannot alter paging
+        // identity or the event's source reference.
+        projection.source_kind = row.try_get("source_kind")?;
+        projection.source_id = row.try_get("source_id")?;
+        projection.row_sort_id = row.try_get("row_sort_id")?;
+        projection.occurred_at = row.try_get("occurred_at")?;
+        Ok(projection)
+    }
+
     fn build_alert_event_from_projection(row: AlertEventProjectionRow) -> Option<AlertEventRecord> {
         let AlertEventProjectionRow {
             source_kind,
@@ -2291,6 +2381,14 @@ impl KeyStore {
         };
         event.semantic_window = event_semantic_window(&event);
         Some(event)
+    }
+
+    fn build_alert_event_items(
+        rows: impl IntoIterator<Item = AlertEventProjectionRow>,
+    ) -> Vec<AlertEventRecord> {
+        rows.into_iter()
+            .filter_map(Self::build_alert_event_from_projection)
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
