@@ -35,7 +35,7 @@
 
 - `.github/workflows/ci.yml`
 - Rust/前端业务代码与用户可见界面
-- 发布版本号策略、release comment 语义与 GHCR tag 规则
+- 发布版本号策略与 GHCR tag 规则
 
 ## 需求（Requirements）
 
@@ -158,4 +158,7 @@ None
 - `.github/workflows/release.yml`
 - GitHub Actions run `24066040493`（`Build and smoke image (amd64)` 失败）
 - `docs/specs/release-native-arm-images/SPEC.md`
-- `docs/specs/release-pr-comment-upsert/SPEC.md`
+
+## Related ADRs
+
+None

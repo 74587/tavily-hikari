@@ -80,7 +80,7 @@
   Then 结果必须通过，且不得引入新的 release-only 规则改动。
 - Given merge SHA `445a80f87b42ca1eccb60520a443d09326287f95`
   When `Release` workflow 以 `workflow_dispatch(head_sha=445a80f87b42ca1eccb60520a443d09326287f95)` 回填
-  Then 仓库必须可见正式版 `v0.38.0`（或已有同版本 release 的幂等结果），并能定位到 GitHub Release 链接、GHCR `latest` / `v0.38.0` 标签与 PR #227 release comment。
+  Then 仓库必须可见正式版 `v0.38.0`（或已有同版本 release 的幂等结果），并能定位到 GitHub Release 链接与 GHCR `latest` / `v0.38.0` 标签。
 - Given 本次修复范围
   When 全流程结束
   Then 修复 PR 本身不得额外产生产品 release，且 spec/README 必须说明原因是沿用 `type:skip + channel:stable` 的既有边界，而非修改 release 规则。
@@ -151,7 +151,6 @@ None
 - Fix PRs: `#229`, `#230`
 - Backfill release run: `#24227733663`
 - Final release URL: [v0.38.0](https://github.com/IvanLi-CN/tavily-hikari/releases/tag/v0.38.0)
-- PR #227 release comment: [#issuecomment-4220964591](https://github.com/IvanLi-CN/tavily-hikari/pull/227#issuecomment-4220964591)
 - GHCR stable tags: `ghcr.io/ivanli-cn/tavily-hikari:latest`, `ghcr.io/ivanli-cn/tavily-hikari:v0.38.0`
 - Release-rule boundary: 保持既有 semver / label 规则不变；`#229` 与 `#230` 均使用 `type:skip + channel:stable`，只恢复 `main` 的 post-merge 发布前置条件，不额外生成新的产品版本。
 
@@ -161,3 +160,7 @@ None
 - GitHub Actions `CI Pipeline` run `24208388945`
 - GitHub Actions `Release` run `24208510515`
 - Merge commit `445a80f87b42ca1eccb60520a443d09326287f95`
+
+## Related ADRs
+
+None

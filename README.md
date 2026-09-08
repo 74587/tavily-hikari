@@ -442,7 +442,7 @@ codex mcp list | grep tavily_hikari
 - Hooks: `bun install --frozen-lockfile` or `bun run hooks:install` installs the shared `post-checkout` hook; if the `lefthook` binary is available on `PATH`, it also refreshes automatic `cargo fmt`, `cargo clippy`, `bunx --bun dprint fmt`, and `bunx --bun commitlint --edit` commit hooks.
 - No-node proof: run `bun run validate:no-node-runtime` to verify the repo build/hook paths still pass when a failing `node` shim is prepended to `PATH`.
 - CI: `.github/workflows/ci.yml` runs the linked-worktree bootstrap smoke, lint/tests/build, and release prerequisites.
-- Release: `.github/workflows/release.yml` runs after main CI succeeds and publishes tags, GitHub Releases, Linux binary assets, GHCR images, and an upserted PR release comment.
+- Release: `.github/workflows/release.yml` runs after main CI succeeds and publishes tags, GitHub Releases, Linux binary assets, and GHCR images. Release completion is reported by the workflow result and summary; it does not post back to the source PR.
 
 ## Release (PR labels)
 
@@ -452,7 +452,6 @@ Releases are label-driven:
 - Every PR must have exactly one channel label: `channel:stable` or `channel:rc`.
 - When a PR is merged into `main` and CI passes, the release workflow computes the next stable semver (`X.Y.Z`) and publishes:
   - Git tag + GitHub Release
-  - A marker-based PR comment linking the published release/version
   - GHCR image tags:
     - stable (`channel:stable`): `latest`, `vX.Y.Z`
     - prerelease (`channel:rc`): `vX.Y.Z-rc.<sha7>` (no `latest`)

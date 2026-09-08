@@ -1,68 +1,76 @@
-# Release：发布后回写 PR 评论（#kmmtg）
+# Release：源 PR 完成评论废止边界
 
-## 背景 / 问题陈述
+## Context and Scope
 
-- 当前 release workflow 能正确解析 `main` 提交对应的 PR，并成功发布 tag、GitHub Release 与 GHCR 镜像，但不会把发布结果回写到原 PR。
-- `prepare` 阶段已经产出了 `pr_number` / `pr_url`，但这些信息只被写入 GitHub Actions step summary，没有后续消费。
-- 现有 workflow 顶层权限仅为 `issues: read`，即便补脚本也无法对 PR issue thread 发评论。
+Release workflow 需要解析合并提交对应的 PR，以读取发布 intent/channel labels 并在摘要中保留发布上下文；这不意味着发布完成后应继续写入源 PR。源 PR 完成评论会增加额外权限、评论幂等与失败分支，当前 release policy 明确要求由 workflow 结果/摘要提供完成信号，并由调用方等待 release 终态后向 owner 报告。
 
-## 目标 / 非目标
+## Goals
 
-### Goals
+- 禁止 release workflow 在发布完成后向源 PR 创建、更新或查询完成评论。
+- 保留 release preparation、labels、版本/tag、GitHub Release、镜像、release assets 与失败通知语义。
+- 让 owner-facing release flow 以 workflow 终态和摘要作为完成结果来源。
 
-- release workflow 成功发布后，自动在对应 PR 上创建或更新一条带 marker 的发布评论。
-- 评论内容至少包含 release tag、release 链接、版本号、channel 与 GHCR tag 信息。
-- workflow rerun 时必须幂等：若 bot marker 评论已存在，则更新而不是重复刷屏。
-- 若评论步骤权限不足或出现临时 API 异常，保留 warning 并不阻断已完成的正式发布。
+## Non-goals
 
-### Non-goals
+- 不修改 release intent/channel label taxonomy、版本计算、tag 生成或 rerun 幂等性。
+- 不修改 GitHub Release 正文、GHCR manifest、binary/CLI asset 发布或失败通知。
+- 不删除历史 PR 中已经存在的评论，也不补发新的历史评论。
 
-- 不修改 release 版本计算、tag 生成、GitHub Release 正文或 GHCR manifest 行为。
-- 不补发历史 PR 的发布评论。
-- 不引入新的外部 Action 以外的复杂发布队列或快照机制。
-
-## 范围（Scope）
+## Scope
 
 ### In scope
 
 - `.github/workflows/release.yml`
+- `tests/test_release_workflow.py`
 - `README.md`
 - `README.zh-CN.md`
-- `docs/specs/README.md`
-- `docs/specs/release-pr-comment-upsert/SPEC.md`
+- 直接引用源 PR 完成评论语义的 release 文档
 
 ### Out of scope
 
 - Rust/Web 业务代码
-- 任何数据库、部署脚本或 101 rollout 流程
+- 数据库、部署脚本与 101 rollout 流程
+- 与 release completion comment 无关的 workflow、评论或运营通知
 
-## 验收标准（Acceptance Criteria）
+## Requirements
 
-- Given 某次 stable release 成功结束且 `prepare` 已解析到唯一 PR
-  When `github-release` job 收尾
-  Then 对应 PR 必须存在一条带固定 marker 的 bot 评论，正文包含 `vX.Y.Z` release 链接、`stable` channel、版本号与 `latest` / `vX.Y.Z` GHCR tag。
-- Given 某次 rc release 成功结束且 `prepare` 已解析到唯一 PR
-  When `github-release` job 收尾
-  Then 对应 PR 评论必须改写为 rc 版本信息，且 GHCR tag 只列出 `vX.Y.Z-rc.<sha7>`，不包含 `latest`。
-- Given 同一提交重复 rerun release workflow
-  When marker 评论已经存在
-  Then workflow 必须更新该评论而不是创建第二条重复发布评论。
-- Given PR 线程中已有同 marker 但并非 `github-actions[bot]` 所发的评论
-  When release workflow 尝试回写
-  Then workflow 只记录 warning 并跳过修改，避免覆盖人工内容。
+- `REQ-001`: `.github/workflows/release.yml` MUST NOT contain a release-completion comment helper, marker, or GitHub comment list/update/create call for the source PR.
+- `REQ-002`: The `github-release` job MUST request only the permissions required to publish the GitHub Release and assets; it MUST NOT request `issues: write` or `pull-requests: write` for completion reporting.
+- `REQ-003`: The `prepare` job MUST continue resolving the source PR and its intent/channel labels, and MUST preserve the PR context in the release summary.
+- `REQ-004`: The workflow MUST preserve tag preparation, GitHub Release publication, GHCR image publication, native/portable binary assets, CLI assets, and release failure notification behavior.
+- `REQ-005`: Release completion MUST be observable through the workflow result and step summary so an owner-side flow can wait for the release terminal state and report it to the owner.
+- `REQ-006`: The workflow contract test MUST cover both the absence of source-PR completion comment behavior and the preserved publication/preparation boundaries.
 
-## 非功能性验收 / 质量门槛（Quality Gates）
+## Acceptance Criteria
 
-- `git diff --check`
-- `bunx --bun prettier --check .github/workflows/release.yml README.md README.zh-CN.md docs/specs/README.md docs/specs/release-pr-comment-upsert/SPEC.md`
+- Given a stable or rc release reaches `github-release`
+  When the job completes
+  Then the workflow MUST NOT query, create, or update comments on the source PR.
+- Given a release intent resolves to exactly one PR
+  When `prepare` runs
+  Then label-based release preparation and the PR context in the step summary MUST remain available.
+- Given release publication runs
+  When GitHub Release, image, or binary/CLI assets are produced
+  Then their existing publication steps MUST remain present and usable.
+- Given release execution fails
+  When the notifier workflow receives the failed run
+  Then the existing failure notification path MUST remain unchanged.
 
-## 风险 / 假设
+## Verification
 
-- 验证结果：GitHub `issues: write` 单独不足以让 `workflow_run` 的 release job 对 PR thread 回写评论；`github-release` job 还需要 `pull-requests: write`。
-- 风险：如果仓库把 `GITHUB_TOKEN` 权限进一步收窄到 job 级别之外，评论步骤仍可能只产出 warning；但这不应回滚已发布的 release 资产。
+- `VER-001` covers: `REQ-001`, `REQ-002`, and `REQ-006`: run
+  `python3 -m unittest tests/test_release_workflow.py` to verify the source-PR comment boundary,
+  reduced permissions, and preserved publication steps.
+- `VER-002` covers: `REQ-003`, `REQ-004`, and `REQ-005`: run `actionlint .github/workflows/release.yml` and inspect the prepare summary, publication jobs, and failure
+  notification trigger.
+- `VER-003` covers: `REQ-001`, `REQ-002`, `REQ-003`, `REQ-004`, and `REQ-005`: run `git diff --check` and the documentation formatter check listed below.
+- `VER-004` covers: `REQ-006`: run the Spec contract check and Spec drift check against the current
+  base and the frozen ADR relationship.
 
-## 进展记录
+Formatting check:
 
-- 2026-04-06: 确认根因不是发布失败，而是 `release.yml` 从未实现 PR 评论步骤，且 workflow 权限只有 `issues: read`。
-- 2026-04-06: 参考 `codex-vibe-monitor` 的 marker comment upsert 方案，为 `github-release` job 增加幂等 PR 发布评论逻辑，并同步 release 文档。
-- 2026-04-06: 首次上线后通过真实 release 验证发现 `issues: write` 仍会对 PR thread 返回 403；补充 `pull-requests: write` 作为最终闭环修复。
+`bunx --bun dprint check README.md README.zh-CN.md docs/specs/README.md docs/specs/release-pr-comment-upsert/SPEC.md docs/specs/release-pr-comment-upsert/IMPLEMENTATION.md docs/specs/release-pr-comment-upsert/HISTORY.md docs/specs/release-amd64-smoke-hardening/SPEC.md docs/specs/post-merge-release-unblock/SPEC.md docs/specs/post-merge-release-unblock/HISTORY.md docs/specs/release-binary-assets/IMPLEMENTATION.md`
+
+## Related ADRs
+
+None

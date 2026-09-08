@@ -1,14 +1,18 @@
-# Release：发布后回写 PR 评论 实现状态
+# Release：源 PR 完成评论废止边界实现状态
 
-## 状态
+## Status
 
 - Status: 已完成
-- Created: 2026-04-06
-- Last: 2026-04-06
 
-## 实现里程碑（Milestones / Delivery checklist）
+## Implementation coverage
 
-- [x] M1: 新建 spec，锁定“发布后 PR 评论”的行为契约与幂等要求
-- [x] M2: 为 release workflow 补齐可写权限与 marker-based PR comment upsert
-- [x] M3: README / README.zh-CN 同步 release 行为说明
-- [x] M4: 完成本地格式/差异校验并准备普通流程收口
+- Removed the release-completion comment helper and all source-PR comment API calls from `.github/workflows/release.yml`.
+- Reduced `github-release` permissions to `contents: write`, which is sufficient for GitHub Release and asset publication.
+- Preserved release intent resolution, PR context in the prepare summary, tag creation, GHCR publication, GitHub Release publication, binary/CLI assets, and failure notifications.
+- Added `tests/test_release_workflow.py` to enforce the negative comment boundary and preserved release contracts.
+- Updated current README and release topic references so they describe workflow-result/summary completion reporting.
+
+## Verification coverage
+
+- Workflow contract unit test covers absence of the comment helper/API calls and the retained publication steps.
+- Workflow syntax and documentation formatting checks are listed in `SPEC.md`.
