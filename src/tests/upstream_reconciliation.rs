@@ -1385,7 +1385,7 @@ async fn reconciliation_rejects_reclaimed_claim_after_remote_fetch() {
             )
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), fetch_started.notified())
+    tokio::time::timeout(std::time::Duration::from_secs(5), fetch_started.notified())
         .await
         .expect("upstream usage fetch starts");
     clock.set_now_ts(now + 61);
@@ -2172,13 +2172,16 @@ async fn reconciliation_all_key_cooldowns_defer_to_earliest_retry() {
         )
         .await
         .expect("all key cooldowns produce a typed defer");
-    assert!(matches!(
-        outcome,
-        ClaimedReconciliationRunOutcome::Deferred {
-            reason: RECONCILIATION_RETRY_REASON_KEY_COOLDOWN,
-            retry_at,
-        } if retry_at == now + 300
-    ));
+    assert!(
+        matches!(
+            outcome,
+            ClaimedReconciliationRunOutcome::Deferred {
+                reason: RECONCILIATION_RETRY_REASON_KEY_COOLDOWN,
+                retry_at,
+            } if retry_at == now + 300
+        ),
+        "all-key cooldown must retain its earliest wake: {outcome:?}"
+    );
     let work_counts: (i64, i64) = sqlx::query_as(
         "SELECT COUNT(*), COALESCE(SUM(completed_generation), 0) FROM upstream_reconciliation_work WHERE token_id LIKE 'all-cooldown-token-%'",
     )

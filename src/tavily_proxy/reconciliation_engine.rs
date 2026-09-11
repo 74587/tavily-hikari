@@ -521,7 +521,7 @@ impl ReconciliationEngine {
             };
             if let Err(reason) = proxy
                 .key_store
-                .try_admit_upstream_reconciliation_projection()
+                .preflight_upstream_reconciliation_projection()
             {
                 return Ok(Self::deferred(&proxy, reason.as_str()));
             }

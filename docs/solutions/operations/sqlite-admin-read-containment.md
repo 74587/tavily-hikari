@@ -74,18 +74,44 @@ reads:
   when one bounded read slot is available, foreground activity is at most `5 rps`, and recent
   contention is clear. It does not reserve two idle connections or grow a lazy pool before the
   check; a foreground checkout or waiter produces a typed defer. It stages the three values and
-  publishes them atomically at one projection generation; generation changes or partial failures
-  discard the staged set. Retry at `5s/5s/30s`.
+  publishes them atomically from one immutable projection snapshot. A newer projection revision
+  makes that complete cache entry stale rather than mixed; only an incomplete or failed snapshot is
+  discarded. Retry true defers at `5s/5s/30s`.
+  Aged reconciliation scheduling exceptions never transfer to this controller: an Alerts warm
+  slice cannot use them to grow the pool or take a foreground-reserved connection.
   Canonical HTTP handlers are cache-first and return cold `503 Retry-After: 1` instead of rebuilding
   or falling back to raw CTEs. Their fresh, stale, and cold payload responses must not create synthetic
   foreground SQLite activity, or client retries can indefinitely defer the background owner. A configured
   passkey session lookup and a noncanonical exact-key bounded-read fallback each record their real
   foreground SQLite work.
-- The default Events `1/20` warm slice reads `COUNT(*)` and the indexed page directly from
-  `dashboard_alert_projection_events` and decodes its materialized `payload_json` in Rust. Filtered
-  reads retain the JSON CTE contract. A statement that still misses the 250ms native deadline must be
-  handled by a separate query-plan-driven projection/index change; increasing the deadline or restoring
-  a raw fallback is not an admissible containment.
+- The default Events `1/20` warm slice reads `COUNT(*)` and the indexed page directly from the
+  projection time index and decodes its materialized `payload_json` in Rust. Catalog facets checkpoint
+  fifty immutable Groups-event rows per accepted indexed slice into a local facet model, then use a
+  durable 250-row output cursor per facet to write independent output rows, so a defer resumes rather
+  than executes a JSON CTE or rereads prior rows. Exact derived payloads advance durable output cursors
+  without truncation or an
+  arbitrary size-based terminal stop. Filtered reads retain the JSON CTE contract. A statement that still
+  misses its fixed native deadline must be handled by a separate query-plan-driven projection change;
+  increasing the deadline or restoring a raw fallback is not an admissible containment.
+- When default Groups aggregation cannot meet that budget from the generic projection CTE, build a
+  local observability read model from complete-history events in source-fenced bounded membership
+  slices. Capture a projection revision and source-row upper bound before the first slice; projection
+  writers retain the pre-update event once for that build, so later writes cannot extend its immutable
+  source set. Every source statement is independently bounded; persist bounded event fragments and stage
+  final groups as bounded payload chunks plus metadata instead of an ever-growing JSON accumulator.
+  Exact partition results remain recoverable by recomputing only an unaccepted partition from its staged
+  source fragments. Preserve the group summary, counts, and latest event, but omit only optional nested
+  `child_events` once their inline detail exceeds one read fragment; the existing child drawer retrieves
+  request details through its paginated source. A source-fence change discards the staged generation instead of publishing it
+  as stale. Reuse only the inactive one of two model slots after
+  clearing it in small write slices. Reclaim obsolete event, override, and group generations in small write
+  batches while excluding the active and in-flight build generations. Do not use the model for filtered
+  queries or replicate it through HA.
+  The staged Catalog output table must key a facet by both value and label. The v39 local sidecar
+  prevents a later label for the same user value from replacing an earlier label. Semantic Groups
+  finalization uses v40 durable classification and output cursors; placeholder metadata is useful for
+  reclaim/restart visibility but remains tied to the inactive generation until all payload chunks are
+  accepted.
 - Treat every durable alert projection advance, including history-only slices, as a canonical cache
   generation change. The scheduler must fence the three staged values against that generation so a
   partial or cancelled warm never replaces the prior exact-key last-good set.

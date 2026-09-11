@@ -4,7 +4,7 @@ use super::*;
 use futures_util::FutureExt;
 
 #[tokio::test]
-async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_local_backoff() {
+async fn aged_reconciliation_turn_still_defers_for_foreground_pressure() {
     let db_path = temp_db_path("reconciliation-low-pressure-recovery");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -84,6 +84,13 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
         dashboard_overview_cache: new_dashboard_overview_cache(),
         remote_attempt_admission: new_remote_attempt_admission(),
     });
+    // This fixture isolates the RPS heuristic. The coalescer is unrelated to
+    // reconciliation and otherwise can transiently consume a pool connection.
+    state
+        .proxy
+        .shutdown_request_stats_coalescer(Duration::from_secs(2))
+        .await
+        .expect("stop unrelated request-stats worker");
     sqlx::query(
         r#"INSERT INTO meta (key, value) VALUES
              ('upstream_reconciliation_local_pressure_streak_v1', '3'),
@@ -107,11 +114,16 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
         .expect("claim reconciliation representative")
         .expect("representative becomes running");
 
-    assert_eq!(
-        state.proxy.foreground_activity_rps(),
-        0,
-        "recovery worker starts after foreground traffic has drained"
+    for _ in 0..6 {
+        state.proxy.record_foreground_activity();
+    }
+    assert!(
+        state.proxy.foreground_activity_rps() > tavily_hikari::HA_OUTBOX_GC_LOW_PRESSURE_RPS,
+        "fixture establishes foreground-rate pressure"
     );
+    let turn = remote_attempt_admission_for_state(state.as_ref())
+        .reserve_aged_reconciliation_turn()
+        .expect("aged reconciliation receives the next automatic remote turn");
     assert!(
         run_manual_claimed_job(
             state.clone(),
@@ -122,21 +134,38 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
                 claim_generation: claim.claim_generation,
                 _job_execution_gate: None,
             },
-            None,
+            Some(turn),
             false,
         )
         .await
     );
-    let completed: i64 = sqlx::query_scalar(
-        "SELECT completed_generation >= work_generation FROM upstream_reconciliation_work WHERE token_id = ? AND period_code = 'recovery/S1'",
+    let work: (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT work_generation, completed_generation, next_attempt_at, last_outcome \
+         FROM upstream_reconciliation_work WHERE token_id = ? AND period_code = 'recovery/S1'",
     )
     .bind(&token.id)
     .fetch_one(&pool)
     .await
-    .expect("read shadow fixture completion");
-    assert_eq!(
-        completed, 1,
-        "a low-pressure recovery worker must not turn an eligible shadow terminal into an empty backoff completion"
+    .expect("read shadow fixture state");
+    let scheduled_job: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, message FROM scheduled_jobs WHERE id = ?",
+    )
+    .bind(claim.id)
+    .fetch_one(&pool)
+    .await
+    .expect("read aged reconciliation claim");
+    assert_eq!(scheduled_job.0, "success");
+    assert_ne!(work.1, work.0, "foreground pressure must defer local preparation");
+    assert!(
+        scheduled_job
+            .1
+            .as_deref()
+            .is_some_and(|message| message.contains("defer_reason=foreground_pressure")),
+        "an aged remote turn must not bypass local SQLite foreground protection: \
+         next_attempt_at={}, last_outcome={}, job_message={}",
+        work.2,
+        work.3,
+        scheduled_job.1.as_deref().unwrap_or("none"),
     );
 
     drop(state);
@@ -144,7 +173,7 @@ async fn reconciliation_low_pressure_recovery_runs_shadow_fixture_despite_prior_
 }
 
 #[tokio::test]
-async fn reconciliation_foreground_defer_releases_scheduler_reconciliation_turn() {
+async fn non_aged_reconciliation_defers_for_foreground_pressure() {
     let db_path = temp_db_path("reconciliation-foreground-dispatch-release");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -178,11 +207,6 @@ async fn reconciliation_foreground_defer_releases_scheduler_reconciliation_turn(
         .await
         .expect("claim reconciliation representative")
         .expect("representative becomes running");
-    let controller = remote_attempt_admission_for_state(state.as_ref());
-    let turn = controller
-        .reserve_aged_reconciliation_turn()
-        .expect("scheduler reserves the aged reconciliation turn");
-
     assert!(
         run_manual_claimed_job(
             state.clone(),
@@ -193,20 +217,11 @@ async fn reconciliation_foreground_defer_releases_scheduler_reconciliation_turn(
                 claim_generation: claim.claim_generation,
                 _job_execution_gate: None,
             },
-            Some(turn),
+            None,
             false,
         )
         .await,
         "typed foreground defer persists a representative"
-    );
-    assert!(
-        !controller.reconciliation_turn_required(),
-        "a defer before HTTP releases the fairness turn"
-    );
-    drop(
-        controller
-            .reserve_aged_reconciliation_turn()
-            .expect("a deferred reconciliation turn permits later automatic work"),
     );
 
     let statuses: Vec<String> = sqlx::query_scalar(
@@ -643,6 +658,7 @@ async fn non_aged_research_defers_for_foreground_pressure() {
         .expect("claim Research drain")
         .expect("Research drain becomes running");
 
+    let run_started_at = state.proxy.backend_time().now_ts();
     assert!(
         run_manual_claimed_job(
             state.clone(),
@@ -659,6 +675,7 @@ async fn non_aged_research_defers_for_foreground_pressure() {
         .await,
         "a non-aged Research representative receives a durable defer"
     );
+    let run_finished_at = state.proxy.backend_time().now_ts();
     let finished_message: String = sqlx::query_scalar(
         "SELECT COALESCE(message, '') FROM scheduled_jobs WHERE id = ?",
     )
@@ -674,7 +691,11 @@ async fn non_aged_research_defers_for_foreground_pressure() {
     .await
     .expect("read Research continuation");
     assert_eq!(finished_message, "deferred=foreground_pressure");
-    assert_eq!(continuation_at, now + 30);
+    assert!(
+        (run_started_at + 30..=run_finished_at + 30).contains(&continuation_at),
+        "continuation must be scheduled exactly 30 seconds from the defer decision: \
+         started={run_started_at}, finished={run_finished_at}, continuation={continuation_at}"
+    );
 
     drop(state);
     let _ = std::fs::remove_file(db_path);

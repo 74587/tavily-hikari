@@ -1,5 +1,8 @@
 use super::*;
 use crate::BackendTime;
+use super::key_store_alert_event_projection::{
+    ALERT_EVENT_DISPLAY_TEXT_MAX_CHARS, ALERT_EVENT_IDENTIFIER_MAX_CHARS,
+};
 use tempfile::tempdir;
 
 async fn seed_bound_user_and_token(
@@ -324,6 +327,62 @@ fn request_rate_events_merge_request_kinds_into_one_child_window() {
 }
 
 #[test]
+fn oversized_alert_event_is_compacted_before_derived_persistence() {
+    let mut event = make_alert_event(
+        "evt-oversized",
+        ALERT_TYPE_USER_REQUEST_RATE_LIMITED,
+        1_700_000_000,
+        "mcp_tools_list",
+        "MCP tools/list",
+        Some("diagnostic"),
+    );
+    event.error_message = Some("oversized-error".repeat(32 * 1024));
+    event.token = Some(AlertEntityRef {
+        id: "token-identity".repeat(32 * 1024),
+        label: "token-label".repeat(32 * 1024),
+    });
+
+    let (bounded, payload) = serialize_alert_event_record_for_projection(event)
+        .expect("serialize bounded derived event");
+    assert!(
+        payload.len() <= ALERT_EVENT_PROJECTION_MAX_BYTES,
+        "derived event payload must stay bounded: {}",
+        payload.len()
+    );
+    assert!(bounded.error_message.as_ref().is_some_and(|value| {
+        value.chars().count() <= ALERT_EVENT_DISPLAY_TEXT_MAX_CHARS
+    }));
+    assert!(bounded
+        .token
+        .as_ref()
+        .is_some_and(|value| value.id.chars().count() <= ALERT_EVENT_IDENTIFIER_MAX_CHARS));
+    assert!(bounded
+        .token
+        .as_ref()
+        .is_some_and(|value| value.label.chars().count() <= ALERT_EVENT_DISPLAY_TEXT_MAX_CHARS));
+    assert_eq!(
+        bounded.semantic_window.as_ref().map(|value| value.kind),
+        Some(AlertSemanticWindowKind::RequestRate),
+        "compaction must preserve grouping semantics while dropping oversized detail"
+    );
+
+    let mut long_display_event = make_alert_event(
+        "evt-long-identity",
+        ALERT_TYPE_USER_REQUEST_RATE_LIMITED,
+        1_700_000_001,
+        "mcp_tools_list",
+        "MCP tools/list",
+        None,
+    );
+    long_display_event.subject_label = "subject-label".repeat(2_000);
+    let (bounded_display, display_payload) =
+        serialize_alert_event_record_for_projection(long_display_event)
+            .expect("serialize a bounded long display field");
+    assert!(display_payload.len() < ALERT_EVENT_PROJECTION_MAX_BYTES);
+    assert!(bounded_display.subject_label.chars().count() <= ALERT_EVENT_DISPLAY_TEXT_MAX_CHARS);
+}
+
+#[test]
 fn upstream_alerts_prefer_key_subject_over_token() {
     let user = AlertUserRef {
         user_id: "usr_test".to_string(),
@@ -554,7 +613,8 @@ async fn fetch_alert_groups_page_executes_sqlite_grouped_query_for_mother_and_co
     let temp_dir = tempdir().expect("create temp dir");
     let db_path = temp_dir.path().join("alerts-groups.db");
     let db_str = db_path.to_string_lossy().to_string();
-    let store = KeyStore::new_with_time(&db_str, BackendTime::system())
+    let (backend_time, _manual_time) = BackendTime::manual_from_ts(1_700_101_000);
+    let store = KeyStore::new_with_time(&db_str, backend_time)
         .await
         .expect("create key store");
 
@@ -710,7 +770,8 @@ async fn fetch_alert_groups_page_supports_multiple_mother_groups_without_sqlite_
     let temp_dir = tempdir().expect("create temp dir");
     let db_path = temp_dir.path().join("alerts-groups-multi-mother.db");
     let db_str = db_path.to_string_lossy().to_string();
-    let store = KeyStore::new_with_time(&db_str, BackendTime::system())
+    let (backend_time, _manual_time) = BackendTime::manual_from_ts(1_700_010_600);
+    let store = KeyStore::new_with_time(&db_str, backend_time)
         .await
         .expect("create key store");
 

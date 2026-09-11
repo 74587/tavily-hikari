@@ -61,6 +61,14 @@
 - Reconciliation diagnostics also aggregate partial-key observations, multi-key pending candidates,
   `remote_attempt_budget` defers, resumed runs, and terminal completions. They expose counts only;
   token ids, key ids, SQL, and upstream response content remain private.
+- The same 60-second window separately aggregates canonical Events indexed reads, Catalog source and
+  independently staged output-row slices, canonical Groups fixed-membership copy/fragment/finalization
+  slices, publishes, resumable payload checkpoints, defers, and Key-observation identity reuses/misses. These
+  counters describe source-fence progress only; they never emit a Key, token, source identity, SQL,
+  or payload.
+  Catalog label-preserving writes and streamed Groups reducer slices are counted separately from
+  publication. A reduction placeholder or staged row is not a successful publish; only a complete
+  generation-fenced payload contributes to the publication counter.
 - Dashboard read-model invalidation is a durable business-write signal, not only a request-statistics
   signal. A successful quota or other overview-visible write advances the shared dirty generation;
   the read model coalesces dirty rebuilds to at most once per ten seconds and uses a sixty-second
@@ -180,6 +188,11 @@
 - `sqlite_workload_window` aggregates `observability_deferred_write` alongside other operation
   classes. Per-flush defer/retry records remain DEBUG; queue recovery or a persistent stale state
   is emitted only as a sampled state transition.
+- Reconciliation records a preflight rejection as the operation's typed admission defer before any
+  claim-attempt control query. It does not create a raw pool timeout or a second permit owner.
+- An aged main-reconciliation turn that reaches SQLite capacity still records the ordinary typed
+  admission defer. Its RPS exception never permits pool prewarm, foreground-slot consumption, or
+  a separate capacity metric that could obscure the foreground reservation.
 - Forward proxy / xray startup:
   - `component=forward_proxy event=startup_runtime_begin`
   - `component=forward_proxy event=startup_runtime_snapshot_persisted`

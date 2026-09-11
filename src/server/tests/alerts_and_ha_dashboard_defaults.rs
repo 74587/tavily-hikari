@@ -2,57 +2,7 @@ use super::*;
 use super::core_support_and_parsing::*;
 use super::linuxdo_oauth_and_admin_keys::*;
 use super::upstream_support_and_manual_jobs::*;
-use std::sync::{Arc, Mutex};
 use tavily_hikari::SqliteAdmissionOutcome;
-use tracing::{Event, Subscriber, field};
-use tracing_subscriber::{layer::{Context, Layer, SubscriberExt}, registry::LookupSpan};
-
-#[derive(Clone)]
-struct AlertPerfEventLayer {
-    events: Arc<Mutex<Vec<(String, String)>>>,
-}
-
-impl<S> Layer<S> for AlertPerfEventLayer
-where
-    S: Subscriber + for<'span> LookupSpan<'span>,
-{
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let mut visitor = AlertPerfEventVisitor::default();
-        event.record(&mut visitor);
-        if let (Some(event_name), Some(phase)) = (visitor.event, visitor.phase) {
-            self.events
-                .lock()
-                .expect("alert perf event lock")
-                .push((event_name, phase));
-        }
-    }
-}
-
-#[derive(Default)]
-struct AlertPerfEventVisitor {
-    event: Option<String>,
-    phase: Option<String>,
-}
-
-impl field::Visit for AlertPerfEventVisitor {
-    fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
-        self.record(field, format!("{value:?}").trim_matches('"').to_string());
-    }
-
-    fn record_str(&mut self, field: &field::Field, value: &str) {
-        self.record(field, value.to_string());
-    }
-}
-
-impl AlertPerfEventVisitor {
-    fn record(&mut self, field: &field::Field, value: String) {
-        match field.name() {
-            "event" => self.event = Some(value),
-            "phase" => self.phase = Some(value),
-            _ => {}
-        }
-    }
-}
 
 #[tokio::test]
 async fn alerts_endpoints_default_to_all_history_while_dashboard_recent_alerts_stays_24h() {
@@ -763,12 +713,13 @@ async fn admin_alerts_canonical_events_use_bounded_projection_reads() {
     .expect("proxy created");
 
     let pool = connect_sqlite_test_pool(&db_str).await;
+    let occurred_at = Utc::now().timestamp().saturating_sub(60);
     let payload = serde_json::json!({
         "source_kind": "auth_token_log",
         "source_id": "alert-source-1",
         "row_sort_id": "alert-sort-1",
         "alert_type": "upstream_rate_limited_429",
-        "occurred_at": 1_700_000_000_i64,
+        "occurred_at": occurred_at,
         "token_id": "token-1",
         "key_id": "key-1",
         "request_log_id": null,
@@ -802,13 +753,14 @@ async fn admin_alerts_canonical_events_use_bounded_projection_reads() {
     sqlx::query(
         r#"INSERT INTO observability.dashboard_alert_projection_events
                (source_kind, source_id, occurred_at, row_sort_id, payload_json, projected_at)
-           VALUES ('auth_token_log', 'alert-source-1', 1700000000, 'alert-sort-1', ?, 1700000000)"#,
+           VALUES ('auth_token_log', 'alert-source-1', ?, 'alert-sort-1', ?, ?)"#,
     )
-    .bind(payload)
+    .bind(occurred_at)
+    .bind(&payload)
+    .bind(occurred_at)
     .execute(&pool)
     .await
     .expect("seed projected alert event");
-
     let plan_rows = sqlx::query(
         r#"EXPLAIN QUERY PLAN
              SELECT source_kind, source_id, occurred_at, row_sort_id, payload_json
@@ -826,7 +778,7 @@ async fn admin_alerts_canonical_events_use_bounded_projection_reads() {
         .join(" ");
     assert!(
         plan.contains("idx_dashboard_alert_projection_events_time"),
-        "canonical Events page must use its time index: {plan}"
+        "canonical Events page must use the projection time index: {plan}"
     );
 
     let count_plan_rows = sqlx::query(
@@ -844,30 +796,382 @@ async fn admin_alerts_canonical_events_use_bounded_projection_reads() {
         .join(" ");
     assert!(
         count_plan.contains("idx_dashboard_alert_projection_events_time"),
-        "canonical Events count must use a covering time index: {count_plan}"
+        "canonical Events count must use a projection index: {count_plan}"
     );
 
-    let log_events = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(AlertPerfEventLayer {
-        events: Arc::clone(&log_events),
-    });
-    let log_guard = tracing::subscriber::set_default(subscriber);
     let events = proxy
-        .admin_alert_events_page_for_cache_warm(1, 20)
+        .admin_default_projected_alert_events_page_for_canonical_warm()
         .await
-        .expect("indexed canonical event page");
-    drop(log_guard);
+        .expect("indexed canonical event page from the projection");
     assert_eq!(events.total, 1);
     assert_eq!(events.items.len(), 1);
     assert_eq!(events.items[0].id, "auth_token_log:alert-source-1");
     assert_eq!(events.items[0].alert_type, "upstream_rate_limited_429");
-    let logs = log_events.lock().expect("alert perf event lock");
-    assert!(
-        logs.iter().any(|(event, phase)| {
-            event == "alerts_projection_indexed" && phase == "canonical_events_indexed"
-        }),
-        "canonical warm call must emit its indexed execution phase: {logs:?}"
+
+    sqlx::query(
+        r#"INSERT INTO observability.admin_alert_canonical_group_events
+               (build_generation, source_kind, source_id, occurred_at, row_sort_id, partition_key, payload_json)
+           VALUES (17, 'auth_token_log', 'alert-source-1', ?, 'alert-sort-1', 'key:key-1', ?)"#,
+    )
+    .bind(occurred_at)
+    .bind(&payload)
+    .execute(&pool)
+    .await
+    .expect("seed an immutable snapshot for catalog facets");
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_groups_state \
+         SET active_generation = 17 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("mark the seeded snapshot active for the catalog builder");
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_catalog_state \
+         SET build_generation = 17, cursor_occurred_at = -9223372036854775808, \
+             cursor_row_sort_id = '', source_complete = 0 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("initialize bounded catalog progress for the seeded snapshot");
+    let catalog = {
+        let mut catalog = None;
+        for _ in 0..16 {
+            match proxy.admin_alert_catalog_for_canonical_snapshot(17).await {
+                Ok(value) => {
+                    catalog = Some(value);
+                    break;
+                }
+                Err(ProxyError::Deferred { reason, .. })
+                    if reason == "catalog_payload_build_in_progress" =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("stream canonical catalog facets from indexed event slices: {error:?}"),
+            }
+        }
+        catalog.expect("all five bounded catalog payloads must publish")
+    };
+    assert_eq!(
+        catalog
+            .types
+            .iter()
+            .find(|item| item.value == "upstream_rate_limited_429")
+            .map(|item| item.count),
+        Some(1)
     );
+    assert_eq!(catalog.tokens[0].value, "token-1");
+    assert_eq!(catalog.keys[0].value, "key-1");
+    assert_eq!(catalog.users[0].label, "Test User");
+    assert_eq!(catalog.request_kind_options[0].key, "tavily_search");
+    let completed_payloads: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*) FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 17 AND payload_status = 'complete'), \
+            (SELECT COUNT(*) FROM observability.admin_alert_canonical_catalog_payload_items_v2 \
+              WHERE build_generation = 17), \
+            (SELECT COALESCE(MAX(LENGTH(payload_json)), 0) \
+               FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 17 AND payload_status = 'complete')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read bounded catalog payload checkpoints");
+    assert_eq!(completed_payloads.0, 5);
+    assert!(completed_payloads.1 >= 5);
+    assert!(completed_payloads.2 <= 2);
+
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_groups_state \
+         SET active_generation = 18 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("advance the immutable catalog fixture generation");
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_catalog_state \
+         SET build_generation = 18, cursor_occurred_at = -9223372036854775808, \
+             cursor_row_sort_id = '', source_complete = 0 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("reset the bounded catalog cursor for the next generation");
+    for index in 0..51_i64 {
+        sqlx::query(
+            r#"INSERT INTO observability.admin_alert_canonical_group_events
+                   (build_generation, source_kind, source_id, occurred_at, row_sort_id,
+                    partition_key, payload_json)
+               VALUES (18, 'auth_token_log', ?, ?, ?, 'key:key-1', ?)"#,
+        )
+        .bind(format!("catalog-source-{index}"))
+        .bind(occurred_at + 100 + index)
+        .bind(format!("catalog-sort-{index:020}"))
+        .bind(&payload)
+        .execute(&pool)
+        .await
+        .expect("seed a catalog checkpoint event");
+    }
+    let first_catalog_slice = proxy
+        .admin_alert_catalog_for_canonical_snapshot(18)
+        .await
+        .expect_err("the first catalog slice must checkpoint before publication");
+    assert!(matches!(
+        first_catalog_slice,
+        ProxyError::Deferred { ref reason, .. } if reason == "catalog_build_in_progress"
+    ));
+    let catalog_checkpoint: (i64, bool) = sqlx::query_as(
+        "SELECT cursor_occurred_at, source_complete \
+         FROM observability.admin_alert_canonical_catalog_state WHERE singleton = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read the durable catalog checkpoint");
+    assert_eq!(catalog_checkpoint, (occurred_at + 149, false));
+    let resumed_catalog = {
+        let mut catalog = None;
+        for _ in 0..16 {
+            match proxy.admin_alert_catalog_for_canonical_snapshot(18).await {
+                Ok(value) => {
+                    catalog = Some(value);
+                    break;
+                }
+                Err(ProxyError::Deferred { reason, .. })
+                    if reason == "catalog_payload_build_in_progress" =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("resume the final catalog slice without rescanning the first one: {error:?}"),
+            }
+        }
+        catalog.expect("the resumed catalog payload must publish")
+    };
+    assert_eq!(
+        resumed_catalog
+            .types
+            .iter()
+            .find(|item| item.value == "upstream_rate_limited_429")
+            .map(|item| item.count),
+        Some(51)
+    );
+
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_groups_state \
+         SET active_generation = 19 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("activate a multi-page catalog payload fixture");
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_catalog_state \
+         SET build_generation = 19, cursor_occurred_at = 0, cursor_row_sort_id = '', \
+             source_complete = 1 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("mark the facet source complete for payload assembly");
+    for index in 0..501_i64 {
+        let value = format!("token-{index:04}");
+        sqlx::query(
+            r#"INSERT INTO observability.admin_alert_canonical_catalog_facets
+                   (build_generation, facet_kind, facet_identity, facet_value, facet_label, item_count)
+               VALUES (19, 'token', ?, ?, ?, 1)"#,
+        )
+        .bind(&value)
+        .bind(&value)
+        .bind(format!("Token {index:04}"))
+        .execute(&pool)
+        .await
+        .expect("seed one catalog payload facet");
+    }
+    for _ in 0..8 {
+        let payload_slice = proxy
+            .admin_alert_catalog_for_canonical_snapshot(19)
+            .await
+            .expect_err("one bounded catalog payload slice must defer before final publication");
+        assert!(matches!(
+            payload_slice,
+            ProxyError::Deferred { ref reason, .. } if reason == "catalog_payload_build_in_progress"
+        ));
+    }
+    let token_payload_checkpoint: (String, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT payload_status FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 19 AND facet_kind = 'token'), \
+            (SELECT cursor_item_count FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 19 AND facet_kind = 'token'), \
+            (SELECT COUNT(*) FROM observability.admin_alert_canonical_catalog_payload_items_v2 \
+              WHERE build_generation = 19 AND facet_kind = 'token'), \
+            (SELECT LENGTH(payload_json) FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 19 AND facet_kind = 'token') \
+        ",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read the durable first catalog payload page");
+    assert_eq!(
+        token_payload_checkpoint,
+        ("building".to_string(), 1, 250, 2)
+    );
+    let multi_page_catalog = {
+        let mut catalog = None;
+        for _ in 0..8 {
+            match proxy.admin_alert_catalog_for_canonical_snapshot(19).await {
+                Ok(value) => {
+                    catalog = Some(value);
+                    break;
+                }
+                Err(ProxyError::Deferred { reason, .. })
+                    if reason == "catalog_payload_build_in_progress" =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("resume the second catalog payload page: {error:?}"),
+            }
+        }
+        catalog.expect("the multi-page catalog payload must publish")
+    };
+    assert_eq!(multi_page_catalog.tokens.len(), 501);
+
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_groups_state \
+         SET active_generation = 20 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("activate an oversized exact catalog payload fixture");
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_catalog_state \
+         SET build_generation = 20, cursor_occurred_at = 0, cursor_row_sort_id = '', \
+             source_complete = 1 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("mark the oversized catalog source complete");
+    for facet_kind in ["type", "request_kind", "user", "key"] {
+        sqlx::query(
+            "INSERT INTO observability.admin_alert_canonical_catalog_payloads \
+             (build_generation, facet_kind, payload_status) VALUES (20, ?, 'complete')",
+        )
+        .bind(facet_kind)
+        .execute(&pool)
+        .await
+        .expect("seed completed empty catalog payload");
+    }
+    for index in 0..4_000_i64 {
+        let value = format!("token-{index:04}");
+        sqlx::query(
+            r#"INSERT INTO observability.admin_alert_canonical_catalog_facets
+                   (build_generation, facet_kind, facet_identity, facet_value, facet_label, item_count)
+               VALUES (20, 'token', ?, ?, ?, 1)"#,
+        )
+        .bind(&value)
+        .bind(&value)
+        .bind(format!("Token {index:04} {}", "x".repeat(300)))
+        .execute(&pool)
+        .await
+        .expect("seed an independently staged token facet");
+    }
+    let oversized_catalog = {
+        let mut catalog = None;
+        for _ in 0..24 {
+            match proxy.admin_alert_catalog_for_canonical_snapshot(20).await {
+                Ok(value) => {
+                    catalog = Some(value);
+                    break;
+                }
+                Err(ProxyError::Deferred { reason, .. })
+                    if reason == "catalog_payload_build_in_progress" =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!(
+                    "an exact large catalog must publish from independently staged rows: {error:?}"
+                ),
+            }
+        }
+        catalog.expect("the independently staged catalog must complete")
+    };
+    assert_eq!(oversized_catalog.tokens.len(), 4_000);
+    let oversized_status: (String, i64, i64) = sqlx::query_as(
+        "SELECT \
+            (SELECT payload_status FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 20 AND facet_kind = 'token'), \
+            (SELECT COUNT(*) FROM observability.admin_alert_canonical_catalog_payload_items_v2 \
+              WHERE build_generation = 20 AND facet_kind = 'token'), \
+            (SELECT LENGTH(payload_json) FROM observability.admin_alert_canonical_catalog_payloads \
+              WHERE build_generation = 20 AND facet_kind = 'token')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read completed oversized payload checkpoint");
+    assert_eq!(oversized_status.0, "complete");
+    assert_eq!(oversized_status.1, 4_000);
+    assert_eq!(oversized_status.2, 2);
+
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_groups_state \
+         SET active_generation = 21 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("activate a label-sensitive catalog fixture");
+    sqlx::query(
+        "UPDATE observability.admin_alert_canonical_catalog_state \
+         SET build_generation = 21, cursor_occurred_at = 0, cursor_row_sort_id = '', \
+             source_complete = 1 WHERE singleton = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("mark label-sensitive catalog facets complete");
+    for (identity, label) in [
+        ("user-1\u{001f}Former name", "Former name"),
+        ("user-1\u{001f}Current name", "Current name"),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO observability.admin_alert_canonical_catalog_facets
+                   (build_generation, facet_kind, facet_identity, facet_value, facet_label, item_count)
+               VALUES (21, 'user', ?, 'user-1', ?, 1)"#,
+        )
+        .bind(identity)
+        .bind(label)
+        .execute(&pool)
+        .await
+        .expect("seed distinct labels for one user identity");
+    }
+    let label_sensitive_catalog = {
+        let mut catalog = None;
+        for _ in 0..16 {
+            match proxy.admin_alert_catalog_for_canonical_snapshot(21).await {
+                Ok(value) => {
+                    catalog = Some(value);
+                    break;
+                }
+                Err(ProxyError::Deferred { reason, .. })
+                    if reason == "catalog_payload_build_in_progress" =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("publish label-sensitive catalog payload: {error:?}"),
+            }
+        }
+        catalog.expect("label-sensitive catalog payload must complete")
+    };
+    assert_eq!(
+        label_sensitive_catalog
+            .users
+            .iter()
+            .map(|item| (item.value.as_str(), item.label.as_str(), item.count))
+            .collect::<Vec<_>>(),
+        vec![("user-1", "Current name", 1), ("user-1", "Former name", 1)],
+        "staged output must retain every label-sensitive facet identity"
+    );
+    let label_sensitive_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM observability.admin_alert_canonical_catalog_payload_items_v2 \
+         WHERE build_generation = 21 AND facet_kind = 'user' AND facet_value = 'user-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count lossless staged catalog rows");
+    assert_eq!(label_sensitive_rows, 2);
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -1066,7 +1370,7 @@ async fn admin_alerts_pressure_uses_same_key_last_good_and_reports_cold_misses()
 }
 
 #[tokio::test]
-async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slices() {
+async fn admin_alerts_warm_discards_a_snapshot_after_source_advance() {
     let db_path = temp_db_path("admin-alerts-durable-warm-fence");
     let db_str = db_path.to_string_lossy().to_string();
     let proxy = TavilyProxy::with_endpoint(
@@ -1123,7 +1427,7 @@ async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slic
         .await;
     super::super::prewarm_admin_alerts(state.clone()).await;
     tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(15),
         pause.wait_until_arrived(),
     )
     .await
@@ -1137,12 +1441,14 @@ async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slic
     .await
     .expect("commit a durable history projection generation between warm slices");
     assert_eq!(changed.rows_affected(), 3);
+    super::super::mark_dashboard_overview_alert_projection_dirty(state.as_ref()).await;
     {
         let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
         let cache = cache_handle.lock().await;
         assert_eq!(
-            cache.alert_projection_generation, initial_last_good.0,
-            "the scheduler has not yet propagated the durable projection commit into memory"
+            cache.alert_projection_generation,
+            initial_last_good.0 + 1,
+            "the in-memory projection generation advances when the durable source changes"
         );
     }
     pause.release();
@@ -1151,7 +1457,7 @@ async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slic
         loop {
             let cache_handle = super::super::dashboard_overview_cache_for_state(state.as_ref());
             let cache = cache_handle.lock().await;
-            if cache.admin_alerts_prewarm_defers > 0 {
+            if !cache.admin_alerts_prewarm_in_flight {
                 let canonical = cache
                     .admin_alerts
                     .entries
@@ -1159,11 +1465,21 @@ async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slic
                     .filter(|entry| entry.canonical)
                     .map(|entry| (entry.key.clone(), entry.generation, entry.stored_at))
                     .collect::<Vec<_>>();
+                assert!(canonical.iter().all(|(_, generation, _)| {
+                    *generation == initial_last_good.0 + 1
+                }), "the source-fenced retry publishes only the replacement generation");
                 assert_eq!(
-                    canonical, initial_last_good.1,
-                    "a durable generation change must discard staged values and retain last-good"
+                    cache.alert_projection_generation,
+                    initial_last_good.0 + 1,
+                    "the in-memory generation matches the replacement snapshot"
                 );
-                assert_eq!(cache.alert_projection_generation, initial_last_good.0);
+                assert!(
+                    canonical.iter().all(|(_, _, stored_at)| {
+                        *stored_at > initial_last_good.1[0].2
+                    }),
+                    "the controller replaces all three canonical values atomically"
+                );
+                assert_eq!(cache.admin_alerts_prewarm_defers, 0);
                 break;
             }
             drop(cache);
@@ -1171,7 +1487,7 @@ async fn admin_alerts_warm_discards_durable_projection_fence_change_between_slic
         }
     })
     .await
-    .expect("the durable fence mismatch defers the canonical warm");
+    .expect("the durable source advance triggers a complete fenced retry");
 
     let _ = std::fs::remove_file(db_path);
 }

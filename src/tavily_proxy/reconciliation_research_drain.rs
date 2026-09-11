@@ -226,22 +226,37 @@ impl TavilyProxy {
         reconciliation_turn: Option<&crate::ReconciliationTurn>,
     ) -> Result<ClaimedResearchDrainOutcome, ProxyError> {
         let now = self.backend_time.now_ts();
-        let page = match self
-            .key_store
-            .next_upstream_reconciliation_research_candidates(80)
-            .await
-        {
-            Ok(page) => page,
-            Err(error)
-                if ReconciliationEngine::projection_read_budget_is_deferred(&error)
-                    || is_transient_sqlite_write_error(&error) =>
-            {
+        let Some(_run_lease) = self.key_store.sqlite_runtime.try_start_maintenance_run() else {
+            return Ok(ClaimedResearchDrainOutcome::Deferred {
+                reason: crate::ResearchDrainDeferReason::ControlDefer,
+                retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
+            });
+        };
+        let page = {
+            let Ok(_bulk_permit) = self.key_store.sqlite_runtime.try_admit_research_drain_bulk()
+            else {
                 return Ok(ClaimedResearchDrainOutcome::Deferred {
-                        reason: crate::ResearchDrainDeferReason::ReadBudget,
-                        retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
-                    });
+                    reason: crate::ResearchDrainDeferReason::ControlDefer,
+                    retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
+                });
+            };
+            match self
+                .key_store
+                .next_upstream_reconciliation_research_candidates(80)
+                .await
+            {
+                Ok(page) => page,
+                Err(error)
+                    if ReconciliationEngine::projection_read_budget_is_deferred(&error)
+                        || is_transient_sqlite_write_error(&error) =>
+                {
+                    return Ok(ClaimedResearchDrainOutcome::Deferred {
+                            reason: crate::ResearchDrainDeferReason::ReadBudget,
+                            retry_at: now.saturating_add(Self::RESEARCH_DRAIN_DEFER_SECS),
+                        });
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         };
         if page.candidates.is_empty() && page.cooled_due_count > 0 {
             let retry_at = page

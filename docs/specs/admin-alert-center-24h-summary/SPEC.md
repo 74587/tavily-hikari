@@ -35,11 +35,31 @@
   惰性建立连接；HTTP 对 canonical key 只读 exact-key
   cache：同 generation 为 fresh，generation 落后但未过期为 stale，cold/过期为
   `503 Retry-After: 1`，绝不触发重建。
-  默认 Events `1/20` 的 canonical slice 直接从投影表的
-  `(occurred_at DESC, row_sort_id DESC)` 索引读取计数和页面，并在 Rust 解码已物化的
-  `payload_json`；只有带筛选的非 canonical 查询才保留 JSON CTE 语义。若该直接页在生产形状
-  快照上仍超过 `250ms`，必须先提交 `EXPLAIN QUERY PLAN` 证据再另立投影/索引任务，不能提高
-  读预算或恢复 raw fallback。
+  每个 warm slice 在开始时重新检查前台速率与 SQLite contention；任何已 aged 的
+  reconciliation 调度例外也不适用于该 warm controller。它不得因别的维护工作获得 RPS
+  例外而预热、扩张或占用前台保留连接。
+  默认 Events `1/20` 的 canonical slice 从 `dashboard_alert_projection_events` 的时间索引读取计数和
+  页面，并在 Rust 解码已物化的 `payload_json`。Catalog facet 从同代 immutable Groups event snapshot
+  每次接受 `50` 行到本机 facet model，并以每次 `250` 行的持久化 output cursor 写入独立 output rows；重试不能重扫
+  已接受 slice，也不能为每个 facet 运行 JSON CTE。snapshot 只从 complete output rows 组装 exact payload，不能因任意尺寸阈值
+  永久 defer。Groups 的母组与子组摘要、计数和最新事件始终完整；仅当一个母组的嵌入 `childEvents` 历史超过一个有界 read fragment 时，
+  该可选内联列表为空，详情由既有 child drawer 的分页 request-record 读取提供。Alerts projection 与所有 Alerts 查询固定保留最近 `32` 天。
+  只有带筛选的非 canonical 查询才保留 JSON CTE 语义。若该直接页在生产形状快照上仍超过 `250ms`，必须先提交
+  `EXPLAIN QUERY PLAN` 证据再另立投影/索引任务，不能提高读预算或恢复 raw fallback。
+  默认 Groups `1/20` 使用本机 observability 的 canonical-groups read model，而不在 warm
+  路径运行完整历史 JSON CTE。builder 在完整 coverage 时原子捕获 projection revision、source fence
+  与固定 source-row membership boundary，以 rowid/keyset slices 暂存该 snapshot 的事件、复用既有
+  Rust grouping 语义，并在全部 slice 成功后切换 active generation。每个分区 slice 在继续前持久化一个有界
+  event fragment；投影在 build 期间推进时，会在同一短事务保存受影响行的 pre-snapshot 值；每条分区 source
+  statement 都独立受预算限制，且不得将增长中的 partition JSON 反复持久化。final reduction 从 immutable fragments
+  重建未接受的单个 partition，并将每个 group 写为有界 payload chunks 和 metadata；只有同一短事务接受该 partition
+  cursor 后才进入下一分区。build 期间 source
+  fence 改变时必须丢弃 staged generation 并重试，绝不将其作为 stale last-good 发布。staged rows、旧 event/override/group generation 仅以不阻塞发布的小批次后台
+  回收，且永远排除 active 与 in-flight build generation。model slot 在复用前同样只按小批次清空，绝不参与 HTTP。
+  该模型不进入 HA outbox，筛选的非 canonical Groups 仍保留原有语义。
+  Catalog staged output 的 facet identity 同时包含 value 与 label；v39 的本机派生表因此保留同一
+  用户值的多个历史 label。v40 的 semantic Groups reducer 将事件分类、child/mother 聚合和 payload
+  chunk 输出各自持久化，取消或重启只从未接受的 cursor 继续，未完成 generation 不得发布。
   Canonical HTTP 的 fresh、stale 与 cold payload 响应不计入 synthetic SQLite 前台活动；已配置
   passkey 的 session lookup 与实际进入 bounded database fallback 的 noncanonical 读取仍计量；
   前者在开始获取 SQLite 连接之前计量，避免 cache-only 重试自行阻止 warm admission，同时不隐藏

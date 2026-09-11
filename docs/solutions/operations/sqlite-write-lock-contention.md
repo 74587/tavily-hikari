@@ -61,9 +61,10 @@ related_specs:
   accepted wrap and sweep clock committed together, so bounded keyset progress does not strand rows
   that become eligible behind the cursor.
 - Treat `foreground_rps` as an instance-local request-rate heuristic, not evidence of SQLite or
-  host pressure. A normal Research drain yields above the threshold, but after 120 eligible seconds
-  it may take one aged automatic request turn. That exception never skips the native SQLite read
-  deadline, request-scoped single lease, five-second rate limit, or claim-fenced commit. If the
+  host pressure. A normal Research drain and normal main reconciliation run yield above the
+  threshold, but after 120 eligible seconds an already-granted aged turn may take one automatic
+  request. That exception never skips SQLite idle-capacity and contention admission, the native
+  SQLite read deadline, request-scoped single lease, five-second rate limit, or claim-fenced commit. If the
   lease is busy, persist a five-second `remote_lease` continuation instead of waiting inside the
   remote budget; read and control defers retain their separate 30-second continuations. Preserve
   the Research queue-time fairness anchor across those no-request defers so the 120-second age is
@@ -76,11 +77,8 @@ related_specs:
   represented as a typed `remote_attempt_budget` defer. Derived rows are cleared only with terminal
   completion, so writer contention cannot turn a partial remote sample into semantic failure or lose
   billing truth.
-- Multi-key reconciliation observation writes are short `ReconciliationProjection` transactions.
-  They upsert only successful responses for the current work generation, while the two-request cap is
-  represented as a typed `remote_attempt_budget` defer. Derived rows are cleared only with terminal
-  completion, so writer contention cannot turn a partial remote sample into semantic failure or lose
-  billing truth.
+  The candidate-global, Key-set, and per-Key logical source identities fence reuse: one changed Key
+  invalidates only that Key, while a global or Key-set change invalidates the complete partial set.
 
 ## Context
 
@@ -451,6 +449,12 @@ month-tail public metrics scan.
   `KeyStore` only after a pre-acquire check for pool capacity, low foreground arrival rate, and no
   recent SQLite contention. A rejected bulk operation must persist its typed defer without first
   entering the pool.
+- An aged reconciliation turn may override only the foreground-rate heuristic to prevent durable
+  work starvation. It must still pass the same pool-capacity check; a rejection is a typed defer,
+  never a reason to prewarm a lazy pool or consume a foreground-reserved slot.
+- Run a non-reserving bulk preflight before a claimed reconciliation's first control read. This
+  keeps a saturated pool on the typed-defer path; leave actual bulk-permit ownership at the later
+  preparation boundary so control metadata cannot create a second reservation.
 - Short queue metadata transactions are control work, not bulk work: give them a fixed `100ms`
   budget, bypass the bulk permit, and rely on their durable representative/stale-recovery contract
   after a transient failure. Background retry loops merely transfer contention into an unbounded

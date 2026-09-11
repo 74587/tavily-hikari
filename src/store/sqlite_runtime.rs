@@ -361,6 +361,8 @@ struct ReconciliationReadWindow {
     connection_cache_write_pages: u64,
     connection_cache_write_sampled: bool,
     connection_cache_write_sample_failed: bool,
+    key_observation_reuses: u64,
+    key_observation_identity_misses: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -370,6 +372,12 @@ struct AdminAlertsWarmWindow {
     generation_discards: u64,
     defers: u64,
     cold_misses: u64,
+    canonical_events_indexed_reads: u64,
+    canonical_catalog_payload_slices: u64,
+    canonical_group_build_slices: u64,
+    canonical_group_reduction_slices: u64,
+    canonical_group_publishes: u64,
+    canonical_group_defers: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -776,6 +784,69 @@ impl SqliteRuntime {
         &self,
         operation: SqliteOperation,
     ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
+        self.try_admit_maintenance_bulk_with_foreground_policy(operation)
+    }
+
+    /// Research drain has an aged-turn exception for the foreground-RPS
+    /// heuristic, but it still owns the single bulk slot for its bounded
+    /// source read. The permit is intentionally scoped by the caller to the
+    /// local read phase and must be dropped before any outbound HTTP request.
+    pub(crate) fn try_admit_research_drain_bulk(
+        &self,
+    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
+        let operation = SqliteOperation::ReconciliationProjection;
+        if self
+            .inner
+            .maintenance_shutdown
+            .load(AtomicOrdering::Acquire)
+        {
+            self.record_deferred(operation, SqliteAdmissionDeferReason::BulkBusy);
+            return Err(SqliteAdmissionDeferReason::BulkBusy);
+        }
+        if self.recent_contention_active() {
+            self.record_deferred(operation, SqliteAdmissionDeferReason::RecentContention);
+            return Err(SqliteAdmissionDeferReason::RecentContention);
+        }
+        if !self.has_foreground_pool_capacity() {
+            self.record_deferred(operation, SqliteAdmissionDeferReason::PoolPressure);
+            return Err(SqliteAdmissionDeferReason::PoolPressure);
+        }
+        match self.inner.maintenance_bulk.clone().try_acquire_owned() {
+            Ok(permit) => Ok(SqliteMaintenanceBulkPermit { _permit: permit }),
+            Err(_) => {
+                self.record_deferred(operation, SqliteAdmissionDeferReason::BulkBusy);
+                Err(SqliteAdmissionDeferReason::BulkBusy)
+            }
+        }
+    }
+
+    /// Reject a reconciliation run before it reaches a control read that
+    /// could wait on an exhausted pool. The actual preparation still obtains
+    /// the one bulk permit at its own boundary, so this probe never reserves
+    /// foreground capacity or creates a second admission owner.
+    pub(crate) fn preflight_reconciliation_projection_admission(
+        &self,
+    ) -> Result<(), SqliteAdmissionDeferReason> {
+        let operation = SqliteOperation::ReconciliationProjection;
+        if self
+            .inner
+            .maintenance_shutdown
+            .load(AtomicOrdering::Acquire)
+        {
+            self.record_deferred(operation, SqliteAdmissionDeferReason::BulkBusy);
+            return Err(SqliteAdmissionDeferReason::BulkBusy);
+        }
+        if let Some(reason) = self.maintenance_bulk_defer_reason_for(operation) {
+            self.record_deferred(operation, reason);
+            return Err(reason);
+        }
+        Ok(())
+    }
+
+    fn try_admit_maintenance_bulk_with_foreground_policy(
+        &self,
+        operation: SqliteOperation,
+    ) -> Result<SqliteMaintenanceBulkPermit, SqliteAdmissionDeferReason> {
         debug_assert!(operation.is_maintenance_bulk());
         if self
             .inner
@@ -858,7 +929,7 @@ impl SqliteRuntime {
         // pool pressure remains distinguishable from a projection failure.
         let mut held = Vec::new();
         while self.inner.pool.size() < self.inner.maximum_connections {
-            if self.foreground_activity_rps() > MAINTENANCE_BULK_MAX_FOREGROUND_RPS
+            if (self.foreground_activity_rps() > MAINTENANCE_BULK_MAX_FOREGROUND_RPS)
                 || self.inner.acquire_waiters.load(AtomicOrdering::Acquire) > 0
             {
                 break;
@@ -1583,6 +1654,66 @@ impl SqliteRuntime {
         });
     }
 
+    pub(crate) fn record_admin_alerts_canonical_events_indexed_read(&self) {
+        self.record_admin_alerts_warm_event(|metrics| {
+            metrics.canonical_events_indexed_reads =
+                metrics.canonical_events_indexed_reads.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_admin_alerts_canonical_catalog_payload_slice(&self) {
+        self.record_admin_alerts_warm_event(|metrics| {
+            metrics.canonical_catalog_payload_slices =
+                metrics.canonical_catalog_payload_slices.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_admin_alerts_canonical_group_build_slice(&self) {
+        self.record_admin_alerts_warm_event(|metrics| {
+            metrics.canonical_group_build_slices =
+                metrics.canonical_group_build_slices.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_admin_alerts_canonical_group_reduction_slice(&self) {
+        self.record_admin_alerts_warm_event(|metrics| {
+            metrics.canonical_group_reduction_slices =
+                metrics.canonical_group_reduction_slices.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_admin_alerts_canonical_group_publish(&self) {
+        self.record_admin_alerts_warm_event(|metrics| {
+            metrics.canonical_group_publishes = metrics.canonical_group_publishes.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_admin_alerts_canonical_group_defer(&self) {
+        self.record_admin_alerts_warm_event(|metrics| {
+            metrics.canonical_group_defers = metrics.canonical_group_defers.saturating_add(1);
+        });
+    }
+
+    pub(crate) fn record_reconciliation_key_observation_identity(
+        &self,
+        reused: u64,
+        identity_misses: u64,
+    ) {
+        let mut window = self
+            .inner
+            .workload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let metrics = window
+            .reconciliation_reads
+            .entry(ReconciliationReadKind::CandidateHydrate)
+            .or_default();
+        metrics.key_observation_reuses = metrics.key_observation_reuses.saturating_add(reused);
+        metrics.key_observation_identity_misses = metrics
+            .key_observation_identity_misses
+            .saturating_add(identity_misses);
+    }
+
     fn record_admin_alerts_warm_event(&self, update: impl FnOnce(&mut AdminAlertsWarmWindow)) {
         let mut window = self
             .inner
@@ -1896,6 +2027,16 @@ impl KeyStore {
         Some(reason.as_str())
     }
 
+    pub(crate) fn ensure_admin_alerts_cache_warm_write_admitted(&self) -> Result<(), ProxyError> {
+        if let Some(reason) = self.admin_alerts_cache_warm_defer_reason() {
+            return Err(ProxyError::Deferred {
+                operation: "admin_alerts_cache_warm",
+                reason: reason.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn admin_alerts_cache_warm_pressure_reason(&self) -> Option<&'static str> {
         self.sqlite_runtime
             .admin_alerts_cache_warm_pressure_reason()
@@ -1934,6 +2075,14 @@ impl KeyStore {
         &self,
         operation: SqliteOperation,
     ) -> Result<AdminAlertsReadSession, ProxyError> {
+        if operation == SqliteOperation::AdminAlertsCacheWarm
+            && let Some(reason) = self.admin_alerts_cache_warm_defer_reason()
+        {
+            return Err(ProxyError::Deferred {
+                operation: "admin_alerts_cache_warm",
+                reason: reason.to_string(),
+            });
+        }
         Ok(AdminAlertsReadSession {
             snapshot: Some(self.sqlite_runtime.begin_read_snapshot(operation).await?),
             operation,
@@ -2455,6 +2604,42 @@ impl SqliteReadSnapshot {
 }
 
 impl ReconciliationReadSession {
+    /// Execute an intermediate statement without closing the read snapshot.
+    ///
+    /// Reconciliation source identity and partial observations must be read
+    /// from one SQLite snapshot. On an error or an expired cooperative budget
+    /// this method consumes the snapshot through the normal completion path so
+    /// the connection is restored safely instead of being detached by Drop.
+    pub(crate) async fn query<T>(
+        &mut self,
+        query_result: Result<T, sqlx::Error>,
+    ) -> Result<T, ProxyError> {
+        let deadline_expired = self
+            .snapshot
+            .as_ref()
+            .expect("SQLite reconciliation read snapshot")
+            .cooperative_run_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        match query_result {
+            Ok(value) if !deadline_expired => Ok(value),
+            result => {
+                let outcome = self
+                    .snapshot
+                    .take()
+                    .expect("SQLite reconciliation read snapshot")
+                    .complete_reconciliation_read(self.kind, result)
+                    .await?;
+                match outcome {
+                    SqliteCooperativeQueryOutcome::Completed(value) => Ok(value),
+                    SqliteCooperativeQueryOutcome::DeadlineExceeded => Err(ProxyError::Deferred {
+                        operation: "reconciliation_projection",
+                        reason: "projection_read_budget".to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
     pub(crate) async fn complete_query<T>(
         mut self,
         query_result: Result<T, sqlx::Error>,
@@ -3125,7 +3310,7 @@ fn format_operation_window(
                 "unknown".to_string()
             };
             format!(
-                "reconciliation_read/{}:calls={},elapsed_ms={},deadlines={},deferred={},discarded={},connection_cache_write_pages={}",
+                "reconciliation_read/{}:calls={},elapsed_ms={},deadlines={},deferred={},discarded={},connection_cache_write_pages={},key_observation_reuses={},key_observation_identity_misses={}",
                 kind.as_str(),
                 metrics.calls,
                 metrics.elapsed_ms,
@@ -3133,6 +3318,8 @@ fn format_operation_window(
                 metrics.deferred,
                 metrics.discarded_connections,
                 cache_write_pages,
+                metrics.key_observation_reuses,
+                metrics.key_observation_identity_misses,
             )
         }))
         .collect::<Vec<_>>()
@@ -3141,12 +3328,18 @@ fn format_operation_window(
 
 fn format_admin_alerts_warm_window(metrics: AdminAlertsWarmWindow) -> String {
     format!(
-        "slices={},publishes={},generation_discards={},defers={},cold_misses={}",
+        "slices={},publishes={},generation_discards={},defers={},cold_misses={},canonical_events_indexed_reads={},canonical_catalog_payload_slices={},canonical_group_build_slices={},canonical_group_reduction_slices={},canonical_group_publishes={},canonical_group_defers={}",
         metrics.slices,
         metrics.publishes,
         metrics.generation_discards,
         metrics.defers,
         metrics.cold_misses,
+        metrics.canonical_events_indexed_reads,
+        metrics.canonical_catalog_payload_slices,
+        metrics.canonical_group_build_slices,
+        metrics.canonical_group_reduction_slices,
+        metrics.canonical_group_publishes,
+        metrics.canonical_group_defers,
     )
 }
 

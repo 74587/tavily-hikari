@@ -119,6 +119,10 @@
   return; uncertainty closes the physical connection. Billed-credit hydrate is the pre-request
   source-read gate; after an observation, settlement reads current ledger state through a bounded
   finalization connection so charges recorded during HTTP are not missed.
+- A claimed run applies the same non-reserving bulk-admission preflight before its first
+  claim-attempt control read. A rejected pool, contention, shutdown, or bulk condition returns the
+  typed defer before raw pool acquisition; the eventual preparation boundary remains the sole bulk
+  permit owner.
 - Administrator Alerts canonical Events reads are outside this reconciliation source contract: they
   use the independent `AdminAlertsCacheWarm` snapshot and projection time index, while reconciliation
   source reads retain their own preparation deadline and claim-fenced continuation.
@@ -150,9 +154,13 @@
   one request, and atomically accepts its pending/terminal/retry result, exact cursor, Key cooldown,
   and claim fence. `foreground_pressure`, `read_budget`, and `control_defer` schedule one
   30-second continuation; `remote_lease` schedules one five-second continuation. They advance no
-  cursor or retry streak. Above five instance-local foreground requests per second, only an aged
-  Research turn may run one bounded poll; it does not bypass SQLite admission, the request lease,
-  or claim-fenced finalization. After an accepted `remote_lease` continuation, that aged reservation
+  cursor or retry streak. Above five instance-local foreground requests per second, a normal main
+  reconciliation run and a normal Research drain defer. An already-granted aged Main or Research
+  turn reserves one actual remote request; it never changes local SQLite idle-capacity or contention
+  admission, the native read deadline, the request lease, or claim-fenced finalization. After an
+  aged Main capacity rejection, the run returns its typed defer without prewarming a lazy pool or
+  consuming a foreground-reserved connection. After an
+  accepted `remote_lease` continuation, that aged reservation
   remains held until the resumed Research run starts HTTP; ordinary automatic remote work may
   prepare locally but cannot claim the released lease. The turn identity, owner and resumable state
   transition together, so an old claim cleanup cannot corrupt a newer aged reservation.
@@ -162,17 +170,24 @@
   accepted claim-fenced commit refreshes the sweep clock. If every eligible due Key is cooling, the
   wake time is the globally earliest eligible cooldown, independent of the current cursor page.
 - When one candidate maps to multiple eligible upstream keys, persist each successful `/usage`
-  response as a local observation keyed by `(token_id, period_code, work_generation, key_id)`. Each
-  run requests at most two missing keys and returns `remote_attempt_budget` with a 30-second
-  continuation while the set is incomplete. Sum usage and enter the existing compare/active terminal
-  path only after all current-generation keys are observed; candidates with an existing partial
-  observation are selected before fresh candidates sharing the same scheduling Key so the partial
-  set can converge. A partial observation never becomes a semantic failure or terminal result.
-  Terminal completion clears these node-local rows, and generation or claim fencing ignores stale
-  observations. A claimed `remote_attempt_budget` defer atomically finishes only its current claim
-  and leaves exactly one 30-second auto continuation; it changes neither billing truth nor
-  semantic, transport, upstream-429, or local-pressure state. The observation table is derived
-  state, not HA outbox truth.
+  response as a local observation keyed by `(token_id, period_code, work_generation, key_id)` plus
+  candidate-global, complete Key-set, and per-Key logical source identities. A work generation may
+  advance for one changed Key without discarding observations whose identities still match; a
+  candidate-global or Key-set identity change invalidates every prior observation. Legacy rows that
+  have no identity are incompatible and reread without a startup backfill. Each run requests at
+  most two missing keys and returns `remote_attempt_budget` with a 30-second continuation while the
+  set is incomplete. Sum usage and enter the existing compare/active terminal path only after all
+  current keys are observed; candidates with an existing partial observation are selected before
+  fresh candidates sharing the same scheduling Key so the partial set can converge. A partial
+  observation never becomes a semantic failure or terminal result. Terminal completion clears these
+  node-local rows, and generation or claim fencing ignores stale observations. A claimed
+  `remote_attempt_budget` defer atomically finishes only its current claim and leaves exactly one
+  30-second auto continuation; it changes neither billing truth nor semantic, transport,
+  upstream-429, or local-pressure state. The observation table is derived state, not HA outbox
+  truth.
+  The per-Key logical identity is part of the observation fence: a single Key source change rereads
+  only that Key, while candidate-global or Key-set changes invalidate the complete partial set. The
+  identity is local optimization state and never changes compare billing truth.
 - 状态页使用门禁清单和 `n/m`，同时覆盖 loading、empty、error 与 degraded 状态。
 
 ## 功能与行为规格（Functional/Behavior Spec）

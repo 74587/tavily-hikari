@@ -17,6 +17,7 @@ use tracing::log::LevelFilter;
 use tracing::{error, info, warn};
 
 mod immediate_transaction;
+mod key_store_alert_event_projection;
 mod sqlite_runtime;
 pub(crate) use immediate_transaction::ImmediateSqliteTransaction;
 #[cfg(test)]
@@ -564,6 +565,46 @@ pub(crate) async fn sleep_before_sqlite_transient_write_retry(
     deadline: Instant,
     err: &ProxyError,
 ) -> bool {
+    sleep_before_sqlite_transient_retry(
+        backend_time,
+        operation,
+        attempt,
+        deadline,
+        err,
+        "sqlite_transient_write_retry",
+        "write",
+    )
+    .await
+}
+
+pub(crate) async fn sleep_before_sqlite_transient_read_retry(
+    backend_time: &BackendTime,
+    operation: &str,
+    attempt: usize,
+    deadline: Instant,
+    err: &ProxyError,
+) -> bool {
+    sleep_before_sqlite_transient_retry(
+        backend_time,
+        operation,
+        attempt,
+        deadline,
+        err,
+        "sqlite_transient_read_retry",
+        "read",
+    )
+    .await
+}
+
+async fn sleep_before_sqlite_transient_retry(
+    backend_time: &BackendTime,
+    operation: &str,
+    attempt: usize,
+    deadline: Instant,
+    err: &ProxyError,
+    event: &str,
+    kind: &str,
+) -> bool {
     if !is_transient_sqlite_write_error(err) {
         return false;
     }
@@ -577,12 +618,12 @@ pub(crate) async fn sleep_before_sqlite_transient_write_retry(
     let backoff = sqlite_transient_write_retry_delay(attempt).min(remaining);
     warn!(
         component = "db",
-        event = "sqlite_transient_write_retry",
+        event,
         operation,
         attempt = attempt + 1,
         backoff_ms = backoff.as_millis() as u64,
         err = %err,
-        "{operation}: transient sqlite write error (attempt={}, backoff={}ms): {err}",
+        "{operation}: transient sqlite {kind} error (attempt={}, backoff={}ms): {err}",
         attempt + 1,
         backoff.as_millis(),
     );
@@ -1211,6 +1252,24 @@ pub(crate) fn is_observability_table(table: &str) -> bool {
             | "api_key_usage_buckets"
             | "dashboard_request_rollup_buckets"
             | "request_log_catalog_rollups"
+            | "admin_alert_canonical_groups_state"
+            | "admin_alert_canonical_groups"
+            | "admin_alert_canonical_group_events"
+            | "admin_alert_canonical_group_fragments"
+            | "admin_alert_canonical_group_overrides"
+            | "admin_alert_canonical_group_payload_chunks"
+            | "admin_alert_canonical_group_payload_read_chunks"
+            | "admin_alert_canonical_group_payload_read_chunks_v2"
+            | "admin_alert_canonical_group_reduction_children"
+            | "admin_alert_canonical_group_reduction_events"
+            | "admin_alert_canonical_group_reduction_mothers"
+            | "admin_alert_canonical_catalog_state"
+            | "admin_alert_canonical_catalog_facets"
+            | "admin_alert_canonical_catalog_payloads"
+            | "admin_alert_canonical_catalog_payload_items"
+            | "admin_alert_canonical_catalog_payload_items_v2"
+            | "dashboard_alert_projection_events"
+            | "dashboard_alert_projection_revision_state"
     )
 }
 
@@ -2720,6 +2779,7 @@ impl KeyStore {
 
 include!("key_store_bootstrap.rs");
 include!("key_store_schema_migrations.rs");
+include!("key_store_schema_migrations_convergence.rs");
 include!("key_store_bootstrap_legacy.rs");
 include!("key_store_ha_schema.rs");
 include!("key_store_quota_schema_semantic_migration.rs");
@@ -2753,6 +2813,9 @@ include!("key_store_request_log_body_retention.rs");
 include!("key_store_token_logs.rs");
 include!("key_store_alert_models.rs");
 include!("key_store_alerts.rs");
+include!("key_store_alert_canonical_catalog.rs");
+include!("key_store_alert_canonical_groups.rs");
+include!("key_store_alert_canonical_semantic_reduction.rs");
 include!("key_store_alert_group_records.rs");
 include!("key_store_alert_events_cte.rs");
 include!("key_store_alert_projection.rs");

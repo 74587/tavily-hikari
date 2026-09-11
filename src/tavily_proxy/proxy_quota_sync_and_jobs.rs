@@ -760,13 +760,15 @@ impl TavilyProxy {
             try_remote_attempt: false,
             attempt_deadline: None,
         };
-        let mut local_admission_outcome = self.admit_upstream_reconciliation_projection();
+        let admit_local_projection = || self.admit_upstream_reconciliation_projection();
+        let mut local_admission_outcome = admit_local_projection();
         if matches!(
             local_admission_outcome,
             SqliteAdmissionOutcome::Deferred {
                 reason: "pool_pressure"
             }
-        ) {
+        )
+        {
             if let Err(error) = self
                 .prewarm_upstream_reconciliation_projection_capacity()
                 .await
@@ -774,7 +776,7 @@ impl TavilyProxy {
             {
                 return Err(error);
             }
-            local_admission_outcome = self.admit_upstream_reconciliation_projection();
+            local_admission_outcome = admit_local_projection();
         }
         let mut local_admission = match local_admission_outcome {
             SqliteAdmissionOutcome::Admitted(admission) => admission,
@@ -2977,12 +2979,8 @@ impl TavilyProxy {
             .await
     }
 
-    pub async fn ensure_upstream_reconciliation_research_drain_job(
-        &self,
-    ) -> Result<(), ProxyError> {
-        self.key_store
-            .ensure_upstream_reconciliation_research_drain_job()
-            .await
+    pub async fn ensure_upstream_reconciliation_research_drain_job(&self) -> Result<(), ProxyError> {
+        self.key_store.ensure_upstream_reconciliation_research_drain_job().await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3109,12 +3107,8 @@ impl TavilyProxy {
             .await
     }
 
-    pub async fn ensure_upstream_reconciliation_representative_job(
-        &self,
-    ) -> Result<(), ProxyError> {
-        self.key_store
-            .ensure_upstream_reconciliation_representative_job()
-            .await
+    pub async fn ensure_upstream_reconciliation_representative_job(&self) -> Result<(), ProxyError> {
+        self.key_store.ensure_upstream_reconciliation_representative_job().await
     }
 
     pub async fn record_upstream_reconciliation_budget_exhausted(

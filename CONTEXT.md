@@ -53,10 +53,36 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   entry within five minutes is stale, and a cold/expired entry returns `503 Retry-After: 1`.
   These cache-only payload responses do not count as synthetic SQLite foreground activity. A configured
   passkey session lookup and a noncanonical bounded-read fallback are each real foreground work.
-  The default Events `1/20` warm slice reads count and page rows directly through the projection
-  time index and decodes materialized payloads in Rust; filtered/noncanonical reads keep their existing
-  JSON CTE semantics. A production-shaped statement that still exceeds the native deadline requires
-  query-plan evidence and a separate projection/index task, never a larger read budget or raw fallback.
+  The default Events `1/20` warm slice reads count and page rows directly through the projection's
+  time index and decodes materialized payloads in Rust. Catalog facets checkpoint 50 immutable Groups
+  snapshot rows at a time into a local facet model; each sorted facet payload advances through a durable
+  250-row cursor into independently staged output rows. Retries resume those cursors rather than issuing
+  a JSON CTE or rescanning prior rows, and snapshot assembly reads only completed output rows. Exact
+  derived payloads must not be turned into a permanent defer because of an arbitrary size threshold.
+  A semantic Groups summary retains nested `child_events` only while that optional detail fits one
+  bounded read fragment; otherwise it publishes the exact group counts and latest event with an empty
+  inline detail list. The existing child drawer reads request details through its paginated source.
+  Filtered/noncanonical reads keep
+  their existing JSON CTE semantics. A production-shaped statement that exceeds its native read deadline
+  requires query-plan evidence and a separate projection task, never a larger read budget or raw fallback.
+  Default Groups `1/20` is served from a local observability canonical-groups model. Its builder
+  atomically captures a complete projection revision, source fence, and fixed source-row membership
+  boundary. Source rows are copied by that bounded rowid range, so later projection writes cannot
+  extend a build's final scan. A projection write that advances during a build retains the previous row
+  once for that snapshot. Each partition checkpoints bounded event fragments. Final reduction reads those
+  immutable fragments, stages each resulting group as bounded payload chunks plus a small metadata row,
+  then atomically accepts the partition cursor. A cancellation recomputes only the unaccepted partition;
+  it never rewrites an accumulating JSON state row. A changed source fence discards the staged generation
+  before publication, so it never publishes a cross-generation or stale replacement. The two model slots
+  are cleared in short slices before reuse.
+  Incomplete staging never reaches HTTP, and reclaimer slices exclude the active and in-flight build
+  generations. This derived model never enters the HA outbox and does not change filtered Groups semantics.
+  The lossless catalog payload slot retains the facet label in its staged-output identity, so two labels
+  for one user value cannot overwrite one another. Semantic Groups reduction keeps classification input,
+  child/mother aggregates, and output chunk position in local durable sidecar rows; an in-flight
+  generation may contain placeholder metadata, but it is never published until every payload chunk and
+  partition cursor is accepted. Alerts projection and all Alerts reads retain a rolling 32-day window;
+  the derived sidecar reclaims expired rows in bounded background slices.
 
 ## Reconciliation Terms
 
@@ -83,6 +109,10 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   state through a separately bounded finalization connection so charges written during HTTP remain
   visible without moving the native source deadline past the remote boundary. Claim, finish, and
   continuation remain `maintenance control` rather than part of this session.
+- `reconciliation admission preflight`: a non-reserving bulk-admission check that runs before a
+  claimed run's first control read. It returns a typed defer when foreground capacity, contention,
+  shutdown, or the one bulk permit would reject preparation; the later preparation boundary remains
+  the sole owner that acquires the permit.
 - `reconciliation read-budget defer`: the `projection_read_budget` outcome emitted when a
   reconciliation read session reaches its SQLite deadline. It preserves work and billing truth,
   ends local preparation before another source read, projection slice, or remote attempt, records
@@ -103,10 +133,14 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 - `missing eligible upstream key`: a durable nonterminal input condition. It records a fixed
   fifteen-minute retry without incrementing semantic or transport failure state, and administrators
   see only its aggregate count.
-- `partial key observation`: a node-local, generation-scoped successful upstream usage response for
-  one key in a multi-key candidate. It is rebuildable diagnostic state, never a terminal result or
-  HA outbox truth. The engine requests at most two missing keys per run and cannot sum or complete
-  the candidate until every current-generation key is observed.
+- `partial key observation`: a node-local successful upstream usage response for one key in a
+  multi-key candidate. It is reusable only when its candidate-global identity, complete current
+  Key-set identity, and that Key's `request_count`/first-use/last-use identity all match. A single
+  Key source change therefore rereads only that Key; a candidate-global or Key-set change fences
+  every prior observation. Observations without these identities are legacy state and conservatively
+  reread. This is rebuildable diagnostic state, never a terminal result or HA outbox truth. The
+  engine requests at most two missing keys per run and cannot sum or complete the candidate until
+  every current Key is observed.
 - `remote attempt budget`: the typed nonterminal continuation used when a candidate still has missing
   keys after the two-request run cap. It schedules one claim-fenced representative 30 seconds later
   without incrementing semantic, transport, 429, or local-pressure streaks.
@@ -124,10 +158,13 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
   request starts; ordinary automatic remote work may prepare locally but cannot acquire its lease.
 - `foreground_rps`: the instance-local recent request-rate heuristic used to protect foreground
   traffic. It is not a CPU, SQLite-pool, cgroup, or host-load metric. A non-aged Research drain
-  defers above five requests per second; an aged Research turn bypasses only this heuristic for
-  one bounded poll and still requires SQLite admission, the request lease, and a claim fence.
-  Its durable `scheduled_jobs.queued_at` fairness anchor survives foreground, lease, read-budget,
-  and control defers; an accepted poll or Key cooldown begins a new interval.
+  defers above five requests per second; an aged Research turn may use its reserved turn only when it
+  reaches one actual outbound request. The reservation never changes local SQLite admission: all
+  candidate reads, projection work, and finalization still follow the normal idle-capacity,
+  contention, native-deadline, and claim-fence rules. Aged Main priority is likewise a remote
+  scheduling concern, not a local read exception. Its durable `scheduled_jobs.queued_at` fairness
+  anchor survives foreground, lease, read-budget, and control defers; an accepted poll or Key
+  cooldown begins a new interval.
 - `research selection page`: an indexed, due-only page of at most 80 Research rows, hydrated in
   bounded batches with a four-per-key and 20-row sweep cap. Its stable keyset cursor advances only
   after claim-fenced acceptance of an actually processed candidate; read pressure or cancellation

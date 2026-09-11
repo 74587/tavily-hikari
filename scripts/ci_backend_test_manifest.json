@@ -503,7 +503,10 @@
       "estimated_seconds": 64,
       "coverage_target": "lib",
       "run_args": ["--lib"],
-      "include_prefixes": ["tests::alert_projection::"]
+      "include_prefixes": [
+        "tests::alert_projection::",
+        "store::key_store_alert_event_projection::tests::alert_projection_redacts_"
+      ]
     },
     {
       "id": "lib-reconciliation-maintenance",
@@ -926,6 +929,7 @@
         "server::tests::alerts_and_ha_source_and_recovery::ha_",
         "server::tests::alerts_and_ha_source_and_recovery::request_logs_gc_",
         "server::tests::alerts_and_ha_source_and_recovery::aged_",
+        "server::tests::alerts_and_ha_source_and_recovery::non_aged_reconciliation_",
         "server::tests::alerts_and_ha_source_and_recovery::non_aged_research_",
         "server::tests::alerts_and_ha_source_and_recovery::remote_attempt_",
         "server::tests::alerts_and_ha_source_and_recovery::reconciliation_",

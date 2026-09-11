@@ -7,7 +7,9 @@ and permits at most two serial main settlement requests per run. Terminal Resear
 durable drain that owns the v21 cursor, performs at most one actual poll every five seconds, and shares only the
 request-scoped single remote lease with main settlement. Main runs neither reserve time for nor issue Research
 requests. After 120 eligible seconds, main and Research compete by oldest eligibility for the next non-manual
-request turn, with main winning an exact tie; a Research turn bypasses only the foreground request-rate heuristic.
+request turn, with main winning an exact tie; an already-granted aged Main or Research turn bypasses only the
+foreground request-rate heuristic for one request. Both still require normal SQLite capacity and contention
+admission, the request-scoped lease, and claim-fenced finalization.
 Research exhaustion is diagnostic follow-up, not primary local pressure. Local-pressure backoff (`30/60/120/300s`) is separate from the
 per-key upstream-429 cooldown (`5/10/20/30m`); a 429 only cools the affected `period_reconciliation` key,
 and non-429 failures do not reset that key's cooldown. A current claim that reaches a
@@ -47,16 +49,21 @@ scope only; the existing `period_reconciliation` 429 cooldown remains independen
 transitions are claim-fenced and keep raw upstream details out of durable observations.
 
 For a period that maps to more than one eligible upstream key, persist each successful key observation
-by work generation before requesting another key. Advance that generation only for a logical usage
-revision or current Key-set change, including a removed Key: storage replay, timestamp refresh, and
-an equal logical payload must retain partial observations. Read missing keys in deterministic order
-and cap each main run at two
+with the candidate-global, complete Key-set, and that Key's logical request-count/first-use/last-use
+identity before requesting another key. A generation advance from one Key's logical source change
+must preserve matching observations for every unchanged Key; a candidate-global or Key-set change,
+including a removed Key, invalidates the complete partial set. Storage replay, timestamp refresh, and
+an equal logical payload retain partial observations. Observations predating these identities safely
+reread their Key without historical backfill. Read missing keys in deterministic order and cap each main run at two
 remote requests. If keys remain, write `remote_attempt_budget` and use the current claim to create or
 reuse one durable 30-second continuation; this must not write a semantic failure, transport or 429
 state, local-pressure state, or billing truth. Sum usage and enter the existing compare/active terminal
 path only after all current-generation key observations are present. Delete local observations
 atomically only with terminal completion, and fence both observation writes and continuations by claim
 generation.
+The identity columns are the reuse fence, not another source of truth: a single changed Key rereads
+only that Key, while a changed candidate or Key set invalidates all partial observations. This keeps
+the optimization local and makes accepted terminal work the only state that can affect billing.
 The scheduled-job `attempt` is part of that fence: a controlled pre-request retry records an error for
 the current claim and creates one continuation at `attempt + 1`, while finalization rejects any stale
 `(job_id, claim_generation, attempt)` tuple. This makes retry injection deterministic in tests without

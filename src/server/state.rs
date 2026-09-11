@@ -86,8 +86,20 @@ struct DashboardOverviewCacheState {
     notify: Arc<tokio::sync::Notify>,
     admin_alerts: AdminAlertsReadCache,
     admin_alerts_prewarm_in_flight: bool,
+    admin_alerts_prewarm_owner: u64,
     admin_alerts_prewarm_not_before: Option<tokio::time::Instant>,
     admin_alerts_prewarm_defers: u8,
+    admin_alerts_groups_reclaimer_in_flight: bool,
+    admin_alerts_groups_reclaimer_owner: u64,
+    admin_alerts_groups_reclaim_batch_in_flight: bool,
+    admin_alerts_groups_reclaim_batch_owner: u64,
+    admin_alerts_groups_build_in_flight: bool,
+    admin_alerts_groups_build_owner: u64,
+    admin_alerts_next_flight_owner: u64,
+    admin_alerts_shutting_down: bool,
+    admin_alerts_shutdown_notify: Arc<tokio::sync::Notify>,
+    admin_alerts_prewarm_task: Option<tokio::task::JoinHandle<()>>,
+    admin_alerts_groups_reclaimer_task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(test)]
     admin_alerts_warm_after_catalog_pause: Option<AdminAlertsWarmPause>,
     #[cfg(test)]
@@ -117,8 +129,20 @@ impl Default for DashboardOverviewCacheState {
             notify: Arc::new(tokio::sync::Notify::new()),
             admin_alerts: AdminAlertsReadCache::default(),
             admin_alerts_prewarm_in_flight: false,
+            admin_alerts_prewarm_owner: 0,
             admin_alerts_prewarm_not_before: None,
             admin_alerts_prewarm_defers: 0,
+            admin_alerts_groups_reclaimer_in_flight: false,
+            admin_alerts_groups_reclaimer_owner: 0,
+            admin_alerts_groups_reclaim_batch_in_flight: false,
+            admin_alerts_groups_reclaim_batch_owner: 0,
+            admin_alerts_groups_build_in_flight: false,
+            admin_alerts_groups_build_owner: 0,
+            admin_alerts_next_flight_owner: 1,
+            admin_alerts_shutting_down: false,
+            admin_alerts_shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            admin_alerts_prewarm_task: None,
+            admin_alerts_groups_reclaimer_task: None,
             #[cfg(test)]
             admin_alerts_warm_after_catalog_pause: None,
             #[cfg(test)]
@@ -137,6 +161,29 @@ impl Default for DashboardOverviewCacheState {
 const ADMIN_ALERTS_CACHE_CAPACITY: usize = 64;
 const ADMIN_ALERTS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const ADMIN_ALERTS_PREWARM_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn wait_for_admin_alerts_shutdown_or(
+    cache: &Arc<Mutex<DashboardOverviewCacheState>>,
+    shutdown_notify: &Arc<tokio::sync::Notify>,
+    delay: std::time::Duration,
+) -> bool {
+    let notified = shutdown_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if admin_alerts_shutdown_requested(cache).await {
+        return true;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => admin_alerts_shutdown_requested(cache).await,
+        _ = &mut notified => true,
+    }
+}
+
+async fn admin_alerts_shutdown_requested(
+    cache: &Arc<Mutex<DashboardOverviewCacheState>>,
+) -> bool {
+    cache.lock().await.admin_alerts_shutting_down
+}
 
 fn admin_alerts_warm_deferred(reason: &'static str) -> tavily_hikari::ProxyError {
     tavily_hikari::ProxyError::Deferred {
@@ -201,26 +248,46 @@ impl AdminAlertsWarmPause {
 }
 
 impl DashboardOverviewCacheState {
-    fn try_start_admin_alerts_prewarm(&mut self, now: tokio::time::Instant) -> bool {
+    fn next_admin_alerts_flight_owner(&mut self) -> u64 {
+        let owner = self.admin_alerts_next_flight_owner.max(1);
+        self.admin_alerts_next_flight_owner = owner.wrapping_add(1).max(1);
+        owner
+    }
+
+    fn start_admin_alerts_prewarm(&mut self, now: tokio::time::Instant) -> Option<u64> {
         if self.admin_alerts_prewarm_in_flight
             || self
                 .admin_alerts_prewarm_not_before
                 .is_some_and(|not_before| now < not_before)
         {
-            return false;
+            return None;
         }
 
+        let owner = self.next_admin_alerts_flight_owner();
         self.admin_alerts_prewarm_in_flight = true;
+        self.admin_alerts_prewarm_owner = owner;
         self.admin_alerts_prewarm_not_before = Some(now + ADMIN_ALERTS_PREWARM_MIN_INTERVAL);
-        true
+        Some(owner)
+    }
+
+    #[cfg(test)]
+    fn try_start_admin_alerts_prewarm(&mut self, now: tokio::time::Instant) -> bool {
+        self.start_admin_alerts_prewarm(now).is_some()
     }
 
     fn finish_admin_alerts_prewarm(&mut self) {
         self.admin_alerts_prewarm_in_flight = false;
+        self.admin_alerts_prewarm_owner = 0;
         self.admin_alerts_prewarm_defers = 0;
         self.admin_alerts_prewarm_not_before = Some(
             tokio::time::Instant::now() + ADMIN_ALERTS_PREWARM_MIN_INTERVAL,
         );
+    }
+
+    fn finish_admin_alerts_prewarm_owner(&mut self, owner: u64) {
+        if self.admin_alerts_prewarm_owner == owner {
+            self.finish_admin_alerts_prewarm();
+        }
     }
 
     fn defer_admin_alerts_prewarm(&mut self, now: tokio::time::Instant) -> std::time::Duration {
@@ -231,6 +298,137 @@ impl DashboardOverviewCacheState {
         };
         self.admin_alerts_prewarm_not_before = Some(now + delay);
         delay
+    }
+
+    fn start_admin_alerts_groups_reclaimer(&mut self) -> Option<u64> {
+        if self.admin_alerts_groups_reclaimer_in_flight {
+            return None;
+        }
+        let owner = self.next_admin_alerts_flight_owner();
+        self.admin_alerts_groups_reclaimer_in_flight = true;
+        self.admin_alerts_groups_reclaimer_owner = owner;
+        Some(owner)
+    }
+
+    fn finish_admin_alerts_groups_reclaimer(&mut self, owner: u64) {
+        if self.admin_alerts_groups_reclaimer_owner == owner {
+            self.admin_alerts_groups_reclaimer_in_flight = false;
+            self.admin_alerts_groups_reclaimer_owner = 0;
+        }
+    }
+
+    fn start_admin_alerts_groups_build(&mut self) -> Option<u64> {
+        if self.admin_alerts_groups_reclaim_batch_in_flight
+            || self.admin_alerts_groups_build_in_flight
+        {
+            return None;
+        }
+        let owner = self.next_admin_alerts_flight_owner();
+        self.admin_alerts_groups_build_in_flight = true;
+        self.admin_alerts_groups_build_owner = owner;
+        Some(owner)
+    }
+
+    fn finish_admin_alerts_groups_build(&mut self, owner: u64) {
+        if self.admin_alerts_groups_build_owner == owner {
+            self.admin_alerts_groups_build_in_flight = false;
+            self.admin_alerts_groups_build_owner = 0;
+        }
+    }
+
+    fn start_admin_alerts_groups_reclaim_batch(&mut self) -> Option<u64> {
+        if self.admin_alerts_groups_build_in_flight
+            || self.admin_alerts_groups_reclaim_batch_in_flight
+        {
+            return None;
+        }
+        let owner = self.next_admin_alerts_flight_owner();
+        self.admin_alerts_groups_reclaim_batch_in_flight = true;
+        self.admin_alerts_groups_reclaim_batch_owner = owner;
+        Some(owner)
+    }
+
+    fn finish_admin_alerts_groups_reclaim_batch(&mut self, owner: u64) {
+        if self.admin_alerts_groups_reclaim_batch_owner == owner {
+            self.admin_alerts_groups_reclaim_batch_in_flight = false;
+            self.admin_alerts_groups_reclaim_batch_owner = 0;
+        }
+    }
+
+    fn clear_admin_alerts_flight(&mut self, kind: AdminAlertsFlightKind, owner: u64) {
+        match kind {
+            AdminAlertsFlightKind::Prewarm => {
+                if self.admin_alerts_prewarm_owner == owner {
+                    self.admin_alerts_prewarm_in_flight = false;
+                    self.admin_alerts_prewarm_owner = 0;
+                }
+            }
+            AdminAlertsFlightKind::GroupsReclaimer => {
+                self.finish_admin_alerts_groups_reclaimer(owner);
+            }
+            AdminAlertsFlightKind::GroupsReclaimBatch => {
+                self.finish_admin_alerts_groups_reclaim_batch(owner);
+            }
+            AdminAlertsFlightKind::GroupsBuild => {
+                self.finish_admin_alerts_groups_build(owner);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdminAlertsFlightKind {
+    Prewarm,
+    GroupsReclaimer,
+    GroupsReclaimBatch,
+    GroupsBuild,
+}
+
+struct AdminAlertsFlightGuard {
+    cache: Arc<Mutex<DashboardOverviewCacheState>>,
+    kind: AdminAlertsFlightKind,
+    owner: u64,
+    armed: bool,
+}
+
+impl AdminAlertsFlightGuard {
+    fn new(
+        cache: Arc<Mutex<DashboardOverviewCacheState>>,
+        kind: AdminAlertsFlightKind,
+        owner: u64,
+    ) -> Self {
+        Self {
+            cache,
+            kind,
+            owner,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AdminAlertsFlightGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let cache = self.cache.clone();
+        let kind = self.kind;
+        let owner = self.owner;
+        if let Ok(mut cache) = cache.try_lock() {
+            cache.clear_admin_alerts_flight(kind, owner);
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let mut cache = cache.lock().await;
+            cache.clear_admin_alerts_flight(kind, owner);
+        });
     }
 }
 
@@ -425,6 +623,10 @@ fn publish_admin_alerts_canonical_into_cache(
     events: PaginatedAlertEvents,
     groups: PaginatedAlertGroups,
 ) -> bool {
+    // The controller validates the durable projection fence before this
+    // atomic cache publish. The in-memory generation must still match that
+    // attempt too; otherwise a concurrent projection update would mix a
+    // newly-read Events page with an older Catalog/Groups snapshot.
     if cache.alert_projection_generation != generation {
         return false;
     }
@@ -482,14 +684,32 @@ fn default_admin_alert_cache_key(kind: &str) -> String {
 
 pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
     let cache = dashboard_overview_cache_for_state(state.as_ref());
-    {
+    let (owner, shutdown_notify) = {
         let mut cache = cache.lock().await;
-        if !cache.try_start_admin_alerts_prewarm(tokio::time::Instant::now()) {
+        if cache.admin_alerts_shutting_down {
             return;
         }
-    }
-    tokio::spawn(async move {
+        let Some(owner) = cache.start_admin_alerts_prewarm(tokio::time::Instant::now()) else {
+            return;
+        };
+        (owner, cache.admin_alerts_shutdown_notify.clone())
+    };
+    let flight_guard = AdminAlertsFlightGuard::new(
+        cache.clone(),
+        AdminAlertsFlightKind::Prewarm,
+        owner,
+    );
+    let task_cache = cache.clone();
+    let task = tokio::spawn(async move {
+        let cache = task_cache;
+        let mut flight_guard = flight_guard;
+        let mut snapshot_cache_generation = None;
         loop {
+            if admin_alerts_shutdown_requested(&cache).await {
+                cache.lock().await.finish_admin_alerts_prewarm_owner(owner);
+                flight_guard.disarm();
+                return;
+            }
             if let Some(reason) = state.proxy.admin_alerts_cache_warm_defer_reason() {
                 state.proxy.record_admin_alerts_warm_defer();
                 let delay = dashboard_overview_cache_for_state(state.as_ref())
@@ -503,21 +723,29 @@ pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
                     retry_after_secs = delay.as_secs(),
                     "deferred canonical administrator Alerts cache before SQLite admission"
                 );
-                tokio::time::sleep(delay).await;
+                if wait_for_admin_alerts_shutdown_or(&cache, &shutdown_notify, delay).await {
+                    cache.lock().await.finish_admin_alerts_prewarm_owner(owner);
+                    flight_guard.disarm();
+                    return;
+                }
                 continue;
             }
-            let generation = current_admin_alerts_generation(state.as_ref()).await;
+            let generation = match snapshot_cache_generation {
+                Some(generation) => generation,
+                None => current_admin_alerts_generation(state.as_ref()).await,
+            };
             let result = async {
-                let durable_projection_fence = state
-                    .proxy
-                    .admin_alerts_canonical_warm_projection_fence()
-                    .await?;
                 state.proxy.prepare_admin_alerts_canonical_warm().await?;
                 if let Some(reason) = state.proxy.admin_alerts_cache_warm_defer_reason() {
                     return Err(admin_alerts_warm_deferred(reason));
                 }
+                let (groups, build_generation, recent_generation, history_generation) =
+                    admin_alerts_canonical_groups_for_warm(state.as_ref()).await?;
                 state.proxy.record_admin_alerts_warm_slice();
-                let catalog = state.proxy.admin_alert_catalog_for_cache_warm().await?;
+                let catalog = state
+                    .proxy
+                    .admin_alert_catalog_for_canonical_snapshot(build_generation)
+                    .await?;
                 #[cfg(test)]
                 pause_admin_alerts_warm_after_catalog_for_test(state.as_ref()).await;
                 if let Some(reason) = state.proxy.admin_alerts_cache_warm_defer_reason() {
@@ -526,18 +754,8 @@ pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
                 state.proxy.record_admin_alerts_warm_slice();
                 let events = state
                     .proxy
-                    .admin_alert_events_page_for_cache_warm(1, 20)
+                    .admin_default_projected_alert_events_page_for_canonical_warm()
                     .await?;
-                if let Some(reason) = state.proxy.admin_alerts_cache_warm_defer_reason() {
-                    return Err(admin_alerts_warm_deferred(reason));
-                }
-                state.proxy.record_admin_alerts_warm_slice();
-                let groups = state
-                    .proxy
-                    .admin_alert_groups_page_for_cache_warm(1, 20)
-                    .await?;
-                #[cfg(test)]
-                pause_admin_alerts_warm_before_projection_fence_for_test(state.as_ref()).await;
                 if let Some(reason) = state.proxy.admin_alerts_cache_warm_defer_reason() {
                     return Err(admin_alerts_warm_deferred(reason));
                 }
@@ -545,13 +763,18 @@ pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
                     .proxy
                     .admin_alerts_canonical_warm_projection_fence()
                     .await?
-                    != durable_projection_fence
+                    != (recent_generation, history_generation)
                 {
-                    state.proxy.record_admin_alerts_warm_generation_discard();
                     return Err(tavily_hikari::ProxyError::Deferred {
                         operation: "admin_alerts_warm",
-                        reason: "projection_fence_changed".to_string(),
+                        reason: "groups_source_fence_changed".to_string(),
                     });
+                }
+                state.proxy.record_admin_alerts_warm_slice();
+                #[cfg(test)]
+                pause_admin_alerts_warm_before_projection_fence_for_test(state.as_ref()).await;
+                if let Some(reason) = state.proxy.admin_alerts_cache_warm_defer_reason() {
+                    return Err(admin_alerts_warm_deferred(reason));
                 }
                 if !publish_admin_alerts_canonical(
                     state.as_ref(),
@@ -578,13 +801,38 @@ pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
                     dashboard_overview_cache_for_state(state.as_ref())
                         .lock()
                         .await
-                        .finish_admin_alerts_prewarm();
+                        .finish_admin_alerts_prewarm_owner(owner);
+                    flight_guard.disarm();
                     tracing::debug!(
                         component = "admin_read",
                         event = "alerts_canonical_warm_published",
                         "published canonical administrator Alerts cache"
                     );
+                    spawn_admin_alerts_canonical_groups_reclaimer(state.clone()).await;
                     break;
+                }
+                Err(tavily_hikari::ProxyError::Deferred { reason, .. })
+                    if reason == "groups_build_in_progress"
+                        || reason == "catalog_build_in_progress"
+                        || reason == "catalog_payload_build_in_progress" =>
+                {
+                    // Groups and Catalog each commit one bounded slice before
+                    // asking the controller for the next independently-admitted
+                    // slice. This is forward progress, not a failed warm attempt.
+                    snapshot_cache_generation.get_or_insert(generation);
+                    tokio::task::yield_now().await;
+                }
+                Err(tavily_hikari::ProxyError::Deferred { reason, .. })
+                    if reason == "groups_build_replaced" =>
+                {
+                    snapshot_cache_generation = None;
+                    tokio::task::yield_now().await;
+                }
+                Err(tavily_hikari::ProxyError::Deferred { reason, .. })
+                    if reason == "groups_source_fence_changed" =>
+                {
+                    snapshot_cache_generation = None;
+                    tokio::task::yield_now().await;
                 }
                 Err(error)
                     if tavily_hikari::is_transient_sqlite_write_error(&error)
@@ -602,7 +850,12 @@ pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
                         retry_after_secs = delay.as_secs(),
                         "deferred canonical administrator Alerts cache"
                     );
-                    tokio::time::sleep(delay).await;
+                    spawn_admin_alerts_canonical_groups_reclaimer(state.clone()).await;
+                    if wait_for_admin_alerts_shutdown_or(&cache, &shutdown_notify, delay).await {
+                        cache.lock().await.finish_admin_alerts_prewarm_owner(owner);
+                        flight_guard.disarm();
+                        return;
+                    }
                 }
                 Err(error) => {
                     tracing::error!(
@@ -614,12 +867,179 @@ pub(crate) async fn prewarm_admin_alerts(state: Arc<AppState>) {
                     dashboard_overview_cache_for_state(state.as_ref())
                         .lock()
                         .await
-                        .finish_admin_alerts_prewarm();
+                        .finish_admin_alerts_prewarm_owner(owner);
+                    flight_guard.disarm();
+                    spawn_admin_alerts_canonical_groups_reclaimer(state.clone()).await;
                     break;
                 }
             }
         }
     });
+    cache.lock().await.admin_alerts_prewarm_task = Some(task);
+}
+
+async fn admin_alerts_canonical_groups_for_warm(
+    state: &AppState,
+) -> Result<
+    (
+        PaginatedAlertGroups,
+        i64,
+        i64,
+        i64,
+    ),
+    tavily_hikari::ProxyError,
+> {
+    let cache = dashboard_overview_cache_for_state(state);
+    let owner = {
+        let mut cache_state = cache.lock().await;
+        let Some(owner) = cache_state.start_admin_alerts_groups_build() else {
+            return Err(admin_alerts_warm_deferred("groups_reclaim_busy"));
+        };
+        owner
+    };
+    let mut flight_guard = AdminAlertsFlightGuard::new(
+        cache.clone(),
+        AdminAlertsFlightKind::GroupsBuild,
+        owner,
+    );
+    let result = state.proxy.admin_alert_canonical_groups_page_for_warm().await;
+    // The guard is deliberately disarmed only after the owner token is
+    // cleared. If cancellation occurs before that await completes, its
+    // owner-checked Drop cleanup releases the in-flight flag safely.
+    cache
+        .lock()
+        .await
+        .finish_admin_alerts_groups_build(owner);
+    flight_guard.disarm();
+    result
+}
+
+async fn spawn_admin_alerts_canonical_groups_reclaimer(state: Arc<AppState>) {
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    let (owner, shutdown_notify) = {
+        let mut cache_state = cache.lock().await;
+        if cache_state.admin_alerts_shutting_down {
+            return;
+        }
+        let Some(owner) = cache_state.start_admin_alerts_groups_reclaimer() else {
+            return;
+        };
+        (owner, cache_state.admin_alerts_shutdown_notify.clone())
+    };
+    let reclaimer_guard = AdminAlertsFlightGuard::new(
+        cache.clone(),
+        AdminAlertsFlightKind::GroupsReclaimer,
+        owner,
+    );
+    let task_cache = cache.clone();
+    let task = tokio::spawn(async move {
+        let cache = task_cache;
+        let mut reclaimer_guard = reclaimer_guard;
+        let mut defers = 0_u8;
+        loop {
+            if admin_alerts_shutdown_requested(&cache).await {
+                cache.lock().await.finish_admin_alerts_groups_reclaimer(owner);
+                reclaimer_guard.disarm();
+                return;
+            }
+            let batch_owner = {
+                let cache = dashboard_overview_cache_for_state(state.as_ref());
+                let mut cache_state = cache.lock().await;
+                cache_state.start_admin_alerts_groups_reclaim_batch()
+            };
+            let Some(batch_owner) = batch_owner else {
+                if wait_for_admin_alerts_shutdown_or(
+                    &cache,
+                    &shutdown_notify,
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                {
+                    cache.lock().await.finish_admin_alerts_groups_reclaimer(owner);
+                    reclaimer_guard.disarm();
+                    return;
+                }
+                continue;
+            };
+            let mut batch_guard = AdminAlertsFlightGuard::new(
+                dashboard_overview_cache_for_state(state.as_ref()),
+                AdminAlertsFlightKind::GroupsReclaimBatch,
+                batch_owner,
+            );
+            let result = state
+                .proxy
+                .reclaim_admin_alert_canonical_groups_generations()
+                .await;
+            dashboard_overview_cache_for_state(state.as_ref())
+                .lock()
+                .await
+                .finish_admin_alerts_groups_reclaim_batch(batch_owner);
+            batch_guard.disarm();
+            match result {
+                Ok(false) => {
+                    dashboard_overview_cache_for_state(state.as_ref())
+                        .lock()
+                        .await
+                        .finish_admin_alerts_groups_reclaimer(owner);
+                    reclaimer_guard.disarm();
+                    return;
+                }
+                Ok(true) => {
+                    defers = 0;
+                    if wait_for_admin_alerts_shutdown_or(
+                        &cache,
+                        &shutdown_notify,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    {
+                        cache.lock().await.finish_admin_alerts_groups_reclaimer(owner);
+                        reclaimer_guard.disarm();
+                        return;
+                    }
+                }
+                Err(error)
+                    if error.is_deferred()
+                        || tavily_hikari::is_transient_sqlite_write_error(&error) =>
+                {
+                    defers = defers.saturating_add(1);
+                    let delay = if defers < 3 { 5 } else { 30 };
+                    tracing::debug!(
+                        component = "admin_read",
+                        event = "alerts_canonical_groups_reclaim_deferred",
+                        retry_after_secs = delay,
+                        "deferred retired canonical Alerts groups reclamation"
+                    );
+                    if wait_for_admin_alerts_shutdown_or(
+                        &cache,
+                        &shutdown_notify,
+                        std::time::Duration::from_secs(delay),
+                    )
+                    .await
+                    {
+                        cache.lock().await.finish_admin_alerts_groups_reclaimer(owner);
+                        reclaimer_guard.disarm();
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        component = "admin_read",
+                        event = "alerts_canonical_groups_reclaim_failed",
+                        error = %error,
+                        "failed retired canonical Alerts groups reclamation"
+                    );
+                    dashboard_overview_cache_for_state(state.as_ref())
+                        .lock()
+                        .await
+                        .finish_admin_alerts_groups_reclaimer(owner);
+                    reclaimer_guard.disarm();
+                    return;
+                }
+            }
+        }
+    });
+    cache.lock().await.admin_alerts_groups_reclaimer_task = Some(task);
 }
 
 #[cfg(test)]
@@ -920,6 +1340,44 @@ pub(crate) async fn prewarm_admin_privacy_status(state: Arc<AppState>) {
     }));
 }
 
+pub(crate) async fn fence_admin_alerts_workers(state: &AppState) {
+    let cache = dashboard_overview_cache_for_state(state);
+    let shutdown_notify = {
+        let mut cache = cache.lock().await;
+        cache.admin_alerts_shutting_down = true;
+        cache.admin_alerts_shutdown_notify.clone()
+    };
+    shutdown_notify.notify_waiters();
+}
+
+pub(crate) async fn shutdown_admin_alerts_workers(state: &AppState) {
+    fence_admin_alerts_workers(state).await;
+    let (prewarm_task, reclaimer_task) = {
+        let cache = dashboard_overview_cache_for_state(state);
+        let mut cache = cache.lock().await;
+        (
+            cache.admin_alerts_prewarm_task.take(),
+            cache.admin_alerts_groups_reclaimer_task.take(),
+        )
+    };
+    for (name, task) in [
+        ("alerts_canonical_warm", prewarm_task),
+        ("alerts_groups_reclaimer", reclaimer_task),
+    ] {
+        if let Some(task) = task
+            && let Err(error) = task.await
+        {
+            tracing::warn!(
+                component = "shutdown",
+                event = "admin_alerts_worker_join_failed",
+                worker = name,
+                error = %error,
+                "administrator Alerts worker ended before its cooperative shutdown boundary"
+            );
+        }
+    }
+}
+
 pub(crate) async fn shutdown_admin_privacy_status_refresh(state: &AppState) {
     fence_admin_privacy_status_refresh(state).await;
     let (prewarm_task, refresh_task) = {
@@ -1099,36 +1557,60 @@ mod admin_alerts_prewarm_tests {
         );
     }
 
+    #[tokio::test]
+    async fn cancelled_admin_alerts_flight_releases_its_owner() {
+        let cache = std::sync::Arc::new(tokio::sync::Mutex::new(
+            DashboardOverviewCacheState::default(),
+        ));
+        let owner = cache
+            .lock()
+            .await
+            .start_admin_alerts_prewarm(tokio::time::Instant::now())
+            .expect("flight owner");
+        let task_cache = cache.clone();
+        let guard = super::AdminAlertsFlightGuard::new(
+            task_cache,
+            super::AdminAlertsFlightKind::Prewarm,
+            owner,
+        );
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let _ = task.await;
+        assert!(!cache.lock().await.admin_alerts_prewarm_in_flight);
+    }
+
     #[test]
-    fn canonical_publish_discards_all_staged_values_after_a_generation_change() {
+    fn canonical_publish_rejects_a_snapshot_after_projection_advance() {
         let mut cache = DashboardOverviewCacheState {
             alert_projection_generation: 2,
             ..Default::default()
         };
 
-        assert!(
-            !publish_admin_alerts_canonical_into_cache(
-                &mut cache,
-                1,
-                123,
-                tokio::time::Instant::now(),
-                empty_catalog(),
-                empty_events(),
-                empty_groups(),
-            ),
-            "a fenced generation cannot publish a mixed canonical cache"
-        );
-        assert!(cache.admin_alerts.entries.is_empty());
-
-        assert!(publish_admin_alerts_canonical_into_cache(
+        assert!(!publish_admin_alerts_canonical_into_cache(
             &mut cache,
-            2,
-            124,
+            1,
+            123,
             tokio::time::Instant::now(),
             empty_catalog(),
             empty_events(),
             empty_groups(),
         ));
+        assert!(cache.admin_alerts.entries.is_empty(), "a stale build must not publish any key");
+        assert!(
+            publish_admin_alerts_canonical_into_cache(
+                &mut cache,
+                2,
+                124,
+                tokio::time::Instant::now(),
+                empty_catalog(),
+                empty_events(),
+                empty_groups(),
+            ),
+            "only a snapshot that matches the current projection generation may publish"
+        );
         assert_eq!(cache.admin_alerts.entries.len(), 3);
         assert!(cache
             .admin_alerts

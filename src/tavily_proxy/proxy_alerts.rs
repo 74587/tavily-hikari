@@ -79,6 +79,15 @@ impl TavilyProxy {
     }
 
     #[doc(hidden)]
+    pub async fn reclaim_admin_alert_canonical_groups_generations(
+        &self,
+    ) -> Result<bool, ProxyError> {
+        self.key_store
+            .reclaim_admin_alert_canonical_groups_generations()
+            .await
+    }
+
+    #[doc(hidden)]
     pub async fn prewarm_admin_alerts_cache_capacity(&self) -> Result<(), ProxyError> {
         self.key_store
             .sqlite_runtime
@@ -314,6 +323,18 @@ impl TavilyProxy {
     }
 
     #[doc(hidden)]
+    pub async fn admin_alert_events_page_for_canonical_snapshot(
+        &self,
+        build_generation: i64,
+        page: i64,
+        per_page: i64,
+    ) -> Result<PaginatedAlertEvents, ProxyError> {
+        self.key_store
+            .fetch_admin_alert_events_page_for_canonical_snapshot(build_generation, page, per_page)
+            .await
+    }
+
+    #[doc(hidden)]
     pub async fn admin_alert_groups_page_for_cache_warm(
         &self,
         page: i64,
@@ -332,7 +353,31 @@ impl TavilyProxy {
                 per_page,
                 crate::store::SqliteOperation::AdminAlertsCacheWarm,
             )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn admin_default_projected_alert_events_page_for_canonical_warm(
+        &self,
+    ) -> Result<PaginatedAlertEvents, ProxyError> {
+        self.key_store.fetch_default_projected_alert_events_page().await
+    }
+
+    #[doc(hidden)]
+    pub async fn admin_alert_canonical_groups_page_for_warm(
+        &self,
+    ) -> Result<(PaginatedAlertGroups, i64, i64, i64), ProxyError> {
+        self.key_store
+            .admin_alert_canonical_groups_page_for_warm()
             .await
+            .map(|(groups, snapshot)| {
+                (
+                    groups,
+                    snapshot.build_generation,
+                    snapshot.source_fence.0,
+                    snapshot.source_fence.1,
+                )
+            })
     }
 
     pub async fn alert_catalog(&self) -> Result<AlertCatalog, ProxyError> {
@@ -351,6 +396,16 @@ impl TavilyProxy {
             .fetch_admin_alert_catalog_for_operation(
                 crate::store::SqliteOperation::AdminAlertsCacheWarm,
             )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn admin_alert_catalog_for_canonical_snapshot(
+        &self,
+        build_generation: i64,
+    ) -> Result<AlertCatalog, ProxyError> {
+        self.key_store
+            .fetch_admin_alert_catalog_for_canonical_snapshot(build_generation)
             .await
     }
 

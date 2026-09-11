@@ -45,9 +45,21 @@ stable cursor, so tying its liveness to the main run is unnecessary.
   resumed run actually begins HTTP, so ordinary automatic jobs cannot take the released lease first,
   although their local preparation may still proceed. The reservation ID, owner kind, and resumable
   flag form one synchronized lifecycle, so clearing an old turn cannot corrupt a newer reservation.
+- An already-granted aged main-reconciliation turn reserves priority for one actual remote request.
+  It does not receive a local SQLite admission exception: idle foreground capacity, recent-contention
+  checks, the one bulk permit, the native source-read deadline, and its claim fence all remain
+  mandatory. Failed capacity admission is a typed defer and must not prewarm a lazy pool or consume a
+  foreground-reserved connection. A non-aged main run still yields for foreground traffic.
 - The administrator Alerts canonical warm path is independent of this drain. Its indexed Events read
   and cache publication do not consume the Research request turn, alter drain fairness, or change any
   reconciliation outcome.
+- Main multi-Key observations remain outside the Research cursor. They reuse only exact
+  candidate-global, Key-set, and per-Key source identities, so an unrelated Key revision cannot make
+  the main owner reread a previously accepted Key.
+- The per-Key identity includes the candidate source revision, current Key-set identity, and that
+  Key's logical usage tuple. A change to one Key invalidates only that Key's observation; a candidate
+  or Key-set change fences the complete partial set. This local reuse state is never a billing or HA
+  settlement record.
 
 ## Consequences
 

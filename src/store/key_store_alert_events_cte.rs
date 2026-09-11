@@ -494,6 +494,18 @@ impl KeyStore {
         query: &mut QueryBuilder<'a, Sqlite>,
         filters: AlertEventFilters<'a>,
     ) {
+        Self::push_projected_alert_events_cte_from_relation(
+            query,
+            filters,
+            "observability.dashboard_alert_projection_events",
+        );
+    }
+
+    fn push_projected_alert_events_cte_from_relation<'a>(
+        query: &mut QueryBuilder<'a, Sqlite>,
+        filters: AlertEventFilters<'a>,
+        relation: &str,
+    ) {
         query.push(
             r#"WITH alerts AS (
                 SELECT source_kind,
@@ -529,7 +541,11 @@ impl KeyStore {
                        json_extract(payload_json, '$.job_queued_at') AS job_queued_at,
                        json_extract(payload_json, '$.job_started_at') AS job_started_at,
                        json_extract(payload_json, '$.job_finished_at') AS job_finished_at
-                  FROM observability.dashboard_alert_projection_events
+                  FROM "#,
+        );
+        query.push(relation);
+        query.push(
+            r#"
                  WHERE 1 = 1"#,
         );
         if let Some(alert_type) = filters.alert_type {

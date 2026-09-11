@@ -310,8 +310,11 @@ INSERT INTO upstream_reconciliation_usage (
   'testbox-reconciliation-shadow-period',
   'testbox-reconciliation-shadow-project',
   'token:testbox-reconciliation-shadow-token', 'shadow',
-  unixepoch() - 1800, unixepoch() - 601, 1,
-  unixepoch() - 1800, unixepoch() - 601, unixepoch() - 601
+  -- Keep the clone-only fixture at the newest legal reconciliation boundary.
+  -- It must be eligible immediately, yet never compete with rows whose period
+  -- has not completed its required 600-second observation window.
+  unixepoch() - 1800, unixepoch() - 600, 1,
+  unixepoch() - 1800, unixepoch() - 600, unixepoch() - 600
 )
 ON CONFLICT(token_id, key_id, period_code) DO UPDATE SET
   project_id = excluded.project_id,
@@ -691,6 +694,7 @@ def structured_field(line, field, value):
 
 sqlite_transient_lock_retries = sum(
     structured_field(line, "event", "sqlite_transient_write_retry")
+    or structured_field(line, "event", "sqlite_transient_read_retry")
     or ("transient sqlite error" in line and "attempt=" in line)
     for line in sqlite_lock_lines
 )

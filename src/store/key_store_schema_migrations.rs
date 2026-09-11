@@ -727,7 +727,7 @@ impl KeyStore {
     }
 
     async fn verify_recorded_schema_migrations(&self) -> Result<(), ProxyError> {
-        let expected = [
+        let mut expected = vec![
             (
                 SCHEMA_BASELINE_VERSION,
                 SCHEMA_BASELINE_NAME,
@@ -875,6 +875,7 @@ impl KeyStore {
                 RECONCILIATION_CURRENT_SOURCE_IDENTITY_DELETE_CHECKSUM,
             ),
         ];
+        expected.extend(convergence_schema_migration_records());
         let recorded: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version",
         )
@@ -1296,6 +1297,7 @@ impl KeyStore {
                 "schema migration object validation failed at version 30".to_string(),
             ));
         }
+        self.validate_convergence_schema_migration_objects().await?;
         Ok(())
     }
 
@@ -2946,6 +2948,7 @@ impl KeyStore {
             self.apply_reconciliation_current_source_identity_delete_migration()
                 .await?;
         }
+        self.apply_pending_convergence_schema_migrations().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::debug!(
@@ -3016,6 +3019,7 @@ impl KeyStore {
             .await?;
         self.apply_reconciliation_current_source_identity_delete_migration()
             .await?;
+        self.apply_all_convergence_schema_migrations().await?;
         self.validate_applied_migration_objects().await?;
         self.clear_new_database_bootstrap_marker().await?;
         tracing::info!(
@@ -3023,7 +3027,7 @@ impl KeyStore {
             event = "baseline_adopted",
             outcome = "applied",
             elapsed_ms = started.elapsed().as_millis() as u64,
-            migration_count = 30_i64,
+            migration_count = 44_i64,
         );
         Ok(())
     }
