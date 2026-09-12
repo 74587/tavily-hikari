@@ -939,6 +939,26 @@ impl TavilyProxy {
         })?;
         let url = build_path_prefixed_url(&base, "/usage");
         let remote_attempt_context = remote_attempt;
+        let plan = match remote_attempt_context.deadline_remaining() {
+            Some(remaining) => match tokio::time::timeout(
+                remaining,
+                self.prepare_forward_proxy_plan(key_id),
+            )
+            .await
+            {
+                Ok(plan) => plan,
+                Err(_) => {
+                    return Err((
+                        ReconciliationEngine::remote_attempt_admission_error(
+                            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                        ),
+                        None,
+                        false,
+                    ));
+                }
+            },
+            None => self.prepare_forward_proxy_plan(key_id).await,
+        };
         let remote_attempt = remote_attempt_context
             .acquire()
             .await
@@ -964,8 +984,12 @@ impl TavilyProxy {
             }
             Some(remaining) => {
                 let request_lease = remote_attempt.as_ref();
-                let outbound = self
-                    .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                let outbound = self.send_with_forward_proxy_plan(
+                    key_id,
+                    Some(key_id),
+                    "period_reconciliation",
+                    plan,
+                    |client| {
                         if let Some(lease) = request_lease {
                             lease.mark_request_started();
                         }
@@ -976,7 +1000,8 @@ impl TavilyProxy {
                             .header("Authorization", format!("Bearer {secret}"))
                             .header("X-Project-ID", project_id)
                             .timeout(request_timeout)
-                    });
+                    },
+                );
                 match tokio::time::timeout(remaining, outbound).await {
                     Ok(result) => result,
                     Err(_) => {
@@ -999,7 +1024,12 @@ impl TavilyProxy {
             }
             None => {
                 let request_lease = remote_attempt.as_ref();
-                self.send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                self.send_with_forward_proxy_plan(
+                    key_id,
+                    Some(key_id),
+                    "period_reconciliation",
+                    plan,
+                    |client| {
                     if let Some(lease) = request_lease {
                         lease.mark_request_started();
                     }
@@ -1010,7 +1040,8 @@ impl TavilyProxy {
                         .header("Authorization", format!("Bearer {secret}"))
                         .header("X-Project-ID", project_id)
                         .timeout(request_timeout)
-                })
+                    },
+                )
                 .await
             }
         };
@@ -1101,6 +1132,26 @@ impl TavilyProxy {
         let path = format!("/research/{}", urlencoding::encode(request_id));
         let url = build_path_prefixed_url(&base, &path);
         let remote_attempt_context = remote_attempt;
+        let plan = match remote_attempt_context.deadline_remaining() {
+            Some(remaining) => match tokio::time::timeout(
+                remaining,
+                self.prepare_forward_proxy_plan(key_id),
+            )
+            .await
+            {
+                Ok(plan) => plan,
+                Err(_) => {
+                    return Err((
+                        ReconciliationEngine::remote_attempt_admission_error(
+                            ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
+                        ),
+                        None,
+                        false,
+                    ));
+                }
+            },
+            None => self.prepare_forward_proxy_plan(key_id).await,
+        };
         let remote_attempt = remote_attempt_context
             .acquire()
             .await
@@ -1126,8 +1177,12 @@ impl TavilyProxy {
             }
             Some(remaining) => {
                 let request_lease = remote_attempt.as_ref();
-                let outbound = self
-                    .send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                let outbound = self.send_with_forward_proxy_plan(
+                    key_id,
+                    Some(key_id),
+                    "period_reconciliation",
+                    plan,
+                    |client| {
                         if let Some(lease) = request_lease {
                             lease.mark_request_started();
                         }
@@ -1136,7 +1191,8 @@ impl TavilyProxy {
                             .get(url.clone())
                             .header("Authorization", format!("Bearer {secret}"))
                             .timeout(request_timeout)
-                    });
+                    },
+                );
                 match tokio::time::timeout(remaining, outbound).await {
                     Ok(result) => result,
                     Err(_) => {
@@ -1159,7 +1215,12 @@ impl TavilyProxy {
             }
             None => {
                 let request_lease = remote_attempt.as_ref();
-                self.send_with_forward_proxy(key_id, "period_reconciliation", |client| {
+                self.send_with_forward_proxy_plan(
+                    key_id,
+                    Some(key_id),
+                    "period_reconciliation",
+                    plan,
+                    |client| {
                     if let Some(lease) = request_lease {
                         lease.mark_request_started();
                     }
@@ -1168,7 +1229,8 @@ impl TavilyProxy {
                         .get(url.clone())
                         .header("Authorization", format!("Bearer {secret}"))
                         .timeout(request_timeout)
-                })
+                    },
+                )
                 .await
             }
         };

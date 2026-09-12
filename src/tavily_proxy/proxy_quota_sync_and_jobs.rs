@@ -2491,6 +2491,39 @@ impl TavilyProxy {
         .map_err(normalize_quota_sync_fetch_error)
     }
 
+    /// Prepare the local proxy plan before taking the shared outbound lease.
+    /// This is the scheduler-facing path for automatic quota work: local
+    /// maintenance and plan construction remain outside the actual request
+    /// lease, while the lease is held through the outbound send and response.
+    pub async fn fetch_usage_quota_for_sync_secret_with_admission(
+        &self,
+        secret: &str,
+        usage_base: &str,
+        key_id: &str,
+        admission: std::sync::Arc<crate::RemoteAttemptAdmissionController>,
+        manual_remote_attempt: bool,
+    ) -> Result<(i64, i64), ProxyError> {
+        let plan = self.prepare_forward_proxy_plan(key_id).await;
+        let remote_attempt = if manual_remote_attempt {
+            admission.acquire_manual_attempt().await
+        } else {
+            admission.acquire_attempt().await
+        }
+        .map_err(|reason| ProxyError::Other(reason.to_string()))?;
+        self.fetch_usage_quota_for_secret_with_plan(
+            secret,
+            usage_base,
+            Some(Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS)),
+            Some(key_id),
+            None,
+            "quota_sync",
+            Some(remote_attempt),
+            Some(plan),
+        )
+        .await
+        .map_err(normalize_quota_sync_fetch_error)
+    }
+
     pub async fn record_quota_sync_usage_error(
         &self,
         key_id: &str,
@@ -2637,6 +2670,31 @@ impl TavilyProxy {
         proxy_affinity: Option<(&str, &forward_proxy::ForwardProxyAffinityRecord)>,
         request_kind: &str,
     ) -> Result<(i64, i64), ProxyError> {
+        self.fetch_usage_quota_for_secret_with_plan(
+            secret,
+            usage_base,
+            timeout,
+            api_key_id,
+            proxy_affinity,
+            request_kind,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_usage_quota_for_secret_with_plan(
+        &self,
+        secret: &str,
+        usage_base: &str,
+        timeout: Option<Duration>,
+        api_key_id: Option<&str>,
+        proxy_affinity: Option<(&str, &forward_proxy::ForwardProxyAffinityRecord)>,
+        request_kind: &str,
+        remote_attempt: Option<crate::RemoteAttemptLease>,
+        prepared_plan: Option<Vec<forward_proxy::SelectedForwardProxy>>,
+    ) -> Result<(i64, i64), ProxyError> {
         let base = Url::parse(usage_base).map_err(|e| ProxyError::InvalidEndpoint {
             endpoint: usage_base.to_string(),
             source: e,
@@ -2645,8 +2703,29 @@ impl TavilyProxy {
 
         let secret_header = secret.to_string();
         let request_url = url.clone();
-        let (resp, _relay_lease) = match (api_key_id, proxy_affinity) {
-            (Some(api_key_id), _) => self
+        let (resp, _relay_lease) = match (api_key_id, proxy_affinity, remote_attempt) {
+            (Some(api_key_id), _, Some(remote_attempt)) => {
+                let plan = prepared_plan.unwrap_or_default();
+                self.send_with_forward_proxy_plan(
+                    api_key_id,
+                    Some(api_key_id),
+                    request_kind,
+                    plan,
+                    |client| {
+                        remote_attempt.mark_request_started();
+                        let mut req = client
+                            .get(request_url.clone())
+                            .header("Authorization", format!("Bearer {}", secret_header));
+                        if let Some(timeout) = timeout {
+                            req = req.timeout(timeout);
+                        }
+                        req
+                    },
+                )
+                .await
+                .map(|(response, relay_lease)| (response, Some(relay_lease)))?
+            }
+            (Some(api_key_id), _, None) => self
                 .send_with_forward_proxy(api_key_id, request_kind, |client| {
                     let mut req = client
                         .get(request_url.clone())
@@ -2658,7 +2737,7 @@ impl TavilyProxy {
                 })
                 .await
                 .map(|(response, relay_lease)| (response, Some(relay_lease)))?,
-            (None, Some((subject, proxy_affinity))) => self
+            (None, Some((subject, proxy_affinity)), _) => self
                 .send_with_forward_proxy_affinity(subject, request_kind, proxy_affinity, |client| {
                     let mut req = client
                         .get(request_url.clone())
@@ -2670,7 +2749,7 @@ impl TavilyProxy {
                 })
                 .await
                 .map(|(response, relay_lease)| (response, Some(relay_lease)))?,
-            (None, None) => {
+            (None, None, _) => {
                 let mut req = self
                     .client
                     .get(request_url.clone())

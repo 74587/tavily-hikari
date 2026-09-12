@@ -1822,6 +1822,15 @@ impl KeyStore {
             .sqlite_runtime
             .begin_immediate(SqliteOperation::ReconciliationProjection)
             .await?;
+        for reservation_id in crate::store::take_abandoned_upstream_usage_attempts() {
+            // A cancelled owner may have lost its cleanup runtime after the
+            // bounded retry ladder. Remove that durable marker while this
+            // reservation transaction already owns the write boundary.
+            sqlx::query("DELETE FROM upstream_usage_rate_attempts WHERE id = ?")
+                .bind(reservation_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("DELETE FROM upstream_usage_rate_attempts WHERE attempted_at <= ?")
             .bind(threshold)
             .execute(&mut *tx)

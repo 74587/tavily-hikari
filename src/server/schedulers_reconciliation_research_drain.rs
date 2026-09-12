@@ -42,6 +42,7 @@ async fn select_next_scheduled_candidate(
                 RECONCILIATION_REMOTE_TURN_WAIT_SECS,
             )
             .await?;
+        let aged_research_available = aged_research.is_some();
         let resumed_kind = controller.resumable_reconciliation_turn_kind();
         let aged = match (resumed_kind, aged_main, aged_research) {
             (Some(ReconciliationTurnKind::ResearchDrain), _, Some(research)) => {
@@ -65,7 +66,10 @@ async fn select_next_scheduled_candidate(
         };
         if let Some((aged_job, kind)) = aged {
             let turn = match kind {
-                ReconciliationTurnKind::Main => controller.reserve_aged_reconciliation_turn(),
+                ReconciliationTurnKind::Main => controller
+                    .reserve_aged_reconciliation_turn_with_research_available(
+                        aged_research_available,
+                    ),
                 ReconciliationTurnKind::ResearchDrain => {
                     controller.reserve_aged_research_drain_turn()
                 }

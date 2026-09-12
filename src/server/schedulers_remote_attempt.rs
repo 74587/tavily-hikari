@@ -16,23 +16,20 @@ async fn sync_key_quota_with_db_job_gate(
         let _maintenance = acquire_db_maintenance_read_gate().await;
         state.proxy.quota_sync_api_key_secret(key_id).await?
     };
-    let remote_attempt = (if manual_remote_attempt {
-        remote_attempt_admission_for_state(state)
-            .acquire_manual_attempt()
-            .await
-    } else {
-        remote_attempt_admission_for_state(state).acquire_attempt().await
-    })
-    .map_err(|reason| ProxyError::Other(reason.to_string()))?;
-    remote_attempt.mark_request_started();
+    let admission = remote_attempt_admission_for_state(state);
     let result = tokio::time::timeout(
         Duration::from_secs(QUOTA_SYNC_JOB_TIMEOUT_SECS),
         state
             .proxy
-            .fetch_usage_quota_for_sync_secret(&secret, &state.usage_base, key_id),
+            .fetch_usage_quota_for_sync_secret_with_admission(
+                &secret,
+                &state.usage_base,
+                key_id,
+                admission,
+                manual_remote_attempt,
+            ),
     )
     .await;
-    drop(remote_attempt);
 
     let (limit, remaining) = match result {
         Ok(Ok(quota)) => quota,

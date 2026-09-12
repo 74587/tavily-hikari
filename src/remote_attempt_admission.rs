@@ -244,7 +244,15 @@ impl Default for RemoteAttemptAdmissionController {
 
 impl RemoteAttemptAdmissionController {
     pub fn reserve_aged_reconciliation_turn(self: &Arc<Self>) -> Option<ReconciliationTurn> {
-        self.reserve_turn(ReconciliationTurnKind::Main, true)
+        self.reserve_aged_reconciliation_turn_with_research_available(false)
+    }
+
+    #[doc(hidden)]
+    pub fn reserve_aged_reconciliation_turn_with_research_available(
+        self: &Arc<Self>,
+        research_available: bool,
+    ) -> Option<ReconciliationTurn> {
+        self.reserve_turn_with_followup(ReconciliationTurnKind::Main, true, !research_available)
     }
 
     pub fn reserve_aged_research_drain_turn(self: &Arc<Self>) -> Option<ReconciliationTurn> {
@@ -285,7 +293,7 @@ impl RemoteAttemptAdmissionController {
         kind: ReconciliationTurnKind,
         aged: bool,
     ) -> Option<ReconciliationTurn> {
-        self.reserve_turn_with_followup(kind, aged, kind != ReconciliationTurnKind::Main)
+        self.reserve_turn_with_followup(kind, aged, false)
     }
 
     fn reserve_turn_with_followup(
@@ -1032,7 +1040,7 @@ mod tests {
     async fn aged_main_followup_defers_when_research_is_available() {
         let controller = Arc::new(RemoteAttemptAdmissionController::default());
         let turn = controller
-            .reserve_aged_reconciliation_turn()
+            .reserve_aged_reconciliation_turn_with_research_available(true)
             .expect("aged main reserves the first automatic turn");
         assert!(turn.is_aged());
         assert!(!turn.allows_main_followup());
@@ -1048,6 +1056,29 @@ mod tests {
             turn.acquire_followup_attempt().await,
             Err("remote_attempt_budget")
         ));
+    }
+
+    #[tokio::test]
+    async fn aged_main_only_retains_its_second_request() {
+        let controller = Arc::new(RemoteAttemptAdmissionController::default());
+        let turn = controller
+            .reserve_aged_reconciliation_turn_with_research_available(false)
+            .expect("aged main reserves the first automatic turn");
+        assert!(turn.allows_main_followup());
+
+        let lease = turn
+            .acquire_attempt()
+            .await
+            .expect("the first request acquires the sole remote lease");
+        lease.mark_request_started();
+        drop(lease);
+
+        let followup = turn
+            .acquire_followup_attempt()
+            .await
+            .expect("aged Main-only work retains its second bounded request");
+        drop(followup);
+        assert!(!controller.reconciliation_turn_required());
     }
 
     #[tokio::test]

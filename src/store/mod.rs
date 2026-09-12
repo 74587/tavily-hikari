@@ -7,7 +7,7 @@ use sqlx::ConnectOptions;
 use sqlx::Connection;
 use sqlx::Row;
 use sqlx::SqliteConnection;
-use std::collections::{HashMap as StdHashMap, VecDeque};
+use std::collections::{HashMap as StdHashMap, HashSet as StdHashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
@@ -34,6 +34,25 @@ pub(crate) struct ObservabilityOfflineGuard {
 pub(crate) const SQLITE_BUSY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(5);
 pub(crate) const SQLITE_SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_millis(250);
 pub(crate) const SQLITE_SLOW_OPERATION_THRESHOLD: Duration = Duration::from_secs(1);
+
+static ABANDONED_UPSTREAM_USAGE_ATTEMPTS: StdOnceLock<StdMutex<StdHashSet<String>>> =
+    StdOnceLock::new();
+
+pub(crate) fn remember_abandoned_upstream_usage_attempt(reservation_id: String) {
+    ABANDONED_UPSTREAM_USAGE_ATTEMPTS
+        .get_or_init(|| StdMutex::new(StdHashSet::new()))
+        .lock()
+        .expect("abandoned upstream usage attempt lock is not poisoned")
+        .insert(reservation_id);
+}
+
+pub(crate) fn take_abandoned_upstream_usage_attempts() -> Vec<String> {
+    let mut abandoned = ABANDONED_UPSTREAM_USAGE_ATTEMPTS
+        .get_or_init(|| StdMutex::new(StdHashSet::new()))
+        .lock()
+        .expect("abandoned upstream usage attempt lock is not poisoned");
+    abandoned.drain().collect()
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

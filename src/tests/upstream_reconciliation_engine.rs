@@ -413,6 +413,61 @@ async fn remote_attempt_admission_defer_releases_rate_attempt_reservation() {
     let _ = std::fs::remove_file(db_path);
 }
 
+#[tokio::test]
+async fn abandoned_rate_attempt_marker_is_recovered_before_next_reservation() {
+    let db_path = reconciliation_test_db_path();
+    let db_string = db_path.to_string_lossy().to_string();
+    let (backend_time, _) = BackendTime::manual_from_ts(local_ts(2026, 8, 21, 3, 0));
+    let proxy = TavilyProxy::with_options_and_time(
+        vec!["tvly-reconciliation-abandoned-rate-reservation"],
+        DEFAULT_UPSTREAM,
+        &db_string,
+        TavilyProxyOptions::from_database_path(&db_string),
+        backend_time,
+    )
+    .await
+    .expect("create proxy");
+    let key_id = "reconciliation-abandoned-rate-reservation-key";
+    sqlx::query(
+        "INSERT INTO api_keys (id, api_key, status, created_at, status_changed_at, last_used_at) VALUES (?, ?, 'active', unixepoch(), unixepoch(), 0)",
+    )
+    .bind(key_id)
+    .bind("tvly-reconciliation-abandoned-rate-reservation-key")
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed key");
+
+    let abandoned_id = proxy
+        .key_store
+        .reserve_upstream_usage_attempt(key_id)
+        .await
+        .expect("reserve attempt")
+        .expect("reservation admitted");
+    crate::store::remember_abandoned_upstream_usage_attempt(abandoned_id);
+
+    let replacement_id = proxy
+        .key_store
+        .reserve_upstream_usage_attempt(key_id)
+        .await
+        .expect("recover abandoned reservation")
+        .expect("replacement reservation admitted");
+    let active_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM upstream_usage_rate_attempts WHERE key_id = ?")
+            .bind(key_id)
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("count active reservations");
+    assert_eq!(active_count, 1);
+    proxy
+        .key_store
+        .release_upstream_usage_attempt(&replacement_id)
+        .await
+        .expect("release replacement reservation");
+
+    drop(proxy);
+    let _ = std::fs::remove_file(db_path);
+}
+
 async fn record_research_progress_window_observation(
     proxy: &TavilyProxy,
 ) -> Result<(), ProxyError> {
