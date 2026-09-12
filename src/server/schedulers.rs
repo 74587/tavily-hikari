@@ -2002,6 +2002,7 @@ async fn post_linuxdo_credit_system_full_refund(
         .acquire_attempt()
         .await
         .map_err(str::to_string)?;
+    remote_attempt.mark_request_started();
     let response = reqwest::Client::new()
         .post(endpoint)
         .form(&params)

@@ -1118,6 +1118,9 @@ impl TavilyProxy {
                     },
                     None => None,
                 };
+                if let Some(lease) = remote_attempt.as_ref() {
+                    lease.mark_request_started();
+                }
                 let trace = self
                     .fetch_forward_proxy_trace(&endpoint, trace_timeout, None)
                     .await;

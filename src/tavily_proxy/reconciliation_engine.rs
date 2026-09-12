@@ -919,13 +919,13 @@ impl TavilyProxy {
         usage_base: &str,
         project_id: &str,
         remote_attempt: ReconciliationRemoteAttemptContext<'_>,
-    ) -> Result<i64, (ProxyError, Option<i64>)> {
+    ) -> Result<i64, (ProxyError, Option<i64>, bool)> {
         let secret = self
             .key_store
             .fetch_api_key_secret(key_id)
             .await
-            .map_err(|err| (err, None))?
-            .ok_or_else(|| (ProxyError::Database(sqlx::Error::RowNotFound), None))?;
+            .map_err(|err| (err, None, false))?
+            .ok_or_else(|| (ProxyError::Database(sqlx::Error::RowNotFound), None, false))?;
         let base = Url::parse(usage_base).map_err(|source| {
             (
                 ProxyError::InvalidEndpoint {
@@ -933,6 +933,7 @@ impl TavilyProxy {
                     source,
                 },
                 None,
+                false,
             )
         })?;
         let url = build_path_prefixed_url(&base, "/usage");
@@ -940,7 +941,13 @@ impl TavilyProxy {
         let remote_attempt = remote_attempt_context
             .acquire()
             .await
-            .map_err(|reason| (ReconciliationEngine::remote_attempt_admission_error(reason), None))?;
+            .map_err(|reason| {
+                (
+                    ReconciliationEngine::remote_attempt_admission_error(reason),
+                    None,
+                    false,
+                )
+            })?;
         let request_timeout = remote_attempt_context.request_timeout();
         let request_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let response_result = match remote_attempt_context.deadline_remaining() {
@@ -951,6 +958,7 @@ impl TavilyProxy {
                         ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
                     ),
                     None,
+                    false,
                 ));
             }
             Some(remaining) => {
@@ -979,7 +987,11 @@ impl TavilyProxy {
                                 ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
                             )
                         };
-                        return Err((error, None));
+                        return Err((
+                            error,
+                            None,
+                            request_started.load(std::sync::atomic::Ordering::Relaxed),
+                        ));
                     }
                 }
             }
@@ -1001,7 +1013,13 @@ impl TavilyProxy {
         };
         let response = response_result
             .map(|(response, _)| response)
-            .map_err(|err| (err, None))?;
+            .map_err(|err| {
+                (
+                    err,
+                    None,
+                    request_started.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })?;
         let status = response.status();
         let retry_after = response
             .headers()
@@ -1012,7 +1030,13 @@ impl TavilyProxy {
         let bytes = response
             .bytes()
             .await
-            .map_err(|err| (ProxyError::Http(err), retry_after))?;
+            .map_err(|err| {
+                (
+                    ProxyError::Http(err),
+                    retry_after,
+                    request_started.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })?;
         drop(remote_attempt);
         if !status.is_success() {
             return Err((
@@ -1021,10 +1045,17 @@ impl TavilyProxy {
                     body: String::from_utf8_lossy(&bytes).into_owned(),
                 },
                 retry_after,
+                true,
             ));
         }
         let json: Value = serde_json::from_slice(&bytes)
-            .map_err(|err| (ProxyError::Other(format!("invalid usage json: {err}")), None))?;
+            .map_err(|err| {
+                (
+                    ProxyError::Other(format!("invalid usage json: {err}")),
+                    None,
+                    true,
+                )
+            })?;
         json.get("key")
             .and_then(|key| key.get("usage"))
             .and_then(Value::as_i64)
@@ -1034,6 +1065,7 @@ impl TavilyProxy {
                         reason: "missing key.usage for reconciliation".to_string(),
                     },
                     None,
+                    true,
                 )
             })
     }
@@ -1044,12 +1076,12 @@ impl TavilyProxy {
         usage_base: &str,
         request_id: &str,
         remote_attempt: ReconciliationRemoteAttemptContext<'_>,
-    ) -> Result<ResearchPollOutcome, (ProxyError, Option<i64>)> {
+    ) -> Result<ResearchPollOutcome, (ProxyError, Option<i64>, bool)> {
         let Some(secret) = self
             .key_store
             .fetch_api_key_secret(key_id)
             .await
-            .map_err(|err| (err, None))?
+            .map_err(|err| (err, None, false))?
         else {
             return Ok(ResearchPollOutcome::MissingLocalSecret);
         };
@@ -1060,6 +1092,7 @@ impl TavilyProxy {
                     source,
                 },
                 None,
+                false,
             )
         })?;
         let path = format!("/research/{}", urlencoding::encode(request_id));
@@ -1068,7 +1101,13 @@ impl TavilyProxy {
         let remote_attempt = remote_attempt_context
             .acquire()
             .await
-            .map_err(|reason| (ReconciliationEngine::remote_attempt_admission_error(reason), None))?;
+            .map_err(|reason| {
+                (
+                    ReconciliationEngine::remote_attempt_admission_error(reason),
+                    None,
+                    false,
+                )
+            })?;
         let request_timeout = remote_attempt_context.request_timeout();
         let request_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let response_result = match remote_attempt_context.deadline_remaining() {
@@ -1079,6 +1118,7 @@ impl TavilyProxy {
                         ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
                     ),
                     None,
+                    false,
                 ));
             }
             Some(remaining) => {
@@ -1106,7 +1146,11 @@ impl TavilyProxy {
                                 ReconciliationEngine::REMOTE_ATTEMPT_BUDGET_REASON,
                             )
                         };
-                        return Err((error, None));
+                        return Err((
+                            error,
+                            None,
+                            request_started.load(std::sync::atomic::Ordering::Relaxed),
+                        ));
                     }
                 }
             }
@@ -1127,7 +1171,13 @@ impl TavilyProxy {
         };
         let response = response_result
             .map(|(response, _)| response)
-            .map_err(|err| (err, None))?;
+            .map_err(|err| {
+                (
+                    err,
+                    None,
+                    request_started.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })?;
         let status = response.status();
         let retry_after = response
             .headers()
@@ -1138,7 +1188,13 @@ impl TavilyProxy {
         let body = response
             .bytes()
             .await
-            .map_err(|err| (ProxyError::Http(err), retry_after))?;
+            .map_err(|err| {
+                (
+                    ProxyError::Http(err),
+                    retry_after,
+                    request_started.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })?;
         drop(remote_attempt);
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(ResearchPollOutcome::Unavailable);
@@ -1153,6 +1209,7 @@ impl TavilyProxy {
                     body: String::from_utf8_lossy(&body).into_owned(),
                 },
                 retry_after,
+                true,
             ));
         }
         Ok(if research_response_is_terminal(&body) {

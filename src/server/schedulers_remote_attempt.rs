@@ -24,6 +24,7 @@ async fn sync_key_quota_with_db_job_gate(
         remote_attempt_admission_for_state(state).acquire_attempt().await
     })
     .map_err(|reason| ProxyError::Other(reason.to_string()))?;
+    remote_attempt.mark_request_started();
     let result = tokio::time::timeout(
         Duration::from_secs(QUOTA_SYNC_JOB_TIMEOUT_SECS),
         state

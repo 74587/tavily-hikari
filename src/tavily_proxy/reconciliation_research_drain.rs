@@ -411,7 +411,7 @@ impl TavilyProxy {
                     1,
                 )
             }
-            Err((error, _)) if ReconciliationEngine::remote_attempt_is_deferred(&error) => {
+            Err((error, _, _)) if ReconciliationEngine::remote_attempt_is_deferred(&error) => {
                 if ReconciliationEngine::remote_attempt_is_stale(&error) {
                     return Ok(ClaimedResearchDrainOutcome::StaleClaim);
                 }
@@ -432,7 +432,7 @@ impl TavilyProxy {
                         retry_at: now.saturating_add(retry_after_secs),
                     });
             }
-            Err((ProxyError::UsageHttp { status, .. }, retry_after))
+            Err((ProxyError::UsageHttp { status, .. }, retry_after, _))
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
             {
                 let prior_retry_after_secs = self
@@ -468,7 +468,7 @@ impl TavilyProxy {
                     1,
                 )
             }
-            Err((error, _)) => {
+            Err((error, _, _)) => {
                 let error_kind = if ReconciliationEngine::is_remote_request_timeout(&error) {
                     "timeout"
                 } else if matches!(&error, ProxyError::UsageHttp { status, .. } if status.is_server_error()) {

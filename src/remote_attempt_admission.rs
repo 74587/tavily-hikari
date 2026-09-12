@@ -133,6 +133,7 @@ pub struct ReconciliationTurn {
     turn_id: u64,
     kind: ReconciliationTurnKind,
     aged: bool,
+    main_followup_allowed: bool,
     consumed: Arc<AtomicBool>,
     clear_on_drop: AtomicBool,
 }
@@ -146,6 +147,11 @@ impl ReconciliationTurn {
     #[doc(hidden)]
     pub fn is_aged(&self) -> bool {
         self.aged
+    }
+
+    #[doc(hidden)]
+    pub fn allows_main_followup(&self) -> bool {
+        self.main_followup_allowed
     }
 
     /// Preserve an aged Research reservation after its claim-fenced
@@ -193,7 +199,7 @@ impl ReconciliationTurn {
     /// follow-up, so the current run defers instead of overtaking Research.
     #[doc(hidden)]
     pub async fn acquire_followup_attempt(&self) -> Result<RemoteAttemptLease, &'static str> {
-        if !self.consumed.load(Ordering::Acquire) {
+        if !self.main_followup_allowed || !self.consumed.load(Ordering::Acquire) {
             return Err("remote_attempt_budget");
         }
         self.controller.acquire_followup_automatic_attempt().await
@@ -270,13 +276,26 @@ impl RemoteAttemptAdmissionController {
             (false, true, _) => ReconciliationTurnKind::ResearchDrain,
             (true, true, kind) => kind,
         };
-        self.reserve_turn(kind, false)
+        self.reserve_turn_with_followup(
+            kind,
+            false,
+            !(kind == ReconciliationTurnKind::Main && research_available),
+        )
     }
 
     fn reserve_turn(
         self: &Arc<Self>,
         kind: ReconciliationTurnKind,
         aged: bool,
+    ) -> Option<ReconciliationTurn> {
+        self.reserve_turn_with_followup(kind, aged, true)
+    }
+
+    fn reserve_turn_with_followup(
+        self: &Arc<Self>,
+        kind: ReconciliationTurnKind,
+        aged: bool,
+        main_followup_allowed: bool,
     ) -> Option<ReconciliationTurn> {
         let turn_id = {
             let mut state = self
@@ -312,6 +331,7 @@ impl RemoteAttemptAdmissionController {
             turn_id,
             kind,
             aged,
+            main_followup_allowed,
             consumed: Arc::new(AtomicBool::new(false)),
             clear_on_drop: AtomicBool::new(true),
         })
@@ -914,7 +934,7 @@ mod tests {
     fn consumed_turn_defers_before_a_second_automatic_request() {
         let controller = Arc::new(RemoteAttemptAdmissionController::default());
         let turn = controller
-            .reserve_next_automatic_reconciliation_turn(true, true)
+            .reserve_next_automatic_reconciliation_turn(true, false)
             .expect("main reserves the first automatic turn");
         let lease = turn
             .try_acquire_attempt()
@@ -970,7 +990,7 @@ mod tests {
     async fn consumed_main_turn_allows_one_followup_without_advancing_fairness() {
         let controller = Arc::new(RemoteAttemptAdmissionController::default());
         let turn = controller
-            .reserve_next_automatic_reconciliation_turn(true, true)
+            .reserve_next_automatic_reconciliation_turn(true, false)
             .expect("main reserves the first automatic turn");
         let lease = turn
             .acquire_attempt()
@@ -993,6 +1013,28 @@ mod tests {
         drop(followup);
         assert_eq!(controller.metrics().active_attempts, 0);
         assert!(!controller.reconciliation_turn_required());
+    }
+
+    #[tokio::test]
+    async fn ordinary_main_followup_defers_when_research_is_available() {
+        let controller = Arc::new(RemoteAttemptAdmissionController::default());
+        let turn = controller
+            .reserve_next_automatic_reconciliation_turn(true, true)
+            .expect("main reserves the first automatic turn");
+        assert_eq!(turn.kind(), ReconciliationTurnKind::Main);
+        assert!(!turn.allows_main_followup());
+
+        let lease = turn
+            .acquire_attempt()
+            .await
+            .expect("the first request acquires the sole remote lease");
+        lease.mark_request_started();
+        drop(lease);
+
+        assert!(matches!(
+            turn.acquire_followup_attempt().await,
+            Err("remote_attempt_budget")
+        ));
     }
 
     #[tokio::test]

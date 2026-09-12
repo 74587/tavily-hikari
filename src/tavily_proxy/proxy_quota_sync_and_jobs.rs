@@ -343,7 +343,7 @@ impl TavilyProxy {
                 });
             }
             match research_result {
-                Err((err, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) => {
+                Err((err, _, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) => {
                     // Admission failure means no Research request was made. Preserve
                     // the cursor and retry with the existing durable continuation.
                     polled = polled.saturating_sub(1);
@@ -359,7 +359,7 @@ impl TavilyProxy {
                     budget_exhausted = true;
                     break;
                 }
-                Err((err, _)) if ReconciliationEngine::is_remote_request_timeout(&err) =>
+                Err((err, _, _)) if ReconciliationEngine::is_remote_request_timeout(&err) =>
                 {
                     let next_poll_at = now.saturating_add(match candidate.poll_attempt_count {
                         0..=1 => 60,
@@ -508,7 +508,7 @@ impl TavilyProxy {
                     .await?;
                     retries += 1;
                 }
-                Err((err, retry_after)) => {
+                Err((err, retry_after, _)) => {
                     let reason = if matches!(
                         &err,
                         ProxyError::UsageHttp { status, .. }
@@ -1390,7 +1390,10 @@ impl TavilyProxy {
                         attempted_candidate_count += 1;
                         candidate_attempted = true;
                     }
-                    let allow_main_followup = remote_request_count > 0;
+                    let allow_main_followup = remote_request_count > 0
+                        && reconciliation_turn
+                            .map(|turn| turn.allows_main_followup())
+                            .unwrap_or(true);
                     remote_request_started = true;
                     if remote_request_count == 0 {
                         first_remote_ms = Some(
@@ -1408,20 +1411,29 @@ impl TavilyProxy {
                                 .with_main_followup_if(allow_main_followup),
                         )
                         .await;
+                    let request_started = usage_result
+                        .as_ref()
+                        .map(|_| true)
+                        .unwrap_or_else(|(_, _, started)| *started);
+                    if !request_started {
+                        // Rate-attempt rows reserve capacity only for an actual
+                        // outbound request. Secret/endpoint/proxy setup and
+                        // pre-request deadline failures must release them too.
+                        self.key_store
+                            .release_upstream_usage_attempt(&reservation_id)
+                            .await?;
+                        remote_request_count = remote_request_count.saturating_sub(1);
+                        if remote_request_count == 0 {
+                            remote_request_started = false;
+                            first_remote_ms = None;
+                        }
+                    }
                     match usage_result {
-                        Err((err, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) =>
+                        Err((err, _, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) =>
                         {
                             // Admission failure means no outbound request was made. Keep
                             // metrics and retry semantics distinct from transport/semantic
                             // failures, and let the durable representative retry later.
-                            self.key_store
-                                .release_upstream_usage_attempt(&reservation_id)
-                                .await?;
-                            remote_request_count = remote_request_count.saturating_sub(1);
-                            if remote_request_count == 0 {
-                                remote_request_started = false;
-                                first_remote_ms = None;
-                            }
                             if ReconciliationEngine::remote_attempt_is_stale(&err) {
                                 if let Some((job_id, claim_generation)) = claimed_job {
                                     return Err(ProxyError::StaleClaim {
@@ -1437,7 +1449,7 @@ impl TavilyProxy {
                             budget_exhausted = true;
                             break;
                         }
-                        Err((err, retry_after))
+                        Err((err, retry_after, _))
                             if matches!(&err, ProxyError::Http(error) if error.is_timeout()) =>
                         {
                             transport_failure_windows += 1;
@@ -1489,7 +1501,7 @@ impl TavilyProxy {
                                     partial_key_observations.saturating_add(1);
                             }
                         }
-                        Err((err, upstream_retry_at)) => {
+                        Err((err, upstream_retry_at, _)) => {
                             let outcome = if matches!(
                                 &err,
                                 ProxyError::UsageHttp { status, .. }
