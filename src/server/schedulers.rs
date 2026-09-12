@@ -3004,14 +3004,34 @@ fn spawn_forward_proxy_maintenance_scheduler(state: Arc<AppState>) {
         loop {
             {
                 let _maintenance = acquire_db_maintenance_read_gate().await;
-                if state.ha.status().await.allows_basic_business
-                    && let Err(err) = state.proxy.maybe_run_forward_proxy_maintenance().await
-                {
-                    tracing::warn!(
-                        component = "forward_proxy_maintenance",
-                        event = "maintenance_failed",
-                        err = %err,
-                    );
+                if state.ha.status().await.allows_basic_business {
+                    // Subscription and probe requests are maintenance HTTP. Keep
+                    // them behind the same instance-wide lease as reconciliation
+                    // and quota requests so they cannot overlap an active remote
+                    // attempt while local plan preparation is in progress.
+                    match remote_attempt_admission_for_state(state.as_ref())
+                        .acquire_manual_attempt()
+                        .await
+                    {
+                        Ok(_remote_attempt) => {
+                            if let Err(err) =
+                                state.proxy.maybe_run_forward_proxy_maintenance().await
+                            {
+                                tracing::warn!(
+                                    component = "forward_proxy_maintenance",
+                                    event = "maintenance_failed",
+                                    err = %err,
+                                );
+                            }
+                        }
+                        Err(reason) => {
+                            tracing::debug!(
+                                component = "forward_proxy_maintenance",
+                                event = "maintenance_deferred",
+                                reason,
+                            );
+                        }
+                    }
                 }
             }
             state.proxy.backend_time().sleep(Duration::from_secs(30)).await;

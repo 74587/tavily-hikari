@@ -1189,6 +1189,7 @@ include!("proxy_alerts.rs");
 include!("proxy_announcements.rs");
 include!("proxy_admin_user_usage_series.rs");
 include!("reconciliation_reservation.rs");
+include!("reconciliation_quota_sync_api.rs");
 include!("proxy_user_dashboard_overview.rs");
 include!("proxy_quota_sync_and_jobs.rs");
 include!("proxy_forward_proxy_maintenance.rs");

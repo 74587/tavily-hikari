@@ -443,7 +443,10 @@ async fn abandoned_rate_attempt_marker_is_recovered_before_next_reservation() {
         .await
         .expect("reserve attempt")
         .expect("reservation admitted");
-    crate::store::remember_abandoned_upstream_usage_attempt(abandoned_id);
+    crate::store::remember_abandoned_upstream_usage_attempt(
+        proxy.key_store.database_path.clone(),
+        abandoned_id,
+    );
 
     let replacement_id = proxy
         .key_store

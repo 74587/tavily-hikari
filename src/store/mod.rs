@@ -35,23 +35,35 @@ pub(crate) const SQLITE_BUSY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(5);
 pub(crate) const SQLITE_SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_millis(250);
 pub(crate) const SQLITE_SLOW_OPERATION_THRESHOLD: Duration = Duration::from_secs(1);
 
-static ABANDONED_UPSTREAM_USAGE_ATTEMPTS: StdOnceLock<StdMutex<StdHashSet<String>>> =
+static ABANDONED_UPSTREAM_USAGE_ATTEMPTS: StdOnceLock<StdMutex<StdHashSet<(String, String)>>> =
     StdOnceLock::new();
 
-pub(crate) fn remember_abandoned_upstream_usage_attempt(reservation_id: String) {
+pub(crate) fn remember_abandoned_upstream_usage_attempt(
+    database_path: impl Into<String>,
+    reservation_id: String,
+) {
     ABANDONED_UPSTREAM_USAGE_ATTEMPTS
         .get_or_init(|| StdMutex::new(StdHashSet::new()))
         .lock()
         .expect("abandoned upstream usage attempt lock is not poisoned")
-        .insert(reservation_id);
+        .insert((database_path.into(), reservation_id));
 }
 
-pub(crate) fn take_abandoned_upstream_usage_attempts() -> Vec<String> {
+pub(crate) fn take_abandoned_upstream_usage_attempts(database_path: &str) -> Vec<String> {
     let mut abandoned = ABANDONED_UPSTREAM_USAGE_ATTEMPTS
         .get_or_init(|| StdMutex::new(StdHashSet::new()))
         .lock()
         .expect("abandoned upstream usage attempt lock is not poisoned");
-    abandoned.drain().collect()
+    let mut matching = Vec::new();
+    abandoned.retain(|(path, reservation_id)| {
+        if path == database_path {
+            matching.push(reservation_id.clone());
+            false
+        } else {
+            true
+        }
+    });
+    matching
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2862,6 +2874,28 @@ include!("key_store_request_logs_and_dashboard_test_support.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abandoned_upstream_usage_attempt_markers_are_database_scoped() {
+        let database_a = format!("marker-isolation-a-{}", std::process::id());
+        let database_b = format!("marker-isolation-b-{}", std::process::id());
+        let reservation_a = "reservation-a".to_string();
+        let reservation_b = "reservation-b".to_string();
+
+        let _ = take_abandoned_upstream_usage_attempts(&database_a);
+        let _ = take_abandoned_upstream_usage_attempts(&database_b);
+        remember_abandoned_upstream_usage_attempt(database_a.clone(), reservation_a.clone());
+        remember_abandoned_upstream_usage_attempt(database_b.clone(), reservation_b.clone());
+
+        assert_eq!(
+            take_abandoned_upstream_usage_attempts(&database_a),
+            vec![reservation_a]
+        );
+        assert_eq!(
+            take_abandoned_upstream_usage_attempts(&database_b),
+            vec![reservation_b]
+        );
+    }
     fn as_account_usage_rollup_tuples(
         records: &[AccountUsageRollupRecord],
     ) -> Vec<(String, i64, i64)> {

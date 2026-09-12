@@ -1822,7 +1822,9 @@ impl KeyStore {
             .sqlite_runtime
             .begin_immediate(SqliteOperation::ReconciliationProjection)
             .await?;
-        for reservation_id in crate::store::take_abandoned_upstream_usage_attempts() {
+        for reservation_id in
+            crate::store::take_abandoned_upstream_usage_attempts(&self.database_path)
+        {
             // A cancelled owner may have lost its cleanup runtime after the
             // bounded retry ladder. Remove that durable marker while this
             // reservation transaction already owns the write boundary.

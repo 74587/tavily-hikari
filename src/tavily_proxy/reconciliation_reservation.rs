@@ -68,9 +68,12 @@ impl Drop for UpstreamUsageAttemptReservation {
             return;
         };
         let key_store = Arc::clone(&self.key_store);
+        let database_path = key_store.database_path.clone();
         let spawn_fallback_id = reservation_id.clone();
         let runtime_fallback_id = spawn_fallback_id.clone();
         let cleanup_id = reservation_id.clone();
+        let cleanup_database_path = database_path.clone();
+        let thread_database_path = database_path.clone();
         let cleanup = async move {
             const RETRY_DELAYS_MS: [u64; 4] = [20, 50, 100, 200];
             let mut attempt = 0;
@@ -92,6 +95,7 @@ impl Drop for UpstreamUsageAttemptReservation {
                     }
                     Err(_) => {
                         crate::store::remember_abandoned_upstream_usage_attempt(
+                            cleanup_database_path.clone(),
                             reservation_id.clone(),
                         );
                         tracing::warn!(
@@ -118,6 +122,7 @@ impl Drop for UpstreamUsageAttemptReservation {
                     Ok(runtime) => runtime,
                     Err(err) => {
                         crate::store::remember_abandoned_upstream_usage_attempt(
+                            thread_database_path.clone(),
                             runtime_fallback_id.clone(),
                         );
                         tracing::warn!(
@@ -138,7 +143,7 @@ impl Drop for UpstreamUsageAttemptReservation {
                 error_kind = "thread_spawn",
                 error = %err,
             );
-            crate::store::remember_abandoned_upstream_usage_attempt(spawn_fallback_id);
+            crate::store::remember_abandoned_upstream_usage_attempt(database_path, spawn_fallback_id);
         }
     }
 }
