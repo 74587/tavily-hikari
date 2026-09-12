@@ -16,6 +16,64 @@ struct ResearchSweepOutcome {
     cursor_ready: bool,
 }
 
+/// Owns a rate-attempt reservation until the corresponding upstream request
+/// has actually started. Cancellation and task aborts must not leave a quota
+/// row behind, so the drop path schedules the same bounded release used by
+/// normal pre-request failures.
+struct UpstreamUsageAttemptReservation {
+    key_store: Arc<KeyStore>,
+    reservation_id: Option<String>,
+}
+
+impl UpstreamUsageAttemptReservation {
+    fn new(key_store: Arc<KeyStore>, reservation_id: String) -> Self {
+        Self {
+            key_store,
+            reservation_id: Some(reservation_id),
+        }
+    }
+
+    async fn release(&mut self) -> Result<(), ProxyError> {
+        let Some(reservation_id) = self.reservation_id.as_deref() else {
+            return Ok(());
+        };
+        self.key_store
+            .release_upstream_usage_attempt(reservation_id)
+            .await?;
+        self.reservation_id = None;
+        Ok(())
+    }
+
+    fn disarm(&mut self) {
+        self.reservation_id = None;
+    }
+}
+
+impl Drop for UpstreamUsageAttemptReservation {
+    fn drop(&mut self) {
+        let Some(reservation_id) = self.reservation_id.take() else {
+            return;
+        };
+        let key_store = Arc::clone(&self.key_store);
+        let cleanup = async move {
+            if key_store
+                .release_upstream_usage_attempt(&reservation_id)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    component = "reconciliation",
+                    event = "rate_attempt_reservation_cleanup_deferred",
+                    "cancelled reconciliation reservation could not be released"
+                );
+            }
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(cleanup);
+        }
+    }
+}
+
 fn should_emit_reconciliation_summary_at(last_emitted_at: &AtomicI64, now: i64) -> bool {
     let mut previous = last_emitted_at.load(Ordering::Relaxed);
     loop {
@@ -1377,12 +1435,14 @@ impl TavilyProxy {
                             break;
                         }
                     };
+                    let mut reservation = UpstreamUsageAttemptReservation::new(
+                        Arc::clone(&self.key_store),
+                        reservation_id,
+                    );
                     if !remote_request_started
                         && std::time::Instant::now() >= preparation_deadline
                     {
-                        self.key_store
-                            .release_upstream_usage_attempt(&reservation_id)
-                            .await?;
+                        reservation.release().await?;
                         budget_exhausted = true;
                         break 'candidates;
                     }
@@ -1419,14 +1479,14 @@ impl TavilyProxy {
                         // Rate-attempt rows reserve capacity only for an actual
                         // outbound request. Secret/endpoint/proxy setup and
                         // pre-request deadline failures must release them too.
-                        self.key_store
-                            .release_upstream_usage_attempt(&reservation_id)
-                            .await?;
+                        reservation.release().await?;
                         remote_request_count = remote_request_count.saturating_sub(1);
                         if remote_request_count == 0 {
                             remote_request_started = false;
                             first_remote_ms = None;
                         }
+                    } else {
+                        reservation.disarm();
                     }
                     match usage_result {
                         Err((err, _, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) =>

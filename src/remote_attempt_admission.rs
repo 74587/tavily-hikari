@@ -244,7 +244,7 @@ impl Default for RemoteAttemptAdmissionController {
 
 impl RemoteAttemptAdmissionController {
     pub fn reserve_aged_reconciliation_turn(self: &Arc<Self>) -> Option<ReconciliationTurn> {
-        self.reserve_aged_turn(ReconciliationTurnKind::Main)
+        self.reserve_turn(ReconciliationTurnKind::Main, true)
     }
 
     pub fn reserve_aged_research_drain_turn(self: &Arc<Self>) -> Option<ReconciliationTurn> {
@@ -276,11 +276,7 @@ impl RemoteAttemptAdmissionController {
             (false, true, _) => ReconciliationTurnKind::ResearchDrain,
             (true, true, kind) => kind,
         };
-        self.reserve_turn_with_followup(
-            kind,
-            false,
-            !(kind == ReconciliationTurnKind::Main && research_available),
-        )
+        self.reserve_turn_with_followup(kind, false, kind != ReconciliationTurnKind::Main)
     }
 
     fn reserve_turn(
@@ -288,7 +284,7 @@ impl RemoteAttemptAdmissionController {
         kind: ReconciliationTurnKind,
         aged: bool,
     ) -> Option<ReconciliationTurn> {
-        self.reserve_turn_with_followup(kind, aged, true)
+        self.reserve_turn_with_followup(kind, aged, kind != ReconciliationTurnKind::Main)
     }
 
     fn reserve_turn_with_followup(
@@ -331,7 +327,7 @@ impl RemoteAttemptAdmissionController {
             turn_id,
             kind,
             aged,
-            main_followup_allowed,
+            main_followup_allowed: main_followup_allowed && kind != ReconciliationTurnKind::Main,
             consumed: Arc::new(AtomicBool::new(false)),
             clear_on_drop: AtomicBool::new(true),
         })
@@ -987,7 +983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn consumed_main_turn_allows_one_followup_without_advancing_fairness() {
+    async fn consumed_main_turn_defers_before_a_followup_turn() {
         let controller = Arc::new(RemoteAttemptAdmissionController::default());
         let turn = controller
             .reserve_next_automatic_reconciliation_turn(true, false)
@@ -999,18 +995,10 @@ mod tests {
         lease.mark_request_started();
         drop(lease);
 
-        let followup = turn
-            .acquire_followup_attempt()
-            .await
-            .expect("main may issue its bounded second request");
-        assert_eq!(controller.metrics().active_attempts, 1);
-        assert!(controller.reconciliation_turn_required());
-        assert!(
-            controller
-                .reserve_next_automatic_reconciliation_turn(true, true)
-                .is_none()
-        );
-        drop(followup);
+        assert!(matches!(
+            turn.acquire_followup_attempt().await,
+            Err("remote_attempt_budget")
+        ));
         assert_eq!(controller.metrics().active_attempts, 0);
         assert!(!controller.reconciliation_turn_required());
     }
@@ -1022,6 +1010,28 @@ mod tests {
             .reserve_next_automatic_reconciliation_turn(true, true)
             .expect("main reserves the first automatic turn");
         assert_eq!(turn.kind(), ReconciliationTurnKind::Main);
+        assert!(!turn.allows_main_followup());
+
+        let lease = turn
+            .acquire_attempt()
+            .await
+            .expect("the first request acquires the sole remote lease");
+        lease.mark_request_started();
+        drop(lease);
+
+        assert!(matches!(
+            turn.acquire_followup_attempt().await,
+            Err("remote_attempt_budget")
+        ));
+    }
+
+    #[tokio::test]
+    async fn aged_main_followup_defers_when_research_is_available() {
+        let controller = Arc::new(RemoteAttemptAdmissionController::default());
+        let turn = controller
+            .reserve_aged_reconciliation_turn()
+            .expect("aged main reserves the first automatic turn");
+        assert!(turn.is_aged());
         assert!(!turn.allows_main_followup());
 
         let lease = turn
