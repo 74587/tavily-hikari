@@ -526,6 +526,12 @@ source when a usable persisted runtime already exists.
   filtered JSON projection builder: it uses the projection time index and decodes materialized
   payloads after the query. Its `100ms` acquire and `250ms` native statement deadline remain fixed;
   a missed deadline is evidence for a separate query-plan task, not a reason to relax this contract.
+- The canonical Groups builder uses the same read budget with a retention-bounded
+  `(occurred_at, row_sort_id)` time-keyset and a captured rowid upper bound. If no complete
+  canonical generation has published for 120 seconds, one liveness slot may bypass only
+  foreground-rate and lazy-pool-idle heuristics. Partial slices remain observable but do not reset
+  this anchor. A slot covers one logical canonical stage and its fenced micro-transactions; the next
+  key acquires a new slot. Actual waiters, contention, writer pressure, and native budgets still defer it.
 
 ## Related ADRs
 
