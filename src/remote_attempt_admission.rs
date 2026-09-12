@@ -276,7 +276,8 @@ impl RemoteAttemptAdmissionController {
             (false, true, _) => ReconciliationTurnKind::ResearchDrain,
             (true, true, kind) => kind,
         };
-        self.reserve_turn_with_followup(kind, false, kind != ReconciliationTurnKind::Main)
+        let main_followup_allowed = kind == ReconciliationTurnKind::Main && !research_available;
+        self.reserve_turn_with_followup(kind, false, main_followup_allowed)
     }
 
     fn reserve_turn(
@@ -327,7 +328,7 @@ impl RemoteAttemptAdmissionController {
             turn_id,
             kind,
             aged,
-            main_followup_allowed: main_followup_allowed && kind != ReconciliationTurnKind::Main,
+            main_followup_allowed: main_followup_allowed && kind == ReconciliationTurnKind::Main,
             consumed: Arc::new(AtomicBool::new(false)),
             clear_on_drop: AtomicBool::new(true),
         })
@@ -988,6 +989,7 @@ mod tests {
         let turn = controller
             .reserve_next_automatic_reconciliation_turn(true, false)
             .expect("main reserves the first automatic turn");
+        assert!(turn.allows_main_followup());
         let lease = turn
             .acquire_attempt()
             .await
@@ -995,10 +997,11 @@ mod tests {
         lease.mark_request_started();
         drop(lease);
 
-        assert!(matches!(
-            turn.acquire_followup_attempt().await,
-            Err("remote_attempt_budget")
-        ));
+        let followup = turn
+            .acquire_followup_attempt()
+            .await
+            .expect("main-only runs retain their second bounded request");
+        drop(followup);
         assert_eq!(controller.metrics().active_attempts, 0);
         assert!(!controller.reconciliation_turn_required());
     }

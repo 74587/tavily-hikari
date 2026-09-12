@@ -918,6 +918,7 @@ impl TavilyProxy {
         key_id: &str,
         usage_base: &str,
         project_id: &str,
+        reservation: &mut UpstreamUsageAttemptReservation,
         remote_attempt: ReconciliationRemoteAttemptContext<'_>,
     ) -> Result<i64, (ProxyError, Option<i64>, bool)> {
         let secret = self
@@ -968,6 +969,7 @@ impl TavilyProxy {
                         if let Some(lease) = request_lease {
                             lease.mark_request_started();
                         }
+                        reservation.disarm();
                         request_started.store(true, std::sync::atomic::Ordering::Relaxed);
                         client
                             .get(url.clone())
@@ -1001,6 +1003,7 @@ impl TavilyProxy {
                     if let Some(lease) = request_lease {
                         lease.mark_request_started();
                     }
+                    reservation.disarm();
                     request_started.store(true, std::sync::atomic::Ordering::Relaxed);
                     client
                         .get(url.clone())
