@@ -56,20 +56,67 @@ impl Drop for UpstreamUsageAttemptReservation {
         };
         let key_store = Arc::clone(&self.key_store);
         let cleanup = async move {
-            if key_store
-                .release_upstream_usage_attempt(&reservation_id)
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    component = "reconciliation",
-                    event = "rate_attempt_reservation_cleanup_deferred",
-                    "cancelled reconciliation reservation could not be released"
-                );
+            // Cancellation can coincide with a short SQLite writer conflict.
+            // Retry the same bounded delete so a pre-request reservation is
+            // not counted as a real request merely because its owner dropped.
+            const RETRY_DELAYS_MS: [u64; 4] = [20, 50, 100, 200];
+            let mut attempt = 0;
+            loop {
+                match key_store
+                    .release_upstream_usage_attempt(&reservation_id)
+                    .await
+                {
+                    Ok(()) => return,
+                    Err(_err) if attempt < RETRY_DELAYS_MS.len() => {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt])).await;
+                        attempt += 1;
+                        tracing::debug!(
+                            component = "reconciliation",
+                            event = "rate_attempt_reservation_cleanup_retry",
+                            attempt,
+                            error_kind = "sqlite_write",
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            component = "reconciliation",
+                            event = "rate_attempt_reservation_cleanup_deferred",
+                            "cancelled reconciliation reservation could not be released"
+                        );
+                        break;
+                    }
+                }
             }
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(cleanup);
+        } else if let Err(err) = std::thread::Builder::new()
+            .name("reconciliation-reservation-cleanup".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        tracing::warn!(
+                            component = "reconciliation",
+                            event = "rate_attempt_reservation_cleanup_deferred",
+                            error_kind = "runtime_init",
+                            error = %err,
+                        );
+                        return;
+                    }
+                };
+                runtime.block_on(cleanup);
+            })
+        {
+            tracing::warn!(
+                component = "reconciliation",
+                event = "rate_attempt_reservation_cleanup_deferred",
+                error_kind = "thread_spawn",
+                error = %err,
+            );
         }
     }
 }

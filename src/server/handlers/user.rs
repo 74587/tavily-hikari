@@ -423,6 +423,7 @@ pub(crate) async fn fetch_linuxdo_profile_from_refresh_token_with_remote_attempt
             remote_attempt_admission.acquire_attempt().await
         })
             .map_err(|reason| LinuxDoSyncError::Admission(reason.to_string()))?;
+        remote_attempt.mark_request_started();
         let result = exchange_linuxdo_refresh_token(client, cfg, refresh_token).await;
         drop(remote_attempt);
         result?
@@ -434,6 +435,7 @@ pub(crate) async fn fetch_linuxdo_profile_from_refresh_token_with_remote_attempt
             remote_attempt_admission.acquire_attempt().await
         })
             .map_err(|reason| LinuxDoSyncError::Admission(reason.to_string()))?;
+        remote_attempt.mark_request_started();
         let result =
             fetch_linuxdo_profile_with_access_token(client, cfg, &token_payload.access_token).await;
         drop(remote_attempt);
