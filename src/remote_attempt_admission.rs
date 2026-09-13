@@ -202,7 +202,9 @@ impl ReconciliationTurn {
         if !self.main_followup_allowed || !self.consumed.load(Ordering::Acquire) {
             return Err("remote_attempt_budget");
         }
-        self.controller.acquire_followup_automatic_attempt().await
+        self.controller
+            .acquire_followup_automatic_attempt(self.turn_id)
+            .await
     }
 
     #[doc(hidden)]
@@ -642,6 +644,7 @@ impl RemoteAttemptAdmissionController {
 
     async fn acquire_followup_automatic_attempt(
         self: &Arc<Self>,
+        turn_id: u64,
     ) -> Result<RemoteAttemptLease, &'static str> {
         let waiting_started_at = Instant::now();
         let permit = self
@@ -655,7 +658,11 @@ impl RemoteAttemptAdmissionController {
                 .reconciliation_turn
                 .lock()
                 .expect("reconciliation turn state lock is not poisoned");
-            if state.id == 0 && !state.followup_in_flight {
+            let next_turn_id = self.next_reconciliation_turn_id.load(Ordering::Acquire);
+            if state.id == 0
+                && !state.followup_in_flight
+                && next_turn_id == turn_id.saturating_add(1)
+            {
                 state.followup_in_flight = true;
                 true
             } else {
@@ -1102,6 +1109,35 @@ mod tests {
             Err("remote_attempt_budget")
         ));
         drop(research);
+    }
+
+    #[tokio::test]
+    async fn main_followup_defers_when_research_completed_after_main_request() {
+        let controller = Arc::new(RemoteAttemptAdmissionController::default());
+        let main = controller
+            .reserve_next_automatic_reconciliation_turn(true, false)
+            .expect("main reserves the first automatic turn");
+        let lease = main
+            .acquire_attempt()
+            .await
+            .expect("the first request acquires the sole remote lease");
+        lease.mark_request_started();
+        drop(lease);
+
+        let research = controller
+            .reserve_next_automatic_reconciliation_turn(true, true)
+            .expect("research reserves the next automatic turn");
+        let research_lease = research
+            .acquire_attempt()
+            .await
+            .expect("research acquires the sole remote lease");
+        research_lease.mark_request_started();
+        drop(research_lease);
+
+        assert!(matches!(
+            main.acquire_followup_attempt().await,
+            Err("remote_attempt_budget")
+        ));
     }
 
     #[test]
