@@ -89,7 +89,7 @@
 
 ## Validation Notes
 
-- 101 双库只读快照对比已完成（`pr623_adec2767_final`，baseline/candidate 各 600 秒，stub upstream，隔离目录）。两侧前台 5xx 与最终 SQLite lock error 均为 `0`，billing adjustment delta 为 `0`；candidate Research terminal delta 为 `+10`、pending delta 为 `-9`。testbox 清理已完成。
+- 101 双库只读快照对比已完成（`pr623_53b439bd_final`，baseline/candidate 各 600 秒，stub upstream，隔离目录）。两侧前台、Dashboard 和 maintenance 5xx 以及最终 SQLite lock error 均为 `0`，billing adjustment delta 为 `0`；candidate Research terminal delta 为 `+7`、pending delta 为 `-6`。testbox 清理已完成。
 
 ## Related Changes
 
