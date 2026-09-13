@@ -1822,12 +1822,12 @@ impl KeyStore {
             .sqlite_runtime
             .begin_immediate(SqliteOperation::ReconciliationProjection)
             .await?;
-        for reservation_id in
-            crate::store::take_abandoned_upstream_usage_attempts(&self.database_path)
-        {
+        let abandoned_reservation_ids =
+            crate::store::peek_abandoned_upstream_usage_attempts(&self.database_path);
+        for reservation_id in &abandoned_reservation_ids {
             // A cancelled owner may have lost its cleanup runtime after the
-            // bounded retry ladder. Remove that durable marker while this
-            // reservation transaction already owns the write boundary.
+            // bounded retry ladder. Keep the marker until the transaction
+            // commits so a rollback can retry it on the next reservation.
             sqlx::query("DELETE FROM upstream_usage_rate_attempts WHERE id = ?")
                 .bind(reservation_id)
                 .execute(&mut *tx)
@@ -1853,6 +1853,10 @@ impl KeyStore {
             .fetch_one(&mut *tx)
             .await?;
             tx.finish(Ok(())).await?;
+            crate::store::forget_abandoned_upstream_usage_attempts(
+                &self.database_path,
+                &abandoned_reservation_ids,
+            );
             return Ok(Err(oldest.saturating_add(600)));
         }
         let reservation_id = nanoid!(18);
@@ -1865,6 +1869,10 @@ impl KeyStore {
         .execute(&mut *tx)
         .await?;
         tx.finish(Ok(())).await?;
+        crate::store::forget_abandoned_upstream_usage_attempts(
+            &self.database_path,
+            &abandoned_reservation_ids,
+        );
         Ok(Ok(reservation_id))
     }
 

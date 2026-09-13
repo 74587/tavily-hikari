@@ -361,6 +361,7 @@ impl TavilyProxy {
         endpoint: &forward_proxy::ForwardProxyEndpoint,
         timeout: Duration,
         cancellation: Option<&ForwardProxyCancellation>,
+        remote_attempt: Option<&crate::RemoteAttemptLease>,
     ) -> Option<(String, String)> {
         if timeout.is_zero() {
             return None;
@@ -385,6 +386,9 @@ impl TavilyProxy {
                     .await
                     .ok()?;
                 tokio::time::timeout(timeout, async {
+                    if let Some(lease) = remote_attempt {
+                        lease.mark_request_started();
+                    }
                     let response = client.get(trace_url).send().await.ok()?;
                     if !response.status().is_success() {
                         return None;
@@ -1118,11 +1122,13 @@ impl TavilyProxy {
                     },
                     None => None,
                 };
-                if let Some(lease) = remote_attempt.as_ref() {
-                    lease.mark_request_started();
-                }
                 let trace = self
-                    .fetch_forward_proxy_trace(&endpoint, trace_timeout, None)
+                    .fetch_forward_proxy_trace(
+                        &endpoint,
+                        trace_timeout,
+                        None,
+                        remote_attempt.as_ref(),
+                    )
                     .await;
                 drop(remote_attempt);
                 if let Some((ip, _location)) = trace {

@@ -7,7 +7,7 @@ use sqlx::ConnectOptions;
 use sqlx::Connection;
 use sqlx::Row;
 use sqlx::SqliteConnection;
-use std::collections::{HashMap as StdHashMap, HashSet as StdHashSet, VecDeque};
+use std::collections::{HashMap as StdHashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
@@ -35,36 +35,7 @@ pub(crate) const SQLITE_BUSY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(5);
 pub(crate) const SQLITE_SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_millis(250);
 pub(crate) const SQLITE_SLOW_OPERATION_THRESHOLD: Duration = Duration::from_secs(1);
 
-static ABANDONED_UPSTREAM_USAGE_ATTEMPTS: StdOnceLock<StdMutex<StdHashSet<(String, String)>>> =
-    StdOnceLock::new();
-
-pub(crate) fn remember_abandoned_upstream_usage_attempt(
-    database_path: impl Into<String>,
-    reservation_id: String,
-) {
-    ABANDONED_UPSTREAM_USAGE_ATTEMPTS
-        .get_or_init(|| StdMutex::new(StdHashSet::new()))
-        .lock()
-        .expect("abandoned upstream usage attempt lock is not poisoned")
-        .insert((database_path.into(), reservation_id));
-}
-
-pub(crate) fn take_abandoned_upstream_usage_attempts(database_path: &str) -> Vec<String> {
-    let mut abandoned = ABANDONED_UPSTREAM_USAGE_ATTEMPTS
-        .get_or_init(|| StdMutex::new(StdHashSet::new()))
-        .lock()
-        .expect("abandoned upstream usage attempt lock is not poisoned");
-    let mut matching = Vec::new();
-    abandoned.retain(|(path, reservation_id)| {
-        if path == database_path {
-            matching.push(reservation_id.clone());
-            false
-        } else {
-            true
-        }
-    });
-    matching
-}
+include!("upstream_usage_attempt_markers.rs");
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2894,6 +2865,27 @@ mod tests {
         assert_eq!(
             take_abandoned_upstream_usage_attempts(&database_b),
             vec![reservation_b]
+        );
+    }
+
+    #[test]
+    fn abandoned_upstream_usage_attempt_markers_survive_process_memory_reset() {
+        let database = format!(
+            "/tmp/tavily-hikari-abandoned-marker-restart-{}",
+            std::process::id()
+        );
+        let reservation_id = "reservation-restart".to_string();
+        let _ = take_abandoned_upstream_usage_attempts(&database);
+        remember_abandoned_upstream_usage_attempt(database.clone(), reservation_id.clone());
+        clear_abandoned_upstream_usage_attempt_memory_for_test(&database);
+
+        assert_eq!(
+            peek_abandoned_upstream_usage_attempts(&database),
+            vec![reservation_id.clone()]
+        );
+        assert_eq!(
+            take_abandoned_upstream_usage_attempts(&database),
+            vec![reservation_id]
         );
     }
     fn as_account_usage_rollup_tuples(
