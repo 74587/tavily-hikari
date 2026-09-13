@@ -87,9 +87,9 @@
   remote work, marks the claim as an error, and creates exactly one continuation with `attempt + 1`;
   stale finalization cannot advance or overwrite a newer attempt.
 
-## Remaining Gaps
+## Validation Notes
 
-- 101 双库快照对比仍受共享 testbox 可用空间限制；本地与 Storybook 门禁已完成。
+- 101 双库只读快照对比已完成（`pr623_adec2767_final`，baseline/candidate 各 600 秒，stub upstream，隔离目录）。两侧前台 5xx 与最终 SQLite lock error 均为 `0`，billing adjustment delta 为 `0`；candidate Research terminal delta 为 `+10`、pending delta 为 `-9`。testbox 清理已完成。
 
 ## Related Changes
 
