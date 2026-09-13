@@ -20,6 +20,7 @@ pub struct RemoteAttemptAdmissionController {
     reconciliation_turn: Mutex<ReconciliationTurnState>,
     next_automatic_reconciliation_kind: AtomicU8,
     next_reconciliation_turn_id: AtomicU64,
+    last_consumed_reconciliation_turn_id: AtomicU64,
     next_automatic_attempt_token: AtomicU64,
     reconciliation_turn_cleared: Notify,
     active_attempts: AtomicUsize,
@@ -234,6 +235,7 @@ impl Default for RemoteAttemptAdmissionController {
             reconciliation_turn: Mutex::new(ReconciliationTurnState::default()),
             next_automatic_reconciliation_kind: AtomicU8::new(0),
             next_reconciliation_turn_id: AtomicU64::new(1),
+            last_consumed_reconciliation_turn_id: AtomicU64::new(0),
             next_automatic_attempt_token: AtomicU64::new(1),
             reconciliation_turn_cleared: Notify::new(),
             active_attempts: AtomicUsize::new(0),
@@ -658,11 +660,10 @@ impl RemoteAttemptAdmissionController {
                 .reconciliation_turn
                 .lock()
                 .expect("reconciliation turn state lock is not poisoned");
-            let next_turn_id = self.next_reconciliation_turn_id.load(Ordering::Acquire);
-            if state.id == 0
-                && !state.followup_in_flight
-                && next_turn_id == turn_id.saturating_add(1)
-            {
+            let last_consumed_turn_id = self
+                .last_consumed_reconciliation_turn_id
+                .load(Ordering::Acquire);
+            if state.id == 0 && !state.followup_in_flight && last_consumed_turn_id == turn_id {
                 state.followup_in_flight = true;
                 true
             } else {
@@ -703,6 +704,8 @@ impl RemoteAttemptAdmissionController {
             if state.id != turn_id {
                 false
             } else {
+                self.last_consumed_reconciliation_turn_id
+                    .store(turn_id, Ordering::Release);
                 *state = ReconciliationTurnState::default();
                 self.next_automatic_reconciliation_kind.store(
                     match kind {
@@ -1138,6 +1141,32 @@ mod tests {
             main.acquire_followup_attempt().await,
             Err("remote_attempt_budget")
         ));
+    }
+
+    #[tokio::test]
+    async fn main_followup_survives_research_no_request_defer() {
+        let controller = Arc::new(RemoteAttemptAdmissionController::default());
+        let main = controller
+            .reserve_next_automatic_reconciliation_turn(true, false)
+            .expect("main reserves the first automatic turn");
+        let lease = main
+            .acquire_attempt()
+            .await
+            .expect("the first request acquires the sole remote lease");
+        lease.mark_request_started();
+        drop(lease);
+
+        let research = controller
+            .reserve_next_automatic_reconciliation_turn(true, true)
+            .expect("research reserves the next automatic turn");
+        drop(research);
+
+        let followup = main
+            .acquire_followup_attempt()
+            .await
+            .expect("a no-request Research defer leaves Main's bounded follow-up available");
+        drop(followup);
+        assert!(!controller.reconciliation_turn_required());
     }
 
     #[test]
