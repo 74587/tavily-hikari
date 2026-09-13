@@ -2337,6 +2337,7 @@ impl TavilyProxy {
                             &endpoint,
                             Duration::from_millis(FORWARD_PROXY_TRACE_TIMEOUT_MS),
                             cancellation,
+                            None,
                         )
                         .await;
                     let (ip, location) = trace
@@ -2640,6 +2641,7 @@ impl TavilyProxy {
                                         &endpoint,
                                         Duration::from_millis(FORWARD_PROXY_TRACE_TIMEOUT_MS),
                                         cancellation,
+                                        None,
                                     )
                                     .await
                             {

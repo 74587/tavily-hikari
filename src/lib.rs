@@ -2304,6 +2304,9 @@ pub(crate) async fn resolve_registration_regions_with_remote_attempt_admission(
                 },
                 None => None,
             };
+            if let Some(lease) = remote_attempt.as_ref() {
+                lease.mark_request_started();
+            }
             let response = client.post(&batch_url).json(batch).send().await;
             match response {
                 Ok(response)

@@ -361,6 +361,7 @@ impl TavilyProxy {
         endpoint: &forward_proxy::ForwardProxyEndpoint,
         timeout: Duration,
         cancellation: Option<&ForwardProxyCancellation>,
+        remote_attempt: Option<&crate::RemoteAttemptLease>,
     ) -> Option<(String, String)> {
         if timeout.is_zero() {
             return None;
@@ -385,6 +386,9 @@ impl TavilyProxy {
                     .await
                     .ok()?;
                 tokio::time::timeout(timeout, async {
+                    if let Some(lease) = remote_attempt {
+                        lease.mark_request_started();
+                    }
                     let response = client.get(trace_url).send().await.ok()?;
                     if !response.status().is_success() {
                         return None;
@@ -1119,7 +1123,12 @@ impl TavilyProxy {
                     None => None,
                 };
                 let trace = self
-                    .fetch_forward_proxy_trace(&endpoint, trace_timeout, None)
+                    .fetch_forward_proxy_trace(
+                        &endpoint,
+                        trace_timeout,
+                        None,
+                        remote_attempt.as_ref(),
+                    )
                     .await;
                 drop(remote_attempt);
                 if let Some((ip, _location)) = trace {
@@ -1901,19 +1910,50 @@ impl TavilyProxy {
     where
         F: FnMut(Client) -> reqwest::RequestBuilder,
     {
+        let plan = self
+            .prepare_forward_proxy_plan_with_maintenance(api_key_id)
+            .await;
+        self.send_with_forward_proxy_plan(api_key_id, Some(api_key_id), request_kind, plan, build)
+            .await
+    }
+
+    /// Build a local proxy plan without running remote maintenance.
+    ///
+    /// Reconciliation and quota scheduling use this boundary before acquiring
+    /// the request-scoped remote-attempt lease. The separate maintenance
+    /// scheduler owns subscription/probe HTTP, so local plan reads cannot
+    /// trigger an unaccounted outbound request.
+    pub(crate) async fn prepare_forward_proxy_plan(
+        &self,
+        api_key_id: &str,
+    ) -> Vec<forward_proxy::SelectedForwardProxy> {
+        self.build_forward_proxy_plan(api_key_id, false).await
+    }
+
+    pub(crate) async fn prepare_forward_proxy_plan_with_maintenance(
+        &self,
+        api_key_id: &str,
+    ) -> Vec<forward_proxy::SelectedForwardProxy> {
+        self.build_forward_proxy_plan(api_key_id, true).await
+    }
+
+    async fn build_forward_proxy_plan(
+        &self,
+        api_key_id: &str,
+        run_maintenance: bool,
+    ) -> Vec<forward_proxy::SelectedForwardProxy> {
         {
             let mut manager = self.forward_proxy.lock().await;
             manager.note_request();
         }
-        if let Err(err) = self.maybe_run_forward_proxy_maintenance().await {
+        if run_maintenance
+            && let Err(err) = self.maybe_run_forward_proxy_maintenance().await
+        {
             eprintln!("forward-proxy maintenance error: {err}");
         }
-        let plan = self
-            .build_proxy_attempt_plan(api_key_id)
+        self.build_proxy_attempt_plan(api_key_id)
             .await
-            .unwrap_or_default();
-        self.send_with_forward_proxy_plan(api_key_id, Some(api_key_id), request_kind, plan, build)
-            .await
+            .unwrap_or_default()
     }
 
     pub(crate) async fn send_with_forward_proxy_affinity<F>(
@@ -1926,19 +1966,40 @@ impl TavilyProxy {
     where
         F: FnMut(Client) -> reqwest::RequestBuilder,
     {
+        let plan = self
+            .prepare_forward_proxy_affinity_plan_with_maintenance(subject, affinity)
+            .await;
+        self.send_with_forward_proxy_plan(subject, None, request_kind, plan, build)
+            .await
+    }
+
+    pub(crate) async fn prepare_forward_proxy_affinity_plan_with_maintenance(
+        &self,
+        subject: &str,
+        affinity: &forward_proxy::ForwardProxyAffinityRecord,
+    ) -> Vec<forward_proxy::SelectedForwardProxy> {
+        self.build_forward_proxy_affinity_plan(subject, affinity, true)
+            .await
+    }
+
+    async fn build_forward_proxy_affinity_plan(
+        &self,
+        subject: &str,
+        affinity: &forward_proxy::ForwardProxyAffinityRecord,
+        run_maintenance: bool,
+    ) -> Vec<forward_proxy::SelectedForwardProxy> {
         {
             let mut manager = self.forward_proxy.lock().await;
             manager.note_request();
         }
-        if let Err(err) = self.maybe_run_forward_proxy_maintenance().await {
+        if run_maintenance
+            && let Err(err) = self.maybe_run_forward_proxy_maintenance().await
+        {
             eprintln!("forward-proxy maintenance error: {err}");
         }
-        let plan = self
-            .build_proxy_attempt_plan_for_record(subject, affinity, false)
+        self.build_proxy_attempt_plan_for_record(subject, affinity, false)
             .await
-            .unwrap_or_default();
-        self.send_with_forward_proxy_plan(subject, None, request_kind, plan, build)
-            .await
+            .unwrap_or_default()
     }
 
     pub(crate) async fn billing_subject_for_token(

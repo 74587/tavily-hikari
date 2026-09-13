@@ -35,6 +35,8 @@ pub(crate) const SQLITE_BUSY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(5);
 pub(crate) const SQLITE_SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_millis(250);
 pub(crate) const SQLITE_SLOW_OPERATION_THRESHOLD: Duration = Duration::from_secs(1);
 
+include!("upstream_usage_attempt_markers.rs");
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservabilityOfflineProbe {
@@ -2843,6 +2845,49 @@ include!("key_store_request_logs_and_dashboard_test_support.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abandoned_upstream_usage_attempt_markers_are_database_scoped() {
+        let database_a = format!("marker-isolation-a-{}", std::process::id());
+        let database_b = format!("marker-isolation-b-{}", std::process::id());
+        let reservation_a = "reservation-a".to_string();
+        let reservation_b = "reservation-b".to_string();
+
+        let _ = take_abandoned_upstream_usage_attempts(&database_a);
+        let _ = take_abandoned_upstream_usage_attempts(&database_b);
+        remember_abandoned_upstream_usage_attempt(database_a.clone(), reservation_a.clone());
+        remember_abandoned_upstream_usage_attempt(database_b.clone(), reservation_b.clone());
+
+        assert_eq!(
+            take_abandoned_upstream_usage_attempts(&database_a),
+            vec![reservation_a]
+        );
+        assert_eq!(
+            take_abandoned_upstream_usage_attempts(&database_b),
+            vec![reservation_b]
+        );
+    }
+
+    #[test]
+    fn abandoned_upstream_usage_attempt_markers_survive_process_memory_reset() {
+        let database = format!(
+            "/tmp/tavily-hikari-abandoned-marker-restart-{}",
+            std::process::id()
+        );
+        let reservation_id = "reservation-restart".to_string();
+        let _ = take_abandoned_upstream_usage_attempts(&database);
+        remember_abandoned_upstream_usage_attempt(database.clone(), reservation_id.clone());
+        clear_abandoned_upstream_usage_attempt_memory_for_test(&database);
+
+        assert_eq!(
+            peek_abandoned_upstream_usage_attempts(&database),
+            vec![reservation_id.clone()]
+        );
+        assert_eq!(
+            take_abandoned_upstream_usage_attempts(&database),
+            vec![reservation_id]
+        );
+    }
     fn as_account_usage_rollup_tuples(
         records: &[AccountUsageRollupRecord],
     ) -> Vec<(String, i64, i64)> {

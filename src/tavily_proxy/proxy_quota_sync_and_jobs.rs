@@ -3,37 +3,6 @@ static LAST_RECONCILIATION_SUMMARY_LOG_AT: AtomicI64 = AtomicI64::new(0);
 include!("reconciliation_engine.rs");
 include!("reconciliation_research_drain.rs");
 
-#[derive(Debug, Default)]
-struct ResearchSweepOutcome {
-    polled: i64,
-    terminal: i64,
-    pending: i64,
-    retries: i64,
-    skipped_cooldown: i64,
-    earliest_cooldown_until: Option<i64>,
-    remote_attempt_budget_deferred: bool,
-    budget_exhausted: bool,
-    cursor_ready: bool,
-}
-
-fn should_emit_reconciliation_summary_at(last_emitted_at: &AtomicI64, now: i64) -> bool {
-    let mut previous = last_emitted_at.load(Ordering::Relaxed);
-    loop {
-        if previous > 0 && now.saturating_sub(previous) < 60 {
-            return false;
-        }
-        match last_emitted_at.compare_exchange(
-            previous,
-            now,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return true,
-            Err(observed) => previous = observed,
-        }
-    }
-}
-
 fn should_emit_reconciliation_summary(now: i64) -> bool {
     should_emit_reconciliation_summary_at(&LAST_RECONCILIATION_SUMMARY_LOG_AT, now)
 }
@@ -343,7 +312,7 @@ impl TavilyProxy {
                 });
             }
             match research_result {
-                Err((err, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) => {
+                Err((err, _, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) => {
                     // Admission failure means no Research request was made. Preserve
                     // the cursor and retry with the existing durable continuation.
                     polled = polled.saturating_sub(1);
@@ -359,7 +328,7 @@ impl TavilyProxy {
                     budget_exhausted = true;
                     break;
                 }
-                Err((err, _)) if ReconciliationEngine::is_remote_request_timeout(&err) =>
+                Err((err, _, _)) if ReconciliationEngine::is_remote_request_timeout(&err) =>
                 {
                     let next_poll_at = now.saturating_add(match candidate.poll_attempt_count {
                         0..=1 => 60,
@@ -508,7 +477,7 @@ impl TavilyProxy {
                     .await?;
                     retries += 1;
                 }
-                Err((err, retry_after)) => {
+                Err((err, retry_after, _)) => {
                     let reason = if matches!(
                         &err,
                         ProxyError::UsageHttp { status, .. }
@@ -758,6 +727,7 @@ impl TavilyProxy {
             reconciliation_turn,
             manual_remote_attempt,
             try_remote_attempt: false,
+            allow_main_followup: false,
             attempt_deadline: None,
         };
         let admit_local_projection = || self.admit_upstream_reconciliation_projection();
@@ -1361,12 +1331,12 @@ impl TavilyProxy {
                         budget_exhausted = true;
                         break;
                     }
-                    let reservation = self
+                    let reservation_id = match self
                         .key_store
                         .reserve_upstream_usage_attempt(&key_id)
-                        .await?;
-                    match reservation {
-                        Ok(()) => {}
+                        .await?
+                    {
+                        Ok(reservation_id) => reservation_id,
                         Err(next_attempt_at) => {
                             retry_at = Some(next_attempt_at);
                             retry_reason =
@@ -1375,10 +1345,15 @@ impl TavilyProxy {
                             retry_outcome = Some(ReconciliationOutcome::LocalPressure);
                             break;
                         }
-                    }
+                    };
+                    let mut reservation = UpstreamUsageAttemptReservation::new(
+                        Arc::clone(&self.key_store),
+                        reservation_id,
+                    );
                     if !remote_request_started
                         && std::time::Instant::now() >= preparation_deadline
                     {
+                        reservation.release().await?;
                         budget_exhausted = true;
                         break 'candidates;
                     }
@@ -1386,6 +1361,10 @@ impl TavilyProxy {
                         attempted_candidate_count += 1;
                         candidate_attempted = true;
                     }
+                    let allow_main_followup = remote_request_count > 0
+                        && reconciliation_turn
+                            .map(|turn| turn.allows_main_followup())
+                            .unwrap_or(true);
                     remote_request_started = true;
                     if remote_request_count == 0 {
                         first_remote_ms = Some(
@@ -1398,20 +1377,35 @@ impl TavilyProxy {
                             &key_id,
                             usage_base,
                             &candidate.project_id,
-                            remote_attempt_context.with_attempt_deadline(main_remote_deadline),
+                            &mut reservation,
+                            remote_attempt_context
+                                .with_attempt_deadline(main_remote_deadline)
+                                .with_main_followup_if(allow_main_followup),
                         )
                         .await;
+                    let request_started = usage_result
+                        .as_ref()
+                        .map(|_| true)
+                        .unwrap_or_else(|(_, _, started)| *started);
+                    if !request_started {
+                        // Rate-attempt rows reserve capacity only for an actual
+                        // outbound request. Secret/endpoint/proxy setup and
+                        // pre-request deadline failures must release them too.
+                        reservation.release().await?;
+                        remote_request_count = remote_request_count.saturating_sub(1);
+                        if remote_request_count == 0 {
+                            remote_request_started = false;
+                            first_remote_ms = None;
+                        }
+                    } else {
+                        reservation.disarm();
+                    }
                     match usage_result {
-                        Err((err, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) =>
+                        Err((err, _, _)) if ReconciliationEngine::remote_attempt_is_deferred(&err) =>
                         {
                             // Admission failure means no outbound request was made. Keep
                             // metrics and retry semantics distinct from transport/semantic
                             // failures, and let the durable representative retry later.
-                            remote_request_count = remote_request_count.saturating_sub(1);
-                            if remote_request_count == 0 {
-                                remote_request_started = false;
-                                first_remote_ms = None;
-                            }
                             if ReconciliationEngine::remote_attempt_is_stale(&err) {
                                 if let Some((job_id, claim_generation)) = claimed_job {
                                     return Err(ProxyError::StaleClaim {
@@ -1427,7 +1421,7 @@ impl TavilyProxy {
                             budget_exhausted = true;
                             break;
                         }
-                        Err((err, retry_after))
+                        Err((err, retry_after, _))
                             if matches!(&err, ProxyError::Http(error) if error.is_timeout()) =>
                         {
                             transport_failure_windows += 1;
@@ -1479,7 +1473,7 @@ impl TavilyProxy {
                                     partial_key_observations.saturating_add(1);
                             }
                         }
-                        Err((err, upstream_retry_at)) => {
+                        Err((err, upstream_retry_at, _)) => {
                             let outcome = if matches!(
                                 &err,
                                 ProxyError::UsageHttp { status, .. }
@@ -2434,69 +2428,6 @@ impl TavilyProxy {
             .await
     }
 
-    /// Sync usage/quota for specific key via Tavily Usage API base (e.g., https://api.tavily.com).
-    pub async fn sync_key_quota(
-        &self,
-        key_id: &str,
-        usage_base: &str,
-        source: &str,
-    ) -> Result<(i64, i64), ProxyError> {
-        let Some(secret) = self.key_store.fetch_api_key_secret(key_id).await? else {
-            return Err(ProxyError::Database(sqlx::Error::RowNotFound));
-        };
-        let (limit, remaining) = match self
-            .fetch_usage_quota_for_secret(
-                &secret,
-                usage_base,
-                Some(Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS)),
-                Some(key_id),
-                None,
-                "quota_sync",
-            )
-            .await
-        {
-            Ok(quota) => quota,
-            Err(err) => {
-                let err = normalize_quota_sync_fetch_error(err);
-                self.maybe_quarantine_usage_error(key_id, "/api/tavily/usage", &err)
-                    .await?;
-                return Err(err);
-            }
-        };
-        let now = self.backend_time.now_ts();
-        self.key_store
-            .record_quota_sync_sample(key_id, limit, remaining, now, source)
-            .await?;
-        self.clear_transient_backoffs_after_success(key_id, source, None)
-            .await?;
-        Ok((limit, remaining))
-    }
-
-    pub async fn quota_sync_api_key_secret(&self, key_id: &str) -> Result<String, ProxyError> {
-        self.key_store
-            .fetch_api_key_secret(key_id)
-            .await?
-            .ok_or_else(|| ProxyError::Database(sqlx::Error::RowNotFound))
-    }
-
-    pub async fn fetch_usage_quota_for_sync_secret(
-        &self,
-        secret: &str,
-        usage_base: &str,
-        key_id: &str,
-    ) -> Result<(i64, i64), ProxyError> {
-        self.fetch_usage_quota_for_secret(
-            secret,
-            usage_base,
-            Some(Duration::from_secs(QUOTA_SYNC_FETCH_TIMEOUT_SECS)),
-            Some(key_id),
-            None,
-            "quota_sync",
-        )
-        .await
-        .map_err(normalize_quota_sync_fetch_error)
-    }
-
     pub async fn record_quota_sync_usage_error(
         &self,
         key_id: &str,
@@ -2643,6 +2574,31 @@ impl TavilyProxy {
         proxy_affinity: Option<(&str, &forward_proxy::ForwardProxyAffinityRecord)>,
         request_kind: &str,
     ) -> Result<(i64, i64), ProxyError> {
+        self.fetch_usage_quota_for_secret_with_plan(
+            secret,
+            usage_base,
+            timeout,
+            api_key_id,
+            proxy_affinity,
+            request_kind,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_usage_quota_for_secret_with_plan(
+        &self,
+        secret: &str,
+        usage_base: &str,
+        timeout: Option<Duration>,
+        api_key_id: Option<&str>,
+        proxy_affinity: Option<(&str, &forward_proxy::ForwardProxyAffinityRecord)>,
+        request_kind: &str,
+        remote_attempt: Option<crate::RemoteAttemptLease>,
+        prepared_plan: Option<Vec<forward_proxy::SelectedForwardProxy>>,
+    ) -> Result<(i64, i64), ProxyError> {
         let base = Url::parse(usage_base).map_err(|e| ProxyError::InvalidEndpoint {
             endpoint: usage_base.to_string(),
             source: e,
@@ -2651,8 +2607,29 @@ impl TavilyProxy {
 
         let secret_header = secret.to_string();
         let request_url = url.clone();
-        let (resp, _relay_lease) = match (api_key_id, proxy_affinity) {
-            (Some(api_key_id), _) => self
+        let (resp, _relay_lease) = match (api_key_id, proxy_affinity, remote_attempt) {
+            (Some(api_key_id), _, Some(remote_attempt)) => {
+                let plan = prepared_plan.unwrap_or_default();
+                self.send_with_forward_proxy_plan(
+                    api_key_id,
+                    Some(api_key_id),
+                    request_kind,
+                    plan,
+                    |client| {
+                        remote_attempt.mark_request_started();
+                        let mut req = client
+                            .get(request_url.clone())
+                            .header("Authorization", format!("Bearer {}", secret_header));
+                        if let Some(timeout) = timeout {
+                            req = req.timeout(timeout);
+                        }
+                        req
+                    },
+                )
+                .await
+                .map(|(response, relay_lease)| (response, Some(relay_lease)))?
+            }
+            (Some(api_key_id), _, None) => self
                 .send_with_forward_proxy(api_key_id, request_kind, |client| {
                     let mut req = client
                         .get(request_url.clone())
@@ -2664,7 +2641,7 @@ impl TavilyProxy {
                 })
                 .await
                 .map(|(response, relay_lease)| (response, Some(relay_lease)))?,
-            (None, Some((subject, proxy_affinity))) => self
+            (None, Some((subject, proxy_affinity)), _) => self
                 .send_with_forward_proxy_affinity(subject, request_kind, proxy_affinity, |client| {
                     let mut req = client
                         .get(request_url.clone())
@@ -2676,7 +2653,7 @@ impl TavilyProxy {
                 })
                 .await
                 .map(|(response, relay_lease)| (response, Some(relay_lease)))?,
-            (None, None) => {
+            (None, None, _) => {
                 let mut req = self
                     .client
                     .get(request_url.clone())

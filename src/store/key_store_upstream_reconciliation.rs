@@ -1815,13 +1815,24 @@ impl KeyStore {
     pub(crate) async fn reserve_upstream_usage_attempt(
         &self,
         key_id: &str,
-    ) -> Result<Result<(), i64>, ProxyError> {
+    ) -> Result<Result<String, i64>, ProxyError> {
         let now = self.backend_time.now_ts();
         let threshold = now - 600;
         let mut tx = self
             .sqlite_runtime
             .begin_immediate(SqliteOperation::ReconciliationProjection)
             .await?;
+        let abandoned_reservation_ids =
+            crate::store::peek_abandoned_upstream_usage_attempts(&self.database_path);
+        for reservation_id in &abandoned_reservation_ids {
+            // A cancelled owner may have lost its cleanup runtime after the
+            // bounded retry ladder. Keep the marker until the transaction
+            // commits so a rollback can retry it on the next reservation.
+            sqlx::query("DELETE FROM upstream_usage_rate_attempts WHERE id = ?")
+                .bind(reservation_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query("DELETE FROM upstream_usage_rate_attempts WHERE attempted_at <= ?")
             .bind(threshold)
             .execute(&mut *tx)
@@ -1842,18 +1853,43 @@ impl KeyStore {
             .fetch_one(&mut *tx)
             .await?;
             tx.finish(Ok(())).await?;
+            crate::store::forget_abandoned_upstream_usage_attempts(
+                &self.database_path,
+                &abandoned_reservation_ids,
+            );
             return Ok(Err(oldest.saturating_add(600)));
         }
+        let reservation_id = nanoid!(18);
         sqlx::query(
             "INSERT INTO upstream_usage_rate_attempts (id, key_id, attempted_at) VALUES (?, ?, ?)",
         )
-        .bind(nanoid!(18))
+        .bind(&reservation_id)
         .bind(key_id)
         .bind(now)
         .execute(&mut *tx)
         .await?;
         tx.finish(Ok(())).await?;
-        Ok(Ok(()))
+        crate::store::forget_abandoned_upstream_usage_attempts(
+            &self.database_path,
+            &abandoned_reservation_ids,
+        );
+        Ok(Ok(reservation_id))
+    }
+
+    pub(crate) async fn release_upstream_usage_attempt(
+        &self,
+        reservation_id: &str,
+    ) -> Result<(), ProxyError> {
+        let mut tx = self
+            .sqlite_runtime
+            .begin_immediate(SqliteOperation::ReconciliationProjection)
+            .await?;
+        sqlx::query("DELETE FROM upstream_usage_rate_attempts WHERE id = ?")
+            .bind(reservation_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.finish(Ok(())).await?;
+        Ok(())
     }
 
     async fn lock_reconciliation_work_generation(
