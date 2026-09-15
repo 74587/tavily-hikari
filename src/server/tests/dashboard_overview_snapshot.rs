@@ -2037,6 +2037,83 @@ async fn dashboard_overview_snapshot_patches_contiguous_quota_samples() {
 }
 
 #[tokio::test]
+async fn dashboard_recent_job_changes_patch_last_good_without_a_full_overview_rebuild() {
+    let db_path = temp_db_path("dashboard-recent-job-patch");
+    let db_str = db_path.to_string_lossy().to_string();
+    let proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-dashboard-recent-job-patch".to_string()],
+        DEFAULT_UPSTREAM,
+        &db_str,
+    )
+    .await
+    .expect("proxy created");
+    let state = Arc::new(AppState {
+        proxy,
+        static_dir: None,
+        forward_auth: ForwardAuthConfig::new(None, None, None, None),
+        forward_auth_enabled: false,
+        builtin_admin: BuiltinAdminAuth::new(false, None, None),
+        admin_passkey: AdminPasskeyOptions::disabled(),
+        linuxdo_oauth: LinuxDoOAuthOptions::disabled(),
+        linuxdo_credit: LinuxDoCreditOptions::disabled(),
+        ha: tavily_hikari::HaRuntime::new(tavily_hikari::HaConfig::default()),
+        dev_open_admin: false,
+        usage_base: "http://127.0.0.1:58088".to_string(),
+        api_key_ip_geo_origin: "https://api.country.is".to_string(),
+        dashboard_overview_cache: new_dashboard_overview_cache(),
+        remote_attempt_admission: new_remote_attempt_admission(),
+    });
+    let pool = connect_sqlite_test_pool(&db_str).await;
+    let job = state
+        .proxy
+        .scheduled_job_enqueue("dashboard_recent_job_patch", "test", None, 1)
+        .await
+        .expect("enqueue recent dashboard job");
+    let initial = load_dashboard_overview_snapshot(&state)
+        .await
+        .expect("initial overview snapshot");
+    assert_eq!(initial.payload.recent_jobs.len(), 1);
+    reset_dashboard_overview_build_count(&state).await;
+
+    sqlx::query(
+        "UPDATE scheduled_jobs SET status = 'failed', message = 'bounded patch', finished_at = ? WHERE id = ?",
+    )
+    .bind(state.proxy.backend_time().now_ts())
+    .bind(job.job_id)
+    .execute(&pool)
+    .await
+    .expect("complete recent dashboard job");
+
+    expire_dashboard_overview_freshness_probe(&state).await;
+    let served = tokio::time::timeout(
+        Duration::from_millis(250),
+        load_dashboard_overview_snapshot(&state),
+    )
+    .await
+    .expect("recent-job patch must not block a warm dashboard read")
+    .expect("last-good dashboard snapshot");
+    assert!(
+        Arc::ptr_eq(&served, &initial),
+        "HTTP/SSE callers must keep the immutable last-good snapshot while the job patch runs",
+    );
+
+    let patched = wait_for_dashboard_overview_refresh(&state).await;
+    assert_eq!(
+        dashboard_overview_build_count(&state).await,
+        0,
+        "a recent-job-only change must not rebuild the full dashboard payload",
+    );
+    assert_eq!(patched.payload.recent_jobs[0].status, "failed");
+    assert_eq!(patched.payload.recent_jobs[0].message.as_deref(), Some("bounded patch"));
+    assert_ne!(
+        patched.freshness.recent_jobs, initial.freshness.recent_jobs,
+        "the immutable patch must carry the updated bounded recent-job signature",
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn dashboard_future_quota_sample_patches_when_it_enters_the_window() {
     let db_path = temp_db_path("dashboard-overview-future-quota-sample");
     let db_str = db_path.to_string_lossy().to_string();

@@ -18,6 +18,9 @@
 - Warm HTTP and SSE reads never wait for freshness SQL or payload reconstruction. The first reader
   after expiry claims one background refresh and immediately serves the immutable last-good
   snapshot; concurrent readers reuse it, and only a cold start without last-good waits for a build.
+- Quota charge and the bounded recent-jobs section publish through immutable last-good patches when
+  their signatures are the only changed overview inputs. Quota recovery remains keyset-bounded, and
+  request-log, Alerts, rollup, and other summary freshness changes retain the complete rebuild path.
 - SSE signature polling consumes the same shared snapshot loader and no longer runs an independent
   freshness probe, preventing subscriber count from multiplying SQLite reads.
 - Alert candidate indexing is installed by an idempotent post-ready maintenance job rather than the
