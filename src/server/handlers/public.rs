@@ -1083,7 +1083,7 @@ struct DashboardSnapshot<'a> {
 
 impl DashboardOverviewFreshness {
     fn differs_only_by_quota_charge(&self, next: &Self) -> bool {
-        if self.dashboard_quota_charge_token[..3] == next.dashboard_quota_charge_token[..3] {
+        if self.dashboard_quota_charge_token[..4] == next.dashboard_quota_charge_token[..4] {
             return false;
         }
         let mut normalized_self = self.clone();
@@ -1099,7 +1099,7 @@ impl DashboardOverviewFreshness {
 
     fn differs_only_by_quota_charge_or_recent_jobs(&self, next: &Self) -> bool {
         let quota_charge_changed =
-            self.dashboard_quota_charge_token[..3] != next.dashboard_quota_charge_token[..3];
+            self.dashboard_quota_charge_token[..4] != next.dashboard_quota_charge_token[..4];
         let recent_jobs_changed = self.recent_jobs != next.recent_jobs;
         if !recent_jobs_changed {
             return self.differs_only_by_quota_charge(next);
@@ -2252,8 +2252,8 @@ async fn refresh_dashboard_overview_snapshot_with_reason(
                     .differs_only_by_quota_charge_or_recent_jobs(&freshness)
             {
                 let last_good = cached.snapshot.clone();
-                let quota_charge_changed = cached.freshness.dashboard_quota_charge_token[..3]
-                    != freshness.dashboard_quota_charge_token[..3];
+                let quota_charge_changed = cached.freshness.dashboard_quota_charge_token[..4]
+                    != freshness.dashboard_quota_charge_token[..4];
                 let recent_jobs_changed = cached.freshness.recent_jobs != freshness.recent_jobs;
                 drop(cache);
                 let patch = async {

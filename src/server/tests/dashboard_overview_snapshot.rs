@@ -1535,6 +1535,11 @@ async fn dashboard_overview_freshness_tracks_time_driven_stale_key_transitions()
     reset_dashboard_overview_build_count(&state).await;
     let second = load_dashboard_overview_after_background_refresh(&state).await;
     assert_eq!(
+        dashboard_overview_build_count(&state).await,
+        0,
+        "a stale-key-only transition must publish through the bounded quota patch",
+    );
+    assert_eq!(
         second.payload.summary_windows.today.quota_charge.stale_key_count,
         1,
         "crossing the stale threshold should update the quota stale-key count without requiring a new sample row",
@@ -1832,9 +1837,10 @@ async fn dashboard_overview_snapshot_does_not_reuse_recent_cache_after_freshness
         1_234,
         "freshness changes should bypass the recently loaded cache entry"
     );
-    assert!(
-        dashboard_overview_build_count(&state).await >= 1,
-        "overview snapshot should rebuild after freshness changes even inside the grace window"
+    assert_eq!(
+        dashboard_overview_build_count(&state).await,
+        0,
+        "stale-key quota freshness must publish a bounded patch even inside the grace window"
     );
 
     let _ = std::fs::remove_file(db_path);
