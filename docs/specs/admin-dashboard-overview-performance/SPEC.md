@@ -159,6 +159,12 @@
 - quota sample token 使用 append-only sample 的主键与时间 watermark；一次 freshness probe 触发的
   payload build 必须复用该 token，不能再次查询 token。60 秒 safety probe 仅在 token 或其他
   bounded revision 改变时重建，dirty build 仍由 10 秒 singleflight 合并。
+- `summaryWindows.quota_charge` 与 `recentJobs` 是独立、不可变的 last-good patch 区段：当且仅当
+  quota token、stale-key 状态或最近五个 job 的签名变化，而其余 overview freshness 保持一致时，后台
+  worker 只能读取这些有界区段并发布替换后的 snapshot，不得构建完整 overview payload。
+- quota append 可在有界增量 hydration 中完成；乱序或 backfill sample 必须退回有界 keyset recovery。
+  patch 尚未完成、失败或被更新的 source revision 取代时，HTTP 与 SSE 必须继续返回完整的 last-good
+  snapshot，且不得等待 recovery。
 - `recentAlerts` 必须保留在 overview payload 内，但要使用独立 recent-alerts cache；core overview 不得因为 alerts grouped query 慢或临时错误而阻塞整包重建，必要时返回上一份 last-good 聚合结果。
 - `/api/alerts/events` 与 `/api/alerts/groups` 必须优先以 `auth_token_logs` 为数据面，只在字段缺失且存在 `request_log_id` 时按需回退 `observability.request_logs`，避免再依赖 request body JSON 提取来完成 request-kind 分组与过滤。
 
@@ -174,6 +180,7 @@
 - SSE 正常时，dashboard 不再维持旧的 30 秒 signals polling；SSE 断线后 fallback polling 只刷新 shell data + overview。
 - `cargo test`、`cargo clippy -- -D warnings`、`cd web && bun test src/api.test.ts src/admin/dashboardHourlyCharts.test.ts`、`cd web && bun run build`、`cd web && bun run build-storybook` 通过。
 - dashboard cache-hit freshness probe 不再执行 quota sample heavy CTE，也不再执行 alerts grouped CTE；相应回归测试必须直接断言 baseline-only backfill 不会触发 shared snapshot rebuild。
+- 正常 quota sample、quota backfill/recovery 与仅影响最近五个 job 的变化都不得构建完整 overview；它们只可在后台发布 immutable patch，request-log、Alerts、rollup 或其它 summary freshness 变化仍必须进入完整 rebuild。
 - `recentAlerts`、`summaryWindows.quota_charge` 与 alerts events/groups 的外部返回 shape 保持不变，但内部必须改为独立缓存 / auth-token-first 读路径。
 
 ## 风险与开放点
@@ -185,10 +192,8 @@
 ## Visual Evidence
 
 - source_type: `storybook_canvas`; story_id_or_title: `Admin/Components/DashboardOverview/ZhDarkEvidence`; state: `dashboard overview preserved after lightweight bootstrap refactor`; evidence_note: 验证 dashboard 在改为单一 overview bootstrap、SSE 复用 payload 与风险区轻量子集后，今日/本月/当前状态、风险观察与快捷入口仍保持既有可见结构；默认流量趋势绝对柱状图展示滚动 25 个小时槽，最后当前未满小时槽使用灰底与竖向虚线标识。
-  PR: none
   ![管理仪表盘总览轻量快照验收图](./assets/dashboard-overview-performance-proof.png)
 - source_type: `storybook_canvas`; target_program: `mock-only`; capture_scope: `element`; story_id_or_title: `Admin/Components/DashboardOverview/RecentAlertsBusinessHourWindow`; state: `recent alerts 60m badge`; evidence_note: 验证 Recent alerts 分组卡片在最新事件属于 rolling `60m` business-call cap 时，徽标优先显示真实 `60m window`，不再沿用旧的 `5m window` 分组元数据；该证据绑定本次 dashboard 文案修复实现。
-  PR: none
   ![管理仪表盘近期告警 60m 文案修复图](./assets/dashboard-recent-alerts-60m-window.png)
 
 ## Current Boundary

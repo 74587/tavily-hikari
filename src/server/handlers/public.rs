@@ -1083,7 +1083,7 @@ struct DashboardSnapshot<'a> {
 
 impl DashboardOverviewFreshness {
     fn differs_only_by_quota_charge(&self, next: &Self) -> bool {
-        if self.dashboard_quota_charge_token[..3] == next.dashboard_quota_charge_token[..3] {
+        if self.dashboard_quota_charge_token[..4] == next.dashboard_quota_charge_token[..4] {
             return false;
         }
         let mut normalized_self = self.clone();
@@ -1096,6 +1096,34 @@ impl DashboardOverviewFreshness {
         }
         normalized_self == normalized_next
     }
+
+    fn differs_only_by_quota_charge_or_recent_jobs(&self, next: &Self) -> bool {
+        let quota_charge_changed =
+            self.dashboard_quota_charge_token[..4] != next.dashboard_quota_charge_token[..4];
+        let recent_jobs_changed = self.recent_jobs != next.recent_jobs;
+        if !recent_jobs_changed {
+            return self.differs_only_by_quota_charge(next);
+        }
+
+        let mut normalized_self = self.clone();
+        let mut normalized_next = next.clone();
+        for freshness in [&mut normalized_self, &mut normalized_next] {
+            freshness.recent_jobs.clear();
+            if quota_charge_changed {
+                freshness.dashboard_quota_charge_token = [0; 5];
+                freshness.dashboard_stale_key_count = 0;
+                freshness.latest_quota_sync_sample_at = None;
+                freshness.summary[8..].fill(0);
+            }
+        }
+        normalized_self == normalized_next
+    }
+}
+
+fn dashboard_recent_job_signatures(jobs: &[JobLog]) -> Vec<(i64, String, Option<i64>)> {
+    jobs.iter()
+        .map(|job| (job.id, job.status.clone(), job.finished_at))
+        .collect()
 }
 
 fn patch_dashboard_quota_charge_view(
@@ -1108,36 +1136,49 @@ fn patch_dashboard_quota_charge_view(
     target.latest_sync_at = source.latest_sync_at;
 }
 
-fn patch_dashboard_overview_quota_charge(
+fn patch_dashboard_overview_bounded_sections(
     last_good: &DashboardOverviewSnapshot,
-    quota_charge: tavily_hikari::DashboardQuotaChargeSnapshot,
+    quota_charge: Option<tavily_hikari::DashboardQuotaChargeSnapshot>,
+    recent_jobs: Option<Vec<JobLogView>>,
     mut freshness: DashboardOverviewFreshness,
     token: [i64; 5],
 ) -> Result<DashboardOverviewSnapshot, ProxyError> {
     let mut payload = last_good.payload.clone();
-    patch_dashboard_quota_charge_view(&mut payload.summary_windows.today.quota_charge, &quota_charge.today);
-    patch_dashboard_quota_charge_view(
-        &mut payload.summary_windows.yesterday.quota_charge,
-        &quota_charge.yesterday,
-    );
-    patch_dashboard_quota_charge_view(&mut payload.summary_windows.month.quota_charge, &quota_charge.month);
-    payload.summary.total_quota_limit = freshness.summary[8];
-    payload.summary.total_quota_remaining = freshness.summary[9];
-    payload.site_status.total_quota_limit = freshness.summary[8];
-    payload.site_status.remaining_quota = freshness.summary[9];
+    if let Some(quota_charge) = quota_charge {
+        patch_dashboard_quota_charge_view(
+            &mut payload.summary_windows.today.quota_charge,
+            &quota_charge.today,
+        );
+        patch_dashboard_quota_charge_view(
+            &mut payload.summary_windows.yesterday.quota_charge,
+            &quota_charge.yesterday,
+        );
+        patch_dashboard_quota_charge_view(
+            &mut payload.summary_windows.month.quota_charge,
+            &quota_charge.month,
+        );
+        payload.summary.total_quota_limit = freshness.summary[8];
+        payload.summary.total_quota_remaining = freshness.summary[9];
+        payload.site_status.total_quota_limit = freshness.summary[8];
+        payload.site_status.remaining_quota = freshness.summary[9];
 
-    freshness.dashboard_quota_charge_token = token;
-    freshness.latest_quota_sync_sample_at = (token[0] != 0).then_some(token[1]);
+        freshness.dashboard_quota_charge_token = token;
+        freshness.latest_quota_sync_sample_at = (token[0] != 0).then_some(token[1]);
+    }
+    if let Some(recent_jobs) = recent_jobs {
+        payload.recent_jobs = recent_jobs;
+    }
+
     let http_json = serde_json::to_vec(&payload)
         .map(Bytes::from)
-        .map_err(|error| ProxyError::Other(format!("serialize dashboard quota patch: {error}")))?;
+        .map_err(|error| ProxyError::Other(format!("serialize dashboard patch: {error}")))?;
     let sse_snapshot = DashboardSnapshot {
         keys: &payload.exhausted_keys,
         logs: &payload.recent_logs,
         overview: &payload,
     };
     let sse_json = serde_json::to_vec(&sse_snapshot)
-        .map_err(|error| ProxyError::Other(format!("serialize dashboard quota patch SSE: {error}")))?;
+        .map_err(|error| ProxyError::Other(format!("serialize dashboard patch SSE: {error}")))?;
     let mut sse_snapshot_frame = Vec::with_capacity(sse_json.len().saturating_add(24));
     sse_snapshot_frame.extend_from_slice(b"event: snapshot\ndata: ");
     sse_snapshot_frame.extend_from_slice(&sse_json);
@@ -2208,26 +2249,52 @@ async fn refresh_dashboard_overview_snapshot_with_reason(
             if let Some(cached) = cache.cached.as_ref()
                 && cached
                     .freshness
-                    .differs_only_by_quota_charge(&freshness)
+                    .differs_only_by_quota_charge_or_recent_jobs(&freshness)
             {
                 let last_good = cached.snapshot.clone();
+                let quota_charge_changed = cached.freshness.dashboard_quota_charge_token[..4]
+                    != freshness.dashboard_quota_charge_token[..4];
+                let recent_jobs_changed = cached.freshness.recent_jobs != freshness.recent_jobs;
                 drop(cache);
-                match state
-                    .proxy
-                    .dashboard_quota_charge_snapshot_for_freshness_at(
-                        state.proxy.backend_time().local_now(),
-                        freshness.dashboard_quota_charge_token,
+                let patch = async {
+                    let (quota_charge, token) = if quota_charge_changed {
+                        let (quota_charge, token) = state
+                            .proxy
+                            .dashboard_quota_charge_snapshot_for_freshness_at(
+                                state.proxy.backend_time().local_now(),
+                                freshness.dashboard_quota_charge_token,
+                            )
+                            .await?;
+                        (Some(quota_charge), token)
+                    } else {
+                        (None, freshness.dashboard_quota_charge_token)
+                    };
+                    let recent_jobs = if recent_jobs_changed {
+                        let recent_jobs = state
+                            .proxy
+                            .list_recent_jobs(DASHBOARD_RECENT_JOBS_LIMIT)
+                            .await?;
+                        if dashboard_recent_job_signatures(&recent_jobs) != freshness.recent_jobs {
+                            return Err(ProxyError::Other(
+                                "dashboard recent jobs changed during patch".to_string(),
+                            ));
+                        }
+                        Some(recent_jobs.into_iter().map(JobLogView::from).collect())
+                    } else {
+                        None
+                    };
+                    patch_dashboard_overview_bounded_sections(
+                        last_good.as_ref(),
+                        quota_charge,
+                        recent_jobs,
+                        freshness,
+                        token,
                     )
-                    .await
-                {
-                    Ok((quota_charge, token)) => {
-                        let patched = patch_dashboard_overview_quota_charge(
-                            last_good.as_ref(),
-                            quota_charge,
-                            freshness,
-                            token,
-                        )
-                        .map(Arc::new);
+                }
+                .await;
+                match patch {
+                    Ok(snapshot) => {
+                        let patched = Ok(Arc::new(snapshot));
                         let mut cache = cache_handle.lock().await;
                         if cache.loading_generation == load_generation {
                             cache.loading = false;
@@ -2255,9 +2322,9 @@ async fn refresh_dashboard_overview_snapshot_with_reason(
                         load_guard.disarm();
                         tracing::debug!(
                             component = "admin_read",
-                            event = "dashboard_quota_recovery_deferred",
+                            event = "dashboard_bounded_patch_deferred",
                             err = %error,
-                            "serving immutable last-good Dashboard while quota recovery is unavailable"
+                            "serving immutable last-good Dashboard while a bounded patch is unavailable"
                         );
                         return Ok(last_good);
                     }
