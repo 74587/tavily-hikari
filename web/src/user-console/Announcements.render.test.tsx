@@ -2,11 +2,36 @@ import '../../test/happydom'
 
 import { afterEach, describe, expect, it, mock } from 'bun:test'
 import { act } from 'react'
+import type { ComponentProps, ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 import type { Announcement } from '../api'
 import { EN } from './text'
-import UserConsoleAnnouncements from './Announcements'
+
+mock.module('../components/ui/dialog', () => {
+  const Dialog = ({ open, children }: { open: boolean; children?: ReactNode }) => open ? <>{children}</> : null
+  const DialogContent = ({ children, ...props }: ComponentProps<'div'>) => <div {...props}>{children}</div>
+  const DialogHeader = ({ children, ...props }: ComponentProps<'div'>) => <div {...props}>{children}</div>
+  const DialogFooter = ({ children, ...props }: ComponentProps<'div'>) => <div {...props}>{children}</div>
+  const DialogTitle = ({ children, ...props }: ComponentProps<'h2'>) => <h2 {...props}>{children}</h2>
+
+  return { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle }
+})
+
+mock.module('../components/ui/drawer', () => {
+  const Drawer = ({ open, children }: { open: boolean; children?: ReactNode }) => open ? <>{children}</> : null
+  const DrawerClose = ({ children }: { children?: ReactNode }) => <>{children}</>
+  const DrawerContent = ({ children, direction: _direction, ...props }: ComponentProps<'div'> & {
+    direction?: 'bottom' | 'right'
+  }) => <div data-state="open" {...props}>{children}</div>
+  const DrawerHeader = ({ children, ...props }: ComponentProps<'div'>) => <div {...props}>{children}</div>
+  const DrawerDescription = ({ children, ...props }: ComponentProps<'p'>) => <p {...props}>{children}</p>
+  const DrawerTitle = ({ children, ...props }: ComponentProps<'h2'>) => <h2 {...props}>{children}</h2>
+
+  return { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle }
+})
+
+const { default: UserConsoleAnnouncements } = await import('./Announcements')
 
 const renderedRoots = new Set<Root>()
 
@@ -24,7 +49,7 @@ function tickerAnnouncement(patch: Partial<Announcement> = {}): Announcement {
   }
 }
 
-async function renderAnnouncements({
+function renderAnnouncements({
   activeAnnouncements = [tickerAnnouncement()],
   historyAnnouncements = [],
   closedRecords = {},
@@ -38,13 +63,12 @@ async function renderAnnouncements({
   historyOpen?: boolean
   onHistoryOpenChange?: ReturnType<typeof mock>
   onCloseAnnouncement?: ReturnType<typeof mock>
-} = {}): Promise<{ root: Root; onCloseAnnouncement: ReturnType<typeof mock> }> {
+} = {}): { root: Root; onCloseAnnouncement: ReturnType<typeof mock> } {
   const container = document.createElement('div')
-  document.body.appendChild(container)
   const root = createRoot(container)
   renderedRoots.add(root)
 
-  await act(async () => {
+  act(() => {
     root.render(
       <UserConsoleAnnouncements
         language="en"
@@ -59,7 +83,7 @@ async function renderAnnouncements({
     )
   })
 
-  return { root, onCloseAnnouncement }
+  return { container, root, onCloseAnnouncement }
 }
 
 async function unmountRoot(root: Root): Promise<void> {
@@ -67,35 +91,22 @@ async function unmountRoot(root: Root): Promise<void> {
   await act(async () => root.unmount())
 }
 
-async function waitForHistory(): Promise<HTMLElement> {
-  const deadline = Date.now() + 2000
-  while (Date.now() < deadline) {
-    const history = document.querySelector<HTMLElement>('.user-console-announcement-history')
-    if (history?.getAttribute('data-state') === 'open') return history
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 20))
-    })
-  }
-  throw new Error('Expected announcement history to open within 2 seconds.')
-}
-
 afterEach(async () => {
   for (const root of renderedRoots) {
     await unmountRoot(root)
   }
-  document.body.innerHTML = ''
 })
 
 describe('UserConsoleAnnouncements', () => {
   it('opens ticker details instead of dismissing when body content exists', async () => {
     const item = tickerAnnouncement()
-    const { root, onCloseAnnouncement } = await renderAnnouncements({ activeAnnouncements: [item] })
+    const { container, root, onCloseAnnouncement } = renderAnnouncements({ activeAnnouncements: [item] })
 
-    const ticker = document.querySelector<HTMLElement>('.user-console-announcement-ticker')
+    const ticker = container.querySelector<HTMLElement>('.user-console-announcement-ticker')
     expect(ticker?.textContent).toContain('Quota refreshed')
     expect(ticker?.textContent).not.toContain('Daily quota counters have refreshed.')
 
-    const detailButton = document.querySelector<HTMLButtonElement>(
+    const detailButton = container.querySelector<HTMLButtonElement>(
       `button[aria-label="${EN.announcements.tickerOpen.replace('{title}', 'Quota refreshed')}"]`,
     )
     expect(detailButton).not.toBeNull()
@@ -105,7 +116,7 @@ describe('UserConsoleAnnouncements', () => {
     })
 
     expect(onCloseAnnouncement).not.toHaveBeenCalled()
-    expect(document.querySelector('.user-console-announcement-ticker')).not.toBeNull()
+    expect(container.querySelector('.user-console-announcement-ticker')).not.toBeNull()
 
     await unmountRoot(root)
   })
@@ -114,12 +125,12 @@ describe('UserConsoleAnnouncements', () => {
     const item = tickerAnnouncement({
       content: '# Check the [status page](https://example.com)\n\nAdditional details.',
     })
-    const { root } = await renderAnnouncements({ activeAnnouncements: [item] })
+    const { container, root } = renderAnnouncements({ activeAnnouncements: [item] })
 
-    const titleLink = document.querySelector<HTMLAnchorElement>('.user-console-announcement-ticker-title a')
+    const titleLink = container.querySelector<HTMLAnchorElement>('.user-console-announcement-ticker-title a')
     expect(titleLink?.getAttribute('href')).toBe('https://example.com')
 
-    const detailButton = document.querySelector<HTMLButtonElement>(
+    const detailButton = container.querySelector<HTMLButtonElement>(
       `button[aria-label="${EN.announcements.tickerOpen.replace('{title}', 'Check the status page')}"]`,
     )
     expect(detailButton).not.toBeNull()
@@ -129,11 +140,11 @@ describe('UserConsoleAnnouncements', () => {
 
   it('dismisses ticker notifications directly when only a title exists', async () => {
     const item = tickerAnnouncement({ content: '# Quota refreshed' })
-    const { root, onCloseAnnouncement } = await renderAnnouncements({ activeAnnouncements: [item] })
+    const { container, root, onCloseAnnouncement } = renderAnnouncements({ activeAnnouncements: [item] })
 
-    expect(document.querySelector('.user-console-announcement-ticker-main--titled')).not.toBeNull()
+    expect(container.querySelector('.user-console-announcement-ticker-main--titled')).not.toBeNull()
 
-    const closeButton = document.querySelector<HTMLButtonElement>(
+    const closeButton = container.querySelector<HTMLButtonElement>(
       `button[aria-label="${EN.announcements.tickerClose}"]`,
     )
     expect(closeButton).not.toBeNull()
@@ -143,7 +154,7 @@ describe('UserConsoleAnnouncements', () => {
     })
 
     expect(onCloseAnnouncement).toHaveBeenCalledWith(item.id)
-    expect(document.querySelector('.user-console-announcement-dialog')).toBeNull()
+    expect(container.querySelector('.user-console-announcement-dialog')).toBeNull()
 
     await unmountRoot(root)
   })
@@ -153,17 +164,17 @@ describe('UserConsoleAnnouncements', () => {
       id: 'ann-ticker-untitled',
       content: 'Check the [status page](https://example.com) for live updates.',
     })
-    const { root, onCloseAnnouncement } = await renderAnnouncements({ activeAnnouncements: [item] })
+    const { container, root, onCloseAnnouncement } = renderAnnouncements({ activeAnnouncements: [item] })
 
-    const ticker = document.querySelector<HTMLElement>('.user-console-announcement-ticker')
+    const ticker = container.querySelector<HTMLElement>('.user-console-announcement-ticker')
     expect(ticker?.textContent).toContain('Check the status page for live updates.')
-    expect(document.querySelector('.user-console-announcement-ticker-main--untitled')).not.toBeNull()
-    expect(document.querySelector(`button[aria-label="${EN.announcements.tickerDetails}"]`)).toBeNull()
+    expect(container.querySelector('.user-console-announcement-ticker-main--untitled')).not.toBeNull()
+    expect(container.querySelector(`button[aria-label="${EN.announcements.tickerDetails}"]`)).toBeNull()
 
-    const link = document.querySelector<HTMLAnchorElement>('.user-console-announcement-ticker-content a')
+    const link = container.querySelector<HTMLAnchorElement>('.user-console-announcement-ticker-content a')
     expect(link?.getAttribute('href')).toBe('https://example.com')
 
-    const closeButton = document.querySelector<HTMLButtonElement>(
+    const closeButton = container.querySelector<HTMLButtonElement>(
       `button[aria-label="${EN.announcements.tickerClose}"]`,
     )
     expect(closeButton).not.toBeNull()
@@ -179,15 +190,14 @@ describe('UserConsoleAnnouncements', () => {
   it('offers mark as read only for an unclosed published ticker in history', async () => {
     const item = tickerAnnouncement({ id: 'ann-history-unread' })
     const onCloseAnnouncement = mock(() => {})
-    const { root } = await renderAnnouncements({
+    const { container, root } = renderAnnouncements({
       activeAnnouncements: [],
       historyAnnouncements: [item],
       historyOpen: true,
       onCloseAnnouncement,
     })
 
-    const history = await waitForHistory()
-    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const historyItem = container.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Quota refreshed')
     expect(historyItem?.textContent).toContain(EN.announcements.published)
     const markReadButton = Array.from(historyItem?.querySelectorAll('button') ?? [])
@@ -204,15 +214,14 @@ describe('UserConsoleAnnouncements', () => {
 
   it('shows handled time without a mark-read action for closed published tickers', async () => {
     const item = tickerAnnouncement({ id: 'ann-history-closed' })
-    const { root } = await renderAnnouncements({
+    const { container, root } = renderAnnouncements({
       activeAnnouncements: [],
       historyAnnouncements: [item],
       closedRecords: { [item.id]: 1_762_390_120 },
       historyOpen: true,
     })
 
-    const history = await waitForHistory()
-    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const historyItem = container.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Handled')
     expect(historyItem?.textContent).not.toContain(EN.announcements.markRead)
 
@@ -225,14 +234,13 @@ describe('UserConsoleAnnouncements', () => {
       displayKind: 'modal',
       content: '# Scheduled maintenance\n\nThe service will restart tonight.',
     })
-    const { root } = await renderAnnouncements({
+    const { container, root } = renderAnnouncements({
       activeAnnouncements: [],
       historyAnnouncements: [item],
       historyOpen: true,
     })
 
-    const history = await waitForHistory()
-    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const historyItem = container.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Scheduled maintenance')
     expect(historyItem?.textContent).toContain(EN.announcements.published)
     expect(historyItem?.textContent).not.toContain(EN.announcements.markRead)
@@ -248,14 +256,13 @@ describe('UserConsoleAnnouncements', () => {
       archivedAt: 3,
       content: '# Migration complete\n\nThe endpoint migration is complete.',
     })
-    const { root } = await renderAnnouncements({
+    const { container, root } = renderAnnouncements({
       activeAnnouncements: [],
       historyAnnouncements: [item],
       historyOpen: true,
     })
 
-    const history = await waitForHistory()
-    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const historyItem = container.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Migration complete')
     expect(historyItem?.textContent).not.toContain('Archived')
     expect(historyItem?.textContent).not.toContain(EN.announcements.markRead)
@@ -265,14 +272,13 @@ describe('UserConsoleAnnouncements', () => {
   })
 
   it('provides a named close action and an empty state in announcement history', async () => {
-    const { root } = await renderAnnouncements({
+    const { container, root } = renderAnnouncements({
       activeAnnouncements: [],
       historyOpen: true,
     })
 
-    const history = await waitForHistory()
-    expect(history.querySelector(`button[aria-label="${EN.announcements.closeHistory}"]`)).not.toBeNull()
-    expect(history.querySelector('.user-console-announcement-history-list')?.textContent)
+    expect(container.querySelector(`button[aria-label="${EN.announcements.closeHistory}"]`)).not.toBeNull()
+    expect(container.querySelector('.user-console-announcement-history-list')?.textContent)
       .toContain(EN.announcements.emptyHistory)
 
     await unmountRoot(root)
