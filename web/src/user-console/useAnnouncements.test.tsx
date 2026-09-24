@@ -29,6 +29,17 @@ const modalAnnouncement: Announcement = {
   archivedAt: null,
 }
 
+const tickerAnnouncement: Announcement = {
+  id: 'ann-ticker-1',
+  content: '# Ticker notice\n\nTicker body',
+  displayKind: 'ticker',
+  status: 'published',
+  createdAt: 1,
+  updatedAt: 2,
+  publishedAt: 2,
+  archivedAt: null,
+}
+
 const archivedAnnouncement: Announcement = {
   id: 'ann-archived-1',
   content: '# Archived notice\n\nArchived body',
@@ -52,7 +63,7 @@ describe('useUserConsoleAnnouncements', () => {
       const path = String(input)
       if (path === '/api/user/announcements') {
         return Promise.resolve(
-          new Response(JSON.stringify({ items: [modalAnnouncement] }), {
+          new Response(JSON.stringify({ items: [modalAnnouncement, tickerAnnouncement] }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
           }),
@@ -60,7 +71,7 @@ describe('useUserConsoleAnnouncements', () => {
       }
       if (path === '/api/user/announcements/history') {
         return Promise.resolve(
-          new Response(JSON.stringify({ items: [modalAnnouncement, archivedAnnouncement] }), {
+          new Response(JSON.stringify({ items: [modalAnnouncement, tickerAnnouncement, archivedAnnouncement] }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
           }),
@@ -94,10 +105,20 @@ describe('useUserConsoleAnnouncements', () => {
       '/api/user/announcements',
       '/api/user/announcements/history',
     ])
-    expect(latest?.activeAnnouncements).toEqual([modalAnnouncement])
-    expect(latest?.announcementHistory).toEqual([modalAnnouncement, archivedAnnouncement])
+    expect(latest?.activeAnnouncements).toEqual([modalAnnouncement, tickerAnnouncement])
+    expect(latest?.announcementHistory).toEqual([modalAnnouncement, tickerAnnouncement, archivedAnnouncement])
+    expect(latest?.visibleAnnouncementCount).toBe(2)
+    expect(latest?.announcementButtonLabel).toBe('Announcements (2)')
+
+    await act(async () => {
+      latest?.closeAnnouncement(tickerAnnouncement.id)
+    })
+    await flushEffects()
+
     expect(latest?.visibleAnnouncementCount).toBe(1)
     expect(latest?.announcementButtonLabel).toBe('Announcements (1)')
+    const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '{}') as Record<string, number>
+    expect(typeof stored[tickerAnnouncement.id]).toBe('number')
 
     await act(async () => {
       latest?.closeAnnouncement(modalAnnouncement.id)
@@ -106,8 +127,6 @@ describe('useUserConsoleAnnouncements', () => {
 
     expect(latest?.visibleAnnouncementCount).toBe(0)
     expect(latest?.announcementButtonLabel).toBe('Announcements')
-    const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '{}') as Record<string, number>
-    expect(typeof stored[modalAnnouncement.id]).toBe('number')
 
     await act(async () => root.unmount())
   })

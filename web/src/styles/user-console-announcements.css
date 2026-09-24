@@ -115,9 +115,39 @@
   max-height: min(78vh, 48rem);
 }
 
+.user-console-announcement-history--right {
+  height: 100dvh;
+  max-height: 100dvh;
+}
+
+.user-console-announcement-history-header {
+  flex: 0 0 auto;
+  padding: 18px 20px 14px;
+  text-align: left;
+}
+
+.user-console-announcement-history-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.user-console-announcement-history-heading > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.user-console-announcement-history-heading button {
+  flex: 0 0 48px;
+}
+
 .user-console-announcement-history-list {
   display: grid;
+  align-content: start;
   gap: 12px;
+  flex: 1 1 auto;
   min-height: 220px;
   overflow: auto;
   padding: 0 18px 22px;
@@ -160,6 +190,11 @@
   align-items: center;
   gap: 6px;
   font-size: 0.85rem;
+}
+
+.user-console-announcement-history-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 @media (max-width: 720px) {

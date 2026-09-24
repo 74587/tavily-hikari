@@ -62,6 +62,9 @@
 - 用户自动展示接口每种展示方式最多返回一条最新已发布公告。
 - 用户关闭状态只保存在浏览器本地，记录 `{ id, closedAt }`。
 - 用户历史入口必须能打开公告列表，并展示关闭过的公告状态；无标题公告不得生成伪标题。
+- 用户历史抽屉在窄屏（不超过 767px）从底部打开，在其他视口从右侧打开；右侧抽屉使用可滚动的全高列表。
+- 历史列表中，未关闭且仍在发布的横幅公告必须提供“标记已读”操作；该操作复用本地关闭记录，并立即停止自动展示该横幅、更新页头未关闭数量。已关闭横幅和弹窗公告不提供该操作。
+- 已归档公告继续保留在用户历史列表，但默认视为已读，不提供“标记已读”操作；用户界面不显示“已归档”标记。历史列表对关闭和标记已读统一显示处理时间。
 
 ### SHOULD
 
@@ -104,7 +107,15 @@
 
 - Given 用户点击页头通知入口
   When 历史面板打开
-  Then 已发布和已归档公告按时间倒序展示，并标明已关闭状态；无标题公告直接展示完整内容且不重复标题块。
+  Then 已发布和已归档公告按时间倒序展示；窄屏抽屉从底部打开，其他视口从右侧打开；无标题公告直接展示完整内容且不重复标题块，已归档公告不显示归档标记。
+
+- Given 当前发布中的横幅公告尚未在本浏览器关闭
+  When 用户在历史列表点击“标记已读”
+  Then 同一公告写入本地关闭记录，当前横幅消失，页头未关闭数量减少，历史项显示处理时间且不再提供该操作。
+
+- Given 已归档公告出现在历史列表
+  When 用户查看该公告
+  Then 它默认视为已读，不显示“标记已读”操作或“已归档”标记。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -136,7 +147,6 @@
   state: admin create route with content-only editor
   evidence_note: 纯前端 demo 的 `/admin/announcements/new` 路由只剩 `Content` 字段；独立标题输入已移除，文案明确说明首个 Markdown header 会作为标题，展示方式与保存动作仍保留在编辑页头部。
   image:
-  PR: include
   ![Admin announcements ui demo create route](./assets/admin-announcements-ui-demo-create-content-only.png)
 
 - source_type: ui_demo
@@ -144,7 +154,6 @@
   state: admin edit route with derived title and deduplicated body preview
   evidence_note: 纯前端 demo 的编辑路由同样只保留 `Content` 字段；现有横幅公告内容以 Markdown 原文编辑，右侧预览只渲染派生标题与去重后的正文，不再出现独立标题表单。
   image:
-  PR: include
   ![Admin announcements ui demo edit route](./assets/admin-announcements-ui-demo-edit-content-only.png)
 
 - source_type: storybook_canvas
@@ -152,7 +161,6 @@
   state: titled ticker announcement with a separate details action
   evidence_note: Storybook canvas 的控制台顶栏状态显示“有标题且有正文”的横幅只展示标题 `Quota refresh`，右侧是独立 `Details` 按钮，而不是把整条横幅做成点击入口。
   image:
-  PR: include
   ![User console storybook titled ticker details](./assets/user-console-storybook-titled-ticker-details.png)
 
 - source_type: storybook_canvas
@@ -160,7 +168,6 @@
   state: untitled ticker announcement renders inline markdown content
   evidence_note: Storybook canvas 的无标题横幅直接渲染完整内容；横幅内保留可点击的 `status page` 链接，不再生成伪标题，也不提供详情按钮。
   image:
-  PR: include
   ![User console storybook untitled ticker inline content](./assets/user-console-storybook-untitled-ticker-inline.png)
 
 - source_type: storybook_canvas
@@ -168,9 +175,26 @@
   state: untitled announcement history entry without a fake title
   evidence_note: Storybook canvas 的历史抽屉中，无标题公告只展示元信息与完整正文，不再补 `Untitled` 之类的伪标题；历史项里的 Markdown 链接继续可见。
   image:
-  PR: include
   ![User console storybook untitled announcement history](./assets/user-console-storybook-untitled-history.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `User Console/UserConsole/Console Home Announcement History Small Max`
+  state: 767px viewport with bottom drawer, independently scrolling history, and mark-read action
+  evidence_note: Storybook canvas 在 767px 视口下从底部打开公告历史；列表独立滚动，未读发布中横幅显示“标记已读”操作。
+  image:
+  ![User console announcement history at 767px](./assets/user-console-announcement-history-767px.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `User Console/UserConsole/Console Home Announcement History Desktop Min`
+  state: 768px viewport with full-height right drawer and independently scrolling history
+  evidence_note: Storybook canvas 在 768px 视口下从右侧打开满高公告历史；长标题与正文可换行，列表独立滚动，未读发布中横幅显示“标记已读”。
+  image:
+  ![User console announcement history at 768px](./assets/user-console-announcement-history-768px.png)
 
 ## Related PRs
 
 - None
+
+## Related ADRs
+
+None
