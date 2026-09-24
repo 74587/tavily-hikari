@@ -13,6 +13,7 @@ import {
 } from '../components/ui/dialog'
 import {
   Drawer,
+  DrawerClose,
   DrawerContent,
   DrawerDescription,
   DrawerHeader,
@@ -20,6 +21,7 @@ import {
 } from '../components/ui/drawer'
 import type { Language } from '../i18n'
 import { Icon } from '../lib/icons'
+import { useViewportMode } from '../lib/responsive'
 import { parseAnnouncementContent } from '../lib/announcementContent'
 import type { EN } from './text'
 
@@ -86,6 +88,8 @@ export default function UserConsoleAnnouncements({
   onCloseAnnouncement,
 }: UserConsoleAnnouncementsProps): JSX.Element {
   const strings = text.announcements
+  const viewportMode = useViewportMode()
+  const drawerDirection = viewportMode === 'small' ? 'bottom' : 'right'
   const [tickerDetailId, setTickerDetailId] = useState<string | null>(null)
   const modalAnnouncement = activeAnnouncements.find((item) => item.displayKind === 'modal' && !isClosed(item, closedRecords))
     ?? null
@@ -236,11 +240,34 @@ export default function UserConsoleAnnouncements({
         ) : null}
       </Dialog>
 
-      <Drawer open={historyOpen} onOpenChange={onHistoryOpenChange} shouldScaleBackground={false}>
-        <DrawerContent className="user-console-announcement-history">
-          <DrawerHeader>
-            <DrawerTitle>{strings.historyTitle}</DrawerTitle>
-            <DrawerDescription>{strings.historyDescription}</DrawerDescription>
+      <Drawer
+        open={historyOpen}
+        onOpenChange={onHistoryOpenChange}
+        shouldScaleBackground={false}
+        direction={drawerDirection}
+      >
+        <DrawerContent
+          direction={drawerDirection}
+          className={`user-console-announcement-history user-console-announcement-history--${drawerDirection}`}
+        >
+          <DrawerHeader className="user-console-announcement-history-header">
+            <div className="user-console-announcement-history-heading">
+              <div>
+                <DrawerTitle>{strings.historyTitle}</DrawerTitle>
+                <DrawerDescription>{strings.historyDescription}</DrawerDescription>
+              </div>
+              <DrawerClose asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={strings.closeHistory}
+                  title={strings.closeHistory}
+                >
+                  <Icon icon="mdi:close" width={20} height={20} aria-hidden="true" />
+                </Button>
+              </DrawerClose>
+            </div>
           </DrawerHeader>
           <div className="user-console-announcement-history-list">
             {historyAnnouncements.length === 0 ? (
@@ -266,9 +293,9 @@ export default function UserConsoleAnnouncements({
                           {formatAnnouncementTime(announcementHistoryTime(item), language)}
                         </span>
                       </div>
-                      <StatusBadge tone={item.status === 'published' ? 'success' : 'neutral'}>
-                        {item.status === 'published' ? strings.published : strings.archived}
-                      </StatusBadge>
+                      {item.status === 'published' ? (
+                        <StatusBadge tone="success">{strings.published}</StatusBadge>
+                      ) : null}
                     </header>
                     {historyContent ? (
                       <MarkdownContent
@@ -280,11 +307,26 @@ export default function UserConsoleAnnouncements({
                       <div className="user-console-announcement-closed">
                         <Icon icon="mdi:check-circle-outline" width={16} height={16} aria-hidden="true" />
                         <span>
-                          {strings.closedAt.replace(
+                          {strings.handledAt.replace(
                             '{time}',
                             formatAnnouncementTime(closedRecords[item.id], language),
                           )}
                         </span>
+                      </div>
+                    ) : null}
+                    {item.status === 'published'
+                    && item.displayKind === 'ticker'
+                    && !isClosed(item, closedRecords) ? (
+                      <div className="user-console-announcement-history-actions">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onCloseAnnouncement(item.id)}
+                        >
+                          <Icon icon="mdi:check" width={16} height={16} aria-hidden="true" />
+                          {strings.markRead}
+                        </Button>
                       </div>
                     ) : null}
                   </article>

@@ -1687,8 +1687,7 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
     .expect("rebuild should enter the tail replay before the live producer starts");
     let pressure_flush_complete = proxy
         .server_pressure_flush_completed_notifier_for_test()
-        .await
-        .notified_owned();
+        .await;
     let producer = {
         let proxy = proxy.clone();
         tokio::spawn(async move {
@@ -1711,22 +1710,27 @@ async fn analysis_pressure_rebuild_drains_events_arriving_during_tail_replay() {
     .await
     .expect("pressure rebuild drains its live tail");
 
-    // The deferred writer may yield for the five-second contention cooldown
-    // before its one-second retry cadence can observe the completed replay.
-    tokio::time::timeout(Duration::from_secs(8), pressure_flush_complete)
-        .await
-        .expect("deferred pressure writer drains events recorded during tail replay");
-
-    let (success_count, failure_count): (i64, i64) = sqlx::query_as(
-        r#"
-        SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
-        FROM observability.server_pressure_buckets
-        WHERE bucket_kind = 'five_minute'
-        "#,
-    )
-    .fetch_one(&proxy.key_store.pool)
+    let (success_count, failure_count) = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let counts: (i64, i64) = sqlx::query_as(
+                r#"
+                SELECT COALESCE(SUM(success_count), 0), COALESCE(SUM(failure_count), 0)
+                FROM observability.server_pressure_buckets
+                WHERE bucket_kind = 'five_minute'
+                "#,
+            )
+            .fetch_one(&proxy.key_store.pool)
+            .await
+            .expect("read rebuilt pressure totals");
+            if counts.0 >= 250 && counts.1 >= 100 {
+                break counts;
+            }
+            pressure_flush_complete.clone().notified_owned().await;
+        }
+    })
     .await
-    .expect("read rebuilt pressure totals");
+    .expect("deferred pressure writer drains events recorded during tail replay");
+
     assert_eq!(success_count, 250);
     assert_eq!(failure_count, 100);
 

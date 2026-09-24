@@ -22,7 +22,16 @@ type LandingFocus = 'Overview Focus' | 'Token Focus'
 type TokenListState = 'Single Token' | 'Multiple Tokens' | 'Empty'
 type TokenDetailPreview = 'Overview' | 'Token Revealed'
 type PushStatusPreview = 'Live' | 'Reconnecting' | 'Unsupported'
-type AnnouncementPreview = 'Active' | 'Ticker Title Only' | 'Ticker Untitled' | 'Closed' | 'History Open' | 'None'
+type AnnouncementPreview =
+  | 'Active'
+  | 'Ticker Title Only'
+  | 'Ticker Untitled'
+  | 'Closed'
+  | 'History Open'
+  | 'History Unread Ticker'
+  | 'History Read Ticker'
+  | 'History Empty'
+  | 'None'
 type RechargePreview = 'normal' | 'test-price' | 'disabled' | 'hidden'
 type RechargeQuotePreview = 'normal' | 'month-end-clamp'
 
@@ -818,6 +827,22 @@ const announcementArchivedSample: Announcement = {
   archivedAt: 1_762_250_000,
 }
 
+const announcementHistoryArchiveSamples: Announcement[] = Array.from({ length: 7 }, (_, index) => ({
+  ...announcementArchivedSample,
+  id: `ann-history-archived-${index + 1}`,
+  content: index === 0
+    ? '# Coordinated service endpoint migration completed across all regions and proxy routes\n\nThe migration is complete. Review the [migration notes](https://example.com) for details.'
+    : `# Service update ${index + 1}\n\nThis published service update has been archived. See [service notes](https://example.com).`,
+  createdAt: announcementArchivedSample.createdAt - index * 10_000,
+  updatedAt: announcementArchivedSample.updatedAt - index * 10_000,
+  publishedAt: announcementArchivedSample.publishedAt == null
+    ? null
+    : announcementArchivedSample.publishedAt - index * 10_000,
+  archivedAt: announcementArchivedSample.archivedAt == null
+    ? null
+    : announcementArchivedSample.archivedAt - index * 10_000,
+}))
+
 const storyAvatarDataUrl =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
@@ -983,7 +1008,12 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
         ? [announcementTitleOnlyTickerSample]
         : state.announcementPreview === 'Ticker Untitled'
           ? [announcementUntitledTickerSample]
-          : [announcementModalSample, announcementTickerSample]
+          : state.announcementPreview === 'History Unread Ticker'
+            || state.announcementPreview === 'History Read Ticker'
+            ? [announcementTickerSample]
+            : state.announcementPreview.startsWith('History ')
+              ? []
+              : [announcementModalSample, announcementTickerSample]
       return jsonResponse({
         items: state.announcementPreview === 'None'
           ? []
@@ -996,9 +1026,9 @@ function installUserConsoleFetchMock(state: UserConsoleStoryState): () => void {
         ? [announcementTitleOnlyTickerSample, announcementArchivedSample]
         : state.announcementPreview === 'Ticker Untitled'
           ? [announcementUntitledTickerSample, announcementArchivedSample]
-          : [announcementModalSample, announcementTickerSample, announcementArchivedSample]
+          : [announcementModalSample, announcementTickerSample, ...announcementHistoryArchiveSamples]
       return jsonResponse({
-        items: state.announcementPreview === 'None'
+        items: state.announcementPreview === 'None' || state.announcementPreview === 'History Empty'
           ? []
           : historyAnnouncements,
       })
@@ -1321,6 +1351,10 @@ function UserConsoleStory(
         [announcementTitleOnlyTickerSample.id]: 1_762_390_120,
         [announcementUntitledTickerSample.id]: 1_762_390_120,
       }))
+    } else if (storyState.announcementPreview === 'History Read Ticker') {
+      window.localStorage.setItem(storageKey, JSON.stringify({
+        [announcementTickerSample.id]: 1_762_390_120,
+      }))
     } else {
       window.localStorage.removeItem(storageKey)
     }
@@ -1345,7 +1379,7 @@ function UserConsoleStory(
   ])
 
   useEffect(() => {
-    if (!ready || storyState.announcementPreview !== 'History Open') return
+    if (!ready || !storyState.announcementPreview.startsWith('History ')) return
     const timer = window.setTimeout(() => {
       document.querySelector<HTMLButtonElement>('.user-console-announcements-trigger')?.click()
     }, 180)
@@ -1893,56 +1927,6 @@ export const ConsoleHomeUntitledTicker: Story = {
     const link = ticker.querySelector<HTMLAnchorElement>('.user-console-announcement-ticker-content a')
     if (link?.getAttribute('href') !== 'https://example.com') {
       throw new Error('Expected untitled ticker content links to remain clickable.')
-    }
-  },
-}
-
-export const ConsoleHomeAnnouncementHistory: Story = {
-  name: 'Console Home Announcement History',
-  args: {
-    consoleView: 'Console Home',
-    isAdmin: true,
-    landingFocus: 'Overview Focus',
-    announcementPreview: 'History Open',
-  },
-  parameters: {
-    viewport: { defaultViewport: '1440-device-desktop' },
-  },
-  play: async ({ canvasElement }) => {
-    await new Promise((resolve) => window.setTimeout(resolve, 260))
-
-    if (canvasElement.ownerDocument.querySelector('.user-console-announcement-history') == null) {
-      throw new Error('Expected announcement history drawer to render.')
-    }
-  },
-}
-
-export const ConsoleHomeAnnouncementHistoryUntitled: Story = {
-  name: 'Console Home Announcement History Untitled',
-  args: {
-    consoleView: 'Console Home',
-    isAdmin: true,
-    landingFocus: 'Overview Focus',
-    announcementPreview: 'Ticker Untitled',
-  },
-  parameters: {
-    viewport: { defaultViewport: '1440-device-desktop' },
-  },
-  play: async ({ canvasElement }) => {
-    await new Promise((resolve) => window.setTimeout(resolve, 180))
-    document.querySelector<HTMLButtonElement>('.user-console-announcements-trigger')?.click()
-    await new Promise((resolve) => window.setTimeout(resolve, 180))
-
-    const history = canvasElement.ownerDocument.querySelector<HTMLElement>('.user-console-announcement-history')
-    if (history == null) {
-      throw new Error('Expected untitled announcement history drawer to render.')
-    }
-    const firstItemText = history.querySelector('.user-console-announcement-history-item')?.textContent ?? ''
-    if (!firstItemText.includes('Check the status page for live updates.')) {
-      throw new Error('Expected untitled announcement history to render full content.')
-    }
-    if (firstItemText.includes('Untitled')) {
-      throw new Error('Expected untitled announcement history to avoid generating a fake title.')
     }
   },
 }

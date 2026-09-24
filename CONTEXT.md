@@ -4,6 +4,11 @@
 
 Tavily Hikari is a single-product service with one owner-facing admin surface, one user-facing console, and one active business ingress. High availability is implemented as active/standby control around that single ingress, not as a distributed cluster manager.
 
+## Announcement Terms
+
+- `unread ticker announcement`: a published banner announcement awaiting the user's acknowledgement.
+  Archived announcements are outside the unread set, even when the user did not acknowledge them.
+
 ## SQLite Workload Terms
 
 - `foreground work`: request-path reads and writes, including administrator mutations whose request
