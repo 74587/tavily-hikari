@@ -32,6 +32,7 @@
 - `web/src/lib/announcementContent.ts`
 - `web/src/user-console/Announcements.tsx`
 - `web/src/UserConsole.stories.tsx`
+- `web/src/UserConsoleAnnouncementHistory.stories.tsx`
 - `web/src/admin/AnnouncementsModule.stories.tsx`
 
 ## References

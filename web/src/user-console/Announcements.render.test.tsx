@@ -8,6 +8,8 @@ import type { Announcement } from '../api'
 import { EN } from './text'
 import UserConsoleAnnouncements from './Announcements'
 
+const renderedRoots = new Set<Root>()
+
 function tickerAnnouncement(patch: Partial<Announcement> = {}): Announcement {
   return {
     id: 'ann-ticker-1',
@@ -40,6 +42,7 @@ async function renderAnnouncements({
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
+  renderedRoots.add(root)
 
   await act(async () => {
     root.render(
@@ -59,7 +62,27 @@ async function renderAnnouncements({
   return { root, onCloseAnnouncement }
 }
 
-afterEach(() => {
+async function unmountRoot(root: Root): Promise<void> {
+  renderedRoots.delete(root)
+  await act(async () => root.unmount())
+}
+
+async function waitForHistory(): Promise<HTMLElement> {
+  const deadline = Date.now() + 2000
+  while (Date.now() < deadline) {
+    const history = document.querySelector<HTMLElement>('.user-console-announcement-history')
+    if (history?.getAttribute('data-state') === 'open') return history
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 20))
+    })
+  }
+  throw new Error('Expected announcement history to open within 2 seconds.')
+}
+
+afterEach(async () => {
+  for (const root of renderedRoots) {
+    await unmountRoot(root)
+  }
   document.body.innerHTML = ''
 })
 
@@ -84,7 +107,7 @@ describe('UserConsoleAnnouncements', () => {
     expect(onCloseAnnouncement).not.toHaveBeenCalled()
     expect(document.querySelector('.user-console-announcement-ticker')).not.toBeNull()
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('keeps inline markdown links clickable inside derived titles', async () => {
@@ -101,7 +124,7 @@ describe('UserConsoleAnnouncements', () => {
     )
     expect(detailButton).not.toBeNull()
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('dismisses ticker notifications directly when only a title exists', async () => {
@@ -122,7 +145,7 @@ describe('UserConsoleAnnouncements', () => {
     expect(onCloseAnnouncement).toHaveBeenCalledWith(item.id)
     expect(document.querySelector('.user-console-announcement-dialog')).toBeNull()
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('renders untitled ticker content inline without opening details', async () => {
@@ -150,7 +173,7 @@ describe('UserConsoleAnnouncements', () => {
     })
 
     expect(onCloseAnnouncement).toHaveBeenCalledWith(item.id)
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('offers mark as read only for an unclosed published ticker in history', async () => {
@@ -163,7 +186,8 @@ describe('UserConsoleAnnouncements', () => {
       onCloseAnnouncement,
     })
 
-    const historyItem = document.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const history = await waitForHistory()
+    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Quota refreshed')
     expect(historyItem?.textContent).toContain(EN.announcements.published)
     const markReadButton = Array.from(historyItem?.querySelectorAll('button') ?? [])
@@ -175,7 +199,7 @@ describe('UserConsoleAnnouncements', () => {
     })
 
     expect(onCloseAnnouncement).toHaveBeenCalledWith(item.id)
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('shows handled time without a mark-read action for closed published tickers', async () => {
@@ -187,11 +211,12 @@ describe('UserConsoleAnnouncements', () => {
       historyOpen: true,
     })
 
-    const historyItem = document.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const history = await waitForHistory()
+    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Handled')
     expect(historyItem?.textContent).not.toContain(EN.announcements.markRead)
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('does not offer mark as read for published modal notices', async () => {
@@ -206,13 +231,14 @@ describe('UserConsoleAnnouncements', () => {
       historyOpen: true,
     })
 
-    const historyItem = document.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const history = await waitForHistory()
+    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Scheduled maintenance')
     expect(historyItem?.textContent).toContain(EN.announcements.published)
     expect(historyItem?.textContent).not.toContain(EN.announcements.markRead)
     expect(historyItem?.querySelector('button')).toBeNull()
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('keeps archived notices in history without an archived badge or mark-read action', async () => {
@@ -228,13 +254,14 @@ describe('UserConsoleAnnouncements', () => {
       historyOpen: true,
     })
 
-    const historyItem = document.querySelector<HTMLElement>('.user-console-announcement-history-item')
+    const history = await waitForHistory()
+    const historyItem = history.querySelector<HTMLElement>('.user-console-announcement-history-item')
     expect(historyItem?.textContent).toContain('Migration complete')
     expect(historyItem?.textContent).not.toContain('Archived')
     expect(historyItem?.textContent).not.toContain(EN.announcements.markRead)
     expect(historyItem?.querySelector('.status-badge')).toBeNull()
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 
   it('provides a named close action and an empty state in announcement history', async () => {
@@ -243,10 +270,11 @@ describe('UserConsoleAnnouncements', () => {
       historyOpen: true,
     })
 
-    expect(document.querySelector(`button[aria-label="${EN.announcements.closeHistory}"]`)).not.toBeNull()
-    expect(document.querySelector('.user-console-announcement-history-list')?.textContent)
+    const history = await waitForHistory()
+    expect(history.querySelector(`button[aria-label="${EN.announcements.closeHistory}"]`)).not.toBeNull()
+    expect(history.querySelector('.user-console-announcement-history-list')?.textContent)
       .toContain(EN.announcements.emptyHistory)
 
-    await act(async () => root.unmount())
+    await unmountRoot(root)
   })
 })
