@@ -12,7 +12,7 @@
 
 ## Related Changes
 
-- None. Record PR, commit, review, and compatibility references here; do not add task history to `SPEC.md`.
+- 2026-09-28: PR [#629](https://github.com/IvanLi-CN/tavily-hikari/pull/629) adds the endpoint through commits `fb375dfb`, `ca08acbc`, and `99a3b8c9`. Tier 4 review against base `541ab04b` completed with clear contract, state-concurrency, failure-data-safety, test-platform, and database-migration lanes. The API is additive; historical quota before membership tracking remains unknown, and reimported keys use only quota captured during the new membership interval. See `./SPEC.md` for the response and compatibility contract.
 
 ## References
 
