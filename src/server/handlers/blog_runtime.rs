@@ -3,6 +3,34 @@ use axum::routing::MethodRouter;
 use chrono::{FixedOffset, SecondsFormat, Timelike};
 use tower_http::cors::CorsLayer;
 
+#[derive(Debug, Clone)]
+struct CachedPublicBlogRuntimeSnapshot {
+    body: Bytes,
+    etag: String,
+    refreshed_at: tokio::time::Instant,
+}
+
+#[derive(Debug)]
+struct PublicBlogRuntimeCache {
+    snapshot: Option<CachedPublicBlogRuntimeSnapshot>,
+    refreshing: bool,
+    retry_not_before: Option<tokio::time::Instant>,
+    notify: Arc<tokio::sync::Notify>,
+    request_timestamps: VecDeque<tokio::time::Instant>,
+}
+
+impl Default for PublicBlogRuntimeCache {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            refreshing: false,
+            retry_not_before: None,
+            notify: Arc::new(tokio::sync::Notify::new()),
+            request_timestamps: VecDeque::new(),
+        }
+    }
+}
+
 const BLOG_RUNTIME_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
 const BLOG_RUNTIME_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOG_RUNTIME_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(5);

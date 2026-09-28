@@ -71,34 +71,6 @@ struct CachedDashboardOverviewSnapshot {
     freshness: Arc<DashboardOverviewFreshness>,
 }
 
-#[derive(Debug, Clone)]
-struct CachedPublicBlogRuntimeSnapshot {
-    body: Bytes,
-    etag: String,
-    refreshed_at: tokio::time::Instant,
-}
-
-#[derive(Debug)]
-struct PublicBlogRuntimeCache {
-    snapshot: Option<CachedPublicBlogRuntimeSnapshot>,
-    refreshing: bool,
-    retry_not_before: Option<tokio::time::Instant>,
-    notify: Arc<tokio::sync::Notify>,
-    request_timestamps: VecDeque<tokio::time::Instant>,
-}
-
-impl Default for PublicBlogRuntimeCache {
-    fn default() -> Self {
-        Self {
-            snapshot: None,
-            refreshing: false,
-            retry_not_before: None,
-            notify: Arc::new(tokio::sync::Notify::new()),
-            request_timestamps: VecDeque::new(),
-        }
-    }
-}
-
 #[derive(Debug)]
 struct DashboardOverviewCacheState {
     cached: Option<CachedDashboardOverviewSnapshot>,
