@@ -108,6 +108,7 @@ struct DashboardOverviewCacheState {
     #[cfg(test)]
     admin_alerts_warm_before_projection_fence_pause: Option<AdminAlertsWarmPause>,
     admin_privacy_status: AdminPrivacyStatusController,
+    public_blog_runtime: PublicBlogRuntimeCache,
     #[cfg(test)]
     build_count: usize,
     #[cfg(test)]
@@ -154,6 +155,7 @@ impl Default for DashboardOverviewCacheState {
             #[cfg(test)]
             admin_alerts_warm_before_projection_fence_pause: None,
             admin_privacy_status: AdminPrivacyStatusController::default(),
+            public_blog_runtime: PublicBlogRuntimeCache::default(),
             #[cfg(test)]
             build_count: 0,
             #[cfg(test)]

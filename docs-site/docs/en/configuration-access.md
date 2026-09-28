@@ -24,16 +24,17 @@ Recommended defaults:
 
 No matter which access model you choose, these settings are the main runtime contract:
 
-| Flag / Env                        | Usually matters | Purpose                         |
-| --------------------------------- | --------------- | ------------------------------- |
-| `--upstream` / `TAVILY_UPSTREAM`  | yes             | Tavily MCP upstream URL         |
-| `TAVILY_USAGE_BASE`               | yes             | Tavily HTTP / usage base URL    |
-| `--bind` / `PROXY_BIND`           | yes             | listen address                  |
-| `--port` / `PROXY_PORT`           | yes             | listen port                     |
-| `--db-path` / `PROXY_DB_PATH`     | yes             | SQLite database path            |
-| `LOW_QUOTA_DEPLETION_THRESHOLD`   | optional        | low-balance 432 key threshold   |
-| `--static-dir` / `WEB_STATIC_DIR` | depends         | frontend static asset directory |
-| `--keys` / `TAVILY_API_KEYS`      | optional        | one-time key bootstrap helper   |
+| Flag / Env                        | Usually matters | Purpose                                         |
+| --------------------------------- | --------------- | ----------------------------------------------- |
+| `--upstream` / `TAVILY_UPSTREAM`  | yes             | Tavily MCP upstream URL                         |
+| `TAVILY_USAGE_BASE`               | yes             | Tavily HTTP / usage base URL                    |
+| `--bind` / `PROXY_BIND`           | yes             | listen address                                  |
+| `--port` / `PROXY_PORT`           | yes             | listen port                                     |
+| `--db-path` / `PROXY_DB_PATH`     | yes             | SQLite database path                            |
+| `LOW_QUOTA_DEPLETION_THRESHOLD`   | optional        | low-balance 432 key threshold                   |
+| `BLOG_RUNTIME_CORS_ORIGINS`       | optional        | browser origins for the public blog runtime API |
+| `--static-dir` / `WEB_STATIC_DIR` | depends         | frontend static asset directory                 |
+| `--keys` / `TAVILY_API_KEYS`      | optional        | one-time key bootstrap helper                   |
 
 Notes:
 
@@ -51,6 +52,9 @@ Notes:
   exists.
 - `TAVILY_API_KEYS` is convenient for bootstrapping, but long-term key lifecycle should be managed
   through the admin UI or admin API.
+- `BLOG_RUNTIME_CORS_ORIGINS` is a comma-separated explicit origin list for
+  `/api/public/blog-runtime/v1/tavily-hikari`. It defaults to `https://ivanli.cc` and
+  `http://127.0.0.1:12620`; wildcard origins are rejected.
 
 ## Minimum config by deployment shape
 

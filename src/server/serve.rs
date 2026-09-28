@@ -52,6 +52,9 @@ async fn serve_with_shutdown(
         tokio::sync::oneshot::Receiver<()>,
     )>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let blog_runtime_cors = public_blog_runtime_cors_layer_from_env().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+    })?;
     let AdminAuthOptions {
         forward_auth_enabled,
         builtin_auth_enabled,
@@ -428,6 +431,10 @@ async fn serve_with_shutdown(
         )
         .route("/api/stats/forward-proxy", get(get_forward_proxy_live_stats))
         .route("/api/public/metrics", get(get_public_metrics))
+        .route(
+            "/api/public/blog-runtime/v1/tavily-hikari",
+            public_blog_runtime_method_router(blog_runtime_cors),
+        )
         .route("/api/keys", get(list_keys))
         .route("/api/keys", post(create_api_key))
         .route("/api/keys/validate", post(post_validate_api_keys))

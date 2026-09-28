@@ -25,6 +25,7 @@ mod account_quota_and_billing;
 mod account_quota_schema_migration;
 mod account_usage_rollup_request_days;
 mod alert_projection;
+mod blog_runtime;
 mod dashboard_hourly_credits;
 mod dashboard_month_series;
 mod dashboard_rollup_integrity;

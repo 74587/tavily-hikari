@@ -1340,6 +1340,32 @@ pub struct ProxySummary {
     pub total_quota_remaining: i64,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicBlogRuntimeHour {
+    pub local_hour_start: i64,
+    pub requests: i64,
+    pub credits: i64,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicBlogRuntimeDay {
+    pub date: String,
+    pub local_day_start: i64,
+    pub requests: i64,
+    pub credits: i64,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicBlogRuntimeData {
+    pub hours: Vec<PublicBlogRuntimeHour>,
+    pub days: Vec<PublicBlogRuntimeDay>,
+    pub total_quota_limit: Option<i64>,
+    pub historical_quota_limits: Vec<Option<i64>>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SummaryQuotaCharge {
     pub local_estimated_credits: i64,

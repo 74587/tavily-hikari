@@ -907,6 +907,7 @@ impl KeyStore {
         self.ensure_api_key_quarantines_schema().await?;
         self.ensure_api_key_maintenance_records_schema().await?;
         self.ensure_api_key_quota_sync_samples_schema().await?;
+        self.ensure_api_key_membership_intervals_schema().await?;
         self.ensure_api_key_low_quota_depletions_schema().await?;
 
         sqlx::query(

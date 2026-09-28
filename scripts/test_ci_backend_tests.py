@@ -98,6 +98,24 @@ class BackendTestRunnerContractTests(unittest.TestCase):
             self.assertTrue(runtime_manifest.is_file())
             self.assertTrue((root / "source" / "src" / "lib.rs").is_file())
             self.assertTrue((root / "source" / "tests" / "rust_source_line_budgets.rs").is_file())
+            runtime_manifest.write_text(
+                json.dumps(
+                    {
+                        "coverage_targets": {"lib": {}},
+                        "shards": [
+                            {
+                                "id": "fixture-lib",
+                                "name": "Fixture Lib",
+                                "kind": "lib",
+                                "estimated_seconds": 1,
+                                "coverage_target": "lib",
+                                "run_args": ["--lib"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             completed = subprocess.run(
                 [sys.executable, str(runtime_runner), "lane-matrix", "--lane-count", "16"],
@@ -757,12 +775,20 @@ class BackendTestRunnerContractTests(unittest.TestCase):
         self.assertEqual(exact_fallback, ["server::tests::admin::other"])
         self.assertEqual(isolated_tests, [])
 
-    def test_manifest_lpt_stays_within_the_lane_budget(self):
-        _targets, shards = RUNNER.load_manifest()
-        lanes = RUNNER.build_lane_matrix(shards, 16)
+    def test_lane_matrix_fallback_stays_within_the_lane_budget(self):
+        shards = [
+            {"id": f"shard-{index}", "estimated_seconds": duration}
+            for index, duration in enumerate([8, 7, 6, 5, 4], start=1)
+        ]
+        lanes = RUNNER.build_lane_matrix(shards, 2, budget_seconds=15)
 
-        self.assertEqual(len(lanes), 16)
-        self.assertLessEqual(max(lane["estimated_seconds"] for lane in lanes), 120)
+        self.assertEqual(len(lanes), 2)
+        assigned_shards = [shard_id for lane in lanes for shard_id in lane["shard_ids"]]
+        self.assertCountEqual(assigned_shards, [shard["id"] for shard in shards])
+        self.assertLessEqual(
+            max(lane["estimated_seconds"] for lane in lanes),
+            15,
+        )
 
 
 if __name__ == "__main__":

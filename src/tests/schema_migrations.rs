@@ -449,18 +449,45 @@ async fn canonical_groups_snapshot_migration_invalidates_v33_active_generation()
             "{name} reclaim must not sort an unbounded candidate set: {plan}"
         );
     }
-    assert!(
+    let mut held_connections = vec![
+        proxy
+            .key_store
+            .pool
+            .acquire()
+            .await
+            .expect("hold a canonical groups reclaimer pool connection"),
+    ];
+    while let Some(connection) = proxy.key_store.pool.try_acquire() {
+        held_connections.push(connection);
+    }
+    assert_eq!(
+        proxy.key_store.admin_alerts_cache_warm_pressure_reason(),
+        Some("pool_pressure"),
+        "a fully checked-out pool must defer the canonical groups reclaimer"
+    );
+    assert!(matches!(
         proxy
             .key_store
             .reclaim_admin_alert_canonical_groups_generations()
-            .await
-            .expect("reclaim the first legacy retired-generation batch"),
+            .await,
+        Err(ProxyError::Deferred { reason, .. }) if reason == "pool_pressure"
+    ));
+    let release_connections = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(held_connections);
+    });
+    release_connections
+        .await
+        .expect("release the held reclaimer pool connections");
+    let reclaimed_first_batch = reclaim_canonical_groups_generation_batch_when_admitted(&proxy)
+        .await
+        .expect("reclaim the first legacy retired-generation batch");
+    assert!(
+        reclaimed_first_batch,
         "one 25-row batch must leave the final retired legacy row for the next slice"
     );
     assert!(
-        !proxy
-            .key_store
-            .reclaim_admin_alert_canonical_groups_generations()
+        !reclaim_canonical_groups_generation_batch_when_admitted(&proxy)
             .await
             .expect("finish reclaiming legacy retired generations"),
         "the active legacy generation must stay available while older generations drain"
@@ -526,6 +553,29 @@ async fn canonical_groups_snapshot_migration_invalidates_v33_active_generation()
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+}
+
+async fn reclaim_canonical_groups_generation_batch_when_admitted(
+    proxy: &TavilyProxy,
+) -> Result<bool, ProxyError> {
+    let retry_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match proxy
+            .key_store
+            .reclaim_admin_alert_canonical_groups_generations()
+            .await
+        {
+            Err(ProxyError::Deferred { reason, .. })
+                if matches!(
+                    reason.as_str(),
+                    "foreground_pressure" | "recent_contention" | "pool_pressure"
+                ) && tokio::time::Instant::now() < retry_deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 #[tokio::test]

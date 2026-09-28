@@ -1751,6 +1751,15 @@ impl KeyStore {
                     }
                     sql.bind(&id).execute(&mut *tx).await?;
                 }
+                if deleted_at.is_some() {
+                    sqlx::query(
+                        "INSERT INTO api_key_membership_intervals (key_id, active_from) VALUES (?, ?)",
+                    )
+                    .bind(&id)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 if should_persist_proxy_affinity
                     && let Some(proxy_affinity) = input.proxy_affinity
                 {
@@ -1804,6 +1813,13 @@ impl KeyStore {
             .bind(now)
             .execute(&mut *tx)
             .await?;
+            sqlx::query(
+                "INSERT INTO api_key_membership_intervals (key_id, active_from) VALUES (?, ?)",
+            )
+            .bind(&id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
             if let Some(proxy_affinity) = input.proxy_affinity {
                 sqlx::query(
                     r#"
@@ -1840,11 +1856,20 @@ impl KeyStore {
     // Admin ops: soft-delete by ID (mark deleted_at)
     pub(crate) async fn soft_delete_key_by_id(&self, key_id: &str) -> Result<(), ProxyError> {
         let now = self.backend_time.now_ts();
+        let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE api_keys SET deleted_at = ? WHERE id = ?")
             .bind(now)
             .bind(key_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "UPDATE api_key_membership_intervals SET active_until = ? WHERE key_id = ? AND active_until IS NULL",
+        )
+        .bind(now)
+        .bind(key_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 

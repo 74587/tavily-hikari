@@ -29,6 +29,24 @@ impl RebalanceAuditEntry {
 
 impl TavilyProxy {
     #[doc(hidden)]
+    pub async fn public_blog_runtime_data(
+        &self,
+        metric_start: i64,
+        history_start: i64,
+        now: i64,
+        historical_quota_timestamps: &[i64],
+    ) -> Result<PublicBlogRuntimeData, ProxyError> {
+        self.key_store
+            .fetch_public_blog_runtime_data(
+                metric_start,
+                history_start,
+                now,
+                historical_quota_timestamps,
+            )
+            .await
+    }
+
+    #[doc(hidden)]
     pub async fn enqueue_rebalance_audit(&self, entry: RebalanceAuditEntry) -> bool {
         const MAX_AUDITS: usize = 64;
         const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;

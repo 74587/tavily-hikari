@@ -313,9 +313,16 @@ impl KeyStore {
             {
                 if deleted_at.is_some() {
                     sqlx::query("UPDATE api_keys SET deleted_at = NULL WHERE id = ?")
-                        .bind(id)
+                        .bind(&id)
                         .execute(&mut *tx)
                         .await?;
+                    sqlx::query(
+                        "INSERT INTO api_key_membership_intervals (key_id, active_from) VALUES (?, ?)",
+                    )
+                    .bind(&id)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
                 }
                 continue;
             }
@@ -334,15 +341,49 @@ impl KeyStore {
             .bind(now)
             .execute(&mut *tx)
             .await?;
+            sqlx::query(
+                "INSERT INTO api_key_membership_intervals (key_id, active_from) VALUES (?, ?)",
+            )
+            .bind(&id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
         }
 
         // Soft delete any keys not present in the provided set
         if keys.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE api_key_membership_intervals
+                SET active_until = ?
+                WHERE active_until IS NULL
+                  AND key_id IN (SELECT id FROM api_keys WHERE deleted_at IS NULL)
+                "#,
+            )
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
             sqlx::query("UPDATE api_keys SET deleted_at = ? WHERE deleted_at IS NULL")
                 .bind(now)
                 .execute(&mut *tx)
                 .await?;
         } else {
+            let mut interval_builder = QueryBuilder::new(
+                "UPDATE api_key_membership_intervals SET active_until = ",
+            );
+            interval_builder.push_bind(now);
+            interval_builder.push(
+                " WHERE active_until IS NULL AND key_id IN (SELECT id FROM api_keys WHERE deleted_at IS NULL AND api_key NOT IN (",
+            );
+            {
+                let mut separated = interval_builder.separated(", ");
+                for key in keys {
+                    separated.push_bind(key);
+                }
+            }
+            interval_builder.push("))");
+            interval_builder.build().execute(&mut *tx).await?;
+
             let mut builder = QueryBuilder::new("UPDATE api_keys SET deleted_at = ");
             builder.push_bind(now);
             builder.push(" WHERE deleted_at IS NULL AND api_key NOT IN (");
