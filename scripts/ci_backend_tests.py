@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -25,6 +26,7 @@ DEFAULT_BENCHMARK_WORKERS = max(1, os.cpu_count() or 1)
 DEFAULT_LOW_RESOURCE_CARGO_JOBS = 2
 DEFAULT_LOW_RESOURCE_FILTERED_PROCESS_WORKERS = 1
 DEFAULT_LOW_RESOURCE_FILTERED_TEST_THREADS = 2
+LANE_ESTIMATE_BUDGET_SECONDS = 120
 DIAGNOSTIC_CARGO_JOBS = 1
 DIAGNOSTIC_FILTERED_PROCESS_WORKERS = 1
 DIAGNOSTIC_FILTERED_TEST_THREADS = 1
@@ -1014,7 +1016,7 @@ def output_matrix(kind):
     print(json.dumps(matrix))
 
 
-def build_lane_matrix(shards, lane_count):
+def build_lane_matrix(shards, lane_count, budget_seconds=LANE_ESTIMATE_BUDGET_SECONDS):
     if lane_count < 1:
         raise SystemExit("lane count must be at least one")
     if not shards:
@@ -1031,7 +1033,91 @@ def build_lane_matrix(shards, lane_count):
         lane = lanes[lane_index]
         lane["shard_ids"].append(shard["id"])
         lane["estimated_seconds"] += shard["estimated_seconds"]
+
+    # Keep normal planning cheap; search only when LPT misses the configured lane budget.
+    if max(lane["estimated_seconds"] for lane in lanes) > budget_seconds:
+        packed = build_capacity_constrained_lane_matrix(shards, lane_count, budget_seconds)
+        if packed is not None:
+            return packed
+
     return lanes
+
+
+def build_capacity_constrained_lane_matrix(shards, lane_count, budget_seconds):
+    lane_count = min(lane_count, len(shards))
+    ordered = sorted(shards, key=lambda item: (-item["estimated_seconds"], item["id"]))
+    if any(shard["estimated_seconds"] > budget_seconds for shard in ordered):
+        return None
+    if sum(shard["estimated_seconds"] for shard in ordered) > lane_count * budget_seconds:
+        return None
+
+    suffix_seconds = [0] * (len(ordered) + 1)
+    for index in range(len(ordered) - 1, -1, -1):
+        suffix_seconds[index] = suffix_seconds[index + 1] + ordered[index]["estimated_seconds"]
+
+    @lru_cache(maxsize=None)
+    def can_assign(index, remaining):
+        if index == len(ordered):
+            return True
+        if suffix_seconds[index] > sum(remaining) or ordered[index]["estimated_seconds"] > remaining[0]:
+            return False
+
+        duration = ordered[index]["estimated_seconds"]
+        tried_remaining = set()
+        for lane_index, free_seconds in enumerate(remaining):
+            if free_seconds < duration or free_seconds in tried_remaining:
+                continue
+
+            next_remaining = list(remaining)
+            next_remaining[lane_index] -= duration
+            if can_assign(index + 1, tuple(sorted(next_remaining, reverse=True))):
+                return True
+            tried_remaining.add(free_seconds)
+
+        return False
+
+    remaining = tuple([budget_seconds] * lane_count)
+    if not can_assign(0, remaining):
+        return None
+
+    lane_shards = [[] for _ in range(lane_count)]
+    lane_for_remaining = list(range(lane_count))
+    for index, shard in enumerate(ordered):
+        duration = shard["estimated_seconds"]
+        tried_remaining = set()
+        for slot, free_seconds in enumerate(remaining):
+            if free_seconds < duration or free_seconds in tried_remaining:
+                continue
+
+            updated = [
+                value - duration if old_slot == slot else value
+                for old_slot, value in enumerate(remaining)
+            ]
+            entries = sorted(
+                ((value, old_slot) for old_slot, value in enumerate(updated)),
+                key=lambda entry: (-entry[0], entry[1]),
+            )
+            next_remaining = tuple(value for value, _ in entries)
+            if can_assign(index + 1, next_remaining):
+                lane_shards[lane_for_remaining[slot]].append(shard)
+                lane_for_remaining = [lane_for_remaining[old_slot] for _, old_slot in entries]
+                remaining = next_remaining
+                break
+            tried_remaining.add(free_seconds)
+        else:
+            return None
+
+    return [
+        {
+            "id": f"lane-{lane_index + 1:02d}",
+            "name": f"Lane {lane_index + 1:02d}",
+            "estimated_seconds": sum(
+                shard["estimated_seconds"] for shard in lane_shards[lane_index]
+            ),
+            "shard_ids": [shard["id"] for shard in lane_shards[lane_index]],
+        }
+        for lane_index in range(lane_count)
+    ]
 
 
 def shard_resource_limits(shard, filtered_process_workers=None, filtered_test_threads=None):
@@ -1054,7 +1140,17 @@ def isolated_process_worker_limit(shard, filtered_process_workers):
 
 def output_lane_matrix(lane_count):
     _, shards = load_manifest()
-    print(json.dumps(build_lane_matrix(shards, lane_count), separators=(",", ":")))
+    lanes = build_lane_matrix(shards, lane_count)
+    assigned_shards = [shard_id for lane in lanes for shard_id in lane["shard_ids"]]
+    if sorted(assigned_shards) != sorted(shard["id"] for shard in shards):
+        raise SystemExit("backend lane matrix did not assign every shard exactly once")
+    max_estimated_seconds = max(lane["estimated_seconds"] for lane in lanes)
+    if max_estimated_seconds > LANE_ESTIMATE_BUDGET_SECONDS:
+        raise SystemExit(
+            "backend lane matrix exceeds the estimated lane budget "
+            f"({max_estimated_seconds} > {LANE_ESTIMATE_BUDGET_SECONDS} seconds)"
+        )
+    print(json.dumps(lanes, separators=(",", ":")))
 
 
 def run_shard(
