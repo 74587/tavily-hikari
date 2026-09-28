@@ -230,7 +230,7 @@
       "id": "lib-request-rollup-reporting",
       "kind": "lib",
       "name": "Lib Request Rollup Reporting",
-      "estimated_seconds": 48,
+      "estimated_seconds": 55,
       "coverage_target": "lib",
       "run_args": ["--lib"],
       "filtered_test_threads": 2,
@@ -252,7 +252,8 @@
         "tests::request_rollup_public_metrics::request_stats_",
         "tests::request_rollup_public_metrics::admitted_flush_",
         "tests::request_rollup_public_metrics::expired_flush_",
-        "tests::request_rollup::public_"
+        "tests::request_rollup::public_",
+        "tests::blog_runtime::public_blog_runtime_"
       ]
     },
     {
@@ -674,6 +675,17 @@
         "server::admin_resources_tests::",
         "server::dto_tests::"
       ]
+    },
+    {
+      "id": "bin-public-blog-runtime",
+      "kind": "bin",
+      "name": "Bin Public Blog Runtime",
+      "estimated_seconds": 25,
+      "coverage_target": "bin-main",
+      "run_args": ["--bin", "tavily-hikari"],
+      "filtered_process_workers": 1,
+      "filtered_test_threads": 2,
+      "include_prefixes": ["server::tests::blog_runtime_public::"]
     },
     {
       "id": "bin-admin-api-settings",

@@ -45,6 +45,7 @@ mod tests {
     mod alerts_and_ha_startup_roles;
     mod api_keys_and_registration;
     mod branded_assets_contract;
+    mod blog_runtime_public;
     mod core_support_and_parsing;
     mod dashboard_overview_snapshot;
     mod linuxdo_oauth_and_admin_keys;

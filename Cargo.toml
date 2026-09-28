@@ -25,7 +25,7 @@ tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "signal", "
 url = "2.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower-http = { version = "0.5", features = ["fs"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
 tower = { version = "0.4", features = ["util"] }
 nanoid = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
