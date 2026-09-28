@@ -82,8 +82,18 @@ impl KeyStore {
         .await?
         .unwrap_or_default();
 
+        let lifecycle_tracked_from = sqlx::query_scalar::<_, i64>(
+            "SELECT tracked_from FROM api_key_membership_history_state WHERE singleton = 1",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
         let mut historical_quota_limits = Vec::with_capacity(historical_quota_timestamps.len());
         for timestamp in historical_quota_timestamps {
+            if *timestamp < lifecycle_tracked_from {
+                historical_quota_limits.push(None);
+                continue;
+            }
+
             let row = sqlx::query(
                 r#"
                 SELECT
@@ -108,8 +118,9 @@ impl KeyStore {
                             END
                         ) AS quota_limit
                     FROM api_keys ak
-                    WHERE ak.created_at <= ?
-                      AND (ak.deleted_at IS NULL OR ak.deleted_at > ?)
+                    JOIN api_key_membership_intervals membership ON membership.key_id = ak.id
+                    WHERE membership.active_from <= ?
+                      AND (membership.active_until IS NULL OR membership.active_until > ?)
                       AND NOT EXISTS (
                           SELECT 1
                           FROM api_key_quarantines aq

@@ -61,13 +61,16 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
             ('blog-runtime-active-a', 'tvly-blog-runtime-active-a', 'active', ?, 300, ?),
             ('blog-runtime-active-b', 'tvly-blog-runtime-active-b', 'active', ?, 500, ?),
             ('blog-runtime-quarantined', 'tvly-blog-runtime-quarantined', 'active', ?, 700, ?),
-            ('blog-runtime-deleted', 'tvly-blog-runtime-deleted', 'active', ?, 800, ?)
+            ('blog-runtime-deleted', 'tvly-blog-runtime-deleted', 'active', ?, 800, ?),
+            ('blog-runtime-reimported', 'tvly-blog-runtime-reimported', 'active', ?, 800, ?)
         "#,
     )
     .bind(now - 86_400)
     .bind(now - 20_000)
     .bind(now - 86_400)
     .bind(now - 3_600)
+    .bind(now - 86_400)
+    .bind(now - 20_000)
     .bind(now - 86_400)
     .bind(now - 20_000)
     .bind(now - 86_400)
@@ -80,6 +83,39 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         .execute(&proxy.key_store.pool)
         .await
         .expect("delete historical key");
+    sqlx::query("UPDATE api_key_membership_history_state SET tracked_from = ? WHERE singleton = 1")
+        .bind(history_start)
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("set deterministic lifecycle tracking start");
+    sqlx::query("DELETE FROM api_key_membership_intervals")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("clear initial lifecycle intervals");
+    sqlx::query(
+        r#"
+        INSERT INTO api_key_membership_intervals (key_id, active_from, active_until)
+        SELECT id, ?, NULL FROM api_keys WHERE api_key = 'tvly-blog-runtime-test-seed'
+        UNION ALL SELECT id, ?, NULL FROM api_keys WHERE id = 'blog-runtime-active-a'
+        UNION ALL SELECT id, ?, NULL FROM api_keys WHERE id = 'blog-runtime-active-b'
+        UNION ALL SELECT id, ?, NULL FROM api_keys WHERE id = 'blog-runtime-quarantined'
+        UNION ALL SELECT id, ?, ? FROM api_keys WHERE id = 'blog-runtime-deleted'
+        UNION ALL SELECT id, ?, ? FROM api_keys WHERE id = 'blog-runtime-reimported'
+        UNION ALL SELECT id, ?, NULL FROM api_keys WHERE id = 'blog-runtime-reimported'
+        "#,
+    )
+    .bind(now - 86_400)
+    .bind(now - 86_400)
+    .bind(now - 86_400)
+    .bind(now - 86_400)
+    .bind(now - 86_400)
+    .bind(now - 3_600)
+    .bind(now - 86_400)
+    .bind(now - 3_600)
+    .bind(now - 1_800)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("seed complete and interrupted lifecycle intervals");
     sqlx::query(
         r#"
         INSERT INTO api_key_quarantines (
@@ -147,7 +183,13 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
     .await
     .expect("insert daily rollups");
 
-    let quota_times = [now - 18_000, now - 14_400, now];
+    let quota_times = [
+        history_start - 1,
+        now - 18_000,
+        now - 14_400,
+        now - 2_700,
+        now,
+    ];
     let data = proxy
         .key_store
         .fetch_public_blog_runtime_data(
@@ -159,10 +201,10 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         .await
         .expect("read public blog runtime data");
 
-    assert_eq!(data.total_quota_limit, 900);
+    assert_eq!(data.total_quota_limit, 1_700);
     assert_eq!(
         data.historical_quota_limits,
-        vec![Some(1_650), Some(1_650), Some(900)]
+        vec![None, Some(2_450), Some(2_450), Some(900), Some(1_700)]
     );
     assert_eq!(
         data.hours
@@ -192,4 +234,62 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
             .map(|day| (day.requests, day.credits)),
         Some((10, 50))
     );
+}
+
+#[tokio::test]
+async fn public_blog_runtime_tracks_key_reimport_membership_intervals() {
+    let db_path = temp_db_path("public-blog-runtime-key-reimport");
+    let db_str = db_path.to_string_lossy().to_string();
+    let key = "tvly-blog-runtime-key-reimport".to_string();
+    let proxy = TavilyProxy::with_endpoint(vec![key.clone()], "http://127.0.0.1:1", &db_str)
+        .await
+        .expect("proxy created with local-only upstream");
+
+    proxy
+        .key_store
+        .sync_keys(&[])
+        .await
+        .expect("soft-delete missing key");
+    proxy
+        .key_store
+        .sync_keys(std::slice::from_ref(&key))
+        .await
+        .expect("reimport key");
+    let key_id = sqlx::query_scalar::<_, String>("SELECT id FROM api_keys WHERE api_key = ?")
+        .bind(&key)
+        .fetch_one(&proxy.key_store.pool)
+        .await
+        .expect("find key id");
+    proxy
+        .key_store
+        .soft_delete_key_by_id(&key_id)
+        .await
+        .expect("admin soft-delete key");
+    proxy
+        .key_store
+        .add_or_undelete_key(&key)
+        .await
+        .expect("admin reimport key");
+
+    let intervals = sqlx::query_as::<_, (i64, Option<i64>)>(
+        r#"
+        SELECT active_from, active_until
+        FROM api_key_membership_intervals
+        WHERE key_id = (SELECT id FROM api_keys WHERE api_key = ?)
+        ORDER BY active_from ASC, id ASC
+        "#,
+    )
+    .bind(&key)
+    .fetch_all(&proxy.key_store.pool)
+    .await
+    .expect("read key membership intervals");
+
+    assert_eq!(intervals.len(), 3);
+    assert!(
+        intervals
+            .iter()
+            .take(2)
+            .all(|(_, active_until)| active_until.is_some())
+    );
+    assert!(intervals[2].1.is_none());
 }

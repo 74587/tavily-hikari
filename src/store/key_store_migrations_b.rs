@@ -897,6 +897,69 @@ impl KeyStore {
         Ok(())
     }
 
+    pub(crate) async fn ensure_api_key_membership_intervals_schema(
+        &self,
+    ) -> Result<(), ProxyError> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS api_key_membership_history_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                tracked_from INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS api_key_membership_intervals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_id TEXT NOT NULL,
+                active_from INTEGER NOT NULL,
+                active_until INTEGER,
+                CHECK (active_until IS NULL OR active_until >= active_from)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_api_key_membership_intervals_key_start
+               ON api_key_membership_intervals(key_id, active_from DESC)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_api_key_membership_intervals_open
+               ON api_key_membership_intervals(key_id) WHERE active_until IS NULL"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        let tracked_from = self.backend_time.now_ts();
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO api_key_membership_history_state (singleton, tracked_from) VALUES (1, ?)",
+        )
+        .bind(tracked_from)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            sqlx::query(
+                r#"
+                INSERT INTO api_key_membership_intervals (key_id, active_from)
+                SELECT id, ? FROM api_keys WHERE deleted_at IS NULL
+                "#,
+            )
+            .bind(tracked_from)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        Ok(())
+    }
+
     pub(crate) async fn ensure_api_key_low_quota_depletions_schema(
         &self,
     ) -> Result<(), ProxyError> {
