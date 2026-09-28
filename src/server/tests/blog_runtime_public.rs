@@ -387,6 +387,67 @@ fn public_blog_runtime_projects_fixed_rollups_into_contract_metrics() {
 }
 
 #[test]
+fn public_blog_runtime_rejects_overflowing_hourly_totals() {
+    let now = Utc
+        .with_ymd_and_hms(2026, 4, 7, 12, 0, 0)
+        .single()
+        .expect("fixed evaluation time")
+        .timestamp();
+    let window = public_blog_runtime_window(now).expect("valid metric window");
+    let data = PublicBlogRuntimeData {
+        hours: vec![
+            PublicBlogRuntimeHour {
+                local_hour_start: window.today_start,
+                requests: i64::MAX,
+                credits: i64::MAX,
+            },
+            PublicBlogRuntimeHour {
+                local_hour_start: window.today_start + 3600,
+                requests: 1,
+                credits: 1,
+            },
+        ],
+        days: vec![],
+        total_quota_limit: Some(0),
+        historical_quota_limits: vec![Some(0); 12],
+    };
+
+    assert!(public_blog_runtime_body(data, &window).is_err());
+}
+
+#[test]
+fn public_blog_runtime_rejects_overflowing_completed_month_totals() {
+    let now = Utc
+        .with_ymd_and_hms(2026, 4, 7, 12, 0, 0)
+        .single()
+        .expect("fixed evaluation time")
+        .timestamp();
+    let window = public_blog_runtime_window(now).expect("valid metric window");
+    let large_day_credits = i64::MAX / 2 + 1;
+    let data = PublicBlogRuntimeData {
+        hours: vec![],
+        days: vec![
+            PublicBlogRuntimeDay {
+                date: "2026-04-01".to_string(),
+                local_day_start: window.month_start,
+                requests: 0,
+                credits: large_day_credits,
+            },
+            PublicBlogRuntimeDay {
+                date: "2026-04-02".to_string(),
+                local_day_start: window.month_start + 86_400,
+                requests: 0,
+                credits: large_day_credits,
+            },
+        ],
+        total_quota_limit: Some(0),
+        historical_quota_limits: vec![Some(0); 12],
+    };
+
+    assert!(public_blog_runtime_body(data, &window).is_err());
+}
+
+#[test]
 fn public_blog_runtime_uses_shanghai_day_at_utc_boundary() {
     let now = Utc
         .with_ymd_and_hms(2026, 4, 6, 16, 30, 0)

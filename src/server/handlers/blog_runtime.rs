@@ -97,6 +97,12 @@ fn public_blog_runtime_timestamp(timestamp: i64, zone: FixedOffset) -> Result<St
         .ok_or(())
 }
 
+fn sum_non_negative_metrics(values: impl IntoIterator<Item = i64>) -> Result<i64, ()> {
+    values
+        .into_iter()
+        .try_fold(0_i64, |total, value| total.checked_add(value.max(0)).ok_or(()))
+}
+
 fn public_blog_runtime_window(now: i64) -> Result<PublicBlogRuntimeWindow, ()> {
     let zone = FixedOffset::east_opt(8 * 60 * 60).ok_or(())?;
     let now_local = zone.timestamp_opt(now, 0).single().ok_or(())?;
@@ -183,40 +189,44 @@ fn public_blog_runtime_body(
         })
         .collect::<HashMap<_, _>>();
 
-    let today_requests = hours
-        .iter()
-        .filter(|(hour, _)| **hour >= today_start && **hour <= now)
-        .map(|(_, (requests, _))| *requests)
-        .sum::<i64>()
-        .max(0);
-    let today_credits = hours
-        .iter()
-        .filter(|(hour, _)| **hour >= today_start && **hour <= now)
-        .map(|(_, (_, credits))| *credits)
-        .sum::<i64>()
-        .max(0);
-    let completed_month_credits = data
-        .days
-        .iter()
-        .filter(|day| day.local_day_start >= month_start && day.local_day_start < today_start)
-        .map(|day| day.credits.max(0))
-        .sum::<i64>();
-    let month_credits = completed_month_credits
-        + hours
+    let today_requests = sum_non_negative_metrics(
+        hours
+            .iter()
+            .filter(|(hour, _)| **hour >= today_start && **hour <= now)
+            .map(|(_, (requests, _))| *requests),
+    )?;
+    let today_credits = sum_non_negative_metrics(
+        hours
+            .iter()
+            .filter(|(hour, _)| **hour >= today_start && **hour <= now)
+            .map(|(_, (_, credits))| *credits),
+    )?;
+    let completed_month_credits = sum_non_negative_metrics(
+        data.days
+            .iter()
+            .filter(|day| day.local_day_start >= month_start && day.local_day_start < today_start)
+            .map(|day| day.credits),
+    )?;
+    let current_month_credits = sum_non_negative_metrics(
+        hours
         .iter()
         .filter(|(hour, _)| **hour >= month_start && **hour <= now)
-        .map(|(_, (_, credits))| *credits)
-        .sum::<i64>()
-        .max(0);
+            .map(|(_, (_, credits))| *credits),
+    )?;
+    let month_credits = completed_month_credits
+        .checked_add(current_month_credits)
+        .ok_or(())?;
 
-    let mut cumulative_requests = 0;
+    let mut cumulative_requests = 0_i64;
     let today_request_points = (0..=24)
         .map(|hour| {
             let timestamp = today_start + i64::from(hour) * 3600;
             let value = if timestamp > current_hour_start {
                 None
             } else {
-                cumulative_requests += hours.get(&timestamp).map(|value| value.0).unwrap_or_default();
+                cumulative_requests = cumulative_requests
+                    .checked_add(hours.get(&timestamp).map(|value| value.0).unwrap_or_default())
+                    .ok_or(())?;
                 Some(cumulative_requests)
             };
             Ok(PublicBlogRuntimeTrendPoint {
@@ -225,14 +235,16 @@ fn public_blog_runtime_body(
             })
         })
         .collect::<Result<Vec<_>, ()>>()?;
-    let mut cumulative_credits = 0;
+    let mut cumulative_credits = 0_i64;
     let today_credit_points = (0..=24)
         .map(|hour| {
             let timestamp = today_start + i64::from(hour) * 3600;
             let value = if timestamp > current_hour_start {
                 None
             } else {
-                cumulative_credits += hours.get(&timestamp).map(|value| value.1).unwrap_or_default();
+                cumulative_credits = cumulative_credits
+                    .checked_add(hours.get(&timestamp).map(|value| value.1).unwrap_or_default())
+                    .ok_or(())?;
                 Some(cumulative_credits)
             };
             Ok(PublicBlogRuntimeTrendPoint {
@@ -267,22 +279,24 @@ fn public_blog_runtime_body(
                 .single()
                 .ok_or(())?
                 .timestamp();
-            let completed_days = data
-                .days
-                .iter()
-                .filter(|day| {
-                    day.local_day_start >= month_start && day.local_day_start < point_day_start
-                })
-                .map(|day| day.credits.max(0))
-                .sum::<i64>();
-            let current_day_hours = hours
-                .iter()
-                .filter(|(hour, _)| **hour >= point_day_start && **hour < *timestamp)
-                .map(|(_, (_, credits))| *credits)
-                .sum::<i64>();
+            let completed_days = sum_non_negative_metrics(
+                data.days
+                    .iter()
+                    .filter(|day| {
+                        day.local_day_start >= month_start && day.local_day_start < point_day_start
+                    })
+                    .map(|day| day.credits),
+            )?;
+            let current_day_hours = sum_non_negative_metrics(
+                hours
+                    .iter()
+                    .filter(|(hour, _)| **hour >= point_day_start && **hour < *timestamp)
+                    .map(|(_, (_, credits))| *credits),
+            )?;
+            let point_credits = completed_days.checked_add(current_day_hours).ok_or(())?;
             Ok(PublicBlogRuntimeTrendPoint {
                 timestamp: public_blog_runtime_timestamp(*timestamp, zone)?,
-                value: Some((completed_days + current_day_hours).max(0)),
+                value: Some(point_credits),
             })
         })
         .collect::<Result<Vec<_>, ()>>()?;

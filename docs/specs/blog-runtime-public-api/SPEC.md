@@ -60,7 +60,7 @@
 
 ### VER-BLOG-RUNTIME-002
 
-- Method: deterministic date and trend tests using persisted rollup fixtures.
+- Method: deterministic date and trend tests using persisted rollup fixtures in a child process with a non-Shanghai `TZ`.
 - covers: `REQ-BLOG-RUNTIME-003`
 - Pass condition: trend lengths and timestamps are ordered, future points are null, daily activity has 90 complete past Asia/Shanghai dates starting today minus 90 days and ending yesterday independent of the host timezone, and hourly request and credit trends are cumulative with their last non-null values matching the Stats.
 

@@ -1,8 +1,31 @@
 use super::*;
-use chrono::{Datelike, FixedOffset, TimeZone};
+use chrono::{Datelike, FixedOffset, Local, TimeZone};
+
+const PUBLIC_BLOG_RUNTIME_TZ_CHILD_ENV: &str = "TAVILY_HIKARI_BLOG_RUNTIME_TZ_CHILD";
 
 #[tokio::test]
 async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
+    if std::env::var_os(PUBLIC_BLOG_RUNTIME_TZ_CHILD_ENV).is_none() {
+        let child = std::process::Command::new(
+            std::env::current_exe().expect("test executable path"),
+        )
+        .args([
+            "--exact",
+            "tests::blog_runtime::public_blog_runtime_reads_rollups_and_historical_eligible_quotas",
+        ])
+        .env("TZ", "America/Los_Angeles")
+        .env(PUBLIC_BLOG_RUNTIME_TZ_CHILD_ENV, "1")
+        .output()
+        .expect("run persisted fixture with a non-Shanghai host timezone");
+        assert!(
+            child.status.success(),
+            "non-Shanghai timezone child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    }
+
     let db_path = temp_db_path("public-blog-runtime-data");
     let db_str = db_path.to_string_lossy().to_string();
     let now = Utc
@@ -10,6 +33,17 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         .single()
         .expect("valid evaluation time")
         .timestamp();
+    let host_offset = Local
+        .timestamp_opt(now, 0)
+        .single()
+        .expect("host local time")
+        .offset()
+        .local_minus_utc();
+    assert_ne!(
+        host_offset,
+        8 * 60 * 60,
+        "child must use a non-Shanghai timezone"
+    );
     let zone = FixedOffset::east_opt(8 * 60 * 60).expect("fixed Shanghai offset");
     let local_now = zone.timestamp_opt(now, 0).single().expect("local time");
     let local_date = local_now.date_naive();
