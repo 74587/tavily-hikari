@@ -4,6 +4,10 @@
 
 Tavily Hikari is a single-product service with one owner-facing admin surface, one user-facing console, and one active business ingress. High availability is implemented as active/standby control around that single ingress, not as a distributed cluster manager.
 
+## Public API Terms
+
+- `public API route domain`: the resource family segment in `/api/public/{domain}/v1/{project}`. It distinguishes public resource contracts such as blog runtime from general metrics while keeping the project identifier explicit.
+
 ## Announcement Terms
 
 - `unread ticker announcement`: a published banner announcement awaiting the user's acknowledgement.

@@ -25,7 +25,7 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         .expect("month boundary")
         .timestamp();
     let history_start_date = local_date
-        .checked_sub_signed(chrono::Duration::days(89))
+        .checked_sub_signed(chrono::Duration::days(90))
         .expect("history start date");
     let history_start = zone
         .from_local_datetime(
@@ -182,10 +182,13 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
             bucket_start, bucket_secs, total_requests, success_count, error_count,
             quota_exhausted_count, local_estimated_credits, updated_at
         ) VALUES
+            (?, 86400, 4, 4, 0, 0, 10, ?),
             (?, 86400, 10, 10, 0, 0, 50, ?),
             (?, 86400, 9, 9, 0, 0, 20, ?)
         "#,
     )
+    .bind(history_start)
+    .bind(now)
     .bind(today_start - 86_400)
     .bind(now)
     .bind(today_start)
@@ -213,7 +216,7 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         .await
         .expect("read public blog runtime data");
 
-    assert_eq!(data.total_quota_limit, 1_750);
+    assert_eq!(data.total_quota_limit, Some(1_750));
     assert_eq!(
         data.historical_quota_limits,
         vec![None, Some(2_450), Some(2_450), Some(900), None, Some(1_750)]
@@ -246,6 +249,116 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
             .map(|day| (day.requests, day.credits)),
         Some((10, 50))
     );
+    assert_eq!(
+        data.days
+            .iter()
+            .find(|day| day.date == "2026-01-07")
+            .map(|day| (day.requests, day.credits)),
+        Some((4, 10))
+    );
+
+    sqlx::query("UPDATE api_keys SET quota_synced_at = NULL WHERE id = 'blog-runtime-active-a'")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("mark one eligible quota snapshot unsynced");
+    let partially_unknown = proxy
+        .key_store
+        .fetch_public_blog_runtime_data(
+            month_start.min(today_start),
+            history_start,
+            now,
+            &quota_times,
+        )
+        .await
+        .expect("read partially unknown current quota");
+    assert_eq!(partially_unknown.total_quota_limit, None);
+
+    sqlx::query("UPDATE api_keys SET quota_synced_at = 0 WHERE id = 'blog-runtime-active-a'")
+        .execute(&proxy.key_store.pool)
+        .await
+        .expect("mark a zero timestamp quota snapshot unsynced");
+    let zero_timestamp = proxy
+        .key_store
+        .fetch_public_blog_runtime_data(
+            month_start.min(today_start),
+            history_start,
+            now,
+            &quota_times,
+        )
+        .await
+        .expect("read zero timestamp quota");
+    assert_eq!(zero_timestamp.total_quota_limit, None);
+
+    sqlx::query(
+        "UPDATE api_keys SET quota_limit = NULL, quota_synced_at = ? WHERE id = 'blog-runtime-active-a'",
+    )
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark a missing quota limit unknown");
+    let missing_limit = proxy
+        .key_store
+        .fetch_public_blog_runtime_data(
+            month_start.min(today_start),
+            history_start,
+            now,
+            &quota_times,
+        )
+        .await
+        .expect("read missing quota limit");
+    assert_eq!(missing_limit.total_quota_limit, None);
+
+    sqlx::query(
+        r#"
+        UPDATE api_keys
+        SET quota_limit = NULL, quota_synced_at = NULL
+        WHERE deleted_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM api_key_quarantines aq
+              WHERE aq.key_id = api_keys.id AND aq.cleared_at IS NULL
+          )
+        "#,
+    )
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("mark every eligible quota unknown");
+    let all_unknown = proxy
+        .key_store
+        .fetch_public_blog_runtime_data(
+            month_start.min(today_start),
+            history_start,
+            now,
+            &quota_times,
+        )
+        .await
+        .expect("read all unknown quotas");
+    assert_eq!(all_unknown.total_quota_limit, None);
+
+    sqlx::query(
+        r#"
+        UPDATE api_keys SET deleted_at = ?
+        WHERE deleted_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM api_key_quarantines aq
+              WHERE aq.key_id = api_keys.id AND aq.cleared_at IS NULL
+          )
+        "#,
+    )
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("remove every eligible key");
+    let empty_pool = proxy
+        .key_store
+        .fetch_public_blog_runtime_data(
+            month_start.min(today_start),
+            history_start,
+            now,
+            &quota_times,
+        )
+        .await
+        .expect("read empty eligible pool");
+    assert_eq!(empty_pool.total_quota_limit, Some(0));
 }
 
 #[tokio::test]

@@ -68,9 +68,22 @@ impl KeyStore {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let total_quota_limit = sqlx::query_scalar::<_, Option<i64>>(
+        let current_quota_row = sqlx::query(
             r#"
-            SELECT SUM(ak.quota_limit)
+            SELECT
+                COUNT(*) AS eligible_keys,
+                COALESCE(SUM(CASE
+                    WHEN ak.quota_limit IS NULL
+                      OR ak.quota_synced_at IS NULL
+                      OR ak.quota_synced_at = 0
+                    THEN 1 ELSE 0
+                END), 0) AS unknown_keys,
+                COALESCE(SUM(CASE
+                    WHEN ak.quota_limit IS NULL
+                      OR ak.quota_synced_at IS NULL
+                      OR ak.quota_synced_at = 0
+                    THEN 0 ELSE ak.quota_limit
+                END), 0) AS total_quota_limit
             FROM api_keys ak
             LEFT JOIN api_key_quarantines aq
               ON aq.key_id = ak.id AND aq.cleared_at IS NULL
@@ -79,8 +92,17 @@ impl KeyStore {
             "#,
         )
         .fetch_one(&mut *tx)
-        .await?
-        .unwrap_or_default();
+        .await?;
+        let eligible_keys: i64 = current_quota_row.try_get("eligible_keys")?;
+        let unknown_keys: i64 = current_quota_row.try_get("unknown_keys")?;
+        let current_quota_sum: i64 = current_quota_row.try_get("total_quota_limit")?;
+        let total_quota_limit = if eligible_keys == 0 {
+            Some(0)
+        } else if unknown_keys > 0 {
+            None
+        } else {
+            Some(current_quota_sum.max(0))
+        };
 
         let lifecycle_tracked_from = sqlx::query_scalar::<_, i64>(
             "SELECT tracked_from FROM api_key_membership_history_state WHERE singleton = 1",
@@ -158,7 +180,7 @@ impl KeyStore {
         Ok(PublicBlogRuntimeData {
             hours,
             days,
-            total_quota_limit: total_quota_limit.max(0),
+            total_quota_limit,
             historical_quota_limits,
         })
     }

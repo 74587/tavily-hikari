@@ -113,7 +113,7 @@ fn public_blog_runtime_window(now: i64) -> Result<PublicBlogRuntimeWindow, ()> {
         .ok_or(())?
         .timestamp();
     let history_start_date = today
-        .checked_sub_signed(ChronoDuration::days(89))
+        .checked_sub_signed(ChronoDuration::days(90))
         .ok_or(())?;
     let history_start = zone
         .from_local_datetime(&history_start_date.and_hms_opt(0, 0, 0).ok_or(())?)
@@ -171,6 +171,7 @@ fn public_blog_runtime_body(
     let history_start_date = window.history_start_date;
     let current_hour_start = window.current_hour_start;
     let recent_timestamps = &window.recent_timestamps;
+    let total_quota_limit = data.total_quota_limit.ok_or(())?.max(0);
     let hours = data
         .hours
         .into_iter()
@@ -208,29 +209,35 @@ fn public_blog_runtime_body(
         .sum::<i64>()
         .max(0);
 
+    let mut cumulative_requests = 0;
     let today_request_points = (0..=24)
         .map(|hour| {
             let timestamp = today_start + i64::from(hour) * 3600;
+            let value = if timestamp > current_hour_start {
+                None
+            } else {
+                cumulative_requests += hours.get(&timestamp).map(|value| value.0).unwrap_or_default();
+                Some(cumulative_requests)
+            };
             Ok(PublicBlogRuntimeTrendPoint {
                 timestamp: public_blog_runtime_timestamp(timestamp, zone)?,
-                value: if timestamp > current_hour_start {
-                    None
-                } else {
-                    Some(hours.get(&timestamp).map(|value| value.0).unwrap_or_default())
-                },
+                value,
             })
         })
         .collect::<Result<Vec<_>, ()>>()?;
+    let mut cumulative_credits = 0;
     let today_credit_points = (0..=24)
         .map(|hour| {
             let timestamp = today_start + i64::from(hour) * 3600;
+            let value = if timestamp > current_hour_start {
+                None
+            } else {
+                cumulative_credits += hours.get(&timestamp).map(|value| value.1).unwrap_or_default();
+                Some(cumulative_credits)
+            };
             Ok(PublicBlogRuntimeTrendPoint {
                 timestamp: public_blog_runtime_timestamp(timestamp, zone)?,
-                value: if timestamp > current_hour_start {
-                    None
-                } else {
-                    Some(hours.get(&timestamp).map(|value| value.1).unwrap_or_default())
-                },
+                value,
             })
         })
         .collect::<Result<Vec<_>, ()>>()?;
@@ -287,7 +294,7 @@ fn public_blog_runtime_body(
             Ok(PublicBlogRuntimeTrendPoint {
                 timestamp: public_blog_runtime_timestamp(*timestamp, zone)?,
                 value: if index == recent_timestamps.len() - 1 {
-                    Some(data.total_quota_limit.max(0))
+                    Some(total_quota_limit)
                 } else {
                     *value
                 },
@@ -336,7 +343,7 @@ fn public_blog_runtime_body(
             },
         },
         total_credits: PublicBlogRuntimeStat {
-            value: data.total_quota_limit.max(0),
+            value: total_quota_limit,
             trend: PublicBlogRuntimeTrend {
                 range: "recent-hours",
                 points: total_credit_points,
@@ -610,7 +617,7 @@ fn public_blog_runtime_cors_layer(origins: Vec<HeaderValue>) -> CorsLayer {
         .allow_origin(origins)
         .allow_methods([Method::GET])
         .allow_headers([IF_NONE_MATCH])
-        .expose_headers([ETAG])
+        .expose_headers([ETAG, CACHE_CONTROL, RETRY_AFTER])
         .allow_credentials(false)
 }
 

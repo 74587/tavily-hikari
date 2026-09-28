@@ -1362,7 +1362,7 @@ pub struct PublicBlogRuntimeDay {
 pub struct PublicBlogRuntimeData {
     pub hours: Vec<PublicBlogRuntimeHour>,
     pub days: Vec<PublicBlogRuntimeDay>,
-    pub total_quota_limit: i64,
+    pub total_quota_limit: Option<i64>,
     pub historical_quota_limits: Vec<Option<i64>>,
 }
 

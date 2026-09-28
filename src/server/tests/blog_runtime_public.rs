@@ -51,7 +51,19 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
     )
     .await
     .expect("proxy created with local-only upstream");
-    let app = blog_runtime_app(blog_runtime_state(proxy));
+    let state = blog_runtime_state(proxy);
+    let quota_pool = sqlx::SqlitePool::connect(&db_str)
+        .await
+        .expect("connect to the temporary test database");
+    sqlx::query(
+        "UPDATE api_keys SET quota_limit = 321, quota_synced_at = ? WHERE api_key = ?",
+    )
+    .bind(Utc::now().timestamp())
+    .bind("tvly-blog-runtime-contract")
+    .execute(&quota_pool)
+    .await
+    .expect("seed a known current quota snapshot");
+    let app = blog_runtime_app(state.clone());
     let response = app
         .clone()
         .oneshot(
@@ -79,6 +91,18 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
             .and_then(|value| value.to_str().ok()),
         Some("public, max-age=15")
     );
+    let exposed_headers = response
+        .headers()
+        .get("access-control-expose-headers")
+        .and_then(|value| value.to_str().ok())
+        .expect("CORS exposes response metadata headers")
+        .split(',')
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .collect::<HashSet<_>>();
+    assert!(exposed_headers.contains("etag"));
+    assert!(exposed_headers.contains("cache-control"));
+    assert!(exposed_headers.contains("retry-after"));
     let etag = response
         .headers()
         .get(ETAG)
@@ -110,6 +134,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
     assert_eq!(json["monthCredits"]["trend"]["points"].as_array().unwrap().len(), 12);
     assert_eq!(json["totalCredits"]["trend"]["points"].as_array().unwrap().len(), 12);
     assert_eq!(json["requestActivity90d"].as_array().unwrap().len(), 90);
+    assert_eq!(json["totalCredits"]["value"], 321);
     assert_eq!(
         json["monthCredits"]["trend"]["points"][11]["value"],
         json["monthCredits"]["value"]
@@ -138,6 +163,116 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
         .expect("conditional response");
     assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(conditional.headers().get(ETAG), Some(&etag));
+
+    sqlx::query(
+        "UPDATE api_keys SET quota_limit = NULL, quota_synced_at = NULL WHERE api_key = ?",
+    )
+    .bind("tvly-blog-runtime-contract")
+    .execute(&quota_pool)
+    .await
+    .expect("make the current quota snapshot unknown");
+    let cache = dashboard_overview_cache_for_state(state.as_ref());
+    {
+        let mut cache_state = cache.lock().await;
+        cache_state
+            .public_blog_runtime
+            .snapshot
+            .as_mut()
+            .expect("successful response populated snapshot")
+            .refreshed_at = tokio::time::Instant::now()
+            - BLOG_RUNTIME_SNAPSHOT_TTL
+            - Duration::from_secs(1);
+        cache_state.public_blog_runtime.retry_not_before = None;
+    }
+    let stale = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .header("origin", "https://ivanli.cc")
+                .body(Body::empty())
+                .expect("stale snapshot request"),
+        )
+        .await
+        .expect("stale snapshot response");
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(stale.headers().get(ETAG), Some(&etag));
+    let stale_body = to_bytes(stale.into_body(), usize::MAX)
+        .await
+        .expect("last-good body");
+    assert_eq!(stale_body, body);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !cache.lock().await.public_blog_runtime.refreshing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("unknown quota refresh completes");
+    assert_eq!(
+        cache
+            .lock()
+            .await
+            .public_blog_runtime
+            .snapshot
+            .as_ref()
+            .expect("last-good snapshot remains cached")
+            .body,
+        body
+    );
+
+    let cold_temp_dir = tempfile::tempdir().expect("cold temp dir");
+    let cold_db = cold_temp_dir
+        .path()
+        .join("blog-runtime-cold.db")
+        .to_string_lossy()
+        .to_string();
+    let cold_proxy = TavilyProxy::with_endpoint(
+        vec!["tvly-blog-runtime-cold".to_string()],
+        "http://127.0.0.1:1",
+        &cold_db,
+    )
+    .await
+    .expect("cold proxy created with local-only upstream");
+    let cold_state = blog_runtime_state(cold_proxy);
+    let cold_cache = dashboard_overview_cache_for_state(cold_state.as_ref());
+    let cold = blog_runtime_app(cold_state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .header("origin", "https://ivanli.cc")
+                .body(Body::empty())
+                .expect("cold request"),
+        )
+        .await
+        .expect("cold response");
+    assert_eq!(cold.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(cold.headers().get(RETRY_AFTER).and_then(|value| value.to_str().ok()), Some("5"));
+    assert_eq!(cold.headers().get(CACHE_CONTROL).and_then(|value| value.to_str().ok()), Some("no-store"));
+    let cold_exposed_headers = cold
+        .headers()
+        .get("access-control-expose-headers")
+        .and_then(|value| value.to_str().ok())
+        .expect("CORS exposes Retry-After on unavailable responses")
+        .split(',')
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .collect::<HashSet<_>>();
+    assert!(cold_exposed_headers.contains("retry-after"));
+    assert!(to_bytes(cold.into_body(), usize::MAX).await.unwrap().is_empty());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !cold_cache.lock().await.public_blog_runtime.refreshing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("cold unknown quota refresh completes");
+    assert!(cold_cache.lock().await.public_blog_runtime.snapshot.is_none());
 
     let head = app
         .clone()
@@ -191,7 +326,7 @@ fn public_blog_runtime_projects_fixed_rollups_into_contract_metrics() {
         ],
         days: vec![
             PublicBlogRuntimeDay {
-                date: "2026-01-08".to_string(),
+                date: "2026-01-07".to_string(),
                 local_day_start: window.history_start,
                 requests: 14,
                 credits: 20,
@@ -209,7 +344,7 @@ fn public_blog_runtime_projects_fixed_rollups_into_contract_metrics() {
                 credits: 20,
             },
         ],
-        total_quota_limit: 900,
+        total_quota_limit: Some(900),
         historical_quota_limits,
     };
 
@@ -220,8 +355,14 @@ fn public_blog_runtime_projects_fixed_rollups_into_contract_metrics() {
     assert_eq!(json["monthCredits"]["value"], 70);
     assert_eq!(json["totalCredits"]["value"], 900);
     assert_eq!(json["todayRequests"]["trend"]["points"][18]["value"], 7);
-    assert_eq!(json["todayCredits"]["trend"]["points"][19]["value"], 7);
+    assert_eq!(json["todayRequests"]["trend"]["points"][19]["value"], 9);
+    assert_eq!(json["todayRequests"]["trend"]["points"][20]["value"], 9);
+    assert_eq!(json["todayCredits"]["trend"]["points"][19]["value"], 20);
+    assert_eq!(json["todayCredits"]["trend"]["points"][18]["value"], 13);
+    assert_eq!(json["todayCredits"]["trend"]["points"][20]["value"], 20);
     assert_eq!(json["todayCredits"]["trend"]["points"][21]["value"], Value::Null);
+    assert_eq!(json["todayRequests"]["trend"]["points"][20]["value"], json["todayRequests"]["value"]);
+    assert_eq!(json["todayCredits"]["trend"]["points"][20]["value"], json["todayCredits"]["value"]);
     assert_eq!(
         json["monthCredits"]["trend"]["points"][9]["value"],
         50
@@ -235,14 +376,65 @@ fn public_blog_runtime_projects_fixed_rollups_into_contract_metrics() {
     assert_eq!(json["totalCredits"]["trend"]["points"][5]["value"], Value::Null);
     assert_eq!(json["totalCredits"]["trend"]["points"][11]["value"], 900);
     assert_eq!(json["requestActivity90d"].as_array().unwrap().len(), 90);
-    assert_eq!(json["requestActivity90d"][0]["date"], "2026-01-08");
+    assert_eq!(json["requestActivity90d"][0]["date"], "2026-01-07");
     assert_eq!(json["requestActivity90d"][0]["value"], 14);
-    assert_eq!(json["requestActivity90d"][89]["date"], "2026-04-07");
-    assert_eq!(json["requestActivity90d"][89]["value"], 9);
+    assert_eq!(json["requestActivity90d"][89]["date"], "2026-04-06");
+    assert_eq!(json["requestActivity90d"][89]["value"], 10);
     assert_eq!(
         json["todayRequests"]["trend"]["points"][0]["timestamp"],
         "2026-04-07T00:00:00+08:00"
     );
+}
+
+#[test]
+fn public_blog_runtime_uses_shanghai_day_at_utc_boundary() {
+    let now = Utc
+        .with_ymd_and_hms(2026, 4, 6, 16, 30, 0)
+        .single()
+        .expect("fixed UTC boundary time")
+        .timestamp();
+    let window = public_blog_runtime_window(now).expect("valid Shanghai window");
+    let data = PublicBlogRuntimeData {
+        hours: vec![PublicBlogRuntimeHour {
+            local_hour_start: window.today_start,
+            requests: 4,
+            credits: 6,
+        }],
+        days: vec![
+            PublicBlogRuntimeDay {
+                date: "2026-01-07".to_string(),
+                local_day_start: window.history_start,
+                requests: 3,
+                credits: 0,
+            },
+            PublicBlogRuntimeDay {
+                date: "2026-04-06".to_string(),
+                local_day_start: window.today_start - 86_400,
+                requests: 10,
+                credits: 0,
+            },
+            PublicBlogRuntimeDay {
+                date: "2026-04-07".to_string(),
+                local_day_start: window.today_start,
+                requests: 99,
+                credits: 0,
+            },
+        ],
+        total_quota_limit: Some(0),
+        historical_quota_limits: vec![Some(0); 12],
+    };
+
+    let body = public_blog_runtime_body(data, &window).expect("contract payload");
+    let json: Value = serde_json::from_slice(&body).expect("valid JSON response");
+    assert_eq!(
+        json["todayRequests"]["trend"]["points"][0]["timestamp"],
+        "2026-04-07T00:00:00+08:00"
+    );
+    assert_eq!(json["todayRequests"]["value"], 4);
+    assert_eq!(json["requestActivity90d"].as_array().unwrap().len(), 90);
+    assert_eq!(json["requestActivity90d"][0]["date"], "2026-01-07");
+    assert_eq!(json["requestActivity90d"][89]["date"], "2026-04-06");
+    assert_eq!(json["requestActivity90d"][89]["value"], 10);
 }
 
 #[tokio::test]
@@ -260,6 +452,15 @@ async fn public_blog_runtime_cors_omits_unlisted_origins() {
     )
     .await
     .expect("proxy created with local-only upstream");
+    let quota_pool = sqlx::SqlitePool::connect(&db_str)
+        .await
+        .expect("connect to the temporary test database");
+    sqlx::query("UPDATE api_keys SET quota_limit = 100, quota_synced_at = ? WHERE api_key = ?")
+        .bind(Utc::now().timestamp())
+        .bind("tvly-blog-runtime-cors")
+        .execute(&quota_pool)
+        .await
+        .expect("seed a known current quota snapshot");
     let app = blog_runtime_app(blog_runtime_state(proxy));
     let response = app
         .oneshot(
