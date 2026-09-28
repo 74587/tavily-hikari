@@ -72,7 +72,7 @@
 
 ## Related ADRs
 
-[ADR 0005: Public Project APIs Use Domain-Specific Versioned Routes](../../adr/0005-public-project-api-route-namespaces.md)
+- [ADR 0005: Public Project APIs Use Domain-Specific Versioned Routes](../../adr/0005-public-project-api-route-namespaces.md)
 
 ## References
 

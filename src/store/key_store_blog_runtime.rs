@@ -41,15 +41,15 @@ impl KeyStore {
             r#"
             SELECT
                 strftime('%Y-%m-%d', bucket_start, 'unixepoch', '+8 hours') AS date,
-                bucket_start AS local_day_start,
+                ((bucket_start + 28800) / 86400) * 86400 - 28800 AS local_day_start,
                 COALESCE(SUM(total_requests), 0) AS requests,
                 COALESCE(SUM(local_estimated_credits), 0) AS credits
             FROM dashboard_request_rollup_buckets
-            WHERE bucket_secs = 86400
+            WHERE bucket_secs = 60
               AND bucket_start >= ?
               AND bucket_start <= ?
-            GROUP BY bucket_start, date
-            ORDER BY bucket_start ASC
+            GROUP BY local_day_start, date
+            ORDER BY local_day_start ASC
             "#,
         )
         .bind(history_start)

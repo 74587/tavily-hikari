@@ -182,9 +182,27 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
             bucket_start, bucket_secs, total_requests, success_count, error_count,
             quota_exhausted_count, local_estimated_credits, updated_at
         ) VALUES
-            (?, 86400, 4, 4, 0, 0, 10, ?),
-            (?, 86400, 10, 10, 0, 0, 50, ?),
-            (?, 86400, 9, 9, 0, 0, 20, ?)
+            (?, 60, 4, 4, 0, 0, 10, ?),
+            (?, 60, 10, 10, 0, 0, 50, ?)
+        "#,
+    )
+    .bind(history_start + 15 * 60)
+    .bind(now)
+    .bind(today_start - 86_400 + 15 * 60)
+    .bind(now)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("insert minute rollups across UTC date boundaries");
+    // Deliberately conflicting day rollups ensure this public read uses UTC minute buckets.
+    sqlx::query(
+        r#"
+        INSERT INTO dashboard_request_rollup_buckets (
+            bucket_start, bucket_secs, total_requests, success_count, error_count,
+            quota_exhausted_count, local_estimated_credits, updated_at
+        ) VALUES
+            (?, 86400, 400, 400, 0, 0, 1000, ?),
+            (?, 86400, 1000, 1000, 0, 0, 5000, ?),
+            (?, 86400, 900, 900, 0, 0, 2000, ?)
         "#,
     )
     .bind(history_start)
