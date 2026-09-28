@@ -134,14 +134,25 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         INSERT INTO api_key_quota_sync_samples (key_id, quota_limit, quota_remaining, captured_at, source)
         VALUES
             ('blog-runtime-active-b', 450, 100, ?, 'test'),
-            ('blog-runtime-active-b', 500, 120, ?, 'test')
+            ('blog-runtime-active-b', 500, 120, ?, 'test'),
+            ('blog-runtime-reimported', 800, 200, ?, 'test'),
+            ('blog-runtime-reimported', 850, 100, ?, 'test')
         "#,
     )
     .bind(now - 18_000)
     .bind(now - 3_600)
+    .bind(now - 20_000)
+    .bind(now - 600)
     .execute(&proxy.key_store.pool)
     .await
     .expect("insert historical quota samples");
+    sqlx::query(
+        "UPDATE api_keys SET quota_limit = 850, quota_remaining = 100, quota_synced_at = ? WHERE id = 'blog-runtime-reimported'",
+    )
+    .bind(now - 600)
+    .execute(&proxy.key_store.pool)
+    .await
+    .expect("set reimported key quota snapshot");
 
     let first_minute = today_start + 18 * 3600 + 15 * 60;
     let second_hour_minute = today_start + 19 * 3600 + 15 * 60;
@@ -188,6 +199,7 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         now - 18_000,
         now - 14_400,
         now - 2_700,
+        now - 1_200,
         now,
     ];
     let data = proxy
@@ -201,10 +213,10 @@ async fn public_blog_runtime_reads_rollups_and_historical_eligible_quotas() {
         .await
         .expect("read public blog runtime data");
 
-    assert_eq!(data.total_quota_limit, 1_700);
+    assert_eq!(data.total_quota_limit, 1_750);
     assert_eq!(
         data.historical_quota_limits,
-        vec![None, Some(2_450), Some(2_450), Some(900), Some(1_700)]
+        vec![None, Some(2_450), Some(2_450), Some(900), None, Some(1_750)]
     );
     assert_eq!(
         data.hours

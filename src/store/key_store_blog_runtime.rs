@@ -108,12 +108,14 @@ impl KeyStore {
                                 SELECT sample.quota_limit
                                 FROM api_key_quota_sync_samples sample
                                 WHERE sample.key_id = ak.id
+                                  AND sample.captured_at >= membership.active_from
                                   AND sample.captured_at <= ?
                                 ORDER BY sample.captured_at DESC, sample.id DESC
                                 LIMIT 1
                             ),
                             CASE
-                                WHEN ak.quota_synced_at <= ? THEN ak.quota_limit
+                                WHEN ak.quota_synced_at >= membership.active_from
+                                  AND ak.quota_synced_at <= ? THEN ak.quota_limit
                                 ELSE NULL
                             END
                         ) AS quota_limit

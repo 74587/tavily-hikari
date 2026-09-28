@@ -10,8 +10,8 @@
 
 ## Coverage / rollout summary
 
-- `GET /api/public/blog-runtime/v1/tavily-hikari` returns the five approved fields. Daily activity and completed month days use durable daily dashboard rollups; today's and recent hourly values use minute rollups. Current `totalCredits` uses the current eligible key pool; historical points use persisted key membership intervals, quota samples, and quarantine lifecycle.
-- The startup migration records the lifecycle tracking start and seeds intervals for the currently active keys. Historical quota points before that timestamp are unavailable and return `null`; deletion and reimport transitions after it are recorded in the same transaction as key mutations.
+- `GET /api/public/blog-runtime/v1/tavily-hikari` returns the five approved fields. Daily activity and completed month days use durable daily dashboard rollups; today's and recent hourly values use minute rollups. Current `totalCredits` uses the current eligible key pool; historical points use persisted key membership intervals, quota samples captured during that interval, and quarantine lifecycle.
+- The startup migration records the lifecycle tracking start and seeds intervals for the currently active keys. Historical quota points before that timestamp are unavailable and return `null`; after reimport, points remain `null` until a quota snapshot is captured in the new interval. Deletion and reimport transitions after tracking began are recorded in the same transaction as key mutations.
 - Snapshot TTL is 30 seconds. Refresh is single-flight and times out after five seconds; stale last-known-good data survives failed refreshes. Successful responses use ETags and `Cache-Control: public, max-age=15`.
 - The per-process sliding-window limit is 600 requests per 60 seconds. `BLOG_RUNTIME_CORS_ORIGINS` accepts a comma-separated explicit origin list and defaults to `https://ivanli.cc` and `http://127.0.0.1:12620`; credentials and wildcard origins are disabled.
 - The migration adds `api_key_membership_history_state` and `api_key_membership_intervals`; it does not rebuild or alter request rollups or quota samples.
