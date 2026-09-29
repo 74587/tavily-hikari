@@ -432,7 +432,7 @@ async fn serve_with_shutdown(
         .route("/api/stats/forward-proxy", get(get_forward_proxy_live_stats))
         .route("/api/public/metrics", get(get_public_metrics))
         .route(
-            "/api/public/blog-runtime/v1/tavily-hikari",
+            "/api/public/metrics/v1/tavily-hikari",
             public_blog_runtime_method_router(blog_runtime_cors),
         )
         .route("/api/keys", get(list_keys))

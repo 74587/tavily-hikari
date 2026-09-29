@@ -6,7 +6,7 @@ Tavily Hikari is a single-product service with one owner-facing admin surface, o
 
 ## Public API Terms
 
-- `public API route domain`: the resource family segment in `/api/public/{domain}/v1/{project}`. It distinguishes public resource contracts such as blog runtime from general metrics while keeping the project identifier explicit.
+- `public metrics route`: the shared prefix `/api/public/metrics/v1` followed by the owning service slug. The related interfaces are `codex-vibe-monitor`, `tavily-hikari`, and `octo-rill`; each project owns only its endpoint and aggregate data.
 
 ## Announcement Terms
 

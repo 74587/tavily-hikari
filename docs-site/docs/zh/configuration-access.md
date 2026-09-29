@@ -24,17 +24,17 @@ Tavily Hikari 至少有两层访问要分清：
 
 无论你采用哪种访问模型，下面这组参数都是最核心的：
 
-| Flag / Env                        | 是否通常要关心 | 作用                                  |
-| --------------------------------- | -------------- | ------------------------------------- |
-| `--upstream` / `TAVILY_UPSTREAM`  | 是             | Tavily MCP 上游地址                   |
-| `TAVILY_USAGE_BASE`               | 是             | Tavily HTTP / usage 上游基地址        |
-| `--bind` / `PROXY_BIND`           | 是             | 监听地址                              |
-| `--port` / `PROXY_PORT`           | 是             | 监听端口                              |
-| `--db-path` / `PROXY_DB_PATH`     | 是             | SQLite 数据库路径                     |
-| `LOW_QUOTA_DEPLETION_THRESHOLD`   | 可选           | 低余额 432 key 阈值                   |
-| `BLOG_RUNTIME_CORS_ORIGINS`       | 可选           | 博客公开运行时 API 的浏览器来源白名单 |
-| `--static-dir` / `WEB_STATIC_DIR` | 视情况         | 静态前端目录                          |
-| `--keys` / `TAVILY_API_KEYS`      | 可选           | 启动时一次性导入 key                  |
+| Flag / Env                        | 是否通常要关心 | 作用                            |
+| --------------------------------- | -------------- | ------------------------------- |
+| `--upstream` / `TAVILY_UPSTREAM`  | 是             | Tavily MCP 上游地址             |
+| `TAVILY_USAGE_BASE`               | 是             | Tavily HTTP / usage 上游基地址  |
+| `--bind` / `PROXY_BIND`           | 是             | 监听地址                        |
+| `--port` / `PROXY_PORT`           | 是             | 监听端口                        |
+| `--db-path` / `PROXY_DB_PATH`     | 是             | SQLite 数据库路径               |
+| `LOW_QUOTA_DEPLETION_THRESHOLD`   | 可选           | 低余额 432 key 阈值             |
+| `PUBLIC_METRICS_CORS_ORIGINS`     | 可选           | 公开指标 API 的浏览器来源白名单 |
+| `--static-dir` / `WEB_STATIC_DIR` | 视情况         | 静态前端目录                    |
+| `--keys` / `TAVILY_API_KEYS`      | 可选           | 启动时一次性导入 key            |
 
 补充说明：
 
@@ -45,8 +45,8 @@ Tavily Hikari 至少有两层访问要分清：
 - `LOW_QUOTA_DEPLETION_THRESHOLD` 默认是 `15`。当上游 key 返回 432，且最新已知剩余额度小于等于这个值时，Hikari 会在当前 UTC 月把它排除出正常 key 池，但仍允许作为最终兜底。
 - `WEB_STATIC_DIR` 不配置时，会自动尝试使用当前仓库下的 `web/dist`。
 - `TAVILY_API_KEYS` 只是引导启动时导入 key 的助手，不适合长期运维；长期管理还是用管理员后台或管理员 API。
-- `BLOG_RUNTIME_CORS_ORIGINS` 用逗号分隔显式来源，仅作用于
-  `/api/public/blog-runtime/v1/tavily-hikari`。默认值是 `https://ivanli.cc` 和
+- `PUBLIC_METRICS_CORS_ORIGINS` 用逗号分隔显式来源，仅作用于
+  `/api/public/metrics/v1/tavily-hikari`。默认值是 `https://ivanli.cc` 和
   `http://127.0.0.1:12620`；不接受通配符来源。
 
 ## 不同部署形态的最小配置

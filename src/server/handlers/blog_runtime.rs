@@ -37,7 +37,7 @@ const BLOG_RUNTIME_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(5);
 const BLOG_RUNTIME_RATE_WINDOW: Duration = Duration::from_secs(60);
 const BLOG_RUNTIME_RATE_LIMIT: usize = 600;
 const BLOG_RUNTIME_CACHE_CONTROL: &str = "public, max-age=15";
-const BLOG_RUNTIME_CORS_ORIGINS: [&str; 2] = [
+const PUBLIC_METRICS_CORS_ORIGINS: [&str; 2] = [
     "https://ivanli.cc",
     "http://127.0.0.1:12620",
 ];
@@ -591,10 +591,10 @@ async fn get_public_blog_runtime(
 fn parse_public_blog_runtime_cors_origins(config: Option<&str>) -> Result<Vec<HeaderValue>, String> {
     let origins = match config {
         Some(config) => config.split(',').map(str::trim).collect::<Vec<_>>(),
-        None => BLOG_RUNTIME_CORS_ORIGINS.to_vec(),
+        None => PUBLIC_METRICS_CORS_ORIGINS.to_vec(),
     };
     if origins.is_empty() || origins.iter().any(|origin| origin.is_empty()) {
-        return Err("BLOG_RUNTIME_CORS_ORIGINS must contain explicit origins".to_string());
+        return Err("PUBLIC_METRICS_CORS_ORIGINS must contain explicit origins".to_string());
     }
 
     let mut seen = HashSet::new();
@@ -602,12 +602,12 @@ fn parse_public_blog_runtime_cors_origins(config: Option<&str>) -> Result<Vec<He
     for origin in origins {
         if origin == "*" || !seen.insert(origin.to_string()) {
             if origin == "*" {
-                return Err("BLOG_RUNTIME_CORS_ORIGINS does not allow wildcard origins".to_string());
+                return Err("PUBLIC_METRICS_CORS_ORIGINS does not allow wildcard origins".to_string());
             }
             continue;
         }
         let parsed = Url::parse(origin)
-            .map_err(|_| format!("invalid public blog runtime CORS origin: {origin}"))?;
+            .map_err(|_| format!("invalid public metrics CORS origin: {origin}"))?;
         if !matches!(parsed.scheme(), "http" | "https")
             || !parsed.username().is_empty()
             || parsed.password().is_some()
@@ -616,11 +616,11 @@ fn parse_public_blog_runtime_cors_origins(config: Option<&str>) -> Result<Vec<He
             || parsed.fragment().is_some()
             || parsed.origin().ascii_serialization() != origin
         {
-            return Err(format!("invalid public blog runtime CORS origin: {origin}"));
+            return Err(format!("invalid public metrics CORS origin: {origin}"));
         }
         headers.push(
             HeaderValue::from_bytes(origin.as_bytes())
-                .map_err(|_| format!("invalid public blog runtime CORS origin: {origin}"))?,
+                .map_err(|_| format!("invalid public metrics CORS origin: {origin}"))?,
         );
     }
     Ok(headers)
@@ -642,11 +642,11 @@ fn public_blog_runtime_method_router(cors: CorsLayer) -> MethodRouter<Arc<AppSta
 }
 
 fn public_blog_runtime_cors_layer_from_env() -> Result<CorsLayer, String> {
-    let config = match std::env::var("BLOG_RUNTIME_CORS_ORIGINS") {
+    let config = match std::env::var("PUBLIC_METRICS_CORS_ORIGINS") {
         Ok(config) => Some(config),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => {
-            return Err("BLOG_RUNTIME_CORS_ORIGINS must be valid UTF-8".to_string());
+            return Err("PUBLIC_METRICS_CORS_ORIGINS must be valid UTF-8".to_string());
         }
     };
     let origins = parse_public_blog_runtime_cors_origins(config.as_deref())?;
