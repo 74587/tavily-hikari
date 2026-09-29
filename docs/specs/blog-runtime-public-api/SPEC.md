@@ -14,6 +14,7 @@
 - `known current quota`: a non-null `quota_limit` with a non-null, non-zero `quota_synced_at` for every key in the eligible key pool.
 - `local estimated credits`: credit usage accumulated by the durable dashboard request rollup from billable request activity.
 - Shared prefix: `/api/public/metrics/v1`.
+- Shared route grammar: `/api/public/metrics/v1/{project}`, with the owning project slug as the only segment after `v1`.
 - Project interfaces: `GET /api/public/metrics/v1/codex-vibe-monitor`, `GET /api/public/metrics/v1/tavily-hikari`, and `GET /api/public/metrics/v1/octo-rill`.
 - This service's interface: `GET /api/public/metrics/v1/tavily-hikari`; the project slug identifies the metrics instance.
 - A Stat is `{ value, trend }`. A trend is `{ range, points }`; each point is `{ timestamp, value }`, where `value` may be `null` when unavailable or in the future.
