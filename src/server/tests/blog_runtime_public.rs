@@ -30,7 +30,7 @@ fn blog_runtime_app(state: Arc<AppState>) -> Router {
     );
     Router::new()
         .route(
-            "/api/public/blog-runtime/v1/tavily-hikari",
+            "/api/public/metrics/v1/tavily-hikari",
             public_blog_runtime_method_router(cors),
         )
         .with_state(state)
@@ -68,7 +68,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .header("origin", "https://ivanli.cc")
                 .body(Body::empty())
                 .expect("GET request"),
@@ -153,7 +153,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .header("origin", "https://ivanli.cc")
                 .header(IF_NONE_MATCH, format!("W/{}", etag.to_str().unwrap()))
                 .body(Body::empty())
@@ -188,7 +188,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .header("origin", "https://ivanli.cc")
                 .body(Body::empty())
                 .expect("stale snapshot request"),
@@ -241,7 +241,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
     let cold = blog_runtime_app(cold_state)
         .oneshot(
             Request::builder()
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .header("origin", "https://ivanli.cc")
                 .body(Body::empty())
                 .expect("cold request"),
@@ -279,7 +279,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
         .oneshot(
             Request::builder()
                 .method(Method::HEAD)
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .body(Body::empty())
                 .expect("HEAD request"),
         )
@@ -290,7 +290,7 @@ async fn public_blog_runtime_response_has_only_the_contract_fields_and_supports_
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .body(Body::empty())
                 .expect("POST request"),
         )
@@ -526,7 +526,7 @@ async fn public_blog_runtime_cors_omits_unlisted_origins() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .header("origin", "https://unlisted.example")
                 .body(Body::empty())
                 .expect("GET request"),
@@ -557,7 +557,7 @@ async fn public_blog_runtime_allows_only_get_preflight_headers() {
         .oneshot(
             Request::builder()
                 .method(Method::OPTIONS)
-                .uri("/api/public/blog-runtime/v1/tavily-hikari")
+                .uri("/api/public/metrics/v1/tavily-hikari")
                 .header("origin", "https://ivanli.cc")
                 .header("access-control-request-method", "GET")
                 .header("access-control-request-headers", "if-none-match")
